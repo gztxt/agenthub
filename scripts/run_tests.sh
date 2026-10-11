@@ -5,6 +5,7 @@
 #   bash scripts/run_tests.sh hermetic-clean  # 同上，但把 HOME 换成空目录，真模拟干净 runner
 #   bash scripts/run_tests.sh all             # L0 + L1（本机全量）
 #   bash scripts/run_tests.sh host            # 只 L1（本机真实仓库形态断言）
+#   bash scripts/run_tests.sh changed [文件...]   # 按改动挑子集（**开发用，不是闸门**）
 #   bash scripts/run_tests.sh probe verify_p1_backend.py [http://127.0.0.1:3199]
 #   bash scripts/run_tests.sh                 # 不带参数 = all
 #
@@ -25,11 +26,12 @@ case "$MODE" in
   hermetic-clean) exec "$VENV" scripts/run_tier.py hermetic --fake-home ;;
   host)           exec "$VENV" scripts/run_tier.py host ;;
   all)            exec "$VENV" scripts/run_tier.py all ;;
+  changed)        exec "$VENV" scripts/run_changed.py "$@" ;;
   pytest)         exec "$VENV" -m pytest tests -v ;;
   probe)
     f="${1:?用法：run_tests.sh probe <verify_*.py|probe_*.py> [base-url]}"; shift
     [ -f "tests/$f" ] || { echo "找不到 tests/$f"; exit 2; }
     echo "+ $VENV tests/$f $*"
     exec "$VENV" "tests/$f" "$@" ;;
-  *) echo "未知模式：$MODE（可用 hermetic|hermetic-clean|host|all|pytest|probe）"; exit 2 ;;
+  *) echo "未知模式：$MODE（可用 hermetic|hermetic-clean|host|all|changed|pytest|probe）"; exit 2 ;;
 esac

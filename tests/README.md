@@ -4,9 +4,9 @@
 （`Ran 71 tests ... OK`），而其中相当一部分断言的是**这台 NAS 上恰好存在的目录形态**
 —— 换台机器（或干净 CI runner）它们必然红，于是"能不能上 CI"这个问题一直没有答案。
 
-| 层 | 判据 | 换机行为 | 数量（2026-10-10 实测） |
+| 层 | 判据 | 换机行为 | 数量（2026-10-12 实测） |
 |---|---|---|---|
-| **L0 hermetic** | 只依赖纯函数 / `tempfile` / AST 读源码。不读 `~/.claude` 等真盘、不起服务、不打网络、不 fork pty、**不 import `src.main`** | 结论必须一模一样；**出现 SKIP 即分层放错**，闸门判 FAIL（退出码 2） | **1486** |
+| **L0 hermetic** | 只依赖纯函数 / `tempfile` / AST 读源码。不读 `~/.claude` 等真盘、不起服务、不打网络、不 fork pty、**不 import `src.main`** | 结论必须一模一样；**出现 SKIP 即分层放错**，闸门判 FAIL（退出码 2） | **1502** |
 | **L1 host** | 断言本机真实仓库形态（`~/.grok/sessions`、`~/.claude/projects`、`~/.jcode/sessions`、`~/.qoder/projects`、`~/.hermes/state.db`、`~/.codex/state_5.sqlite`、`/fs` 真目录） | 显式 `SKIP(host-dependent)` + 因果与解法，**绝不静默通过** | **65** |
 | **L2 live** | 需要服务在跑：`verify_*.py`、`probe_*.py`（逐只的“需服务 / 不需服务”二分待重测，见下节口径注） | 手动单跑；不被 `discover -p "test_*.py"` 收进来 | **60**（文件数，非用例数：`verify_*.py` 51 + `probe_*.py` 9） |
 
@@ -42,10 +42,16 @@ bash scripts/run_tests.sh hermetic         # 只 L0，以"零跳过"为闸
 bash scripts/run_tests.sh hermetic-clean   # L0 + 把 HOME 换成空目录 ⇒ 真模拟干净 runner
 bash scripts/run_tests.sh all              # L0 + L1（本机全量）
 bash scripts/run_tests.sh host             # 只 L1
+bash scripts/run_tests.sh changed [文件...]  # ★ 开发迭代用：按改动挑子集（**不是闸门**）
 bash scripts/run_tests.sh pytest           # 整层交 pytest 跑（对账用途，标准入口不用它）
 bash scripts/run_tests.sh probe verify_p1_backend.py http://127.0.0.1:3199
 venv/bin/python -m unittest discover -s tests -p "test_*.py"   # 老口径（L0+L1 混在一起）
 ```
+
+**`changed` 是子集，不是闸门**：它按"测试正文是否提及被改的模块"挑文件（`scripts/run_changed.py`），
+映射不到的改动会**显式报出并以退出码 2 结束**（不静默当"没测试要跑"）。它的合法性由
+`tests/test_run_changed_select.py`（L0 6 例）钉住。**提交/推送前一律跑 `scripts/prepush.sh`**
+——子集绿 ≠ 闸门绿，映射漏了谁它不会知道。
 
 `hermetic`/`host`/`all` 跑完都会附一步**收集器对账**：`unittest` 收进几例 vs `pytest`
 收进几例，不等即红（只 `--collect-only`，约 2s，不拿 pytest 跑用例）。

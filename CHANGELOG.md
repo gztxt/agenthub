@@ -545,7 +545,7 @@ L2 前两轮量出 Enter/Tab 假红，**三次都是判据自己的问题**，�
 **闸门** `tests/test_header_busy_gap.py`（新增 L0 5 例）：钉的是**机制**（空挂载点不吃 gap /
 `#hBusy` 内部 gap 归零 / 点靠自己的 margin / 分隔符 margin ≤1px 且仍淡化），
 外加一条**正对照**「三块挂载点仍在」—— 否则后人删掉那两个空 span 会让第一条**静默变绿**。
-红向自证：拿改前模板（`templates/index.html.bak-20261009_150139-hbusy-gap`）跑同一份用例
+红向自证：拿改前模板（`templates/index.html.bak-20261009_150139-pre-hbusy-gap`）跑同一份用例
 ⇒ **4 红 1 绿**（绿的是正对照，证明闸门不是"什么改动都红"）。
 
 **真渲染复测**：改后 `#hBusy` 102.2px、版本号→在跑 14px；截图

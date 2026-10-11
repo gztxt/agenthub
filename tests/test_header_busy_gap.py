@@ -28,7 +28,7 @@
 会一起红，正是要拦住这种"换个地方把间距加回来"的等价回退。
 
 【红向自证怎么复跑】把改前的模板当红基线（本批留了
-`templates/index.html.bak-20261009_150139-hbusy-gap`）：造一棵 `templates/` + `tests/`
+`templates/index.html.bak-20261009_150139-pre-hbusy-gap`）：造一棵 `templates/` + `tests/`
 两目录的假仓、把 `.bak` 复制成 `templates/index.html`、本文件复制进 `tests/`，
 在那棵树里跑本用例 ⇒ 应为 **4 红 1 绿**（绿的是 `test_mount_points_still_exist`）。
 """

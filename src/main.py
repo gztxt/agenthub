@@ -582,67 +582,21 @@ templates = Jinja2Templates(directory=str(templates_dir))
 # 现在 no-cache（每次仍回源校验）+ 自己处理 If-None-Match ⇒ 文件没变只回 304 空响应，
 # 文件一改 ETag 就变 ⇒ 拿不到旧 JS（当初写 no-store 就是怕这个，304 同样防得住）。
 if static_path.exists():
-    import gzip
-    import hashlib
-    import mimetypes
-    from fastapi import Request
-    from fastapi.responses import FileResponse, Response
-
-    _GZ_SUFFIX = {".js", ".css", ".svg", ".json", ".map"}
-    _GZ_MIN = 1024
-    _gz_cache: dict = {}   # "路径|mtime_ns|size" -> gzip 字节；键随文件变，天然失效
-
     @app.get("/static/{file_path:path}")
     async def _static_no_cache(file_path: str, request: Request):
-        # 判据全部下沉到 src/staticguard.py（纯函数）：内联在路由里时，单测无法覆盖
-        # —— import src.main 会触发 lifespan（开真库、起后台任务）。历史三条判据与
-        # 实测红-绿见该模块 docstring。
-        f = staticguard.resolve_serveable(static_path, file_path)
-        if f is None:
+        # 整条策略（判据 + 组装 + 发射）2026-10-12 已收进 src/staticguard.py —— 此前只抽了判据、
+        # 组装内联在这里，⇒「静态资源怎么正确地服务」的 interface 横跨两处且组装不可测。
+        # 现在路由退化为一次调用；行为逐字节冻结，不变量见 staticguard.serve 的 docstring，
+        # golden 矩阵见 tests/test_staticguard_serve.py（L0）与 verify_static_headers_matrix.py（L2）。
+        plan = staticguard.serve(
+            static_path, file_path,
+            (request.query_params.get("v") or "").strip(),
+            request.headers.get("accept-encoding") or "",
+            request.headers.get("if-none-match") or "",
+        )
+        if plan.status == 404:
             raise HTTPException(404)
-        st = f.stat()
-        # 与 FileResponse 同一套算法（md5("mtime-size")）仅用于 revalidate 分支。
-        # 判据在 staticguard.cache_policy（纯函数、可单测）：URL 的 ?v= 等于文件内容哈希
-        # 才许 immutable。09-23 自研 APP 事故的根治——旧口径下 ETag 由 mtime+size 算出，
-        # 与 query、与 content-encoding 都无关 ⇒ 不同 ?v= 与 gzip/identity 共用同一个 ETag，
-        # 条件请求可让端侧继续执行旧体（实测手机对 hub.js 先 200 后 304，且 ?v=22c 与 ?v=23a
-        # 同 ETag）。immutable 分支不发校验器、永不回 304：换新体的唯一途径是 URL 变化本身。
-        policy, want_tok = staticguard.cache_policy(
-            (request.query_params.get("v") or "").strip(), f)
-        headers = {"Vary": "Accept-Encoding", "X-Asset-Token": want_tok}
-        if policy == "immutable":
-            headers["Cache-Control"] = "public, max-age=31536000, immutable"
-        else:
-            etag = '"%s"' % hashlib.md5(
-                f"{st.st_mtime}-{st.st_size}".encode(),
-                usedforsecurity=False).hexdigest()
-            headers.update({"Cache-Control": "no-cache", "Pragma": "no-cache", "ETag": etag})
-            # 304 分支此前漏了 Vary：共享缓存可能把 gzip 版回给不接受 gzip 的客户端
-            if request.headers.get("if-none-match") == etag:
-                return Response(status_code=304, headers=headers)
-        media = mimetypes.guess_type(f.name)[0] or "application/octet-stream"
-        if (f.suffix.lower() in _GZ_SUFFIX and st.st_size >= _GZ_MIN
-                and "gzip" in (request.headers.get("accept-encoding") or "")):
-            key = f"{f}|{st.st_mtime_ns}|{st.st_size}"
-            body = _gz_cache.get(key)
-            if body is None:
-                body = gzip.compress(f.read_bytes(), 6)
-                if len(_gz_cache) > 32:
-                    _gz_cache.clear()
-                _gz_cache[key] = body
-            return Response(content=body, media_type=media,
-                            headers={**headers, "Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
-        # 09-24：immutable 分支**不走 FileResponse**。它会在 __call__ 里 stat 并调
-        # `set_stat_headers()`，自动补 `etag`/`last-modified`——两者都是 mtime+size 的函数，
-        # 与 URL 上的内容哈希提手无关 ⇒ 客户端可能拿 304 复用"提手对不上"的旧副本
-        # （09-23 APP 事故实测：?v=…22c 与 ?v=…23a 共用同一 ETag，先 200 后 304）。
-        # 曾试图覆写 FileResponse.set_headers —— 那个钩子在本 Starlette 版本里不存在，
-        # 方法永不执行（假动作，影子实测当场抓出）。这里直接给全量字节，与 gzip 分支同一做法，
-        # 不依赖任何私有方法名。代价：不支持 Range；静态资源最大约 300KB，可接受。
-        if policy == "immutable":
-            return Response(content=f.read_bytes(), headers=headers, media_type=media)
-        # revalidate 分支照旧：发 ETag、可回 304（提手不对/没提手时的安全阀）。
-        return FileResponse(str(f), headers=headers, media_type=media)
+        return staticguard.to_response(plan)
     # 不再 mount StaticFiles；自定义路由接管 /static/
 
 # 子路由（Hook / 记忆 / 指挥官）

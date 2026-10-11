@@ -393,6 +393,36 @@ class TestFrontendQuartet(unittest.TestCase):
             self.assertIn("if (!items.length) return;", seg,
                           f"{fn} 在 agent 清单为空时会清空 #{sel} 的 option")
 
+    def test_loaded_flags_declared_once(self):
+        """懒加载标志只允许在 01 声明一处。
+
+        v0.13.32 起 09/10 分片顶层各又写了一份 `var lpLoaded/ghLoaded = false`，
+        注释声称「同名 var 是刻意冗余、赋值不会再覆盖」—— **断言是错的**：
+        `var` 的初始化在 09/10 顶层执行，晚于 06 顶层的 go(lsGet('hub.page'))，
+        会把 go() 刚置上的 true 重置回 false ⇒ 每次导航重跑多根扫描，
+        并掩盖「落地页=本机项目时 agent 下拉恒空」的竞速故障（2026-10-11 报障）。"""
+        import re
+        for name in ("lpLoaded", "ghLoaded"):
+            hits = re.findall(r"(?m)^\s*var %s = false\b" % name, self.js)
+            self.assertEqual(len(hits), 1,
+                             f"var {name} 被声明 {len(hits)} 次 ⇒ 后一处会把懒加载标志重置回 false")
+
+    def test_every_agent_select_renderer_is_repainted_by_loadAgents(self):
+        """系统不变量：任何从 AGENTS 渲染 agent 下拉的函数，都必须在 loadAgents
+        拉到清单后补画一次。
+
+        为什么做成「遍历全部分片」而不是只钉 lp/gh 两个名字：这类缺陷的形态是
+        「同步渲染 + 异步数据源」，新增第三个项目页时会一模一样地再犯。
+        2026-10-11 的故障就是两页都缺这个补画，靠用户报障才发现。"""
+        import re
+        renderers = sorted(set(re.findall(r"function (\w*RenderAgents)\(", self.js)))
+        self.assertGreaterEqual(len(renderers), 2, f"预期至少两页 agent 渲染器，实得 {renderers}")
+        i = self.js.find("async function loadAgents(")
+        self.assertGreater(i, 0)
+        seg = self.js[i:i + 2500]
+        for fn in renderers:
+            self.assertIn(f"{fn}()", seg, f"{fn} 未在 loadAgents 的「清单到位」处补画")
+
     def test_start_posts_cwd(self):
         """lpStart 必须把选中项目路径作为 cwd 传给 /api/term/sessions——本页的存在意义。"""
         i = self.js.find("async function lpStart(")

@@ -215,11 +215,15 @@ function cssNum(name, fallback) {
 
 let AGENTS = [], PORTS = [], portsLoaded = false, memLoaded = false, skillsLoaded = false, kbLoaded = false;
 /* v0.13.30 本机项目页懒加载标志：声明在 01（拼接序最先）而赋值/读取在 09 分片。
-   lpLoaded 的 var 声明在 09 里会提升到 go() 可见——两处同名 var 是刻意冗余，
-   保证 06 分片顶层 go() 调用（在 09 声明之前执行）读到的是 undefined 而非 TDZ。 */
+   ⚠ 声明只允许存在于 01 这一处。历史错误（v0.13.32~v0.13.103）：09/10 分片顶层又各
+   写了一份 `var lpLoaded = false`，并在注释里断言「同名 var 是刻意冗余、赋值不
+   会覆盖」——**该断言是错的**：`var` 的初始化语句在 09/10 顶层执行，晚于 06 顶层
+   的 go(lsGet('hub.page'))，会把 go() 刚置上的 true **重置回 false** ⇒ ① 每次
+   导航回本机项目都重跑一次多根 git 扫描；② 掩盖了「落地页=本机项目时 agent
+   下拉恒空」的竞速故障（再点一次菜单意外自愈）。声明重复由
+   tests/test_localprojects.py::test_loaded_flags_declared_once 钉死。 */
 var lpLoaded = false;
-/* v0.13.31 GitHub 页同型（双 var 冗余纪律见上）；10 分片里 var ghLoaded 提升
-   保证 06 顶层 go() 先行调用读到 undefined 而非 TDZ。 */
+/* v0.13.31 GitHub 页同型：声明同样只在 01 一处（理由见上）。 */
 var ghLoaded = false;
 /* v0.13.43 设置三页懒加载标志：go() 在 06 分片顶层就会跑（可能早于 01 里
    settingsModelsLoad 之外的一些初始化），故同样用 var 提升规避 TDZ —— 与
@@ -232,9 +236,9 @@ var resLoaded = false;           // v0.13.52：资源监控页懒加载标志（
    09/10 分片顶层初始化**之前**就能调到 loadLocalProjects()/loadGithubRepos()
    （函数声明提升），而 LP/GH/lpStars… 的 `var X = …` 初始化还没跑 ⇒ 函数里
    读 LP.length 直接 TypeError ⇒ promise reject ⇒ 列表永远停在「加载中…」。
-   修法与 lpLoaded 同型：状态声明+初始化前置到 01（拼接序最先），09/10 里的
-   同名 var 是刻意冗余（提升后赋值不再能覆盖函数已经写入的数据——赋值均为
-   「首次空态」形状，函数体只在数据就位后才写非空值，语义不变）。 */
+   修法与 lpLoaded 同型：状态声明+初始化前置到 01（拼接序最先）。注意这里的前置
+   是**必须**的（09/10 顶层赋值晚于 06 的 go()），且不允许在 09/10 再留第二份声明
+   —— 第二份声明不会「无害冗余」，它会把 go() 置上的懒加载标志重置回 false。 */
 var LP = [], GH = [];
 var lpStars = new Set(), lpHiddenSet = new Set();
 var ghStars = new Set(), ghHiddenSet = new Set();
@@ -5638,7 +5642,9 @@ async function loadAssets() {
 var LP = [];         // 全量项目（过滤前的缓存）
 var lpSel = '';      // 当前选中项目 path（'' = 未选）
 var lpSelName = '';
-var lpLoaded = false;   // go() 懒加载标志（与 memLoaded/skillsLoaded 同型；go() 分支在 01）
+/* lpLoaded 的声明在 01-core-boot.js（**只此一处**）：go() 在 06 顶层同步调用，
+   若在此处再写一份 `var lpLoaded = false`，其初始化晚于 go() ⇒ 把懒加载标志
+   重置回 false（2026-10-11 报障的掩盖因素）。见 01 的说明与静态闸门。 */
 
 /* v0.13.32 收藏/隐藏状态：localStorage 里的 JSON 数组（path 列表）。
    解析失败（旧值形状漂移）按空集处理，绝不让坏存档打断渲染。 */
@@ -5970,7 +5976,8 @@ async function lpStart() {
 var GH = [];          // 全量远端仓库（过滤前缓存）
 var ghSel = null;     // 当前选中索引（null = 未选）
 var ghSelName = '';
-var ghLoaded = false;    // go() 懒加载标志（声明在 01 亦有 var 冗余，同 lpLoaded 纪律）
+/* ghLoaded 的声明在 01-core-boot.js（**只此一处**）：理由同 09 分片的 lpLoaded ——
+   在此处再写一份 `var ghLoaded = false` 会把 06 顶层 go() 置上的懒加载标志重置回 false。 */
 
 /* v0.13.32 收藏/隐藏状态（同 09 的 _lpSet 形态；解析失败按空集，不打断渲染）。 */
 function _ghSet(key) {

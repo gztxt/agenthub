@@ -138,3 +138,69 @@ class TestCompatAndRobustness(_SizeOwnerTest):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestInitialSize(_SizeOwnerTest):
+    """新建 PTY 的初始尺寸（2026-10-11，grok 卡死根因）。
+
+    ★ 为什么这条必须测：pty.fork()/openpty() 给的 winsize 是 **0×0**，而原实现
+      只在 Session 上填了 rows/cols 这两个 Python 属性、**从不调 ioctl** ⇒ 子进程
+      开局拿到的「终端」是 0 行 0 列。grok 的 TUI 读到 0 尺寸会永久卡在启动
+      （真 pty 实测：128 字节后再无输出，且事后 SIGWINCH 唤不醒）。
+      而 _apply_size 又拿被硬编码的 80×24 去跟这个**假值**比 ⇒ 前端首帧 resize
+      若恰是 80×24，短路生效、真 ioctl 永不下发 ⇒ pty 一直停在 0×0。
+
+    判据用 TIOCGWINSZ 直读 pty，不看 Session 上的属性 —— 属性是「宣布值」，
+    本用例要钉的是「真值」，两者在缺陷形态下正好不一致。
+    """
+
+    def _winsz(self, fd):
+        import fcntl, struct, termios
+        return struct.unpack("HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8))[:2]
+
+    def test_fresh_pty_reports_zero_zero(self):
+        """前提事实：不设尺寸的新 pty 就是 0×0（钉住这条，修法才有的放矢）。"""
+        self.assertEqual(self._winsz(self.sfd), (0, 0), "openpty 的 winsize 不再是 0×0，本用例前提已变")
+
+    def test_set_winsize_writes_real_pty(self):
+        """_set_winsize 必须真的写进 pty，而不是只记在会话对象上。"""
+        self.assertTrue(term._set_winsize(self.sfd, 24, 80))
+        self.assertEqual(self._winsz(self.sfd), (24, 80))
+
+    def test_set_winsize_rejects_unpackable(self):
+        """越界行列只返回 False、绝不抛（高频路径不许被 struct.error 打断）。"""
+        self.assertFalse(term._set_winsize(self.sfd, 70000, 80))
+        self.assertFalse(term._set_winsize(self.sfd, 24, 70000))
+
+    def test_initial_constants_are_positive(self):
+        """初始尺寸常量必须是正数；0 就是本次根因本身。"""
+        self.assertGreater(term.INITIAL_ROWS, 0)
+        self.assertGreater(term.INITIAL_COLS, 0)
+
+    def test_new_session_pty_is_not_zero_sized(self):
+        """★ 本版核心判据：新建 Session 的真 PTY 尺寸不再是 0×0。
+
+        直接构造真 Session（不 mock），用 TIOCGWINSZ 从**master fd 读回真值**
+        —— 属性 self.rows/cols 是「宣布值」，本用例要的是「pty 真值」。
+        """
+        import fcntl, signal, struct, termios
+        sess = term.Session("t-init", "shell", ["/bin/cat"], "/tmp")
+        self.addCleanup(lambda: (sess._signal_group(signal.SIGKILL), sess._cleanup()))
+        got = struct.unpack("HHHH", fcntl.ioctl(sess.fd, termios.TIOCGWINSZ, b"\0" * 8))[:2]
+        self.assertEqual(got, (term.INITIAL_ROWS, term.INITIAL_COLS),
+                         "新会话的 pty 是 %r —— 0×0 会让 grok 之类 TUI 永久卡在启动" % (got,))
+        self.assertNotEqual(got, (0, 0))
+
+    def test_gate_is_discriminating(self):
+        """红向自证：把 _set_winsize 抹成 no-op，同一个断言必须**能**看出 0×0。
+
+        没有这条，上一例只是「碰巧绿」——无法区分「修法生效」与「判据根本不看这事」。
+        """
+        import fcntl, signal, struct, termios
+        real = term._set_winsize
+        term._set_winsize = lambda fd, r, c: False      # 模拟修复前的行为
+        self.addCleanup(lambda: setattr(term, "_set_winsize", real))
+        sess = term.Session("t-init-red", "shell", ["/bin/cat"], "/tmp")
+        self.addCleanup(lambda: (sess._signal_group(signal.SIGKILL), sess._cleanup()))
+        got = struct.unpack("HHHH", fcntl.ioctl(sess.fd, termios.TIOCGWINSZ, b"\0" * 8))[:2]
+        self.assertEqual(got, (0, 0), "判据不区分有无初始尺寸 ⇒ 上一例是假绿")

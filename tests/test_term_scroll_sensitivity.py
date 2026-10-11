@@ -238,7 +238,15 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.101"
+    CURRENT_VERSION = "0.13.102"
+
+    #: v0.13.102 的两条根因都要在版本注释里可寻址（该闸门的作用是「注释掉了根因就红」）：
+    #: ① PTY 初始 0×0（grok 起不来）—— 关键字取自实际写下的字句；
+    #: ② WAL 自动检查点落在逐帧写路径上（「又变慢」）—— 含取值与替代触发点。
+    VERSION_ROOT_CAUSES["0.13.102"] = (
+        "0×0", "winsize", "SIGWINCH 唤不醒", "Grok Build",
+        "wal_autocheckpoint", "自动检查点", "wal_checkpoint_loop", "PASSIVE",
+    )
 
     #: 2026-10-05 起，历史版本的根因**逐字归档在 CHANGELOG.md**（main.py 的
     #: VERSION 注释块从 1417 行缩到 1047 行，只留当前版 + 一行指针）。

@@ -257,6 +257,25 @@ def execute(sql: str, params: tuple = ()) -> int:
         return cur.rowcount
 
 
+def checkpoint(mode: str = "PASSIVE") -> None:
+    """跑一次 WAL 检查点（2026-10-11）。
+
+    调用方是 main.wal_checkpoint_loop（后台定时、走 to_thread），**不是**逐帧写路径：
+    SQLite 的自动检查点每积满 wal_autocheckpoint(默认 1000) 页就在「触发它的那条写
+    语句」里同步 checkpoint，而 term_record 的每个按键/每帧输出都是一条 INSERT+commit
+    ⇒ 实测每 183 帧一次 ~90ms 尖峰，全落在 asyncio 事件循环里（p99 6.9ms → 关自动后
+    0.17ms）。所以 hub 主连接关掉自动检查点，改由本函数定期做。
+
+    mode 默认 PASSIVE：**不阻塞**读/写者，能在写者空闲的间隙把 WAL 回写主库；
+    它可能回写不满（有人正写着），但下一轮会继续 —— 比 TRUNCATE 更安全（TRUNCATE
+    要独占，正是 09-2x 注释里「运行期做 TRUNCATE 会与写者抢锁」担心的那件事）。
+    与 db.init_db 的启动期 wal_checkpoint(TRUNCATE) 分工：启动做一次彻底收口，
+    运行期用 PASSIVE 维持。
+    """
+    with _lock:
+        _conn.execute(f"PRAGMA wal_checkpoint({mode})")
+
+
 def execute_script(sql: str) -> None:
     """executescript 会先隐式 commit 当前事务再执行脚本，末尾不 commit 时
     后续连接看不到已执行语句的效果（读不到 / 关进程丢失）⇒ 显式补 commit。"""

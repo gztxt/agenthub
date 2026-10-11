@@ -1,3 +1,98 @@
+## v0.13.102 — 两处「同步动作挂在高频路径」的残留：PTY 初始 0×0（grok 起不来）+ WAL 自动检查点（又变慢）
+
+> 触发：用户「嵌入式中断现在又反应很慢，之前修复一次速度很快，现在又开始慢了 刷新也没用；
+> 另外 grok 无法正常启动」。两条**互不相干**的根因，同属「一个同步动作挂在高频路径上」
+> 这个家族（与 v0.13.100/101 同源），但触发面不同 —— 都不在终端渲染层。
+
+### 一、grok 起不来：PTY 以 0×0 创建
+
+`pty.fork()` 给的 winsize 是 **0×0**（本机实测 `TIOCGWINSZ = (0,0,0,0)`），而原实现只在
+`Session` 上填了 `rows/cols` 两个 **Python 属性**、**从不调 ioctl** ⇒ 子进程开局拿到的
+「终端」是 0 行 0 列。
+
+真 pty 实测（只差这一个变量，各 3 轮全一致）：
+
+| pty 尺寸 | grok 行为 |
+|---|---|
+| **0×0** | 只吐 **128 字节**就永久停住（不发 `Grok Build` 界面，且事后 SIGWINCH 唤不醒） |
+| 120×40 | **4.3s** 正常渲染 |
+
+排除性实验（各自单独成立）：
+- 设尺寸、**不答** DSR（`\x1b[6n`）⇒ 4.3s 正常 —— grok **不需要** DSR 应答；
+- 不设尺寸、答 DSR ⇒ 42 字节即死 —— 尺寸才是决定变量。
+- 事后补救无效：先 9s 保持 0×0、再 `TIOCSWINSZ` 到 120×40，**新增 0 字节**。
+  grok 已经把「没有尺寸」读死，这时再发 SIGWINCH 也唤不醒。
+
+**第二层（「刷新也没用」）**：`_apply_size` 拿被硬编码的「80×24」去跟 Session 上那个
+**假值**比。前端首帧 resize 若恰是 80×24，短路生效、真 ioctl 永不下发 ⇒ pty 一直停在
+0×0。刷新会清屏并让前端重发 resize，但只要尺寸与宣布值相同，就仍然不下发。
+
+改法：`Session.__init__` fork 后立刻 `_set_winsize(fd, INITIAL_ROWS, INITIAL_COLS)`
+（抽成函数，与 `_apply_size` 共用一份 ioctl 细节，也为了可测），宣布值 == 真值从此一致。
+其余画像在 0×0 下照常出界面（claude/codex/opencode/qodercli），是 grok 独有硬失败。
+
+端到端 A/B（**同一探针、只差这份代码**）：
+| 组 | 回放帧 | 实时字节 | 出现 Grok UI |
+|---|---|---|---|
+| 修复后（影子 :3209） | 31B | 866B | **4.6s** |
+| 未修的生产 :3102 | 31B | 121B | **NEVER** |
+
+闸门 `tests/test_term_size_owner.py::TestInitialSize`（6 例，含**红向自证**：把
+`_set_winsize` 抹成 no-op，同一断言必须能看出 0×0 —— 否则那一例只是碰巧绿）。
+
+### 二、「又变慢」：WAL 自动检查点落在逐帧写路径上
+
+SQLite 的**自动**检查点是「每积满 `wal_autocheckpoint`（默认 1000）页，就在**触发它的
+那条写语句**里同步 checkpoint」。而 `term_record` 的逐帧写（每个按键 / 每帧输出一条
+INSERT+commit）正落在这条路上 ⇒ 每 ~183 帧（1000 页 ÷ ~5.5 页/帧）就有一帧被同步
+checkpoint 拖住，且**独占 asyncio 事件循环**。
+
+100 万行真库副本（`sqlite3.backup` 取一致快照，108.8 万行）4000 帧实测：
+
+| `wal_autocheckpoint` | 尖峰(>20ms) | 单帧 p99 | 单帧 max |
+|---|---|---|---|
+| 1000（默认） | **22 次** | **6.9ms** | **115.9ms** |
+| 0（关自动） | **0 次** | **0.17ms** | 16.4ms |
+
+尖峰周期稳定在每 183~190 帧一次（与「1000 页 ÷ ~5.5 页/帧」相符），且**关掉自动检查点
+后 100% 消失** —— 机制确认。
+
+关自动检查点后 WAL 会持续增长（实测 4000 帧 → 88MB），所以**必须**有替代触发点：
+
+- `db.checkpoint(mode="PASSIVE")`（PASSIVE 不抢独占，与写者共存）；
+- `main.wal_checkpoint_loop()`：默认每 `HUB_WAL_CHECKPOINT_SEC=120` 秒，走 `to_thread`
+  执行 —— 总 fsync 次数不变，只是换了执行位置，WAL 不会失控。
+- 启动期仍保留 `init_db` 的一次 `wal_checkpoint(TRUNCATE)` 做彻底收口。
+
+为什么不把默认值写进 `db.py` 的 PRAGMA：那是**连接全局**语义，engine/MCP 侧不该被
+本模块的取舍顺带改掉；改在 hub 主连接 + 后台循环里，影响面就一个对象。
+
+⚠ 本条的绝对取值属本机（NAS 卷、4 核），不宜外引；方向性结论（自动检查点在逐帧写路径
+上 ⇒ 尖峰归零）是机制性的。
+
+### 三、同批取证：录制预算两条路都仍是微秒级（非本次回归点）
+
+顺带在 108.8 万行真库副本上复测 v0.13.100/101 的成果，**确认它们没有退化**：
+
+| 指标 | p50 | p95 |
+|---|---|---|
+| `total_bytes()`（计数表点查） | **0.006ms** | 0.007ms |
+| `Recorder.__init__`（建会话：DELETE + 预算） | **0.027ms** | 0.052ms |
+| `sweep()`（保留期清理，SEARCH idx_termrec_ts） | **0.014ms** | 0.019ms |
+| 录制表行数 / 计数表不变量 | 1,087,959 行，计数 == `SUM(bytes)`（差 0） | — |
+
+⇒ 逐帧 INSERT+commit 的 p50 只有 0.091ms，用户感知的「卡」只能来自上面那条周期性
+同步 checkpoint，而不是录制预算（那两条已被 v0.13.100/101 压成常数）。
+
+### 四、闸门与回归
+
+- `tests/test_term_size_owner.py` 16 例全绿（原 10 例 + 新增 `TestInitialSize` 6 例）。
+- 终端相关既有套件 114 例全绿（reap/hb/reaper/fast_reap/exit_reason/launch_guard/
+  pty_echo/coalescer/editing_keys/focus_policy/mouse_tier/size_owner）。
+- 版本钉 `tests/test_term_scroll_sensitivity.py`：`CURRENT_VERSION` → `0.13.102`，
+  登记 8 个根因关键字（`0×0` / `winsize` / `SIGWINCH 唤不醒` / `Grok Build` /
+  `wal_autocheckpoint` / `自动检查点` / `wal_checkpoint_loop` / `PASSIVE`），7 例全绿。
+
 ## v0.13.101 — 录制预算彻底去 SUM：单行计数表 + 数据库侧触发器
 
 > 触发：用户「彻底消除」（接v0.13.100 之后）。同批含项目页收藏同步的两处修复

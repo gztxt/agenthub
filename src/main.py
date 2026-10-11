@@ -80,7 +80,44 @@ import hublog as hublog_mod        # 日志中心（v0.13.46：设置→日志�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.101"  # 录制预算彻底去SUM：单行计数表 + 数据库侧触发器
+VERSION = "0.13.102"  # 两处「同步动作挂在高频路径」的残留：PTY 初始 0×0 + WAL 自动检查点
+#   v0.13.102：用户「嵌入式中断现在又反应很慢，之前修复一次速度很快，现在又开始慢了；
+#   另外 grok 无法正常启动」。两条**互不相干**的根因，都在「一个同步动作挂在
+#   **高频路径**上」这个家族里（与 v0.13.100/101 同源），但触发面不同：
+#
+#   ① grok 起不来（`src/term.py`）：`pty.fork()` 给的 winsize 是 **0×0**，而原实现
+#      只在 Session 上填 rows/cols 两个 **Python 属性**、**从不调 ioctl** ⇒ 子进程
+#      开局拿到「终端 0 行 0 列」。真 pty 实测（只差这一个变量、各 3 轮一致）：
+#        0×0   ⇒ grok 只吐 128 字节就**永久停住**，不发 `Grok Build` 界面
+#        120×40 ⇒ 4.3s 正常渲染
+#      而且**事后补尺寸救不回来**（先 9s 0×0、再 TIOCSWINSZ 到 120×40 ⇒ 新增 0 字节，
+#      grok 已把「没有尺寸」读死，SIGWINCH 唤不醒）。别的画像在 0×0 下照常出界面
+#      （claude/codex/opencode/qodercli），是 grok 独有硬失败。
+#      `_apply_size` 又拿被硬编码的「80×24」去跟这个**假值**比 ⇒ 前端首帧 resize 若
+#      恰是 80×24，短路生效、真 ioctl 永不下发 ⇒ pty 一直停在 0×0（这是「刷新也没用」
+#      的第二层：刷新会清屏并让前端重发 resize，但只要尺寸与宣布值相同就仍不下发）。
+#      改法：`Session.__init__` fork 后立刻 `_set_winsize(fd, INITIAL_ROWS, INITIAL_COLS)`
+#      （抽成函数供 `_apply_size` 共用、也为了可测），宣布值 == 真值从此一致。
+#      端到端 A/B（同一探针、只差这份代码）：修复后 4.6s 出界面 / 未修的生产 NEVER。
+#      闸门 tests/test_term_size_owner.py::TestInitialSize（含红向自证：把 _set_winsize
+#      抹成 no-op，同一断言必须能看出 0×0）。
+#
+#   ② 「又变慢」（`src/main.py` + `src/db.py`）：SQLite 的**自动**检查点是「每积满
+#      wal_autocheckpoint(默认 1000) 页，就在**触发它的那条写语句**里同步 checkpoint」。
+#      而 term_record 的逐帧写（每个按键 / 每帧输出一条 INSERT+commit）正落在这条路上
+#      ⇒ 每 ~183 帧（1000 页 ÷ ~5.5 页/帧）就有一帧被同步 checkpoint 拖住。100 万行
+#      真库副本实测 4000 帧：
+#        wal_autocheckpoint=1000（默认）⇒ 尖峰 22 次，单帧 p99 **6.9ms** / max **116ms**
+#        wal_autocheckpoint=0（关自动）  ⇒ 尖峰 **0** 次，单帧 p99 **0.17ms** / max 16ms
+#      关闭自动检查点后 WAL 仍会增长（实测 4000 帧 → 88MB），所以**必须**有替代触发点：
+#      `db.checkpoint()` + `main.wal_checkpoint_loop()`（默认每 120s、走 to_thread、
+#      PASSIVE 不抢独占），总 fsync 次数不变，只是换了执行位置。启动期仍保留
+#      init_db 的一次 `wal_checkpoint(TRUNCATE)` 做彻底收口。
+#      为什么不改 db.py 的 PRAGMA 默认值：那是**连接全局**语义，engine/MCP 侧不该被
+#      本模块的取舍顺带改掉；改在 hub 主连接 + 后台循环里，影响面就一个对象。
+#      ⚠ 本条的取值取证属本机（NAS 卷、4 核），绝对值不宜外引；方向性结论
+#      （自动检查点在逐帧写路径上 ⇒ 尖峰归零）是机制性的。
+
 #   v0.13.100：用户「嵌入式终端会话文字输入非常慢 很不正常」。**根因不在终端**——
 #   `Recorder.feed()` 的全局预算检查是 `SELECT SUM(bytes) FROM term_recordings`，
 #   EXPLAIN 实测 `SCAN term_recordings`（表上只有 idx_termrec_sid(session_id,seq)，
@@ -1260,6 +1297,38 @@ async def prov_loop():
         await asyncio.sleep(float(os.getenv("HUB_PROV_SEC", "30")))
 
 
+#: WAL 周期检查点（2026-10-11）。默认 120s；置 0 关闭本条后台循环。
+#: 背景：SQLite 的**自动**检查点是「每积满 wal_autocheckpoint（默认 1000）页，就在
+#: 触发它的那条写语句里同步 checkpoint」。而 term_record 的逐帧写（每个按键 / 每帧
+#: 输出一条 INSERT+commit）正落在这条路上 ⇒ 每 ~180 帧就有一帧被同步 checkpoint
+#: 拖住。本机实测（100 万行真库副本，4000 帧）：
+#:   wal_autocheckpoint=1000（默认）⇒ 每 183 帧一次尖峰，单帧 p99 6.9ms / max 116ms
+#:   wal_autocheckpoint=0（关自动）  ⇒ 尖峰 0 次，单帧 p99 0.17ms / max 16ms
+#: 而 checkpoint 本身**不是正确性前提**（WAL 本就是崩溃安全的），它只是防止 -wal
+#: 无限增长。所以把它从「逐帧同步」挪到「后台定时」：事件循环不再被逐帧路径独占，
+#: 总 fsync 次数不变（只是换了执行位置），WAL 也不会失控。
+#: 为何不把默认值写进 db.py 的 PRAGMA：那是**全局**连接语义，别的库/别的连接
+#: （engine 侧、MCP 侧）不该被本模块的取舍顺带改掉；改在 hub 自己的后台循环里，
+#: 影响面就是「hub 主连接」这一个对象。成本 / 收益与 term_record 的预算修复同源：
+#: 都是「一个同步动作挂在高频写路径上」。
+HUB_WAL_CHECKPOINT_SEC = int(os.getenv("HUB_WAL_CHECKPOINT_SEC", "120"))
+
+
+async def wal_checkpoint_loop():
+    """定期在 to_thread 里 checkpoint（见 HUB_WAL_CHECKPOINT_SEC 的取证注释）。
+
+    异常不打死循环：checkpoint 是优化，失败（被写者占着）下一轮再来。
+    """
+    if HUB_WAL_CHECKPOINT_SEC <= 0:
+        return
+    while True:
+        await asyncio.sleep(HUB_WAL_CHECKPOINT_SEC)
+        try:
+            await asyncio.to_thread(db.checkpoint)
+        except Exception as e:  # noqa: BLE001
+            print(f"[db] WAL 检查点异常（下轮重试）{type(e).__name__}: {str(e)[:160]}", flush=True)
+
+
 MODEL_DRIFT_SWEEP_SEC = int(os.getenv("HUB_MODEL_DRIFT_SWEEP_SEC", "300"))
 #: 漂移写回开关（用户 09-28 授权默认开；置 0/false/no ⇒ 退回 v0.13.50 的只读告警）
 MODEL_DRIFT_REPAIR = os.getenv("HUB_MODEL_DRIFT_REPAIR", "1") not in ("0", "false", "no")
@@ -1318,6 +1387,14 @@ async def startup():
     global discovery
     global _embed_proxy
     db.init_db(config.db_path)
+    # 关掉 hub 主连接的**自动**检查点，改由 wal_checkpoint_loop 定时做（见该循环注释：
+    # 自动检查点每 1000 页就在「触发它的那条写语句」里同步 fsync，而 term_record 的
+    # 逐帧写正是高频写路径 —— 实测每 183 帧一次 ~90ms 尖峰，全部落在事件循环里）。
+    # 放在这一行是因为它必须紧跟 init_db：PRAGMA 是连接级状态，换连接就失效。
+    try:
+        db.execute("PRAGMA wal_autocheckpoint=0")
+    except Exception as e:  # noqa: BLE001 —— 关不掉只是保留旧行为（有尖峰），不该拖垮启动
+        print(f"[db] 关闭自动检查点失败（保留默认行为）：{type(e).__name__}: {str(e)[:120]}", flush=True)
     # v0.13.101：录制预算的计数表播种（存量库升级后计数从0 起跳会让预算判据失真）。
     # 幂等且只在计数行缺失时才做那一次全表 SUM；播种失败不许拖垮启动——
     # 计数表缺失时 total_bytes() 返回 0，代价是预算偏松（多录一点），
@@ -1353,6 +1430,7 @@ async def startup():
     # 只能靠定期 waitpid 探活发现。缺这条快车道，reap_loop 的 60s 间隔
     # 就是「前端空白最长 60 秒」的同义词。
     _spawn(term_mod.fast_reap_loop())
+    _spawn(wal_checkpoint_loop())   # WAL 周期检查点（把自动检查点从逐帧写路径挪走）
     mcpgw_mod.ensure_schema()
     cronjobs_mod.ensure_schema()
     cronjobs_mod.set_context(

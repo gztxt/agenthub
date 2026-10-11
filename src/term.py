@@ -459,6 +459,14 @@ def child_env() -> Dict[str, str]:
     return env
 
 
+#: 新建 PTY 的初始尺寸（2026-10-11）。必须**真**设进 pty（见 Session.__init__ 里的
+#: 「初始 PTY 尺寸」注释）：pty.fork() 的 winsize 是 0×0，而 grok 的 TUI 读到 0 尺寸
+#: 会永久卡在启动（128 字节、再无输出，且事后 SIGWINCH 唤不醒）。80×24 是前端首帧
+#: 抵达前的安全兜底，也是 Session.rows/cols 一直以来的宣布值。
+INITIAL_ROWS = 24
+INITIAL_COLS = 80
+
+
 class Session:
     def __init__(self, sid: str, agent_id: str, cmd: List[str], cwd: str):
         self.id = sid
@@ -507,6 +515,23 @@ class Session:
             termios.tcsetattr(self.fd, termios.TCSANOW, _attr)
         except OSError:
             pass   # 关不掉也不能让建会话失败（最坏退化为「仍可能回显」）
+        # ── 初始 PTY 尺寸（2026-10-11，grok 卡死根因）──────────────────────────────
+        # pty.fork() 给的是 **0×0** winsize（本机实测 TIOCGWINSZ = (0,0,0,0)），
+        # 而原实现只在 Session 上填了 rows/cols 这两个 **Python 属性**、从不调 ioctl
+        # ⇒ 子进程开局拿到的就是「终端 0 行 0 列」，而 _apply_size 又拿被硬的
+        # 「80×24」跟这个假值比 ⇒ 前端若首帧 resize 恰是 80×24，短路生效、真 ioctl
+        # 永不下发，pty 于是一直停在 0×0。
+        # 实测（真 pty，只差这一个变量，各 3 轮全一致）：
+        #   0×0      ⇒ grok 只吐 128 字节就永久停住（不发 `Grok Build` 界面）
+        #   120×40   ⇒ 4.3s 正常渲染
+        # 而且**事后补尺寸救不回来**：先 9s 0×0、再 TIOCSWINSZ 到 120×40，
+        # 新增 0 字节（grok 已经把「没有尺寸」读死，SIGWINCH 唤不醒）。
+        # 别的画像不受影响（同为 0×0，claude/codex/opencode/qodercli 照常出界面），
+        # 是 grok 独有硬失败 —— 但它也是本机唯一的「嵌入式终端起不来」报告。
+        # 先给 80×24（= 前端首帧前的安全兜底，也是原 rows/cols 的宣布值）：
+        # 好处是「宣布值」与「真值」从此一致，前端随后的 resize 只在几何真的不同时才
+        # 短路，`_apply_size` 的语义不再踩到一个自己没设过的尺寸。
+        _set_winsize(self.fd, INITIAL_ROWS, INITIAL_COLS)
         self.alive = True
         self.created = time.time()
         # 两个时钟刻意分开（v0.13.58 / 档二）：
@@ -517,7 +542,7 @@ class Session:
         # 回收只看 last_activity，「客户端不在」不再等价于「会话该死」。
         self.last_io = time.time()
         self.last_activity = time.time()
-        self.cols, self.rows = 80, 24
+        self.cols, self.rows = INITIAL_COLS, INITIAL_ROWS
         # 每个观看者一条**独立**队列（P1-5）。
         # 旧做法：全会话共用一个 outputs 队列，而每个 WS 连接的 pump 都在同一个队列上 get()
         # ⇒ 两台设各（桌面 + 手机）同时看同一会话时，两个消费者会**互相偷字节**，
@@ -755,6 +780,23 @@ def _norm_intent(raw) -> str:
     return s if s in ("claim", "update") else "update"
 
 
+def _set_winsize(fd: int, rows: int, cols: int) -> bool:
+    """把行列数写进真 PTY（TIOCSWINSZ）。返回是否成功。
+
+    抽成函数是为了让「初始尺寸」这条路径可测（tests/test_term_size_owner.py
+    用 openpty 的真 fd 钉它），并让 `_apply_size` 与本函数只有一份 ioctl 细节。
+
+    行列上限不再是可选约束：struct.pack("HHHH") 超过 65535 会抛 struct.error，
+    而调用方（`_apply_size`）已用 _ROWS_RANGE/_COLS_RANGE 夹过，本函数只负责
+    「写不进就返回 False」，绝不让异常穿到调用者的高频路径上。
+    """
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", int(rows), int(cols), 0, 0))
+        return True
+    except (OSError, struct.error):
+        return False
+
+
 def _apply_size(sess: Session, vid: str, rows, cols, intent: str) -> bool:
     """按所有权语义改 PTY 尺寸；返回是否真的改了（未改/被拒都返回 False）。
 
@@ -773,9 +815,7 @@ def _apply_size(sess: Session, vid: str, rows, cols, intent: str) -> bool:
         return False
     if sess.rows == r and sess.cols == c:
         return False                      # 尺寸未变：不打扰 pty（等价于 paseo 的服务端短路）
-    try:
-        fcntl.ioctl(sess.fd, termios.TIOCSWINSZ, struct.pack("HHHH", r, c, 0, 0))
-    except OSError:
+    if not _set_winsize(sess.fd, r, c):
         return False
     sess.rows, sess.cols = r, c
     return True

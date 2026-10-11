@@ -162,7 +162,8 @@ class TestTdzOrder(unittest.TestCase):
         loadLocalProjects()（函数声明提升），而 LP 的 `var LP = []` 初始化在 09
         分片顶层（拼接序在 06 之后）⇒ 函数读 LP.length 抛 TypeError ⇒ promise
         reject ⇒ 列表永远停在「加载中…」。修法：LP/GH/lpStars…lpHiddenSet/
-        ghStars/ghHiddenSet 的初始化前置到 01（lpLoaded 同型双 var 纪律）。
+        ghStars/ghHiddenSet 的初始化前置到 01（lpLoaded 同型：声明只允许在 01
+        一处，09/10 再写一份会把懒加载标志重置回 false，见 test_localprojects）。
         本钉子断言：01 里的初始化行必须早于 06 的 bootstrap go() 行。"""
         src = HUB.read_text(encoding="utf-8").split("\n")
         boot = next(i for i, ln in enumerate(src, 1)

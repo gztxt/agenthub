@@ -25,7 +25,8 @@
 var GH = [];          // 全量远端仓库（过滤前缓存）
 var ghSel = null;     // 当前选中索引（null = 未选）
 var ghSelName = '';
-var ghLoaded = false;    // go() 懒加载标志（声明在 01 亦有 var 冗余，同 lpLoaded 纪律）
+/* ghLoaded 的声明在 01-core-boot.js（**只此一处**）：理由同 09 分片的 lpLoaded ——
+   在此处再写一份 `var ghLoaded = false` 会把 06 顶层 go() 置上的懒加载标志重置回 false。 */
 
 /* v0.13.32 收藏/隐藏状态（同 09 的 _lpSet 形态；解析失败按空集，不打断渲染）。 */
 function _ghSet(key) {
@@ -256,6 +257,8 @@ function ghRenderAgents() {
   if (!sel) return;
   const cur = sel.value;
   const items = AGENTS.filter(a => a.kind === 'agent' && (a.entries || []).some(e => e.type === 'term'));
+  /* v0.13.103：同 09 分片lpRenderAgents——AGENTS 未到时早退保占位，不清空 option。 */
+  if (!items.length) return;
   sel.innerHTML = items.map(a =>
     '<option value="' + escapeHtml(a.id) + '">' + escapeHtml(a.name) + '</option>').join('');
   if (cur && items.some(a => a.id === cur)) sel.value = cur;   // 轮询重绘不覆盖用户选择

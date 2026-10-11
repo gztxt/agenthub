@@ -113,6 +113,26 @@ try:
         if c.eval("!!document.querySelector('#btnNavProjects')"):
             break
 
+    # R0（2026-10-11 报障回归）：落地页=本机项目时，agent 下拉必须**不点任何菜单**
+    # 就自动填充。两页的 option 是同步渲染、AGENTS 是异步来的 ⇒ 曾经竞速成 0 个
+    # option，框塌成 46px 空白且此后再无人重画（用户：「右边选择 agent 框不能正常
+    # 显示，点 GitHub 项目菜单后才能正常显示」）。
+    c.eval("localStorage.setItem('hub.page', 'localprojects');")
+    c.send("Page.reload", ignoreCache=True)
+    opts0 = "0"
+    for _ in range(30):
+        time.sleep(0.5)
+        opts0 = c.eval("(() => { const s = document.getElementById('lpAgent');"
+                       " return s ? s.options.length : 0; })()")
+        if int(opts0 or 0) > 1:
+            break
+    chk("R0 落地页=本机项目：agent 下拉自动填充（无需再点菜单）", int(opts0 or 0) > 1,
+        f"options={opts0}")
+    for _ in range(20):
+        time.sleep(0.3)
+        if c.eval("!!document.querySelector('#btnNavProjects')"):
+            break
+
     # R1：按钮存在且位于 #navTree 之前
     order = c.eval("(() => { const btn = document.querySelector('#btnNavProjects');"
                    " const tree = document.querySelector('#navTree');"

@@ -20,7 +20,9 @@
 var LP = [];         // 全量项目（过滤前的缓存）
 var lpSel = '';      // 当前选中项目 path（'' = 未选）
 var lpSelName = '';
-var lpLoaded = false;   // go() 懒加载标志（与 memLoaded/skillsLoaded 同型；go() 分支在 01）
+/* lpLoaded 的声明在 01-core-boot.js（**只此一处**）：go() 在 06 顶层同步调用，
+   若在此处再写一份 `var lpLoaded = false`，其初始化晚于 go() ⇒ 把懒加载标志
+   重置回 false（2026-10-11 报障的掩盖因素）。见 01 的说明与静态闸门。 */
 
 /* v0.13.32 收藏/隐藏状态：localStorage 里的 JSON 数组（path 列表）。
    解析失败（旧值形状漂移）按空集处理，绝不让坏存档打断渲染。 */
@@ -253,6 +255,11 @@ function lpRenderAgents() {
   if (!sel) return;
   const cur = sel.value;
   const items = AGENTS.filter(a => a.kind === 'agent' && (a.entries || []).some(e => e.type === 'term'));
+  /* v0.13.103：AGENTS 异步来（loadAgents），本函数在 loadLocalProjects 数据一到
+     就同步跑 —— 清单未到时**早退保占位**，不把 innerHTML 清成 0 个 option
+     （清空会让 select 塌成 46px 空白，且此后无人重画：2026-10-11 报障）。
+     真实清单由 01 分片 loadAgents 的补画钩子补上。 */
+  if (!items.length) return;
   sel.innerHTML = items.map(a =>
     '<option value="' + escapeHtml(a.id) + '">' + escapeHtml(a.name) + '</option>').join('');
   if (cur && items.some(a => a.id === cur)) sel.value = cur;   // 轮询重绘不覆盖用户选择

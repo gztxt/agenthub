@@ -529,6 +529,16 @@ async function loadAgents() {
     agentFailStreak = 0;
     renderHomeStats();
     renderNav();   // v0.7.1：Agent / 基础设施的唯一入口是左侧手风琴，随数据刷新
+    /* v0.13.103 补画项目页的 agent 下拉（用户 2026-10-11 报障：「本机项目」右侧
+       agent 框不能正常显示，点 GitHub 项目菜单后才正常）。根因是**竞速**：
+       06 顶层 go(lsGet('hub.page')) 同步跑，落地页=本机项目时 loadLocalProjects()
+       立刻发请求，而 AGENTS 由本函数异步填；/api/localprojects 先回来时
+       lpRenderAgents()/ghRenderAgents() 把 select 的 option 清成 0 个（框塌成
+       46px 空白），此后再无人重画。终态一致性因此放在**数据到位点**：agent
+       清单一到就补画一次，谁先谁后都对。
+       typeof 守卫：两函数在 09/10 分片（拼接序在后），且分片被裁剪时不该炸。 */
+    if (typeof lpRenderAgents === 'function') lpRenderAgents();
+    if (typeof ghRenderAgents === 'function') ghRenderAgents();
     /* 2026-10-08（用户裁定，两次）：顶栏的「Agents: N（可用 N · 未实测 N · 待检 N）」
        整块摘除——先删括号明细（顶栏宽度紧张、窄屏被 ellipsis 截断），
        后删整块（明细在左侧手风琴的卡片徽章上已有，顶栏不必复述）。

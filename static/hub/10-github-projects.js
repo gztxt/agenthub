@@ -256,6 +256,8 @@ function ghRenderAgents() {
   if (!sel) return;
   const cur = sel.value;
   const items = AGENTS.filter(a => a.kind === 'agent' && (a.entries || []).some(e => e.type === 'term'));
+  /* v0.13.103：同 09 分片lpRenderAgents——AGENTS 未到时早退保占位，不清空 option。 */
+  if (!items.length) return;
   sel.innerHTML = items.map(a =>
     '<option value="' + escapeHtml(a.id) + '">' + escapeHtml(a.name) + '</option>').join('');
   if (cur && items.some(a => a.id === cur)) sel.value = cur;   // 轮询重绘不覆盖用户选择

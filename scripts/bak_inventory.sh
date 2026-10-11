@@ -14,6 +14,14 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 KEEP=${KEEP:-3}
+#: 排除项有两类，判据各有出处（2026-10-12 补）：
+#:   · `.git/` —— 备份脚本默认**不排除**它（本仓实测 `.git/*.bak` 5 个会被计入，
+#:     `git config` 的备份含远端与 credential helper）。归档脚本对每个文件逐字节
+#:     打包，把 git 内部件搬进备份区没有意义，且是白拿的暴露面。
+#:   · `.env*` —— **凭据面**。`.env.bak-*` 与当前 `.env` 常含同一批凭据
+#:     （本仓实测：3 条 key/token 指纹与现役 `.env` 逐条相同）。归档 = 把凭据复制到
+#:     第二个位置，而"凭据只应存在于最小必要位置"是本机既有口径（README「凭据仅在
+#:     .env(0600)」）。故它们永不入选，要清理请人工处置。
 BEXPR=(-name '*.bak' -o -name '*.bak-*' -o -name '*.bak[0-9]' -o -name '*.bak[0-9]-*')
 echo "备份件清点（KEEP=$KEEP，只读）"
 echo "────────────────────────────────────────────────────────────"
@@ -24,7 +32,7 @@ while IFS= read -r stem; do
   b=$(basename "$stem")
   mapfile -t files < <(find "$(dirname "$stem")" -maxdepth 1 \
                         \( -name "$b.bak" -o -name "$b.bak-*" -o -name "$b.bak[0-9]" -o -name "$b.bak[0-9]-*" \) \
-                        -not -path './venv/*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
+                        -not -path './venv/*' -not -path './.git/*' -not -path './.git' -not -name '.env*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
   n=${#files[@]}; total=$((total+n))
   [ "$n" -le "$KEEP" ] && continue
   printf '%-52s 共 %3d 份' "$stem" "$n"
@@ -35,7 +43,7 @@ while IFS= read -r stem; do
     arch=$((arch+1))
   done
   printf '（超出保留窗 %d 份）\n' "$((n-KEEP))"
-done < <(find . \( "${BEXPR[@]}" \) -not -path './venv/*' 2>/dev/null \
+done < <(find . \( "${BEXPR[@]}" \) -not -path './venv/*' -not -path './.git/*' -not -path './.git' -not -name '.env*' 2>/dev/null \
           | sed 's/\.bak.*$//' | sort -u)
 echo "────────────────────────────────────────────────────────────"
 echo "总份数=$total ；超出保留窗（可归档候选，**非可删**）=$arch"

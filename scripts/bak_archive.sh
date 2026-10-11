@@ -30,6 +30,14 @@ KEEP=${KEEP:-3}
 # 备份件命名的四种形态，与 .gitignore 第 6-11 行同源（判据不许各写一套）。
 # 09-29 加：原只匹配 `*.bak-*`，漏掉编号命名（`bak2/bak3/bak4-claude-*`）与纯 `.bak`
 # 后缀（`data/backups/` 下），实测两类共 26 份永久积压、既不在清点里也不在归档里。
+#: 排除项有两类，判据各有出处（2026-10-12 补）：
+#:   · `.git/` —— 备份脚本默认**不排除**它（本仓实测 `.git/*.bak` 5 个会被计入，
+#:     `git config` 的备份含远端与 credential helper）。归档脚本对每个文件逐字节
+#:     打包，把 git 内部件搬进备份区没有意义，且是白拿的暴露面。
+#:   · `.env*` —— **凭据面**。`.env.bak-*` 与当前 `.env` 常含同一批凭据
+#:     （本仓实测：3 条 key/token 指纹与现役 `.env` 逐条相同）。归档 = 把凭据复制到
+#:     第二个位置，而"凭据只应存在于最小必要位置"是本机既有口径（README「凭据仅在
+#:     .env(0600)」）。故它们永不入选，要清理请人工处置。
 BEXPR=(-name '*.bak' -o -name '*.bak-*' -o -name '*.bak[0-9]' -o -name '*.bak[0-9]-*')
 OUTROOT=${OUTROOT:-/vol1/backups}
 TS=$(date +%Y%m%d_%H%M%S)
@@ -44,7 +52,7 @@ while IFS= read -r stem; do
   b=$(basename "$stem")
   mapfile -t files < <(find "$(dirname "$stem")" -maxdepth 1 \
                         \( -name "$b.bak" -o -name "$b.bak-*" -o -name "$b.bak[0-9]" -o -name "$b.bak[0-9]-*" \) \
-                        -not -path './venv/*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
+                        -not -path './venv/*' -not -path './.git/*' -not -path './.git' -not -name '.env*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
   n=${#files[@]}
   [ "$n" -le "$KEEP" ] && continue
   for f in "${files[@]:$KEEP}"; do
@@ -53,12 +61,12 @@ while IFS= read -r stem; do
   done
 # stem 截取放宽到「从第一个 `.bak` 起全剥」（09-29）：原 `\.bak-[^/]*$` 匹配不到
 # `.bak2-`/`.bak` 形态 ⇒ 那类文件的 stem 会退化成整条文件名，永远选不进候选集。
-done < <(find . \( "${BEXPR[@]}" \) -not -path './venv/*' 2>/dev/null \
+done < <(find . \( "${BEXPR[@]}" \) -not -path './venv/*' -not -path './.git/*' -not -path './.git' -not -name '.env*' 2>/dev/null \
           | sed 's/\.bak.*$//' | sort -u)
 # 双保险：去重（保持首次出现顺序）
 [ ${#cands[@]} -gt 0 ] && mapfile -t cands < <(printf '%s\n' "${cands[@]}" | awk '!seen[$0]++')
 
-total_all=$(find . \( "${BEXPR[@]}" \) -not -path './venv/*' 2>/dev/null | wc -l)
+total_all=$(find . \( "${BEXPR[@]}" \) -not -path './venv/*' -not -path './.git/*' -not -path './.git' -not -name '.env*' 2>/dev/null | wc -l)
 nc=${#cands[@]}
 bytes=0; for f in "${cands[@]}"; do s=$(stat -c %s "$f" 2>/dev/null || echo 0); bytes=$((bytes+s)); done
 printf '仓内 .bak 总份数=%s　候选(超出 KEEP=%d 且非 rollback/pre-)=%d　候选字节=%s (%s MB)\n' \
@@ -104,7 +112,7 @@ while IFS= read -r f; do
 done < "$OUT/files.txt"
 
 # ── ⑤ 前后对比 ───────────────────────────────────────────────────────
-after=$(find . \( "${BEXPR[@]}" \) -not -path './venv/*' 2>/dev/null | wc -l)
+after=$(find . \( "${BEXPR[@]}" \) -not -path './venv/*' -not -path './.git/*' -not -path './.git' -not -name '.env*' 2>/dev/null | wc -l)
 printf '④ 删除=%d 条　⑤ 仓内 .bak 份数 %s → %s　保留窗内(含 rollback/pre-)未动\n' "$del" "$total_all" "$after"
 printf '归档=%s （tgz + files.txt + SHA256SUMS）\n' "$OUT"
 [ "$del" -eq "$nc" ] && echo "结论: PASS（候选全数已归档并校验通过后才删除）" || \

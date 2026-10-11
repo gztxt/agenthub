@@ -3,7 +3,9 @@
 本机多 Agent 统一管理中心（无头 Web 版），**语义移植自 [Zafer-Liu/Agent_Manager](https://github.com/Zafer-Liu/Agent_Manager) v0.3.0（Apache-2.0）**——
 移植数据模型/协议口径/交互语义，未复制上游源文件；桌面形态（进程起停/Tauri 命令/
 Qdrant sidecar）按本机 NAS 军规有意裁剪。评估全文见
-`/fs/1000/ftp/技术文档/Agent_Manager_融合评估报告.md`。
+[`docs/Agent_Manager_融合评估报告.md`](docs/Agent_Manager_融合评估报告.md)（2026-09-06 融合裁定）。
+
+**第一次用请先读 [`docs/QUICKSTART.md`](docs/QUICKSTART.md)** —— 从零跑起来、配置、验收、故障排查。
 
 > **版本历史见 [`CHANGELOG.md`](CHANGELOG.md)** —— 本 README 只讲「现在是什么」，不讲「哪一版改了什么」。
 
@@ -199,8 +201,12 @@ POST /api/term/sessions  {agent_id, session_id?}   带 session_id 即续聊该�
 ## 控制
 
 ```bash
-~/agent-hub/agent-hubctl.sh {start|stop|restart|status|log}
+bash agenthub/agent-hubctl.sh {start|stop|restart|status|log}   # 仓内脚本，自解析所在目录
 ```
+
+机制：起停一律经 `systemctl --user agenthub.service`（`Restart=always` 归 systemd 管），
+**不再生成/采信 pidfile**；`status` 与 `systemctl --user is-active` 同口径。
+`~/.config/systemd/user/agenthub.service` 由 `deploy/agenthub.service` 安装而来。
 
 ## 二期候选（上游已有、本机未移植）
 

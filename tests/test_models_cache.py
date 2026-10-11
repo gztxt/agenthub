@@ -26,7 +26,7 @@ sys.path.insert(0, str(_REPO / "src"))
 sys.path.insert(0, str(_REPO))
 from src import models_cache  # noqa: E402
 
-MAIN_PY = _REPO / "src" / "main.py"
+MODELS_PY = _REPO / "src" / "api_models.py"   # C2：/api/models 与 _shape_models 已从 main.py 迁到这里
 
 
 class TTLCacheBasics(unittest.TestCase):
@@ -169,7 +169,7 @@ class CachedModelsBehaviour(unittest.TestCase):
     def test_error_payload_is_not_cached(self):
         """★ 本文件最重要的一条，由 2026-10-05 影子实测逼出来。
 
-        `main.py` 的 `_fetch` 里 `async with s.get(...)` **在连接失败时不抛异常** ——
+        `api_models.py` 的 `_fetch` 里 `async with s.get(...)` **在连接失败时不抛异常** ——
         它只是没拿到 200，于是 `out` 保持空、`_shape_models` 返回
         `{"models": [], "error": "Cannot connect to host …"}`。
         若 `cached_models` 只判「有没有抛异常」，就会把这个**失败**缓存 60s
@@ -183,7 +183,7 @@ class CachedModelsBehaviour(unittest.TestCase):
 
         async def fetch_returns_error_payload():
             calls.append(1)
-            # 形状与 main.py 的 _fetch 在连接失败时**完全一致**（不抛异常）
+            # 形状与 api_models.py 的 _fetch 在连接失败时**完全一致**（不抛异常）
             return {"models": [], "groups": {}, "count": 0,
                     "source": "claude",
                     "error": "Cannot connect to host 127.0.0.1:59999"}
@@ -213,14 +213,14 @@ class CachedModelsBehaviour(unittest.TestCase):
 
 class MainWiring(unittest.TestCase):
     def test_endpoint_uses_cache(self):
-        src = MAIN_PY.read_text(encoding="utf-8")
+        src = MODELS_PY.read_text(encoding="utf-8")
         self.assertIn("models_cache.cached_models", src)
         self.assertIn("_models_cache", src)
 
     def test_endpoint_has_force_param(self):
         """`force` 沿用 skill_status(skill.py:857) 的既有惯例，不另造第二套形状。"""
         import ast
-        tree = ast.parse(MAIN_PY.read_text(encoding="utf-8"))
+        tree = ast.parse(MODELS_PY.read_text(encoding="utf-8"))
         fn = None
         for n in ast.walk(tree):
             if isinstance(n, ast.AsyncFunctionDef) and n.name == "list_models":
@@ -236,7 +236,7 @@ class MainWiring(unittest.TestCase):
         ⚠ 窗口从 2000 放宽到 4000：加了缓存层与 docstring 后端点变长，
         2000 字符已经截不到那行 —— 闸门因为**实现变详细**而红，不是行为变了。
         """
-        src = MAIN_PY.read_text(encoding="utf-8")
+        src = MODELS_PY.read_text(encoding="utf-8")
         i = src.index("async def list_models")
         seg = src[i:i + 4000]
         self.assertIn('"error": str(e)[:200]', seg,
@@ -268,9 +268,9 @@ class ShapeModels(unittest.TestCase):
         import importlib.util
         spec = importlib.util.spec_from_file_location(
             "_m", _REPO / "src" / "models_cache.py")
-        # main.py 不能 import（L0 铁律），所以这里只测纯逻辑的等价实现口径：
-        # 直接从 main.py 抠出 _shape_models 的源码文本用 exec 跑（不 import 模块）。
-        src = MAIN_PY.read_text(encoding="utf-8")
+        # 不能 import src.main（L0 铁律），所以这里只测纯逻辑的等价实现口径：
+        # 直接从 api_models.py 抠出 _shape_models 的源码文本用 exec 跑（不 import 模块）。
+        src = MODELS_PY.read_text(encoding="utf-8")
         import ast
         tree = ast.parse(src)
         fn = [n for n in tree.body

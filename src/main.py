@@ -77,6 +77,13 @@ import modelcfg as modelcfg_mod     # 各 Agent 默认模型统一设置（v0.13
 import ghsettings as ghsettings_mod  # GitHub 地址/key/落点（v0.13.42：设置→GitHub 子菜单）
 import hublog as hublog_mod        # 日志中心（v0.13.46：设置→日志子菜单，journald + 操作事件聚合）
 
+# C2（2026-10-12）：领域路由从本文件抽成独立 module —— main 只留组装职责。
+import appstate                     # 组装方写、领域方读的共享可变状态（discovery）
+from api_agents import router as agents_router, _chat_dispatch   # 启动期 chat_fn 回调仍要它
+from api_sessions import router as sessions_router
+from api_models import router as models_router
+from api_vitals import router as vitals_router, agent_profs_for_vitals
+
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
@@ -493,7 +500,6 @@ app = FastAPI(title="Agent Hub", version=VERSION)
 #: `/api/models` 的成功缓存，按 adapter 分桶（claude / jcode / …）。
 #: 模块级 = 跨请求存活，这是缓存的本意；不随 app 重启清空是刻意的
 #: （模型清单重启后立刻重取一次即可，不需要持久化）。
-_models_cache: dict = {}
 
 
 def _parse_cors_origins() -> list:
@@ -648,28 +654,6 @@ try:
 except Exception as e:  # noqa: BLE001
     print(f"[Agent Hub] Hub MCP server 挂载失败（主服务不受影响）：{type(e).__name__}: {e}")
 
-discovery: Optional[AgentDiscovery] = None
-
-
-class ChatRequest(BaseModel):
-    agent_id: Optional[str] = None  # 以路径参数为准（v0.1 遗留必填校验是 bug）
-    message: str
-    session_id: Optional[str] = None
-    model: Optional[str] = None
-    cwd: Optional[str] = None
-
-
-class AgentRegisterRequest(BaseModel):
-    dir: str
-    name: Optional[str] = None
-    port: Optional[int] = None
-    command: Optional[str] = None
-    args: Optional[list] = None
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
 
 @app.get("/health")
 async def health():
@@ -717,327 +701,11 @@ async def health():
     return out
 
 
-# ── Agents ────────────────────────────────────────────────────────────
-
-@app.get("/api/agents")
-async def list_agents():
-    if discovery is None:
-        raise HTTPException(status_code=503, detail="Discovery not initialized")
-    agents = await discovery.discover_all()
-    return {"agents": [a.to_dict() for a in agents], "count": len(agents)}
-
-
-@app.get("/api/agents/{agent_id}")
-async def get_agent(agent_id: str):
-    if discovery is None:
-        raise HTTPException(503, "Discovery not initialized")
-    agent = discovery.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(404, f"Agent {agent_id} not found")
-    return agent.to_dict()
-
-
-def _agent_profs_for_vitals():
-    """只体检 kind=agent 的画像（gateway/service/tool 不进菜单闸门），
-    且**含已被摘掉的候补** —— 不重新探测就会被永久固化，用户装好了也回不来。"""
-    return [p for p in profiles_mod.all_profiles(include_blocked=True)
-            if p.get("kind") == "agent"]
-
-
-@app.get("/api/vitals")
-async def get_vitals():
-    """判定台账（可审计）：每个 agent 的证据 + 裁决 + 来源 + 概率"""
-    snap = vitals_mod.vitals.snapshot()
-    return {"count": len(snap), "last_sweep": vitals_mod.vitals.last_sweep,
-            "jev_key_present": bool(vitals_mod.profiles_jev_key()),
-            "menu_min": vitals_mod.MENU_MIN, "sweep_every_sec": vitals_mod.SWEEP_EVERY,
-            "detail": snap}
-
-
-@app.post("/api/vitals/sweep")
-async def post_sweep():
-    """跑一轮完整体检：先全量 L1/L2（不碰模型），再对「上次真请求实测已过期」的
-    候补补 L4（每人每 24h 最多一次）。VITALS_RT_SWEEP=0 可退成纯廉价轮。"""
-    return await asyncio.to_thread(vitals_mod.vitals.sweep, _agent_profs_for_vitals())
-
-
-@app.post("/api/agents/{agent_id}/verify")
-async def verify_agent(agent_id: str):
-    """L4 体检：跑一次真实一次性请求。要耗 token 且慢（冷启动可达 60s），
-    所以只给显式动作触发，不进自动周期。"""
-    p = profiles_mod.get_profile(agent_id)
-    if not p:
-        raise HTTPException(404, f"未知 agent: {agent_id}")
-    if not p.get("verify_argv"):
-        raise HTTPException(400, {"error": "该 Agent 未声明 verify_argv（无法做真实应答实测）",
-                                 "shape": (vitals_mod.collect(p)).get("agent_shape")})
-    rec = await asyncio.to_thread(vitals_mod.vitals.verify, p)
-    ev = rec.get("evidence", {})
-    out = {k: rec.get(k) for k in ("verdict", "source", "rule_verdict", "confidence",
-                                   "menu_noul", "present_noul", "roundtrip_noul",
-                                   "block_noul", "jev_error", "rt_state", "rt_flaky")}
-    # 应答态与生死判定分两栏回：前端拿 rt_state 说明模型层，拿 verdict 决定颜色
-    out["evidence"] = {kk: ev.get(kk) for kk in
-                       ("agent_shape", "resolved_path", "version_rc", "run_rc", "run_ok",
-                        "run_output", "run_note", "run_model", "run_evidence",
-                        "evidence_sha", "endpoint_serving")}
-    return out
-
-
-@app.post("/api/agents/detect")
-async def detect(body: AgentRegisterRequest):
-    """目录 → 自动识别类型/启动命令/端口（Agent_Manager 添加 Agent 的第一步）"""
-    return detect_project(body.dir)
-
-
-@app.post("/api/agents")
-async def register_agent(body: AgentRegisterRequest):
-    """注册自定义 Agent（识别 + 入库；进程管理交由原守护，hub 只做视图与对话）"""
-    info = detect_project(body.dir)
-    if info["type"] == "unknown" and not body.command:
-        raise HTTPException(400, {"error": "无法识别项目类型且未提供 command", "detected": info})
-    now = _now()
-    agent_id = re.sub(r"[^a-z0-9_-]", "-", (body.name or Path(body.dir).name).lower())
-    port = body.port or info.get("port")
-    endpoint = f"http://127.0.0.1:{port}" if port else None
-    db.execute(
-        """INSERT INTO custom_agents(id,name,type,command,args,working_dir,env,port,endpoint,description,created_at,updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(id) DO UPDATE SET name=excluded.name,type=excluded.type,
-             command=excluded.command,args=excluded.args,working_dir=excluded.working_dir,
-             port=excluded.port,endpoint=excluded.endpoint,description=excluded.description,
-             updated_at=excluded.updated_at""",
-        (agent_id, body.name or Path(body.dir).name, info["type"],
-         body.command or (info.get("command") and " ".join([info["command"]] + info["args"])),
-         json.dumps(info.get("args") or []), str(Path(body.dir).expanduser()),
-         "{}", port, endpoint, info.get("entry") or "", now, now))
-    if discovery:
-        discovery.reload()
-    return {"status": "registered", "id": agent_id, "detected": info}
-
-
-@app.delete("/api/agents/{agent_id}")
-async def unregister_agent(agent_id: str):
-    n = db.execute("DELETE FROM custom_agents WHERE id=?", (agent_id,))
-    if not n:
-        raise HTTPException(404, "custom agent not found (内置 Agent 不可删)")
-    if discovery:
-        discovery.reload()
-    return {"status": "deleted", "id": agent_id}
-
-
-# ── 统一对话（Phase 2：真实适配器直连）──────────────────────────────
-
-async def _chat_dispatch(agent_id: str, message: str,
-                         session_id: Optional[str] = None,
-                         model: Optional[str] = None,
-                         cwd: Optional[str] = None,
-                         trace_id: Optional[str] = None) -> Dict:
-    import time as _time
-    t0 = _time.monotonic()
-    # v0.13.50：模型取值的唯一入口 —— 请求显式带了就用请求的，没带就回落「设置 → 模型」
-    # 落库的那个持久化默认值。以前这条通道完全不知道它的存在，adapter 的
-    # default_model 是启动时算出的常量（实测发出去的是 qwen3.8-flash）⇒ 设置页改了
-    # 模型，对话页 / 协同子任务 / 定时任务照旧用旧模型。
-    model = modelcfg.chat_model(agent_id, model)
-    adapter = get_adapter(agent_id)
-    if adapter is None:
-        rows = db.query("SELECT * FROM custom_agents WHERE id=?", (agent_id,))
-        if rows and rows[0]["port"]:
-            from adapters.openai_compat import OpenAICompatAdapter
-            adapter = OpenAICompatAdapter(config, agent_id,
-                                          base_url=f"http://127.0.0.1:{rows[0]['port']}",
-                                          default_model=model or "")
-        if adapter is None:
-            return {"success": False, "error": f"agent {agent_id} 无可用适配器",
-                    "hint": "CLI/TUI Agent 请通过原生界面访问"}
-    # 取历史
-    history = []
-    if session_id:
-        hist = db.query("SELECT role,content FROM chat_messages WHERE session_id=? "
-                        "AND role IN ('user','assistant') ORDER BY id DESC LIMIT 20",
-                        (session_id,))
-        history = [{"role": r["role"], "content": r["content"]} for r in reversed(hist)]
-    result = await adapter.chat(message, session_id=session_id, model=model,
-                                history=history, cwd=cwd)
-    # S2 画像埋点：append-only，成功率/耗时统计源
-    dur = int((_time.monotonic() - t0) * 1000)
-    db.log_profile_event("hub_chat", agent_id,
-                         "success" if result.get("success") else "fail", dur,
-                         trace_id=trace_id,
-                         detail={"session_id": session_id,
-                                 "usage": result.get("usage"),
-                                 "error": (result.get("error") or "")[:200] or None})
-    # 会话落盘
-    if session_id:
-        now = _now()
-        db.execute("INSERT OR IGNORE INTO chat_sessions(id,agent_id,title,created_at,updated_at) "
-                   "VALUES(?,?,?,?,?)",
-                   (session_id, agent_id, message[:60], now, now))
-        db.execute("INSERT INTO chat_messages(session_id,role,content,created_at) VALUES(?,?,?,?)",
-                   (session_id, "user", message, now))
-        reply = result.get("response") or result.get("error") or ""
-        db.execute("INSERT INTO chat_messages(session_id,role,content,meta,created_at) VALUES(?,?,?,?,?)",
-                   (session_id, "assistant" if result.get("success") else "error", reply,
-                    json.dumps(result.get("usage"), ensure_ascii=False) if result.get("usage") else None, now))
-        db.execute("UPDATE chat_sessions SET updated_at=? WHERE id=?", (now, session_id))
-    return result
-
-
-@app.post("/api/agents/{agent_id}/chat")
-async def chat(agent_id: str, request: Request, req: ChatRequest):
-    session_id = req.session_id or uuid.uuid4().hex[:12]
-    trace_id = request.headers.get("x-trace-id")
-    # P0-1 回归（实测取证）：v0.10.0 commit 2cf96fa 把 tools/repair_mode 从 ChatRequest
-    # 字段表里删了，但调用点仍写 req.tools ⇒ 本端点从 09-20 起每请求必 500
-    # （AttributeError），而 /health 全程 200、vitals 全绿 —— 直连对话框静默不可用三天。
-    # 这两个参数在 v0.10.0 移除 hub-self 工具环后已无实体，**别再往回加**。
-    # 钉死它的测：tests/test_pydantic_attr_drift.py（AST 静态取证，不导 main）
-    result = await _chat_dispatch(agent_id, req.message, session_id, req.model,
-                                  cwd=req.cwd, trace_id=trace_id)
-    return {"agent_id": agent_id, "session_id": session_id,
-            "message": req.message, "timestamp": _now(), **result}
-
-
-@app.post("/api/agents/{agent_id}/chat/stream")
-async def chat_stream(agent_id: str, request: ChatRequest):
-    adapter = get_adapter(agent_id)
-    if adapter is None:
-        raise HTTPException(404, f"agent {agent_id} 不支持流式对话")
-    session_id = request.session_id or uuid.uuid4().hex[:12]
-
-    async def gen():
-        yield f"data: {json.dumps({'session_id': session_id})}\n\n"
-        async for chunk in adapter.chat_stream(request.message, session_id=session_id,
-                                               model=modelcfg.chat_model(agent_id, request.model),
-                                               cwd=request.cwd):
-            yield chunk
-    return StreamingResponse(gen(), media_type="text/event-stream")
-
-
-@app.get("/api/sessions")
-async def list_sessions(agent_id: Optional[str] = None, limit: int = 20):
-    sessions = []
-    sql = ("SELECT s.*, (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id=s.id) "
-           "AS messages FROM chat_sessions s")
-    params: list = []
-    if agent_id:
-        sql += " WHERE s.agent_id=?"
-        params.append(agent_id)
-    sql += " ORDER BY s.updated_at DESC LIMIT ?"
-    params.append(limit)
-    sessions = db.query(sql, tuple(params))
-    # 合并 hub 外部会话（pi）
-    if not agent_id or agent_id == "pi":
-        pi_sessions = await _get_pi_sessions(max(0, limit - len(sessions)))
-        sessions.extend([{"agent": "pi", "id": s.get("id"), **s} for s in pi_sessions])
-    return {"sessions": sessions[:limit], "count": len(sessions)}
-
-
-@app.get("/api/sessions/{session_id}/messages")
-async def session_messages(session_id: str, limit: int = 100):
-    return {"messages": db.query(
-        "SELECT role,content,meta,created_at FROM chat_messages "
-        "WHERE session_id=? ORDER BY id ASC LIMIT ?", (session_id, limit))}
-
-
-@app.get("/api/sessions/export")
-async def export_sessions(request: Request, format: str = "json", agent_id: Optional[str] = None,
-                          limit: int = 1000, with_messages: int = 1, redact: int = 1):
-    """批量导出 hub 自己的会话（0924 方案档 §三「会话导出 P2.5」）。
-
-    三个刻意的设计决定：
-      1) **按写端点同等鉴权**：服务绑 0.0.0.0:3102，批量导出正文是数据外流动作，影响面比
-         单条 `/messages` 大一个量级。复用 `writeauth.decide`（fail-closed：服务端没配口令
-         ⇒ 503 而不是放行），与 09-23「31 个写端点不设防」的收口同一口径。
-      2) **默认脱敏**（`redact=1`）：本工作区三次被凭据外流打过（备份镜像 82 个活凭据文件、
-         `wiki/log.md` 历史含 CCR web token、外发净仓被闸门拦下 3 个抄了真 token 的文档）。
-         导出件正是最容易被顺手 commit/转发的形态；命中数在 meta 里如实回报，**不静默改数据**，
-         要原始字节须显式 `redact=0`。
-      3) **不导出外部 CLI 的历史会话**（claude/jcode/codex/opencode/grok/hermes 的 session store）：
-         那是别的工具链的私有存档，批量外流属另一层隐私裁定，须用户点名；本端点只覆盖
-         hub 自己库里的 `chat_sessions` / `chat_messages`。
-    """
-    verdict, reason = writeauth.decide(
-        "POST", request.url.path,                       # 强制按写方法判：导出=数据外流
-        writeauth.provided_token(request.headers.raw, request.url.query),
-        writeauth.secrets_from_env())
-    if verdict not in ("allow", "exempt"):
-        print(f"[export] 拒绝 {verdict}：{request.url.path} "
-              f"来源={request.client.host if request.client else '?'} —— {reason}", flush=True)
-        raise HTTPException(status_code=503 if verdict == "misconfig" else 401, detail=reason)
-
-    fmt = "csv" if str(format).lower() == "csv" else "json"
-    n_lim = max(1, min(int(limit or 1000), 5000))       # 上限防一次性拖库打爆内存
-    sql = ("SELECT s.id, s.agent_id, s.title, s.created_at, s.updated_at, "
-           "(SELECT COUNT(*) FROM chat_messages m WHERE m.session_id=s.id) AS messages "
-           "FROM chat_sessions s")
-    params: list = []
-    if agent_id:
-        sql += " WHERE s.agent_id=?"
-        params.append(agent_id)
-    sql += " ORDER BY s.updated_at DESC LIMIT ?"
-    params.append(n_lim)
-    rows = [dict(r) for r in db.query(sql, tuple(params))]
-
-    meta = {"agent_id": agent_id or "*", "limit": n_lim, "with_messages": bool(with_messages)}
-    # 2026-10-05：消息正文**一次 IN 查完**（旧实现每会话一次查询，上限 5000 ⇒ 最坏
-    # 5001 次，且每次过 db 的全局锁，把所有其他 DB 使用者一起串行化）。
-    # 判据与分块逻辑在 src/export_batch.py（纯函数，L0 可测 —— L0 禁 import src.main）。
-    if with_messages and rows:
-        msgs_by_sid = export_batch.fetch_messages(db.query, [r.get("id") for r in rows])
-    else:
-        msgs_by_sid = {}
-    if fmt == "csv" and with_messages:
-        # CSV 是扁平表 ⇒ 导出正文时以「一行一条消息」呈现（表头恒定，下游可断言）
-        mrows: list = []
-        for r in rows:
-            for m in msgs_by_sid.get(r.get("id")) or []:
-                mrows.append({"session_id": r.get("id"), "role": m.get("role"),
-                              "created_at": m.get("created_at"), "content": m.get("content")})
-        body, ctype, fname, meta = export_mod.render(
-            mrows, export_mod.MESSAGE_COLUMNS, "csv", "messages", meta=meta, redact=bool(redact))
-    else:
-        if with_messages and fmt == "json":
-            for r in rows:
-                r["transcript"] = [
-                    {"role": m.get("role"), "created_at": m.get("created_at"),
-                     "content": m.get("content")}
-                    for m in msgs_by_sid.get(r.get("id")) or []]
-        body, ctype, fname, meta = export_mod.render(
-            rows, export_mod.SESSION_COLUMNS, fmt, "sessions", meta=meta, redact=bool(redact))
-
-    print(f"[export] {meta.get('kind')} fmt={fmt} rows={meta.get('count')} "
-          f"redacted={'yes' if redact else 'no'} hits={meta.get('redacted_hits')} "
-          f"来源={request.client.host if request.client else '?'}", flush=True)
-    return Response(content=body, media_type=ctype,
-                    headers={"Content-Disposition": f'attachment; filename="{fname}"',
-                             "X-Export-Count": str(meta.get("count", 0)),
-                             "X-Export-Redacted-Hits": str(meta.get("redacted_hits", 0))})
-
-
-class SessionPatch(BaseModel):
-    title: Optional[str] = None
-
-
-@app.patch("/api/sessions/{session_id}")
-async def rename_session(session_id: str, req: SessionPatch):
-    if req.title is None:
-        raise HTTPException(400, "no fields to update")
-    n = db.execute("UPDATE chat_sessions SET title=?, updated_at=? WHERE id=?",
-                   (req.title.strip()[:120], _now(), session_id))
-    if not n:
-        raise HTTPException(404, "session not found")
-    return {"status": "renamed", "id": session_id, "title": req.title}
-
-
-@app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str):
-    n1 = db.execute("DELETE FROM chat_messages WHERE session_id=?", (session_id,))
-    n2 = db.execute("DELETE FROM chat_sessions WHERE id=?", (session_id,))
-    if not n2:
-        raise HTTPException(404, "session not found")
-    return {"status": "deleted", "id": session_id, "messages": n1}
+# ── 领域路由（C2：已从本文件抽成独立 module，见 src/api_*.py）──
+app.include_router(agents_router)
+app.include_router(vitals_router)
+app.include_router(sessions_router)
+app.include_router(models_router)
 
 
 # ── ⚙设置（口令保护的敏感配置查看）────────────────────────
@@ -1063,84 +731,6 @@ async def settings_term_token(request: Request, req: PasscodeRequest):
     return {"term_token": tok, "set": bool(tok)}
 
 
-# ── 模型代理（前端动态加载：CCR/jcode 等 OpenAI 兼容 /v1/models）────
-
-@app.get("/api/models")
-async def list_models(agent_id: Optional[str] = None,
-                      force: bool = Query(default=False)):
-    """统一模型列表端点。
-
-    默认拉 claude(CCR:3456) 的 /v1/models 作为"全局可对话模型"
-    （v0.10.0 起 hub-self 已移除，claude/jcode 共用同一 CCR 模型表）。
-    按 vendor/display_name 去重后返回；带分组（qwen/deepseek/nvidia/openrouter/agnes）。
-
-    2026-10-05 加**成功路径缓存**（`models_cache.py`，60s）：原先每次都新建
-    ClientSession 打上游且 `timeout=total=8` 且无缓存 ⇒ CCR 一挂，模型下拉**每次卡 8 秒**。
-    `force=true` 沿用 `skill_status`（skill.py:857）的既有惯例绕缓存。
-    ⚠ 失败/超时**不写缓存**（models_cache 里那条注释是本改动最要紧的判据）。"""
-    adapter_id = agent_id or "claude"
-    adapter = get_adapter(adapter_id)
-    base = None
-    if hasattr(adapter, "base_url"):
-        base = adapter.base_url
-    if not base:
-        return {"models": [], "groups": {}, "error": "no compatible adapter"}
-
-    # 按 adapter 分桶缓存（claude 与 jcode 共用 CCR，但接口各自可换）
-    _bucket = _models_cache.setdefault(adapter_id, models_cache.TTLCache())
-
-    async def _fetch() -> dict:
-        """⚠ 这个函数**不抛异常**（改前就不抛，语义保持），失败信息装进 `error` 键。
-
-        而 `models_cache.cached_models` 的判据是「`error` 为空才缓存」——
-        两者必须配套：若这里把失败**抛**出去，缓存层就拿不到 payload；
-        若这里失败却**返回**一个无 error 键的空清单，缓存层就会把失败缓存 60s
-        （2026-10-05 影子实测踩过，见 models_cache.cached_models 的 docstring）。
-        """
-        import aiohttp as _aio
-        out: list = []
-        try:
-            async with _aio.ClientSession() as s:
-                async with s.get(f"{base}/v1/models",
-                                 headers=adapter.build_headers() if hasattr(adapter, "build_headers") else {},
-                                 timeout=_aio.ClientTimeout(total=8)) as r:
-                    if r.status == 200:
-                        data = await r.json()
-                        out = data.get("data") or []
-                    else:
-                        # 非 200 也要带 error，否则会被缓存层当成「成功但清单为空」
-                        return {**_shape_models([], adapter_id),
-                                "error": "上游返回 HTTP %d" % r.status}
-        except Exception as e:  # noqa: BLE001 —— 语义与改前逐字一致：不抛，回 error 键
-            return {"models": [], "groups": {}, "error": str(e)[:200]}
-        return _shape_models(out, adapter_id)
-
-    try:
-        payload, was_cached = await models_cache.cached_models(_bucket, _fetch, force=force)
-    except Exception as e:  # noqa: BLE001 —— 兜底：_fetch 已不抛，这里是最后一道
-        return {"models": [], "groups": {}, "error": str(e)[:200]}
-    return {**payload, "cached": was_cached}
-
-
-def _shape_models(out: list, adapter_id: str) -> dict:
-    """把上游的原始 model 列表去重 + 分组（判据与缓存无关，故抽成独立纯函数）。"""
-    seen = set()
-    groups: dict = {}
-    cleaned = []
-    for m in out:
-        mid = m.get("id")
-        if not mid or mid in seen:
-            continue
-        seen.add(mid)
-        cleaned.append({"id": mid, "name": m.get("display_name") or mid,
-                        "owner": m.get("owned_by") or "?"})
-        # 分组键 = mid 第一段（vendor/）
-        gk = mid.split("/", 1)[0] if "/" in mid else "default"
-        groups.setdefault(gk, []).append(mid)
-    return {"models": cleaned, "groups": groups, "count": len(cleaned),
-            "source": adapter_id}
-
-
 # ── 端口管理 ──────────────────────────────────────────────────────────
 
 # ── 只读发现扫描（S2）────────────────────────────────
@@ -1162,16 +752,16 @@ async def scan_run(body: ScanIn):
     rejudge: dict = {}
     try:
         rejudge = await asyncio.to_thread(
-            vitals_mod.vitals.rejudge_stale, _agent_profs_for_vitals())
+            vitals_mod.vitals.rejudge_stale, agent_profs_for_vitals())
     except Exception as e:  # noqa: BLE001  重判挂了不能把扫描本身弄失败
         rejudge = {"error": "%s: %s" % (type(e).__name__, str(e)[:160])}
     result["vitals_rejudge"] = rejudge
     need_reload = bool(rejudge.get("changed")) or bool(
         body.auto_register and result.get("added"))
-    if need_reload and discovery:
+    if need_reload and appstate.discovery:
         if rejudge.get("changed"):
             profiles_mod.invalidate_cli_cache()   # 30s 候补缓存不得压住刚翻案的卡
-        discovery.reload()
+        appstate.discovery.reload()
     return result
 
 
@@ -1180,8 +770,8 @@ async def api_ports():
     rows = list_listeners()
     # 标注归属已知 Agent
     known = {}
-    if discovery:
-        for a in await discovery.discover_all():
+    if appstate.discovery:
+        for a in await appstate.discovery.discover_all():
             if a.port:
                 known[a.port] = a.id
     for r in rows:
@@ -1214,23 +804,6 @@ async def get_memory_alias(query: Optional[str] = None, limit: int = 10):
                         (limit,))
         return {"memories": rows, "count": len(rows)}
     return await memory_mod.search_memory(query, limit)
-
-
-async def _get_pi_sessions(limit: int) -> list:
-    if limit <= 0:
-        return []
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{config.pi_url}/api/sessions",
-                timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("sessions", [])[:limit]
-    except Exception:  # noqa: BLE001
-        pass
-    return []
 
 
 _embed_proxy = None      # 外框注入代理句柄（EMBED_UNIFY=0 时保持 None）
@@ -1328,7 +901,7 @@ async def vitals_loop():
     await asyncio.sleep(2)
     while True:
         try:
-            r = await asyncio.to_thread(vitals_mod.vitals.sweep, _agent_profs_for_vitals())
+            r = await asyncio.to_thread(vitals_mod.vitals.sweep, agent_profs_for_vitals())
             print("[vitals] sweep %s" % r, flush=True)
         except Exception as e:  # noqa: BLE001
             print("[vitals] sweep 异常（下轮重试）%s: %s" % (
@@ -1338,7 +911,6 @@ async def vitals_loop():
 
 @app.on_event("startup")
 async def startup():
-    global discovery
     global _embed_proxy
     db.init_db(config.db_path)
     # 关掉 hub 主连接的**自动**检查点，改由 wal_checkpoint_loop 定时做（见该循环注释：
@@ -1357,7 +929,7 @@ async def startup():
         term_record.ensure_counted()
     except Exception as e:  # noqa: BLE001
         print(f"[term_record] 计数表播种跳过：{type(e).__name__}: {str(e)[:160]}", flush=True)
-    discovery = AgentDiscovery(config, db=db)
+    appstate.discovery = AgentDiscovery(config, db=db)
     build_adapters(config)
     # v0.13.50 起的漂移体检 + v0.13.51 的授权写回：启动先修一轮（CCR 可能还没改写，
     # 所以另有定期巡检兜底）。写回属共享配置写入 ⇒ 落笔前时间戳备份，见 repair_drift。
@@ -1373,7 +945,7 @@ async def startup():
     tasks_mod.ensure_schema()
     tasks_mod.set_context(
         chat_fn=lambda a, m, s=None, mo=None, tr=None: _chat_dispatch(a, m, s, mo, tr),
-        agent_ids_fn=lambda: [c["id"] for c in discovery.all_configs()])
+        agent_ids_fn=lambda: [c["id"] for c in appstate.discovery.all_configs()])
     _spawn(tasks_mod.sweep_stale_tasks())
     _spawn(vitals_loop())
     _spawn(model_drift_loop())   # 配置漂移巡检（CCR 重启会把模型改回旧值）

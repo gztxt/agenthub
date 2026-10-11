@@ -150,10 +150,10 @@ class RedArmOldApproach(unittest.TestCase):
 
 
 class MainWiring(unittest.TestCase):
-    """接线：`main.py` 必须真的用它（改回去就红）。"""
+    """接线：`api_sessions.py` 必须真的用它（改回去就红；C2 把导出处理器从 main.py 迁到 api_sessions.py）。"""
 
     def test_main_uses_export_batch(self):
-        src = (_REPO / "src" / "main.py").read_text(encoding="utf-8")
+        src = (_REPO / "src" / "api_sessions.py").read_text(encoding="utf-8")
         self.assertIn("import export_batch", src)
         self.assertIn("export_batch.fetch_messages", src,
                       "导出端点必须走批量取消息")
@@ -162,18 +162,18 @@ class MainWiring(unittest.TestCase):
         """旧形状「for r in rows: 查一次」必须从**导出处理器**里消失。
 
         ⚠ 判据为什么限定在导出处理器内（第一版写太宽，误报了 2 处）：
-        `main.py` 里还有两处合法的 `WHERE session_id=?` ——
-          · `:890`  GET /api/sessions/{id}/messages —— **单会话历史**，本来就该一条
-          · `:910`  DELETE /api/sessions/{id}      —— 删除本来就按单个 id 走
+        `api_sessions.py` 里还有两处合法的 `WHERE session_id=?` ——
+          · `GET /api/sessions/{id}/messages` —— **单会话历史**，本来就该一条
+          · `DELETE /api/sessions/{id}`      —— 删除本来就按单个 id 走
         把它们一并禁掉就是**逼人改坏正确代码求绿**。所以按 AST 定位到
         `sessions_export` 那个处理器，只判它内部。
         """
-        tree = ast.parse((_REPO / "src" / "main.py").read_text(encoding="utf-8"))
+        tree = ast.parse((_REPO / "src" / "api_sessions.py").read_text(encoding="utf-8"))
         handler = None
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 src_seg = ast.get_source_segment(
-                    (_REPO / "src" / "main.py").read_text(encoding="utf-8"), node) or ""
+                    (_REPO / "src" / "api_sessions.py").read_text(encoding="utf-8"), node) or ""
                 if "MESSAGE_COLUMNS" in src_seg and "SESSION_COLUMNS" in src_seg:
                     handler = node
                     break

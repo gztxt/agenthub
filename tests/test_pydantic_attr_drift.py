@@ -83,19 +83,29 @@ class TestAttrDrift(unittest.TestCase):
     def test_known_buggy_pattern_is_gone(self):
         """把这次的事故形状单独钉死：ChatRequest 上没有 tools/repair_mode，
         且 `_chat_dispatch` 的**调用点**不得再传这两个 kwarg。
-        只认 AST —— 用子串查会在解释性注释上误报（本仓注释里必须写 req.tools 才能说清教训）。"""
-        tree = ast.parse((SRC / "main.py").read_text(encoding="utf-8"), filename="main.py")
-        fields = _basemodel_fields(tree).get("ChatRequest", set())
-        self.assertTrue(fields, "没解析到 ChatRequest 的字段（模型改名了？）")
+        只认 AST —— 用子串查会在解释性注释上误报（本仓注释里必须写 req.tools 才能说清教训）。
+
+        2026-10-12 C2：ChatRequest / `_chat_dispatch` 已从 main.py 迁到 `src/api_agents.py`
+        ⇒ 本测改为**扫全 src**，并加一条「必须找到调用点」的反向断言 —— 否则搬家后
+        守卫会静默变成空断言（本仓「文字存在≠已生效」家族）。"""
+        fields: set = set()
+        calls: list = []
+        for f in sorted(SRC.rglob("*.py")):
+            tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
+            fields |= _basemodel_fields(tree).get("ChatRequest", set())
+            rel = f.relative_to(SRC.parent)
+            calls += [(rel, c) for c in ast.walk(tree)
+                      if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "_chat_dispatch"]
+        self.assertTrue(fields, "没解析到 ChatRequest 的字段（模型改名/搬家了？）")
         self.assertNotIn("tools", fields, "ChatRequest 又声明了 tools —— 与调用点必须同步")
         self.assertNotIn("repair_mode", fields)
-        for call in [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-                     and getattr(n.func, "id", None) == "_chat_dispatch"]:
+        self.assertTrue(calls, "没找到 _chat_dispatch 的调用点（改名/搬家了？守卫会静默失效）")
+        for rel, call in calls:
             passed = {kw.arg for kw in call.keywords}
             self.assertNotIn("tools", passed,
-                             f"main.py:{call.lineno} 调用点又传 tools= —— 运行期必 500")
+                             f"{rel}:{call.lineno} 调用点又传 tools= —— 运行期必 500")
             self.assertNotIn("repair_mode", passed,
-                             f"main.py:{call.lineno} 调用点又传 repair_mode= —— 运行期必 500")
+                             f"{rel}:{call.lineno} 调用点又传 repair_mode= —— 运行期必 500")
 
 
 if __name__ == "__main__":

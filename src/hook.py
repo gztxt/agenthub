@@ -55,6 +55,10 @@ def _check_auth(request: Request) -> None:
 
 @router.post("/telemetry/events/{source}")
 async def push_event(source: str, body: TelemetryEvent, request: Request):
+    # 本模块自带鉴权；writeauth 对 /telemetry/events/ 的豁免**以本行为前提**
+    # （2026-10-12 实测：它此前只定义、全仓零调用 ⇒ 豁免当时没有依据）。
+    # 恒等回归：tests/test_writeauth.py::test_telemetry_exempt_premise_holds_hook_enforces_auth。
+    _check_auth(request)
     if source not in ALLOWED_SOURCES:
         # 与 Agent_Manager 一致：只收已知 adapter，但留 custom 前缀扩展
         if not source.startswith("custom"):

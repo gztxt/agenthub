@@ -392,28 +392,6 @@ def _pi_write(model: str):
     return out
 
 
-def _grok_existing_api_key(text: str) -> str:
-    """取文件里**已指向 CCR** 的某个 [model.*] 块的 api_key（复用本机在用的那把）。"""
-    sec_bases: Dict[str, str] = {}
-    cur = ""
-    for ln in text.splitlines():
-        s = ln.strip()
-        if s.startswith("[") and s.endswith("]"):
-            cur = s[1:-1]
-            continue
-        if cur.startswith("model.") and s.startswith("base_url"):
-            sec_bases[cur] = s.split("=", 1)[1].strip().strip('"')
-    cur = ""
-    for ln in text.splitlines():
-        s = ln.strip()
-        if s.startswith("[") and s.endswith("]"):
-            cur = s[1:-1]
-            continue
-        if "3456" in sec_bases.get(cur, "") and s.startswith("api_key"):
-            return s.split("=", 1)[1].strip().strip('"')
-    return ""
-
-
 def _grok_read() -> dict:
     """grok 的「默认模型」＝ `[models] default` 指向的那个**表头键**，值在 `[model.<键>] model`。
 

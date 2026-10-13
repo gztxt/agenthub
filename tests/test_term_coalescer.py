@@ -2,7 +2,7 @@
 
 借鉴出处（paseo v0.10.0 实证）：
   packages/server/src/terminal/terminal-output-coalescer.ts:19,39-64 的 5ms 前后沿节流
-  docs/terminal-performance.md:22 原话：只留后沿（普通 debounce）会给每次按键回显
+  上游 docs/terminal-performance.md:22 原话（摘引见 docs/PASEO-FUSION-PLAN-20260929.md:140）：只留后沿（普通 debounce）会给每次按键回显
     平白加一个完整窗口的延迟 —— 所以前沿「空闲后第一块立刻发」不是优化，是正确性。
 
 本测钉死四件事：

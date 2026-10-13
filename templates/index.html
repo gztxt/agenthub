@@ -267,6 +267,10 @@
            刻意不并进 status：代码没重启 ≠ 服务坏了（main.py 注释里的设计意图）。 */
         .stale-tag { font-size: var(--fs-xs); color: var(--warn); border: 1px solid var(--warn-border);
                      background: var(--warn-soft); border-radius: 4px; padding: 0 5px; cursor: help; }
+        /* 2026-10-12：把「需重启」从静态标签变成可点按钮（点它调用 /api/system/restart 重启 agenthub）。 */
+        .stale-btn { cursor: pointer; font: inherit; }
+        .stale-btn:hover { filter: brightness(0.95); }
+        .stale-btn:disabled { opacity: .6; cursor: default; }
 
         /* ── 左侧手风琴导航 + 右侧操作区（v0.7.0：20 个实体全部收拢进左栏）── */
         .shell { display: flex; flex: 1; overflow: hidden; }
@@ -2478,6 +2482,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=482fe117"></script>
+    <script src="/static/hub.js?v=e0e1ab5c"></script>
 </body>
 </html>

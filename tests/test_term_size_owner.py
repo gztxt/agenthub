@@ -2,7 +2,7 @@
 
 借鉴出处（paseo v0.10.0 实证）：
   packages/server/src/terminal/terminal-size-ownership.ts（全文 38 行）
-  docs/terminal-performance.md:31 原话：lets an owning pane follow splits and
+  上游 docs/terminal-performance.md:31 原话（摘引见 docs/PASEO-FUSION-PLAN-20260929.md:208）：lets an owning pane follow splits and
     keyboard insets without allowing an idle phone or browser to steal the PTY size.
 
 要防的真问题：桌面正开着 vim（120×40），手机端同一会话的页面在后台被 ResizeObserver

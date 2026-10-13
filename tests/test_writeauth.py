@@ -100,6 +100,20 @@ class BRouteInventory(unittest.TestCase):
             self.assertTrue(any(r.startswith(pre) for r in routes),
                             f"豁免前缀 {pre} 当前匹配不到任何写路由，请删掉它")
 
+    def test_telemetry_exempt_premise_holds_hook_enforces_auth(self):
+        """豁免理由写的是「hook.py 自带方案」——必须真接上，否则豁免＝免检洞。
+
+        2026-10-12 实测：`hook._check_auth` 只定义、全仓零调用 ⇒ 该豁免当时**没有依据**。
+        """
+        s = (SRC / "hook.py").read_text(encoding="utf-8")
+        self.assertIn("def _check_auth", s, "方案函数没了，豁免必须重写理由")
+        body = s[s.index("async def push_event"):]
+        cut = body.find("\n@router.")
+        if cut > 0:
+            body = body[:cut]
+        self.assertIn("_check_auth(request)", body,
+                      "/telemetry/events/ 的豁免以 hook.py 自带鉴权为前提；push_event 必须调用 _check_auth")
+
     def test_term_control_plane_stays_gated(self):
         """P1-7 原先只在 handler 里守的两条，现在被中间件多守一层 —— 不许被误豁免。"""
         for p in ("/api/term/sessions", "/api/scan/run", "/mcp/call", "/api/memory/l3"):

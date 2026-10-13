@@ -60,7 +60,7 @@ def hit(base, method, path, token=None, timeout=10):
 # 豁免端点的"自带鉴权"预期。503 也算通过：`/api/settings/term-token` 在未配置
 # HUB_PASSCODE 时**主动拒绝服务**（fail-closed），影子树正是这种情况 —— 把它记成
 # 失败就会诱导后人"为了让探针绿而去给影子塞口令"，那是把正确的保守行为改坏。
-EXPECT_OWN = {"/api/settings/term-token": (401, 503), "/telemetry/events/": (401, 422, 400)}
+EXPECT_OWN = {"/api/settings/term-token": (401, 503), "/telemetry/events/": (401, 422, 400, 403)}
 
 # 带凭据那一腿只打"空 body 必然进不去业务逻辑"的安全端点（影子树里也一样保守）
 SAFE_WITH_TOKEN = ["/api/agents", "/api/memory/l1", "/mcp/call", "/mcp/servers",

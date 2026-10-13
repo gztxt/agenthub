@@ -29,7 +29,3 @@ def build_adapters(config) -> Dict[str, object]:
 
 def get_adapter(agent_id: str) -> Optional[object]:
     return _adapters.get(agent_id)
-
-
-def adapter_ids() -> list:
-    return sorted(_adapters.keys())

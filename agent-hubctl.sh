@@ -23,8 +23,11 @@
 # 自检开关：HUBCTL_DRY=1 只打印将要执行的 systemctl 命令，不实际执行（供回归测用）。
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-$HOME/agent-hub}"
-UNIT="${UNIT:-agent-hub.service}"
+# 2026-10-12 修默认值漂移：原默认指向旧家目录仓 `$HOME/agent-hub`（已不存在）与旧 unit 名
+# `agent-hub.service`（已改名），本机靠 env 兜住、对外 clone 会读旧名。改为按脚本所在目录
+# 推导仓路径 + 新 unit 名（`APP_DIR`/`UNIT` 仍可被 env 覆盖）。
+APP_DIR="${APP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+UNIT="${UNIT:-agenthub.service}"
 # 自路径必须从 BASH_SOURCE 取。`bash agent-hubctl.sh restart` 时 $0 == "agent-hubctl.sh"
 # （没有 ./ 前缀），拿它当命令执行就是 command not found —— 而它藏在 start/restart 分支的收尾，
 # 主流程（systemctl 委托）已跑完，所以只在末尾安静留一行错误、退出码仍是 0。

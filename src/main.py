@@ -83,6 +83,7 @@ from api_agents import router as agents_router, _chat_dispatch   # 启动期 cha
 from api_sessions import router as sessions_router
 from api_models import router as models_router
 from api_vitals import router as vitals_router, agent_profs_for_vitals
+from api_system import router as system_router   # 系统级：前端「需重启」按钮的自重启端点
 
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
@@ -706,6 +707,7 @@ app.include_router(agents_router)
 app.include_router(vitals_router)
 app.include_router(sessions_router)
 app.include_router(models_router)
+app.include_router(system_router)
 
 
 # ── ⚙设置（口令保护的敏感配置查看）────────────────────────

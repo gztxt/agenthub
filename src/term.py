@@ -264,13 +264,6 @@ def _join_wrapped_urls(buf: str) -> "List[Tuple[int, str]]":
     return out
 
 
-def _cue_window(lines: List[str], idx: int) -> str:
-    """取 `idx` 附近 `AUTH_CUE_BACK_LINES/FWD_LINES` 行的文本（登录线索判定范围）。"""
-    lo = max(0, idx - AUTH_CUE_BACK_LINES)
-    hi = min(len(lines), idx + AUTH_CUE_FWD_LINES + 1)
-    return "\n".join(lines[lo:hi]).lower()
-
-
 def url_has_auth_cue(window: str, **kw) -> bool:
     """该窗口里有没有登录线索词（纯函数，保留给诊断/测试；播报判据见下）。
 
@@ -690,7 +683,7 @@ _sessions: Dict[str, Session] = {}
 _dying: Dict[int, "Session"] = {}
 
 
-# 输出合并窗口（毫秒）。5ms 是 paseo 实测值（docs/terminal-performance.md:5-16），
+# 输出合并窗口（毫秒）。5ms 是 paseo 实测值（上游 docs/terminal-performance.md:5-16；摘引见本仓 docs/PASEO-FUSION-PLAN-20260929.md），
 # 不是随手取的：再大就会让按键回显可见地发黏，再小则合并不住 npm run build 这种
 # 持续高频吐字节的场景。
 TERM_COALESCE_MS = 5.0

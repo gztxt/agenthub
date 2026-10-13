@@ -603,10 +603,12 @@ async function pollHealth() {
     if (staleEl) {
       const needRestart = d && d.needs_restart === true;
       if (needRestart) {
-        staleEl.innerHTML = '<span class="stale-tag" title="' +
+        staleEl.innerHTML = '<button type="button" class="stale-tag stale-btn" title="' +
           escapeHtml('运行中的代码与磁盘不一致（启动于 ' + ((d && d.git_sha_boot) || '?') +
                       '，当前磁盘 ' + ((d && d.git_sha_now) || '?') +
-                      '）。改动要重启 hub 才生效。') + '">需重启</span>';
+                      '）。点此重启 agenthub 让改动生效。') + '">需重启</button>';
+        const b = staleEl.querySelector('button');
+        if (b) b.addEventListener('click', restartHub);
       } else {
         staleEl.innerHTML = '';
       }
@@ -618,6 +620,38 @@ async function pollHealth() {
   }
 }
 
+
+/* 点「需重启」→ 自重启 agenthub（后端 POST /api/system/restart）。
+   有活终端会话时后端回 409，确认后再带 force=1（与 agent-hubctl 的 guard 同口径）。
+   重启窗口内 /health 必然不可达 ⇒ 轮询到恢复再刷新页面拿新静态资产。 */
+async function restartHub(ev) {
+  const btn = ev.currentTarget;
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '重启中…';
+  const post = (force) => api('/api/system/restart' + (force ? '?force=1' : ''), { method: 'POST' });
+  try {
+    try { await post(false); }
+    catch (e) {
+      if (e.http !== 409) throw e;
+      const n = (e.payload && e.payload.detail && e.payload.detail.term_sessions) || '?';
+      if (!confirm('当前有 ' + n + ' 个终端会话在跑，重启会中断它们。确认重启 agenthub？')) {
+        btn.disabled = false; btn.textContent = old; return;
+      }
+      await post(true);
+    }
+  } catch (e) {
+    toast('重启请求失败：' + e.message, 'err');
+    btn.disabled = false; btn.textContent = old; return;
+  }
+  let back = false;
+  for (let i = 0; i < 90; i++) {                 // 最多 ~90s
+    await new Promise((r) => setTimeout(r, 1000));
+    try { const d = await api('/health'); if (d && d.status) { back = true; break; } } catch (e) { /* 重启窗口内正常失败 */ }
+  }
+  if (back) { toast('agenthub 已重启'); setTimeout(() => location.reload(), 600); }
+  else { toast('重启后 90s 内未恢复，请检查服务', 'err'); btn.disabled = false; btn.textContent = old; }
+}
 
 /* 模型层情报（rt_state）→ 短标。它只影响副标文案，永远不影响「可用」。 */
 const RT_LABELS = {

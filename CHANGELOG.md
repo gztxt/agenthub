@@ -1,3 +1,81 @@
+## v0.13.104 — P0-2 成本度量：CCR usage 账本只读门面 + `GET /api/runlog/cost`
+
+> 触发：用户逐条裁决 aliyun《AI Agent Handbook》融合评估的四项待裁定后**立项施工**
+> （P0-1~P0-5 全批；排序 `P0-2 → P0-4 → P0-5 → P0-3 → P0-1`，逐项串行）。本条是排序第一项。
+> 立项书：`docs/AI-AGENT-HANDBOOK-P0-立项施工-20261014.md`。
+
+### 一、缺口：runlog 记「成不成 / 多快」，不记「多贵」
+
+`profile_events` 的 `task_exec` 只有 `status` 与 `duration_ms`，**没有 token / cost**
+⇒「单位成功任务成本」在本仓**没有任何数据源可以回答**。成本其实一直在记，只是记在
+CCR 侧（`~/.claude-code-router/app-data/usage.sqlite`，2026-10-15 实测 **37,088 行** /
+23.7MB，`created_at` 自 2026-07-26 起），agenthub 从来没读过它。
+
+实测（2026-10-15，窗口 `created_at >= 2026-09-15T00:00:00.000Z`，只读打开）：
+
+| client | 请求数 | total_tokens | Σcost_usd | cost 为 NULL |
+|---|---|---|---|---|
+| `API Key 1` | 11,943 | 1,193,064,573 | 20.15 | 4,108 |
+| `Local Gateway` | 4,417 | 416,383,115 | 2.86 | 3,808 |
+| `Profile: Claude Code` | 4,038 | 469,512,138 | 81.84 | 1,652 |
+| `Profile: Codex` | 2,567 | 169,138,319 | 2.40 | 2,015 |
+| `unknown` | 2,032 | 175,423,954 | 3.36 | 749 |
+
+`cost_source` 同窗口以 `models.dev`（估价）为主，另有 `openrouter` / `request_log`，
+**以及大量空串**——空 `cost_source` 与 `cost_usd IS NULL` 是两回事，两个都要单独回，
+不许并进别的桶。
+
+### 二、本次落地
+
+1. **`src/usage_ledger.py`（新增）**——CCR 账本**只读**聚合门面。
+   - `_connect_ro()` 用 `file:…?mode=ro` URI：**写不进去**（账本是 CCR 生命线资产；
+     负向测试直接断言 `INSERT` 抛 `OperationalError`）。
+   - `summary(group_by, since, until, limit)`：聚合维度走白名单
+     `client / model / provider / credential_id`，默认 `client × model`；
+     `by_request(ids)` 按 `request_id` 精确取行。
+2. **`GET /api/runlog/cost`（新增）**——`group_by` / `window`(小时,0=全量) / `limit`，
+   回 `rows + total + attribution`；鉴权与 `/api/runlog` 抽成**同一个 `_require_read()`**。
+3. **`src/llm.py`**——`_headers()` 支持 `X-Request-Id`，新增 `new_request_id()`；
+   `chat_tools_loop()` 新增 `request_id` / `usage_sink` 两个关键字参数。
+4. **闸门**：`tests/test_usage_ledger.py`(15) + `tests/test_runlog_cost_api.py`(7)，全 L0。
+
+### 三、三条硬口径（都是判例换来的）
+
+- **`logical_model` 不作聚合维度**：它是 CCR 内部逻辑名
+  （`provider-alibaba-…::openai_chat_completions/…`），**不是**客户端/模型 ID。
+  2026-09-07 判例：把它当客户端 ID 写进配置 ⇒ jcode 当天不可用。白名单里干脆没有它，
+  传了直接 `ValueError` / HTTP 400——**拒绝，不静默忽略**。
+- **cost NULL 不许静默当 0**：`COALESCE(cost_usd,0)` 求和同时必须回 `null_cost` 计数与
+  `cost_sources` 分布。免费模型实测就是 `cost_usd=NULL`（本次探针那行也是），
+  「合并成 0」等于把成本报小——与「静默 0 = 谎报」同族。
+- **fail-closed**：账本缺失/损坏/查询失败一律 `{ok:false,error}` → 端点 **503**，
+  绝不回 `{rows:[],total:0}`。
+
+### 四、归因精度：`approximate` 是**实测结论**，不是设计选择
+
+P0-2 原计划用「agenthub 发 `X-Request-Id` → 对上 `usage_events.request_id`」实现
+任务↔成本精确对齐。**单次只读探针当场否掉这条**（2026-10-15，1 次调用即结论）：
+
+| 步骤 | 实测 |
+|---|---|
+| 带 `X-Request-Id: hubprobe-1791995661` 打 `/v1/messages` | HTTP **200** |
+| 按该 id 查 `usage_events.request_id` | **0 行**（查不到） |
+| 同一时刻最新一行 | `19eccbce-4ed1-49b4-b131-b2d213dabe63`（CCR **自生成** UUIDv4） |
+| 全表 `request_id` 版本分布 | **37,088 行全是 v4**，无一行带客户端痕迹 |
+
+⇒ CCR **不透传**客户端 `X-Request-Id`。故回包 `attribution="approximate"`：
+只能按 `client × model × 时间窗` 近似归因。`X-Request-Id` 仍然发（零成本、前向兼容，
+上游一旦支持即自动生效），但**不许**把它当已生效的对齐手段。
+
+### 五、验证
+
+- `bash scripts/run_tests.sh all`：L0 **1544 例 0 失败 0 跳过**（基线 1522 + 新 22）、
+  L1 64 例 1 显式跳过（`work/l2-shadow-inject-verify.sh` 不入库，worktree 里无对象可钉；
+  主 checkout 同套件 65/0/0）；收集器对账 `unittest=1609 = pytest=1609`。
+- `bash scripts/prepush.sh` 六步全绿。
+- 未重启生产（不打断在跑的会话）；`src/main.py::VERSION` 已到 `0.13.104`，
+  生产 `/health` 仍报 boot 版本 —— 下次自然重启对齐。
+
 ## v0.13.103 — 记忆联邦融合公平性：单源配额 + 注入包不再丢弃跨 agent 记忆
 
 > 触发：用户要求评估 Cognition「Agent Memory Repo」（cognition.com/agent-memory-repo，

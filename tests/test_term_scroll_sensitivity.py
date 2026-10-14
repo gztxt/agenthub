@@ -238,7 +238,17 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.103"
+    CURRENT_VERSION = "0.13.104"
+
+    #: v0.13.104 的两条根因都要在版本注释里可寻址（该闸门的作用是「注释掉了根因就红」）：
+    #: ① 账本必须**只读**（`?mode=ro`，CCR 生命线资产，写不进去有负向测试钉着）+ 聚合维度
+    #:    白名单**故意不含 `logical_model`**（内部逻辑名，2026-09-07 判例致 jcode 不可用）；
+    #: ② `COALESCE(cost)` 必须同时回 `null_cost`（免费模型实测 cost_usd=NULL，静默 0 = 谎报）
+    #:    + 归因 `attribution=approximate`（探针 `hubprobe-` 实测 CCR 不透传 X-Request-Id）。
+    VERSION_ROOT_CAUSES["0.13.104"] = (
+        "usage_ledger", "mode=ro", "logical_model", "null_cost",
+        "attribution=approximate", "hubprobe-",
+    )
 
     #: v0.13.103 的两条根因都要在版本注释里可寻址（该闸门的作用是「注释掉了根因就红」）：
     #: ① 联邦融合被 TDAI 吃满（权重 1.0 + 满额 top10 + 无下限 ⇒ 其余 10 路永不出结果）——

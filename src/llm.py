@@ -11,6 +11,7 @@ FCC→tokenrouter/qwen3.8-flash 的 tool_use 已由 PT-20260905-01 端到端验�
 """
 import json
 import os
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
@@ -130,10 +131,24 @@ def configured() -> bool:
     return bool(BASE_URL)
 
 
-def _headers() -> Dict[str, str]:
+def new_request_id() -> str:
+    """生成本次 LLM 调用的关联 id（P0-2），随 `X-Request-Id` 发给网关。
+
+    ⚠ 2026-10-15 单次只读探针实测：CCR **不透传**客户端 `X-Request-Id`
+    （探针带 `hubprobe-…` 打 `/v1/messages` 得 200，账本落的是 CCR 自生成的 UUIDv4）。
+    所以现在发这个头**不产生**任务↔成本对齐——真正的对齐要么等 CCR 支持透传，
+    要么退化到 `usage_ledger` 的 client×model×时间窗近似归因（`attribution=approximate`）。
+    仍然发：零成本、前向兼容（上游一旦支持就自动生效），且出问题时日志里能对着看。
+    """
+    return uuid.uuid4().hex
+
+
+def _headers(request_id: Optional[str] = None) -> Dict[str, str]:
     h = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
     if API_KEY:
         h["Authorization"] = f"Bearer {API_KEY}"
+    if request_id:
+        h["X-Request-Id"] = str(request_id)
     return h
 
 
@@ -149,7 +164,16 @@ def _openai_tools_to_anthropic(tools: List[dict]) -> List[dict]:
 
 async def _create_message(system: Optional[str], messages: List[dict],
                           tools: Optional[List[dict]] = None,
-                          model: Optional[str] = None) -> Dict[str, Any]:
+                          model: Optional[str] = None,
+                          request_id: Optional[str] = None,
+                          usage_sink: Optional[List[dict]] = None) -> Dict[str, Any]:
+    """单次上游调用。
+
+    `usage_sink`（P0-2）非 None 时，把每次调用的 `{model, request_id, usage}` 追加进去。
+    用**调用方传入的 list**而不是返回值：`chat_tools_loop` 的 `(answer, steps)`
+    返回形状被 memory.py / tasks.py 与前端步骤渲染同时依赖，改形状的爆炸半径远大于收益。
+    追加整体包 try：账务断言绝不允许带倒一次真实 LLM 调用。
+    """
     body: Dict[str, Any] = {"model": model or MODEL, "max_tokens": MAX_TOKENS,
                             "messages": messages}
     if system:
@@ -158,18 +182,27 @@ async def _create_message(system: Optional[str], messages: List[dict],
         body["tools"] = _openai_tools_to_anthropic(tools)
         body["tool_choice"] = {"type": "auto"}
     async with aiohttp.ClientSession() as s:
-        async with s.post(f"{BASE_URL}/v1/messages", headers=_headers(),
+        async with s.post(f"{BASE_URL}/v1/messages", headers=_headers(request_id),
                           json=body, timeout=TIMEOUT) as resp:
             if resp.status != 200:
                 text = (await resp.text())[:600]
                 raise RuntimeError(f"LLM 网关 HTTP {resp.status}: {text}")
-            return await resp.json()
+            data = await resp.json()
+            if usage_sink is not None:
+                try:
+                    usage_sink.append({"model": body["model"], "request_id": request_id,
+                                       "usage": data.get("usage") or {}})
+                except Exception:  # noqa: BLE001
+                    pass
+            return data
 
 
 async def chat_tools_loop(messages: List[dict], tools: List[dict],
                           dispatch_tool=None, max_rounds: int = 10,
                           model: Optional[str] = None,
-                          on_step=None) -> Tuple[str, List[dict]]:
+                          on_step=None,
+                          request_id: Optional[str] = None,
+                          usage_sink: Optional[List[dict]] = None) -> Tuple[str, List[dict]]:
     """使用指定 model（默认用全局 MODEL）
 
     多轮工具环（上游 mcp_agent.rs 收敛策略）：
@@ -182,6 +215,12 @@ async def chat_tools_loop(messages: List[dict], tools: List[dict],
 
     v0.5.3 软熔断：检测到连续 3 次同类型工具错误指纹，提前 end_turn 给用户答复；
     max_rounds 仅作兜底，正常情况 3 轮就停。指纹 = tool_name:error_type:field:first50。
+
+    P0-2 新增两个**关键字参数**（都不改返回形状）：
+    - `request_id`：本次调用链的关联 id，落到 `X-Request-Id`（当前 CCR 不透传，见
+      `new_request_id` 注释；发了不亏，上游一旦支持即自动生效）。
+    - `usage_sink`：调用方传进来的 list，每轮上游调用追加 `{model,request_id,usage}`，
+      供上层记账（token/成本）。不传 = 老行为，一个字节不变。
     """
     active_model = model or MODEL
     system = None
@@ -239,7 +278,8 @@ async def chat_tools_loop(messages: List[dict], tools: List[dict],
         return f"{tool_name}:{err_type}:{field}:{first50}"
 
     for _ in range(max_rounds):
-        data = await _create_message(system, convo, tools or None, model=active_model)
+        data = await _create_message(system, convo, tools or None, model=active_model,
+                                     request_id=request_id, usage_sink=usage_sink)
         content_blocks = data.get("content") or []
         # v0.5.4 sub-α Fix 1：text 剥离 raw tool_call XML。
         # 部分上游（Nemotron/FCC Anthropic-compatible）把 tool_call 当 text 块直出，
@@ -334,7 +374,8 @@ async def chat_tools_loop(messages: List[dict], tools: List[dict],
         convo.append({"role": "user", "content": tool_results})
 
     # 轮数耗尽：无 tools 强制收尾
-    data = await _create_message(system, convo, None, model=active_model)
+    data = await _create_message(system, convo, None, model=active_model,
+                                 request_id=request_id, usage_sink=usage_sink)
     # 同样先剥 raw XML 再用
     raw_texts2 = [b.get("text", "") for b in (data.get("content") or [])
                   if b.get("type") == "text"]

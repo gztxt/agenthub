@@ -28,6 +28,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 import db
 import tdai_client
+import usage_ledger
 import writeauth
 
 router = APIRouter()
@@ -220,6 +221,24 @@ def track(subject: str):
     return deco
 
 
+def _require_read(request: Request) -> None:
+    """本模块所有只读端点的共享鉴权（GET 但按写方法判）。
+
+    运行日志含查询词、成本端点含账单 ⇒ 批量读它们＝窥探本机使用史 / 数据外流，
+    与 `/api/audit/list`（src/audit.py 先例）同级敏感。fail-closed：服务端没配口令
+    ⇒ 503 而不是放行。**抽成函数而不是复制**：两个端点任一漏抄就是一条敞开的通道。
+    """
+    verdict, reason = writeauth.decide(
+        "POST", request.url.path,
+        writeauth.provided_token(request.headers.raw, request.url.query),
+        writeauth.secrets_from_env())
+    if verdict not in ("allow", "exempt"):
+        # 只打 verdict/path/来源，绝不打凭据（与 audit.py 同一口径）
+        print(f"[runlog] 拒绝 {verdict}：{request.url.path} "
+              f"来源={request.client.host if request.client else '?'} —— {reason}", flush=True)
+        raise HTTPException(status_code=503 if verdict == "misconfig" else 401, detail=reason)
+
+
 @router.get("/api/runlog")
 async def runlog_query(request: Request,
                        source: Optional[str] = Query(default=None, max_length=40),
@@ -233,15 +252,7 @@ async def runlog_query(request: Request,
     照抄 /api/audit/list 的鉴权先例（GET 但按写方法判）：运行日志含查询词，
     批量读它＝窥探本机使用史，与导出同级敏感。
     """
-    verdict, reason = writeauth.decide(
-        "POST", request.url.path,
-        writeauth.provided_token(request.headers.raw, request.url.query),
-        writeauth.secrets_from_env())
-    if verdict not in ("allow", "exempt"):
-        # 只打 verdict/path/来源，绝不打凭据（与 audit.py 同一口径）
-        print(f"[runlog] 拒绝 {verdict}：{request.url.path} "
-              f"来源={request.client.host if request.client else '?'} —— {reason}", flush=True)
-        raise HTTPException(status_code=503 if verdict == "misconfig" else 401, detail=reason)
+    _require_read(request)
 
     sql = ("SELECT id,source,subject,trace_id,status,duration_ms,detail,created_at"
            " FROM profile_events")
@@ -282,3 +293,40 @@ async def runlog_query(request: Request,
         "sources": ["rest", "hub_chat", "task_exec", "cron_run", "mcp_call"],
         "subjects": list(SUBJECTS),
     }
+
+
+@router.get("/api/runlog/cost")
+async def runlog_cost(request: Request,
+                      group_by: str = Query(default="client,model", max_length=80),
+                      window: int = Query(default=24, ge=0, le=8760),
+                      limit: int = Query(default=100, ge=1, le=500)):
+    """单位成功任务成本：CCR usage 账本的**只读**聚合（P0-2）。
+
+    单独一个 path、**不复用 /api/runlog**：数据源不同（那边是 hub 自己的
+    `profile_events`，这边是 CCR 的 `usage.sqlite`），混进一个回包会让「日志」与
+    「账单」两套语义互相污染（一个走 db.query、一个走只读 URI，连失败模式都不同）。
+
+    `group_by` 只收 `usage_ledger.GROUP_COLS`；`logical_model` **明确拒绝**
+    （2026-09-07 判例：账本逻辑名不是客户端/模型 ID，误用致 jcode 不可用）。
+    回包带 `attribution`：当前实测 CCR 不透传客户端 `X-Request-Id` ⇒ `approximate`
+    （按 client×model×时间窗近似），调用方不得当作精确对齐。
+
+    fail-closed：账本缺失/打不开 ⇒ **503 + ok:false**，绝不回 0 当成功
+    （免费模型 cost_usd 就是 NULL，静默 0 = 谎报成本）。
+    """
+    _require_read(request)
+
+    cols = tuple(c.strip() for c in str(group_by).split(",") if c.strip())
+    if not cols:
+        raise HTTPException(400, "group_by 不能为空")
+    bad = [c for c in cols if c not in usage_ledger.GROUP_COLS]
+    if bad:
+        raise HTTPException(
+            400, f"group_by 只允许 {list(usage_ledger.GROUP_COLS)}，收到 {bad}"
+                 "（logical_model 是 CCR 内部逻辑名，不是客户端/模型 ID）")
+
+    since, until = usage_ledger.window_bounds(window)
+    data = usage_ledger.summary(group_by=cols, since=since, until=until, limit=limit)
+    if not data.get("ok"):
+        raise HTTPException(503, f"usage ledger unavailable: {data.get('error')}")
+    return data

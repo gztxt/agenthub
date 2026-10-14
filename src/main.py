@@ -88,7 +88,25 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.103"  # 记忆联邦融合公平性：单源配额 + 注入包不再丢弃跨 agent 记忆
+VERSION = "0.13.104"  # P0-2 成本度量：CCR usage 账本只读门面 + GET /api/runlog/cost
+#   v0.13.104：用户逐条裁决 aliyun《AI Agent Handbook》融合评估的四项待裁定后立项施工
+#   （P0-1~P0-5 全批；排序 P0-2 → P0-4 → P0-5 → P0-3 → P0-1，逐项串行），本条是第一名。
+#   缺口：runlog 只记「成不成 / 多快」，没有 token / cost ⇒「单位成功任务成本」不可度量。
+#   ① 新增 src/usage_ledger.py：CCR 账本 `~/.claude-code-router/app-data/usage.sqlite`
+#      的**只读**聚合门面（`?mode=ro`，写不进去有负向测试钉着）。聚合维度白名单
+#      `client/model/provider/credential_id`，**故意不含 `logical_model`**
+#      （2026-09-07 判例：那是 CCR 内部逻辑名，不是客户端/模型 ID，误用致 jcode 不可用）。
+#   ② `COALESCE(cost_usd,0)` 求和**必须同时回 `null_cost` 与 `cost_sources`（含 "" 桶）
+#      —— 2026-10-15 实测：免费模型落库 `cost_usd=NULL`，静默当 0 就是把成本报小。
+#   ③ 新增 `GET /api/runlog/cost`（与 `/api/runlog` **共用 `_require_read`**，防改一处漏一处）；
+#      账本拿不到一律 **503 + ok:false**，绝不回 rows=[]/total=0 那种静默 0。
+#   ④ src/llm.py 发 `X-Request-Id`（新 `new_request_id()`）。**单次只读探针实测 CCR 不透传**
+#      （带 `hubprobe-…` 打 /v1/messages 得 200，账本落的是 CCR 自生成的 UUIDv4
+#      `19eccbce-…`）⇒ 回包 `attribution=approximate`（按 client×model×时间窗近似归因），
+#      调用方不得当作精确对齐。同批给 `chat_tools_loop` 加 `request_id` / `usage_sink`
+#      两个**关键字**参数（不改 `(answer, steps)` 返回形状，memory.py/tasks.py 零改动）。
+#   闸门：tests/test_usage_ledger.py + tests/test_runlog_cost_api.py（共 22 例，全 L0）。
+#   余下四项与验收/回滚口径见 docs/AI-AGENT-HANDBOOK-P0-立项施工-20261014.md。
 #   v0.13.103：用户要求评估 Cognition「Agent Memory Repo」能否融入本机记忆中心。
 #   **规范本身无检索层（纯 grep），不构成替代**；评估反而照出本机记忆中心三个硬缺陷：
 #   ① 联邦融合被 TDAI 吃满（W=1.0 + 满额 top10 + 无下限 ⇒ 数学上其余 10 路永不出结果），

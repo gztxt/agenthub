@@ -112,7 +112,17 @@ CREATE TABLE IF NOT EXISTS asset_audit (
     action TEXT NOT NULL,       -- create|update|delete|bind|unbind|rebuild（见 AUDIT_ACTIONS）
     actor TEXT NOT NULL,        -- user:term-token|user:hub-passcode|user:exempt|agent:<slug>|system
     detail TEXT DEFAULT '{}',   -- JSON；落库前过脱敏，**绝不许含凭据原文**
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- ── P0-4（v0.13.105）研判三列 ──────────────────────────────────────
+    -- 语义**严格限定**为「本事件记载的变更，在 hub 本地是否确实发生了」：
+    -- 每个调用点都在变更落库**之后**才调 log_asset_event ⇒ 「这行存在」本身就是
+    -- 「变更执行了」的证据。它**不**声明上游（TDAI / 远端 GitHub）效果 ——
+    -- 那需要写后核实；核不了就显式传 insufficient，不许默认成 confirmed。
+    -- NULL = **未研判**（迁移前的旧行），与 insufficient（判过了、判不了）**分开计数**，
+    -- 但两者都让 decisive=False。
+    verdict TEXT,               -- confirmed|dismissed|insufficient，NULL=未研判
+    severity TEXT,              -- info|warn|high，NULL=未定级
+    confidence REAL             -- 0..1；不可判定时**不给假刻度**，留 NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_asset ON asset_audit(asset_type, asset_slug);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON asset_audit(created_at);
@@ -217,6 +227,12 @@ def init_db(path: Path) -> None:
         _add_column_if_missing(_conn, "telemetry_events", "duration_ms", "INTEGER")
         _add_column_if_missing(_conn, "telemetry_events", "status", "TEXT")
         _add_column_if_missing(_conn, "custom_agents", "source", "TEXT DEFAULT 'manual'")
+        # P0-4（v0.13.105）：asset_audit 研判三列。存量库交给 ALTER 幂等补，
+        # **不动任何既有行**（旧行的 verdict 保持 NULL = 未研判，这是诚实的，
+        # 比回填一个 confirmed 强 —— 回填等于替历史编证据）。
+        _add_column_if_missing(_conn, "asset_audit", "verdict", "TEXT")
+        _add_column_if_missing(_conn, "asset_audit", "severity", "TEXT")
+        _add_column_if_missing(_conn, "asset_audit", "confidence", "REAL")
         _conn.commit()
 
 
@@ -318,7 +334,9 @@ AUDIT_ACTIONS = ("create", "update", "delete", "bind", "unbind", "rebuild")
 
 
 def log_asset_event(asset_type: str, asset_slug: str, action: str, actor: str,
-                    detail: Optional[dict] = None) -> None:
+                    detail: Optional[dict] = None, verdict: Optional[str] = None,
+                    severity: Optional[str] = None,
+                    confidence: Optional[float] = None) -> None:
     """资产变更审计（**append-only**）。与 log_profile_event 同族但口径不同：
     profile_events 记「调用成不成、多快」，asset_audit 记「哪个资产被谁改了」。
 
@@ -327,20 +345,39 @@ def log_asset_event(asset_type: str, asset_slug: str, action: str, actor: str,
       2) **detail 落库前整体过脱敏**：审计行会成为下一次会话导出的正文，凭据写进去＝二次外流。
          做法是先 json.dumps 再对整串 redact_text ⇒ 嵌套层也覆盖（只扫顶层值会漏 dict 里的 dict）。
       3) **action 不在枚举里 ⇒ 打 action_invalid 标记**，绝不静默丢弃也绝不改写。
+
+    ── P0-4（v0.13.105）第四问：这次变更「证实了吗」──
+    `verdict` 的语义**严格限定为 hub 本地效果**：本函数在每个调用点都在变更落库**之后**
+    调用（mcpgw 的 INSERT、memory.add_memory、githubprojects 的克隆后 origin 校验均在前），
+    所以「审计行存在」本身就是「变更在 hub 侧执行了」的证据 —— 默认 `confirmed` 不是乐观，
+    是**这条事实本身**。
+    ⚠ 它**不**声明上游效果（TDAI 权威库 / 远端 GitHub）：那需要写后核实，而本仓已知
+    `tdai_client` 对 TDAI 的写调用数为 0 ⇒ 对权威库的效果就是 `insufficient`。
+    做不到核实的调用点请**显式传** `insufficient`；**不许**用默认值把「不知道」说成「已确认」。
+    `verdict` 不在枚举里 ⇒ 原样落库 + detail 打 `verdict_invalid`（与 action 同纪律：
+    不静默丢弃、不改写，丢/改比记错更贵）。
     """
     d = dict(detail or {})
     if action not in AUDIT_ACTIONS:
         d = {**d, "action_invalid": True}
+    # 局部 import：db 是最底层，只依赖叶子模块 evidence（它不 import 任何 src 模块）
+    from evidence import SEVERITIES, VERDICTS
+    if verdict is not None and verdict not in VERDICTS:
+        d = {**d, "verdict_invalid": True}
+    if severity is not None and severity not in SEVERITIES:
+        d = {**d, "severity_invalid": True}
     body = json.dumps(d, ensure_ascii=False)
     try:
         from sessions_export import redact_text   # 局部 import：db 是最底层，不许成环
         body = redact_text(body)[0]
     except Exception:                             # noqa: BLE001
         pass                                      # 脱敏器不可用时仍要留下事件（完整性 > 打码）
+    _conf = None if confidence is None else float(confidence)
     execute(
-        "INSERT INTO asset_audit(asset_type,asset_slug,action,actor,detail,created_at)"
-        " VALUES(?,?,?,?,?,?)",
-        (asset_type, str(asset_slug), action, actor, body, _now()))
+        "INSERT INTO asset_audit(asset_type,asset_slug,action,actor,detail,created_at,"
+        "verdict,severity,confidence) VALUES(?,?,?,?,?,?,?,?,?)",
+        (asset_type, str(asset_slug), action, actor, body, _now(),
+         verdict if verdict is not None else "confirmed", severity, _conf))
 
 
 def add_memory(content: str, category: str = "fact", source: str = "manual",

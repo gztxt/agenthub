@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -25,6 +26,63 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT))
 import tiers  # noqa: E402
+
+#: 闸门结果的合法取值（P0-4）。**三态而不是布尔**：
+#:   pass         —— 跑完且结论成立
+#:   fail         —— 跑完且结论不成立
+#:   insufficient —— 跑完了但**没法下结论**（例：L0 出现 skip ⇒ 那些用例在干净 runner
+#:                  上一个断言都没跑）。它**既不是 pass 也不是 fail**，退出码取 2。
+#: 本仓旧口径把这种情形写成 "skipped=N" 然后继续报全绿 —— 「禁把 SKIP 当 PASS」
+#: 在纸面上写了很久，这里把它变成结果对象里的一个值。
+VALIDITY = ("pass", "fail", "insufficient")
+
+#: validity → 退出码。0 绿；1 真失败；2 不可判定（沿用旧脚本对 L0-skip 的 2，不新造码）。
+RC_BY_VALIDITY = {"pass": 0, "fail": 1, "insufficient": 2}
+
+
+def gate_result(tier: str, *, ran: int, skipped: int = 0, failures: int = 0,
+                errors: int = 0, zero_skip: bool = False) -> dict:
+    """闸门产物的**四字段结果对象**（P0-4）：`exec_status + validity + evidence + quality`。
+
+    为什么要拆四字段而不是回一个 bool：一个布尔值无法区分「没跑」「跑了挂了」与
+    「跑了但不可判定」—— 而这三者的处置完全不同。特别是第三类：它看着像绿，
+    实际什么都没证明（测试自己 skipTest、某层未被发现、夹具缺失都会落到这里）。
+
+      exec_status —— **执行**层面：ran（跑了）/ empty（一个用例都没发现）
+      validity    —— **结论**层面：pass / fail / insufficient
+      evidence    —— 原始计数（ran/skipped/failures/errors），**不加工、不折算**
+      quality     —— 证据可信度：是否要求零跳过、是否 decisive
+
+    硬约束：`zero_skip=True`（L0）且 `skipped>0` ⇒ **insufficient**。
+    它与 `evidence` 里的 skipped 计数共存 —— 「跳过几个」是证据，「因此不可判定」是结论，
+    两者不许互相替代（早期版本就是只报 skipped 然后当绿）。
+    """
+    any_seen = bool(ran or skipped or failures or errors)
+    exec_status = "ran" if any_seen else "empty"
+    if failures or errors:
+        validity = "fail"
+    elif zero_skip and skipped:
+        validity = "insufficient"
+    elif not any_seen:
+        validity = "insufficient"          # 一个用例都没跑过 ⇒ 什么也没证明
+    else:
+        validity = "pass"
+    return {
+        "tier": tier,
+        "exec_status": exec_status,
+        "validity": validity,
+        "evidence": {"ran": int(ran), "skipped": int(skipped),
+                     "failures": int(failures), "errors": int(errors)},
+        "quality": {"zero_skip_required": bool(zero_skip),
+                    "skips_were_treated_as": "insufficient" if (zero_skip and skipped) else "n/a",
+                    "decisive": validity != "insufficient"},
+    }
+
+
+def _emit_gate(gr: dict) -> None:
+    """把结果对象打成**一行机器可读**的 JSON（供 prepush/CI/人三相消费）。"""
+    assert gr["validity"] in VALIDITY, gr["validity"]
+    print("[gate] " + json.dumps(gr, ensure_ascii=False, sort_keys=True))
 
 
 def _resolve(test: unittest.TestCase):
@@ -154,19 +212,27 @@ def main(argv):
         for label, tests in pairs:
             if not tests:
                 print(f"[tier] {label}: 0 例（本层无用例）")
+                # P0-4：「0 例」不是「全绿」——它是**什么都没证明**（判据没被发现=
+                # 发现器坏了 / 文件不在）。旧版只打一行就 continue、rc 不变 ⇒ 静默放行。
+                gr0 = gate_result(label, ran=0, skipped=0, zero_skip=label.startswith("L0"))
+                _emit_gate(gr0)
+                rc = max(rc, RC_BY_VALIDITY[gr0["validity"]])
                 continue
             stream = sys.stdout
             res, nskip, ntot = _run(tests, label, stream)
             print(f"[tier] {label}: ran={ntot - nskip} skipped={nskip} failures={len(res.failures)} "
                   f"errors={len(res.errors)}")
-            if not res.wasSuccessful():
-                rc = 1
-            if label.startswith("L0") and nskip:
+            gr = gate_result(label, ran=ntot - nskip, skipped=nskip,
+                             failures=len(res.failures), errors=len(res.errors),
+                             zero_skip=label.startswith("L0"))
+            _emit_gate(gr)
+            rc = max(rc, RC_BY_VALIDITY[gr["validity"]])
+            if gr["validity"] == "insufficient" and nskip:
                 print(f"[tier] ❌ 分层放错：L0 出现 {nskip} 个 skip —— 这些用例在干净 runner 上"
-                      f"什么都没测，请打 @tiers.host_only 或去掉 skipTest：")
+                      f"什么都没测（validity=insufficient，**不是** pass），"
+                      f"请打 @tiers.host_only 或去掉 skipTest：")
                 for t, _r in res.skipped:
                     print(f"        {t.id()}")
-                rc = max(rc, 2)
         if tier == "all" and host:
             print("[tier] （L1 已随 all 一起跑过；单独看：run_tier.py host）")
         rc = max(rc, _parity())

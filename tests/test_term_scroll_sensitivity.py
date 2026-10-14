@@ -238,7 +238,17 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.104"
+    CURRENT_VERSION = "0.13.105"
+
+    #: v0.13.105 的两条根因都要在版本注释里可寻址（该闸门的作用是「注释掉了根因就红」）：
+    #: ① 三层链路（原始事实 → 候选信号 → 研判）+ **空证据集不许投票**：
+    #:    证据缺失/观测失败/规则炸/规则回 None 一律落到 `insufficient`，不许退化成「判否」；
+    #: ② `decisive` = 「禁把 SKIP 当 PASS」的机械形态；`verdict IS NULL`（未研判）
+    #:    与 insufficient 分开计数但**同样**让 decisive=False（迁移不替历史编证据）。
+    VERSION_ROOT_CAUSES["0.13.105"] = (
+        "三层链路", "insufficient", "空证据集不许投票",
+        "decisive", "verdict IS NULL", "禁把 SKIP 当 PASS",
+    )
 
     #: v0.13.104 的两条根因都要在版本注释里可寻址（该闸门的作用是「注释掉了根因就红」）：
     #: ① 账本必须**只读**（`?mode=ro`，CCR 生命线资产，写不进去有负向测试钉着）+ 聚合维度

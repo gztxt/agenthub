@@ -25,6 +25,7 @@ sys.path.insert(0, str(_REPO / "src"))
 sys.path.insert(0, str(_REPO))
 
 import db  # noqa: E402
+import evidence  # noqa: E402 —— P0-4 研判原语（叶子模块，无宿主依赖）
 
 
 class _DbCase(unittest.TestCase):
@@ -55,7 +56,11 @@ class TestSchema(_DbCase):
     def test_columns_are_exact(self):
         cols = [r["name"] for r in db.query("PRAGMA table_info(asset_audit)")]
         self.assertEqual(cols, ["id", "asset_type", "asset_slug", "action",
-                                "actor", "detail", "created_at"])
+                                "actor", "detail", "created_at",
+                                # P0-4（v0.13.105）：研判三列。钉死列集是为了让「有人
+                                # 悄悄加列」得先到这里来解释 **为什么** —— 而本批的理由是
+                                # 「光有 PASS/FAIL 两态没法表达『判不了』」。
+                                "verdict", "severity", "confidence"])
 
 
 class TestWritePath(_DbCase):
@@ -112,6 +117,118 @@ class TestWritePath(_DbCase):
     def test_db_path_canary_stays_on_tmp(self):
         """库指向金丝雀（09-24 曾把测试写入落进生产库）：审计只准落 tmp 库。"""
         self.assertIn("l0audit-", db.current_path())
+
+
+#: P0-4 之前的 asset_audit 形状（**没有** verdict/severity/confidence）。
+#: 用它造一个「存量库」来验证 ALTER 补列：不建旧表就测不出「幂等补建」。
+_LEGACY_DDL = """
+CREATE TABLE asset_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_type TEXT NOT NULL, asset_slug TEXT NOT NULL, action TEXT NOT NULL,
+    actor TEXT NOT NULL, detail TEXT DEFAULT '{}', created_at TEXT NOT NULL
+);
+"""
+
+
+class TestVerdictColumns(_DbCase):
+    """v0.13.105（P0-4）：研判三列 + 幂等补列 + 不替历史编证据。"""
+
+    def test_default_verdict_is_confirmed(self):
+        """默认 confirmed 不是乐观估计：「审计行存在」本身就是「变更在 hub 侧执行了」的证据
+        （每个调用点都在落库**之后**才调 log_asset_event）。"""
+        db.log_asset_event("mcp_server", "s1", "create", "system")
+        self.assertEqual(db.query("SELECT verdict FROM asset_audit")[0]["verdict"], "confirmed")
+
+    def test_explicit_verdict_is_honoured(self):
+        """核不了上游效果的调用点必须能显式说「判不了」—— 这是三态存在的理由。"""
+        db.log_asset_event("memory_l1", "7", "create", "system",
+                           verdict="insufficient", severity="warn", confidence=None)
+        r = db.query("SELECT verdict,severity,confidence FROM asset_audit")[0]
+        self.assertEqual((r["verdict"], r["severity"]), ("insufficient", "warn"))
+        self.assertIsNone(r["confidence"], "不可判定时留 NULL，不编假刻度")
+
+    def test_invalid_verdict_is_flagged_not_rewritten(self):
+        """与 action 同纪律：不静默丢弃、不改写（丢/改比记错更贵）。"""
+        db.log_asset_event("agent", "pi", "update", "system", verdict="probably-fine")
+        r = db.query("SELECT verdict,detail FROM asset_audit")[0]
+        self.assertEqual(r["verdict"], "probably-fine", "不许改写")
+        self.assertTrue(json.loads(r["detail"]).get("verdict_invalid"))
+
+    def test_invalid_severity_is_flagged(self):
+        db.log_asset_event("agent", "pi", "update", "system", severity="catastrophic")
+        r = db.query("SELECT severity,detail FROM asset_audit")[0]
+        self.assertEqual(r["severity"], "catastrophic")
+        self.assertTrue(json.loads(r["detail"]).get("severity_invalid"))
+
+    def test_confirmed_row_carries_confidence_only_if_given(self):
+        db.log_asset_event("setting", "x", "update", "system", confidence=1.0)
+        db.log_asset_event("setting", "y", "update", "system")
+        rows = db.query("SELECT asset_slug,confidence FROM asset_audit ORDER BY id")
+        self.assertEqual(rows[0]["confidence"], 1.0)
+        self.assertIsNone(rows[1]["confidence"], "没给就不填 —— 不是默认 0")
+
+
+class TestLegacyMigration(unittest.TestCase):
+    """★ 验收项①：新列必须**幂等补建**，且**不破坏也不回填**既有行。
+
+    不建旧表就测不出「补建」（新库里三列是 CREATE TABLE 里就有的）。
+    回填一个 confirmed 等于**替历史编证据** —— 旧行没人保证过，就该留在「未研判」。
+    """
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="l0auditmig-"))
+        self._saved = db._conn
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        try:
+            db._conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        db._conn = self._saved
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_legacy(self):
+        import sqlite3
+        p = self.tmp / "legacy.db"
+        c = sqlite3.connect(str(p))
+        c.executescript(_LEGACY_DDL)
+        c.execute("INSERT INTO asset_audit(asset_type,asset_slug,action,actor,detail,created_at)"
+                  " VALUES('mcp_server','old','create','system','{}','2026-01-01T00:00:00Z')")
+        c.commit()
+        c.close()
+        return p
+
+    def test_migration_adds_columns_and_preserves_rows(self):
+        p = self._make_legacy()
+        db.init_db(p)
+        cols = [r["name"] for r in db.query("PRAGMA table_info(asset_audit)")]
+        for c in ("verdict", "severity", "confidence"):
+            self.assertIn(c, cols)
+        rows = db.query("SELECT * FROM asset_audit")
+        self.assertEqual(len(rows), 1, "迁移不许动既有行数")
+        self.assertEqual(rows[0]["asset_slug"], "old")
+        self.assertIsNone(rows[0]["verdict"], "旧行留「未研判」，不回填 confirmed")
+
+    def test_migration_is_idempotent(self):
+        p = self._make_legacy()
+        for _ in range(3):
+            db.init_db(p)
+        cols = [r["name"] for r in db.query("PRAGMA table_info(asset_audit)")]
+        self.assertEqual(len(cols), len(set(cols)), "重复 init_db 不得重复加列")
+        self.assertEqual(len(db.query("SELECT * FROM asset_audit")), 1)
+
+    def test_legacy_row_adjudicates_to_insufficient(self):
+        """端到端含义：迁移完这个库里**没有任何一条**可被判为 confirmed。"""
+        import audit
+        p = self._make_legacy()
+        db.init_db(p)
+        out = audit.adjudicate_rows(db.query(
+            "SELECT id,asset_type,asset_slug,action,severity,verdict,confidence,created_at"
+            " FROM asset_audit"))
+        self.assertEqual(out["summary"]["confirmed"], 0)
+        self.assertEqual(out["summary"]["unjudged"], 1)
+        self.assertFalse(out["summary"]["decisive"])
 
 
 def route_audit_map(module_path):
@@ -175,10 +292,45 @@ NOT_AUDITED = {
 
 
 class TestCoverage(unittest.TestCase):
-    """★ 本闸门的核心：漏一条写点即 FAIL（"漏一条就等于没做"）。"""
+    """★ 本闸门的核心：漏一条写点即 FAIL（"漏一条就等于没做"）。
+
+    P0-4 补充：覆盖面本身也要过研判 —— **空集不许假绿**。
+    原版的 `test_unaudited_routes_have_written_reasons` 是「for 扫到的路由」的循环：
+    扫到 0 条时它**空跑通过**。那正是「不可判定被当成通过」的教科书形态。
+    """
 
     def _map(self, mod):
         return route_audit_map(_REPO / "src" / ("%s.py" % mod))
+
+    def _adjudicate_scan(self, mod):
+        """扫到的路由数 → 原始事实 → 研判（用 evidence 三层，**空集不许投票**）。"""
+        n = len(self._map(mod))
+        return evidence.layer(
+            facts=[evidence.Fact(key="scan:%s" % mod, value=n, source="ast.parse")],
+            signals=[evidence.Signal(key="scan:%s" % mod,
+                                     claim="%s 的写路由能被扫到" % mod,
+                                     facts=("scan:%s" % mod,), rule="coverage.nonempty")],
+            unjudged=0 if n else 1)
+
+    def test_scan_is_nonempty_or_insufficient(self):
+        """★ 扫描结果为空 ⇒ insufficient（不许当通过）。这是本批新增的红向形态。"""
+        for mod in ("mcpgw", "memory"):
+            out = self._adjudicate_scan(mod)
+            self.assertTrue(out["summary"]["decisive"],
+                            "%s 的写路由扫不到 ⇒ 覆盖面不可判定，闸门不许通过" % mod)
+            self.assertEqual(out["judgments"][0]["verdict"], "confirmed")
+
+    def test_empty_scan_is_insufficient_never_confirmed(self):
+        """把「扫到 0 条」直接喂给研判：必须落到 insufficient + non-decisive。"""
+        out = evidence.layer(
+            facts=[evidence.Fact(key="scan:x", value=0, source="ast.parse")],
+            signals=[evidence.Signal(key="scan:x", claim="x 的写路由能被扫到",
+                                     facts=("scan:x",), rule="coverage.nonempty")],
+            unjudged=1)
+        self.assertEqual(out["summary"]["confirmed"], 0)
+        self.assertFalse(out["summary"]["decisive"])
+        with self.assertRaises(evidence.InsufficientEvidence):
+            evidence.require_decisive(out["summary"], "覆盖面")
 
     def test_mcpgw_change_routes_all_audited(self):
         m = self._map("mcpgw")

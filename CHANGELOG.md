@@ -1,3 +1,98 @@
+## v0.13.105 — P0-4 证据分层：研判三态（`confirmed` / `dismissed` / `insufficient`）可断言
+
+> 触发：P0 立项施工书排序第二项（`P0-2 → **P0-4** → P0-5 → P0-3 → P0-1`，逐项串行）。
+> 立项书：`docs/AI-AGENT-HANDBOOK-P0-立项施工-20261014.md`。
+
+### 一、缺口：「判不了」在二元口径里没有位置，于是它被读成「没问题」
+
+本仓把「禁把 SKIP 当 PASS」写进文档已经很久了，但它一直是一句**靠人记得**的话。
+历次事故里它每次都以同一个形状出现：
+
+| 时间 | 形状 | 后果 |
+|---|---|---|
+| 2026-09-23 | L0 用例自己 `skipTest` | 干净 runner 上一个断言都没跑，报「全绿」 |
+| 2026-10-02 | 模块级 pytest 风格闸门 14 条 | 标准套件压根没跑它们，报「全绿」（961 vs 975） |
+| 2026-09-24 | `vitals_loop` 函数头丢失 | 函数存在但永不被调用，体检结果永远是死的 |
+| 2026-09-22 | ccpocket-bridge 全指标绿 | 静默不可用 21 天 |
+
+四例的共同结构：**「没发现问题」与「没法发现问题」被当成同一件事**。
+本批把这两件事在**类型层面**分开。
+
+### 二、新增 `src/evidence.py`：三层链路 + 唯一不变量
+
+`原始事实 facts → 候选信号 signals → 研判 judgments`。唯一必须记住的不变量：
+
+> 证据缺失 / 观测失败（`Fact.ok=False`）/ 规则引用了不存在的事实 / 规则抛异常 /
+> 规则明确返回 `None` —— 五种「判不了」**一律** `insufficient`，
+> **永不**退化成 `dismissed`（=「没发现问题」）或 `confirmed`（=「已确认」）。
+
+配套两条：
+
+- **空证据集不许投票**：`Signal.facts=()` ⇒ `insufficient`。零覆盖不是零问题。
+- **不可判定时 `confidence` 留 `None`**：不编 0.0/0.5 这种假刻度。（工作区裁定：主观刻度上量置信会掉到 0.3，不可当阈值。）
+
+`Fact.ok=False` 的语义单独拉出来说，因为它最容易被盗用：它是**观测没跑成**
+（探针超时、文件读不到、端点拒答），**不是**「观测到没有问题」。混起来就得到
+「探针全挂 = 系统全绿」。
+
+### 三、「insufficient 不走放行」的机械形态
+
+`summarize()` 回 `decisive`，`require_decisive()` 不 decisive 就**抛**（而不是回 `False`）。
+两处细节都是故意的：
+
+- `unjudged`（**从来没判过**）与 `insufficient`（判过了、判不了）**分开计数**，
+  但**同样**让 `decisive=False` —— 合并计数会丢掉「是没人看过还是看了没看懂」这条信息。
+- `InsufficientEvidence` 继承 `RuntimeError` **不是** `ValueError`：调用方若要吞异常，
+  必须指名道姓地吞，不许被 `except ValueError` 顺手吞掉。
+
+### 四、`asset_audit` 增研判三列，并**不替历史编证据**
+
+`verdict` / `severity` / `confidence`，`init_db` 幂等 ALTER 补建（不重建表）。语义**严格限定**：
+
+> 本事件记载的变更，在 **hub 本地**是否确实发生。
+
+每个调用点（`mcpgw` 的 INSERT、`memory.add_memory`、`githubprojects` 的克隆后 origin 校验）
+都在**落库之后**才写审计 ⇒「审计行存在」本身就是「变更执行了」的证据，故默认 `confirmed`。
+它**不**声明上游效果（TDAI 权威库 / 远端 GitHub）—— 那需要写后核实，做不到就显式传
+`insufficient`。已知 `tdai_client` 对 TDAI 的写调用数为 0 ⇒ 对权威库的效果就是 `insufficient`，
+这正是这套三态存在的理由。
+
+**迁移前旧行的 `verdict` 保持 `NULL`（未研判），不回填。** 回填一个 `confirmed`
+等于**替历史编证据** —— 旧行没人保证过，就该留在「不知道」。
+后果是诚实的：迁移后 `GET /api/audit/verdicts` 在存量库上回 `validity=insufficient`，
+直到新行把窗口填满。
+
+非法 `verdict`/`severity` ⇒ 原样落库 + `detail` 打 `verdict_invalid`/`severity_invalid`
+（与 `action` 同纪律：不静默丢弃、不改写）。
+
+### 五、闸门产物也拆四字段（`scripts/run_tier.py`）
+
+闸门自己的输出就是本仓的结论来源，旧输出是一行计数加一个退出码：
+`ran=1541 skipped=3` 在布尔口径里**没有位置**，于是被读成绿。现拆为：
+
+| 字段 | 含义 |
+|---|---|
+| `exec_status` | **执行**：`ran` / `empty` |
+| `validity` | **结论**：`pass` / `fail` / **`insufficient`** |
+| `evidence` | 原始计数（`ran`/`skipped`/`failures`/`errors`），不折算 |
+| `quality` | 证据可信度：要不要零跳过、`decisive` |
+
+- `zero_skip=True`（L0）且 `skipped>0` ⇒ **`insufficient` + 退出码 2**，永不再报绿。
+- 「0 例」也从「打一行就 continue」改成 `exec_status=empty` + `insufficient`
+  （判据没被扫到 = 发现器坏了 / 文件不在，**不是**全绿）。
+- 每层跑完打一行 `[gate] {json}`，供 prepush / CI / 人三相消费。
+
+### 六、验证
+
+- `bash scripts/run_tests.sh all`：L0 **1614 例 0 失败 0 跳过**（基线 1544 + 新 70）、
+  L1 64 例 0 失败（1 例显式跳过：`work/` 不入库）；收集器对账 `unittest=1679 = pytest=1679`。
+- 新增闸门：`tests/test_evidence.py`(24) + `tests/test_audit_verdicts.py`(18) +
+  `tests/test_gate_result_fields.py`(18)；`tests/test_asset_audit.py` 新增 10 例
+  （含**造一个真旧库**验证幂等补列、且旧行不被回填）。
+- `tests/test_asset_audit.py::TestCoverage` 补一条 P0-4 形态：扫描结果**为空 ⇒ insufficient**。
+  原版的「for 扫到的路由」循环在扫到 0 条时**空跑通过** —— 不可判定被当成通过的教科书形态。
+- 未重启生产（不打断在跑会话）；`VERSION` 已到 `0.13.105`，生产 `/health` 仍报 boot 版本。
+
 ## v0.13.104 — P0-2 成本度量：CCR usage 账本只读门面 + `GET /api/runlog/cost`
 
 > 触发：用户逐条裁决 aliyun《AI Agent Handbook》融合评估的四项待裁定后**立项施工**

@@ -88,7 +88,32 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.104"  # P0-2 成本度量：CCR usage 账本只读门面 + GET /api/runlog/cost
+VERSION = "0.13.105"  # P0-4 证据分层：研判三态（confirmed/dismissed/insufficient）可断言
+#   v0.13.105：P0 施工排序第二项（P0-4）。要解决的是本仓**反复出事的那一种静默**：
+#   「判不了」在二元口径里没有位置 —— 于是它被读成「没问题」。原话是「禁把 SKIP 当 PASS」，
+#   写在纸上很久，每次都得靠人记得；本批把它做成**可断言的对象**。
+#   ① 新增 src/evidence.py（叶子模块，不读盘不打网络不碰 db）：三层链路
+#      `原始事实 facts → 候选信号 signals → 研判 judgments`。**唯一不变量**：
+#      证据缺失 / 观测失败（`Fact.ok=False`）/ 规则引用不存在的事实 / 规则抛异常 /
+#      规则回 None —— 五种「判不了」**一律** `insufficient`，永不退化成 `dismissed`。
+#      两条配套口径：**空证据集不许投票**（零覆盖 ≠ 零问题）；`insufficient`
+#      的 `confidence` 留 `None`（不许编假刻度）。
+#   ② `summarize()` 的 `decisive` =「禁把 SKIP 当 PASS」的机械形态；
+#      `unjudged`（**从来没判过**）与 `insufficient`（判过了、判不了）**分开计数**，
+#      但**同样**让 `decisive=False`；`require_decisive()` 就是「insufficient 不走放行」。
+#   ③ asset_audit 增 `verdict/severity/confidence` 三列（`init_db` 幂等 ALTER 补建）。
+#      语义**严格限定**为「本事件记载的变更在 hub 本地是否确实发生」——每个调用点都在
+#      落库**之后**才写审计，所以「行存在」本身就是证据，默认 `confirmed`；
+#      **不**声明上游（TDAI / 远端 GitHub）效果，核不了就显式传 `insufficient`。
+#      `verdict IS NULL`（迁移前旧行）保持 NULL = **未研判**，**不回填** —— 回填等于替历史编证据。
+#   ④ `GET /api/audit/verdicts`：把审计行当事实过一遍三层，回**四字段结果对象**
+#      `exec_status + validity + evidence + quality`（`validity` 三态而不是布尔）。
+#      与 `/api/audit/list` **共用 `_require_read`**（有 AST 钉子钉住「两个端点都走它」）。
+#   ⑤ scripts/run_tier.py 同批拆出四字段产物并以 `[gate] {json}` 一行输出；
+#      **L0 出现 skip ⇒ `validity=insufficient` + 退出码 2，永不再报绿**；
+#      「0 例」也不再是绿（判据没被扫到 = 发现器坏了）。
+#   闸门：tests/test_evidence.py(24) + tests/test_audit_verdicts.py(18) +
+#   tests/test_gate_result_fields.py(18) + tests/test_asset_audit.py 新增 10 例。
 #   v0.13.104：用户逐条裁决 aliyun《AI Agent Handbook》融合评估的四项待裁定后立项施工
 #   （P0-1~P0-5 全批；排序 P0-2 → P0-4 → P0-5 → P0-3 → P0-1，逐项串行），本条是第一名。
 #   缺口：runlog 只记「成不成 / 多快」，没有 token / cost ⇒「单位成功任务成本」不可度量。

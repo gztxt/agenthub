@@ -88,7 +88,16 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.102"  # 两处「同步动作挂在高频路径」的残留：PTY 初始 0×0 + WAL 自动检查点
+VERSION = "0.13.103"  # 记忆联邦融合公平性：单源配额 + 注入包不再丢弃跨 agent 记忆
+#   v0.13.103：用户要求评估 Cognition「Agent Memory Repo」能否融入本机记忆中心。
+#   **规范本身无检索层（纯 grep），不构成替代**；评估反而照出本机记忆中心三个硬缺陷：
+#   ① 联邦融合被 TDAI 吃满（W=1.0 + 满额 top10 + 无下限 ⇒ 数学上其余 10 路永不出结果），
+#      实测 20 查询里 TDAI 独占 200/200 槽位、逐源单查平均 5.2 路有货却只出 1 路；
+#   ② `score` 是 TDAI 原始分直通（距离类、量纲不可比），乱码查询 0.52 > 真命中 0.03；
+#   ③ 会话起始注入包无 q 时**根本不查联邦**（fed.chars=0）却仍报 sources=3 ——
+#      「计数绿、内容空」，pi 门面正走这条链路。
+#   修复见 src/memory.py 的 FUSE_TOP_FRAC/_rank_cap 与 src/memfed.py 的 RECENT_Q。
+#   评估全文（含证据边界与 P1/P2 建议）见 docs/AGENT-MEMORY-REPO-评估-20261013.md。
 #   v0.13.102：用户「嵌入式中断现在又反应很慢，之前修复一次速度很快，现在又开始慢了；
 #   另外 grok 无法正常启动」。两条**互不相干**的根因，都在「一个同步动作挂在
 #   **高频路径**上」这个家族里（与 v0.13.100/101 同源），但触发面不同：

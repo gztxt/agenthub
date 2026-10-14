@@ -96,6 +96,59 @@ def _split_sources(sources: str) -> set:
 # 09-24 独立复核指出 `weights` 形参全仓无人传（死旋钮），已用真代码复现。
 W_LOCAL, W_TDAI_L1, W_TDAI_L0 = 0.2, 1.0, 0.6
 
+# ── 单源名次配额（v0.13.103 P0-1，2026-10-13）────────────────────────
+#: 融合结果里**单个源最多占多少比例**的槽位（0 = 不限制，回退旧行为）。
+#: 为什么必须加：TDAI L1 权重 1.0 且**每次返回满额 top-N、没有相关性下限**，
+#: 于是 RRF 里连它第 10 名（1.0/(60+10)=0.0143）都高于其他源第 1 名
+#: （其余源权重最高 0.8 ⇒ 0.8/61=0.0131）——**数学上其余 10 路永远进不了结果**。
+#: 2026-10-13 实测（20 查询 × top10）：TDAI 独占 200/200 槽位；逐源单查平均
+#: 5.2 路有货，融合后只剩 1 路（丢弃 81% 可用证据）。配额把「名次」与「总量」
+#: 解耦：权威库仍排最前，但不许吃满，其余源按 RRF 名次补位。
+#: 为何按比例而非固定值：limit 会随调用方变（KB_DEFAULT_K/limit 查询参数），
+#: 固定 4 在 limit=50 时又变成 TDAI 独占 8 成。
+FUSE_TOP_FRAC = float(os.getenv("MEMORY_FUSE_TOP_FRAC", "0.4"))
+
+
+def _rank_cap(items, frac: float, limit: int):
+    """多源融合结果的**轮转配额**：返回 `(out, rescued_sources)`，out 长度 = min(limit, len)。
+
+    做法对齐本仓 `_fed_section` 已有的轮转口径（那里注释写得很清楚：**先 RRF 再截断
+    会让某个命中多的源独占名额**）——这里是同一病灶在**主检索路径**上的版本。
+
+    为什么不只是「每源截前 cap 条」：那样 kept 仍按全局 RRF 序排列（TDAI 全在前），
+    截到 limit 时**排在后面的源依然一个名额都拿不到**（实测四源场景第 4 源 = 0 席）。
+    轮转取（第 i 轮每源各出第 i 条）才能保证「只要该源有货，就轮到它」。
+
+    cap = max(1, int(limit*frac))：单源在一轮里最多贡献 cap 条，防止某源轮次内刷屏。
+    超出 cap 的条目按**原全局 RRF 序**回填，保证「没多样性时总量不缩水」。
+    frac<=0 ⇒ 原样返回（保留「退回旧行为」开关，便于 A/B 与排障）。
+
+    `rescued_sources` = 轮转后出现、而纯 RRF top-limit 里**没有**的源——这正是修复的
+    直接证据（旧版 TDAI 独占时它非空，且非空是常态）。
+    """
+    if frac <= 0:
+        return items[:limit], []
+    cap = max(1, int(limit * frac))
+    by_src: dict = {}
+    order: list = []
+    for it in items:
+        s = it.get("source") or ""
+        if s not in by_src:
+            by_src[s] = []
+            order.append(s)
+        by_src[s].append(it)
+    kept: list = []
+    for i in range(cap):
+        for s in order:                      # order 沿用全局 RRF 序 ⇒ 权重高的源在各轮里靠前
+            if i < len(by_src[s]):
+                kept.append(by_src[s][i])
+    kept_ids = {id(x) for x in kept}
+    overflow = [it for it in items if id(it) not in kept_ids]   # 保持全局 RRF 序
+    out = (kept + overflow)[:limit]
+    pure = {it.get("source") or "" for it in items[:limit]}
+    rescued = sorted({it.get("source") or "" for it in out} - pure)
+    return out, rescued
+
 
 def _exc(e: BaseException) -> str:
     """异常 → 可外发的短字符串。**必须过 scrub**：上游异常文本里可能带 URL/头片段，
@@ -275,10 +328,17 @@ async def search_memory(request: Request,
         if r.get("ok") and r.get("items"):
             routes.append((sid, r["items"], memfed.fed_weight(sid)))
 
-    fused = _rrf_fuse([r[1] for r in routes],
-                      weights=[r[2] for r in routes], limit=limit)
+    # 先按 limit 取「配额后仍可能补齐」的候选池，再做单源配额，最后截到 limit。
+    # 为何取大池：若先截 limit 再配额，被砍掉的源腾出的空位没有后备可补，
+    # 结果总数会缩水（用户看到 10 条变 6 条）。池子够大才能「砍掉一路、补上另一路」。
+    pool_cap = max(limit, limit * 4)
+    ranked = _rrf_fuse([r[1] for r in routes],
+                       weights=[r[2] for r in routes], limit=pool_cap)
+    fused, capped_src = _rank_cap(ranked, FUSE_TOP_FRAC, limit)
     engines = [b["name"] for b in backends if b["ok"] and b["count"]]
     degraded = [b["name"] for b in backends if not b["ok"]]
+    #: 配额生效的直接证据：轮转救回、而纯 RRF top-limit 里没有的源。
+    #: 不静默——旧版「TDAI 吃满 200/200」在回包里是**看不出来**的。
     return {
         "memories": fused,
         "count": len(fused),
@@ -289,6 +349,9 @@ async def search_memory(request: Request,
         "tdai": bool(tdai_hits),
         "backends": backends,
         "degraded": degraded,
+        "cap": {"frac": FUSE_TOP_FRAC, "cap_n": max(1, int(limit * FUSE_TOP_FRAC)),
+                "rescued_sources": capped_src,
+                "sources_in_result": sorted({m.get("source") for m in fused if m.get("source")})},
         "took_ms": round((time.monotonic() - t0) * 1000, 1),
     }
 
@@ -498,16 +561,32 @@ async def injection_context(request: Request, q: Optional[str] = None,
     # 坐在会话起始链路上，宁可少给一路，也不能把开局卡死在记忆检索后面。
     fed_want = want & set(_FED_TAIL)
     fed_results: Dict[str, Dict] = {}
+    fed_skip_reason: Optional[str] = None
     if fed_want:
-        if q and fed_chars > 0:
+        if fed_chars <= 0:
+            # 旧版这里把 fed_chars=0 静默当成「没配联邦」，回包仍报 sources=N，
+            # 于是「计数绿、内容空」。现在把原因说清楚。
+            fed_skip_reason = f"未执行：fed_chars={fed_chars}（≤0 表示明确关闭联邦段）"
+        elif not q:
+            # **无查询词 ⇒ 取各源最新条目**（P0-3，2026-10-13 修）。
+            # 旧版直接跳过联邦 ⇒ 会话起始注入的「其他 Agent 记忆」段永远是 0 字符，
+            # 而回包仍报 `fed.sources=N`——这正是本仓库反复警惕的「指标绿、功能死」。
+            # 会话开始时没有查询词是**常态**（pi 门面就是无 q 调这个端点），
+            # 此时「最近各 agent 在做什么」恰恰是有用的开场上下文；用 __recent__ 哨兵召回。
+            fed_results = await memfed.search_fed(memfed.RECENT_Q, 20, fed_want,
+                                                  wall_s=CONTEXT_TIMEOUT_S)
+        else:
             fed_results = await memfed.search_fed(q, 20, fed_want, wall_s=CONTEXT_TIMEOUT_S)
         for sid in _FED_TAIL:
-            if sid in fed_want:
-                backends.append(_backend(sid, fed_results.get(sid) or {
-                    "ok": False, "count": 0, "items": [],
-                    "error": "未执行（无 q 或 fed_chars=0）"}))
+            if sid not in fed_want:
+                continue
+            backends.append(_backend(sid, fed_results.get(sid) or {
+                "ok": False, "count": 0, "items": [],
+                "error": fed_skip_reason or "未执行（无 q 或 fed_chars=0）"}))
     fed_meta = {"sources": len(fed_want), "done": [], "skipped_budget": [],
                 "failed": [], "chars": 0}
+    if fed_skip_reason:
+        fed_meta["reason"] = fed_skip_reason
 
     parts = []
     if l3["content"] or l3["manual"]:
@@ -523,8 +602,11 @@ async def injection_context(request: Request, q: Optional[str] = None,
     if q:
         local_rows = _local_l1(q, 10)
         tdai_rows = (results.get("l1") or {}).get("items") or []
+        # 注入包同样过单源配额（P0-1）：否则 TDAI 满额 top10 会把本地/联邦挤光，
+        # 开局「相关记忆」段等于只有权威库一家。
         fused = _rrf_fuse([local_rows, tdai_rows],
-                          weights=[W_LOCAL, W_TDAI_L1], limit=10)
+                          weights=[W_LOCAL, W_TDAI_L1], limit=30)
+        fused = _rank_cap(fused, FUSE_TOP_FRAC, 10)[0]
         if fused:
             parts.append("## 相关记忆\n" + "\n".join(
                 f"- [{m.get('category') or m.get('type') or 'l1'}] {m.get('content','')}"
@@ -541,6 +623,12 @@ async def injection_context(request: Request, q: Optional[str] = None,
             fed_results, fed_want, fed_top, fed_chars)
         fed_meta = {"sources": len(fed_want), "done": done,
                     "skipped_budget": skipped, "failed": failed, "chars": fed_used}
+        # 用「召回到的条目数」而非「跑了几路」判断联邦段是否真的有用：跑通 3 路
+        # 但一条没召回（如各源都空），对模型而言与「没跑」等价，必须能区分。
+        fed_meta["matched"] = sum(len((fed_results.get(s) or {}).get("items") or [])
+                                  for s in fed_want)
+        if fed_skip_reason:
+            fed_meta["reason"] = fed_skip_reason
         if fed_lines:
             parts.append("## 其他 Agent 记忆（联邦）\n" + "\n".join(fed_lines))
 
@@ -548,6 +636,10 @@ async def injection_context(request: Request, q: Optional[str] = None,
     truncated = len(text) > max_chars
     body = text[:max_chars]
     degraded = [b["name"] for b in backends if not b["ok"]]
+    # 「绿而空」是一种必须说出口的故障：联邦源声明了几路、却一条没召回
+    # （或压根没执行），回包形状看着成功。这里把它翻成显式 degraded 标记。
+    if fed_want and not (fed_meta.get("matched") or fed_meta.get("chars")):
+        fed_meta["degraded"] = True
     return {"context": body, "truncated": truncated, "chars": len(body),
             "backends": backends, "degraded": degraded, "fed": fed_meta,
             "took_ms": round((time.monotonic() - t0) * 1000, 1)}

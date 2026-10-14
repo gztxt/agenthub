@@ -3680,7 +3680,7 @@ async function cloudcliStart(path) {
 const SRC_ABBR = {
   claude_mem: 'CM', claude_projects: 'CP', pi_sessions: 'PI', codex_sessions: 'CX',
   grok_memory: 'GK', hermes_memory: 'HM', workbuddy_memory: 'WB',
-  workspace_files: 'WS', archived_sessions: 'AR',
+  workspace_files: 'WS', archived_sessions: 'AR', amr_memory: 'AM',
   turbovec: 'TV', tdai_l1: 'TD', tdai: 'TD', local: 'L1'
 };
 function srcTag(srcName) {

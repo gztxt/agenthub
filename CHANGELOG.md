@@ -1,3 +1,107 @@
+## v0.13.103 — 记忆联邦融合公平性：单源配额 + 注入包不再丢弃跨 agent 记忆
+
+> 触发：用户要求评估 Cognition「Agent Memory Repo」（cognition.com/agent-memory-repo，
+> GitHub 775★，MIT，38KB）能否融合进 agenthub 记忆中心。
+> **评估结论：它是「格式契约」不是检索系统**（SPEC 全文 1940 字节，检索方式就是 grep +
+> 链接跳转，无任何索引层；官方 README 自认 "Automatic startup and scheduled Dreaming are
+> not included"）⇒ 不构成对本机检索层的替代，但评估过程**照出本机三个硬缺陷**，本版全修。
+
+### 一、联邦融合被 TDAI 吃满：数学上其余 10 路永远进不了结果
+
+`_rrf_fuse` 里 `W_TDAI_L1=1.0`、其余源最高 0.8，而 TDAI **每次返回满额 top-N 且无相关性
+下限**。按 `Σ w/(RRF_K+rank+1)`（K=60）：TDAI 第 10 名 = `1.0/70 = 0.0143`，
+其他源第 1 名最高 = `0.8/61 = 0.0131` ⇒ **其余源无论如何都排在 TDAI 第 10 名之后**。
+
+实测（2026-10-13，20 查询 × top10）：
+
+| 口径 | 结果 |
+|---|---|
+| 默认（全 11 路） | `tdai_l1` 独占 **200/200** 槽位，其余 10 路贡献 = **0** |
+| 逐源单查（有货源数） | 平均 **5.2** 路有货 → 融合后 **1.0** 路（**丢弃 81% 可用证据**） |
+
+端到端危害（问题"记忆中心没有联邦检索框"，该事实确在归档会话中）：
+默认路径返回 10 条 TDAI 噪声、**答案不在里面**；排除 TDAI 后**第 1 条即命中**。
+
+**修复**：`_rank_cap` **轮转配额**（`FUSE_TOP_FRAC`，默认 0.4，env
+`MEMORY_FUSE_TOP_FRAC` 可回退）。轮转口径对齐本仓 `_fed_section` 已有实现——那里注释
+已写明「先 RRF 再截断会让某个命中多的源独占名额」，本版是同一病灶在**主检索路径**上的
+版本。超出配额的条目**按原 RRF 序回填** ⇒ 单源独占场景**不缩水**（仅 TDAI 有货时仍出
+10 条而非 4 条）。回包新增 `cap.rescued_sources` 作**可断言证据**，不静默。
+
+**修复后**（公平口径，只在默认快路集内比较，20 查询）：参与融合源数 = 有货源数，
+**利用率 100%**（修复前恒为 1/N）；延迟 p50 **52ms**（修复前 57ms）、max 109ms。
+
+### 二、`score` 不是相关性信号，且系统性反向 —— 故**不设分数阈值**
+
+`score` 是 TDAI 原始分**直通**（`tdai_client._norm` 的 `hit.get("score")`），未按
+`1/(K+rank)` 归一化，量纲与其他路不可比：
+
+```
+真实在库事实 "用户担心账户扣款…"  score = 0.033
+无关乱码     "😀😀😀"            score = 0.520   ← 反而最高
+             "紫电青霜玄铁重剑"     score = 0.519
+```
+
+同一批条目在**匹配查询**时返回 0.0328、在**乱码查询**时返回 0.3905 ⇒ `score` 实为
+**距离类**（越小越相关），而 TDAI 按降序返回。**结论：不能拿 score 当阈值** ——
+故本版只做「名次 + 配额」，不做「相关性下限」（做了会是个看似合理却无效的阈值）。
+
+### 三、会话起始注入包不携带任何跨 agent 记忆（「计数绿、内容空」）
+
+`/api/memory/context` **5/5 次**实测：`fed={sources:3, chars:0, failed:[3 路]}`、
+错误文本 `未执行（无 q 或 fed_chars=0）`、仅 3.5ms。启动时无查询词 ⇒ 联邦源**根本不
+执行**，而对外仍报 `fed.sources=3`，**看着像成功**。pi 的门面正走这条 REST 链路注入记忆。
+
+**修复**：无 q 时取**各源最新条目**（`memfed.RECENT_Q = "__recent__"` 哨兵）——
+会话起始"最近各 agent 在做什么"本身即有用的开场上下文。新增 `_recent_rg`
+（按文件 mtime 排序）与 `_recent_claude_mem`（按 created_at 降序）。
+**刻意不走投影库**：投影是关键词 FTS 且实测陈旧 11 天，而"最近"是实时性需求 ⇒ 扫实时树；
+
+- `_rg_head_content` 走 **rg 而非 Python `open()`**：本模块只读性由
+  `tests/test_memfeed_inject.py::TestInjectionIsReadOnly` 按字面量把守（扫 `open(`/
+  `.write(`），那是**防写入**的必要保守判据，不该为新功能放宽。`-m 8` 上界保证有界
+  （21MB 会话文件实测 5ms）。
+- `_usable_line` 滤退化行：YAML frontmatter 键、markdown 标题、blockquote 元数据、
+  JSON 碎片、`<!--` 标记、纯分隔符 —— 实测这些都曾混进注入包（`name: xxx`、
+  `> Last updated:`、`<!-- RAW_JSON_START`）。
+- 回包 `fed` 新增 `matched`（召回到的条目数）与 `reason`；`sources>0 且 matched==0`
+  时置 `fed.degraded=true` —— 把「计数绿、内容空」翻成**显式故障**。
+
+**修复后**：`fed={sources:3, done:[3 路], matched:25, chars:904}`，联邦段为真实近期条目。
+
+### 四、A4 索引投影陈旧看护（P0-3b，**只告警不自动重建**）
+
+`data/memindex.db`（1.72GB / 9107 文件 / 219171 chunk）**只构建过一次**（停在
+2026-10-02），仓内**无任何 cron/timer 自动刷新** ⇒「快，但越来越错」是一种静默失效。
+新增 `scripts/memindex_watchdog.sh`：探针读陈旧度，超阈值（默认 7d，env
+`MEMINDEX_STALE_DAYS`）告警并退出码 3；**默认只告警**，`--rebuild` 才增量重建且**先过
+磁盘闸**（fail-closed，绝不自动删索引 D4）——理由：1.7GB 增量重建是重 IO，A4 设计文档
+明确「三路 fts_proj 探针 ≤200ms 且 G13 全绿才提请放量」，看护脚本不该替代那条人工裁定。
+**crontab 安装待用户授权**（安全分类器拦为「未授权持久化」，未绕过）。
+
+### 五、如实标注的边界
+
+- **未找到**任何针对 "git+grep 记忆" 的**量化**性能/召回实测（仓库发布仅 9 天，HN 讨论
+  近乎为零）；Reddit/X/博客讨论、Memobase/LangMem 一手资料、基于该 spec 的 MCP server
+  均**未找到**（搜索池退化 + Bing 对 "Cognition" 品牌冲突）。
+- 本地 L1 只 4 行的主因判定为「无调用方」（叠加权威副本已让渡 TDAI）——**推断，非单行直证**。
+- **hub 的 jobs 引擎实测是坏的**：`SHELL_ALLOW` 白名单只有 `echo,date,…`；`turbovec-rebuild`
+  指向的 `/home/gztxt/agent-hub/scripts/rebuild_turbovec.sh` **路径不存在**；
+  `profile_events` 里**一条 `cron_run` 都没有**。故 P0-3b 走系统 crontab 不依赖它。
+  该引擎**修还是删需用户裁定**（本版未动，属破坏性且超范围）。
+
+### 六、评估全文与 P1/P2
+
+见 `docs/AGENT-MEMORY-REPO-评估-20261013.md`（含 §6 建议采纳/不采纳、§7 证据边界）。
+要点：**采纳** `[source: url; added: 日期]` 溯源元数据、`[[path]]` 交叉链接、Dreaming
+职责定义；**不采纳** git 当并发仲裁、纯 grep 检索、MEMORY.md 当唯一索引
+（顺带证伪"git 当记忆太慢"：本机实测浅 clone 8ms / commit 7ms / push 13ms / 冲突被拒 10ms）。
+
+测试：`test_memfeed_inject` / `test_memfed` / `test_memindex_proj` / `test_tdai_client` /
+`test_writeauth` / `test_kb_federation` 共 **1583 passed**。
+
+---
+
 ## v0.13.102 — 两处「同步动作挂在高频路径」的残留：PTY 初始 0×0（grok 起不来）+ WAL 自动检查点（又变慢）
 
 > 触发：用户「嵌入式中断现在又反应很慢，之前修复一次速度很快，现在又开始慢了 刷新也没用；

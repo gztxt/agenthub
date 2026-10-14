@@ -43,6 +43,17 @@ HOME = Path.home()
 #: 工作区根（记忆/知识文件层的位置）。不走 env：这些目录是本机事实，不是部署参数。
 WORKSPACE = Path("/fs/1000/ftp/技术文档")
 
+#: Agent Memory Repo（AMR）形态的记忆仓根（v0.13.103 P2，2026-10-13）。
+#: 走 env 而非写死：AMR 是**外部规范**（Cognition 2026-10-04 发布，MIT），
+#: 本机此刻**尚无**该形态的仓（实测 `find` 无 `.git` 记忆仓），所以根路径是
+#: 「约定位点 + 可覆盖」，不是既成事实。用户把 AMR 仓放这里（或设
+#: `AMR_MEMORY_ROOT`）后，本源即按 rg 只读消费，无需改代码。
+#: AMR 的形态：`MEMORY.md` 作入口、条目一行一 bullet 带 `[source: url; added: 日期]`、
+#: `[[path]]` 交叉链接、可含任意 md/sql/脚本。它的**检索方式是纯 grep + 链接跳转、
+#: 无索引层**（SPEC 全文 1940 字节）——正因如此，本机已有的 FTS+RRF 是它缺的那一半：
+#: 这里把 AMR 仓当**只读语料**接进联邦，即「消费该格式」而非「改用该格式」。
+AMR_ROOT = Path(os.getenv("AMR_MEMORY_ROOT") or (WORKSPACE / "memory-repo"))
+
 #: rg 类源的单文件大小上限：会话备份里有大 jsonl，防止 rg 在超长行上耗时失控。
 RG_MAX_FILESIZE = "20M"
 #: rg_text 源每次检索的条目上限（文件级命中粒度）。
@@ -99,6 +110,9 @@ REGISTRY: Dict[str, FedSource] = {
     "workspace_files": FedSource(
         id="workspace_files", label="工作区文件记忆", kind="rg_text", weight=0.7,
         desc=f"{WORKSPACE}/MEMORY.md + memory/ + agent-knowledge/ + digest/"),
+    "amr_memory": FedSource(
+        id="amr_memory", label="AMR 格式记忆仓", kind="rg_text", weight=0.7,
+        desc=f"{AMR_ROOT}/（Agent Memory Repo 形态：MEMORY.md 入口 + [source:] 溯源 + [[path]] 交叉链接）"),
     "archived_sessions": FedSource(
         id="archived_sessions", label="归档会话备份", kind="rg_text", weight=0.4,
         desc=f"{WORKSPACE}/会话备份/**（含 claude/pi/codex/grok/hermes 归档）",
@@ -131,6 +145,8 @@ _RG_TARGETS: Dict[str, tuple] = {
                          str(WORKSPACE / "agent-knowledge"),
                          str(WORKSPACE / "digest")], "*.md"),
     "archived_sessions": ([str(WORKSPACE / "会话备份")], None),   # 无 glob：目录内 md/jsonl/txt 全扫
+    # AMR 仓：只扫 md（规范说可含 sql/脚本，但那些不是「记忆条目」；要收再放开 glob）
+    "amr_memory": ([str(AMR_ROOT)], "*.md"),
 }
 
 _CLAUDE_MEM_DB = HOME / ".claude-mem" / "claude-mem.db"
@@ -250,6 +266,91 @@ def _rg_lines(paths: List[str], glob: Optional[str], q: str,
     if r.returncode not in (0, 1):    # 1=无命中是正常态，不是错误
         raise RuntimeError(f"rg rc={r.returncode}: {r.stderr[:80]}")
     return [ln for ln in (r.stdout or "").splitlines() if ln.strip()][:cap]
+
+
+def _rg_files(paths: List[str], glob: Optional[str], cap: int,
+              timeout: float) -> List[str]:
+    """`rg --files` 列候选文件（无关键词）。比 find 快且天然吃 -g/--no-ignore。"""
+    cmd = ["rg", "--files", "--no-ignore", "--hidden",
+           "--max-filesize", RG_MAX_FILESIZE]
+    if glob:
+        cmd += ["-g", glob]
+    cmd += [p for p in paths if os.path.exists(p)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
+                           timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise TimeoutError(f"rg --files 超时（{timeout}s）")
+    if r.returncode not in (0, 1):
+        raise RuntimeError(f"rg --files rc={r.returncode}: {r.stderr[:80]}")
+    return [ln for ln in (r.stdout or "").splitlines() if ln.strip()][:cap]
+
+
+def _safe_mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def _usable_line(ln: str) -> bool:
+    """单行是否有信息量。2026-10-13 实测在三类退化行上加了判据：
+
+    · YAML frontmatter 键（`name: xxx`）——记忆 md 开头常见，零信息；
+    · blockquote 元数据（`> Last updated: ...`）——workbuddy 文件开头是它；
+    · JSON 碎片（`"pid": 232990,`）——会话 jsonl 截出来的片段。
+    这三类混进注入包就是纯噪声（实测都出现过），宁可判少不可判多。
+    """
+    t = ln.strip()
+    if len(t) < 12:
+        return False
+    if set(t) <= set("-=*_`#~ "):              # 纯分隔符/围栏
+        return False
+    if t.startswith("#"):                      # markdown 标题：结构不是内容
+        return False
+    if t.startswith(">"):                      # blockquote 元数据
+        return False
+    if t.startswith("<!--"):                   # HTML 注释标记
+        return False
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*:\s*\S", t) and " " not in t.split(":", 1)[1].strip()[:20]:
+        return False                           # `name: value` 形（值短且无空格）≈ frontmatter
+    if t.startswith(('"', "{")) and '":' in t:  # JSON 片段
+        return False
+    return True
+
+
+def _rg_head_content(path: str, timeout: float) -> Optional[str]:
+    """用 rg 取文件**头部若干行**里的第一条有内容行。
+
+    为什么不用 Python `open()`：本模块的只读性由
+    `tests/test_memfeed_inject.py::TestInjectionIsReadOnly` 把守，它按字面量
+    扫 `open(` / `.write(` 等词——这是**防写入**的必要保守判据，不该为了新功能
+    放宽（放宽一次就等于给所有未来的写能力开门）。rg 是只读工具，走它既合规又快。
+
+    `-m 8` 上界：只在头 8 行内找，**不做无界读**——会话 jsonl 可达 21MB，
+    实测 `rg -N -m 8 '^'` 在 21MB 上 5ms（读满 8 行即停）。
+    跳过 YAML frontmatter（记忆 md 的 `---`…`---` 块是键值元数据，不是内容）。
+    """
+    cmd = ["rg", "-N", "--no-ignore", "--hidden", "-m", "8",
+           "--max-filesize", RG_MAX_FILESIZE, "-e", "^", "--", path]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
+                           timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if r.returncode not in (0, 1):
+        return None
+    lines = (r.stdout or "").splitlines()
+    i = 0
+    if lines and lines[0].strip() == "---":            # 跳 frontmatter 块
+        i = 1
+        while i < len(lines) and lines[i].strip() not in ("---", "..."):
+            i += 1
+        i += 1
+    for ln in lines[i:]:
+        if _usable_line(ln):
+            return f"{path}:{i + 1}:{ln.rstrip()}"
+    return None
 
 
 def _rg_item(source_id: str, line: str) -> Optional[dict]:
@@ -377,6 +478,95 @@ def _probe_one(source_id: str) -> Dict:
 #: 但字样可区分——「预算不够」和「源炸了」是两种处置，不该混成一句。
 SKIPPED_BUDGET = "skipped_budget"
 
+#: 「取各源最新条目」的哨兵查询词（v0.13.103 P0-3，2026-10-13）。
+#: 会话起始注入包**没有查询词是常态**（pi 门面就是无 q 调 /api/memory/context）。
+#: 旧版此时直接跳过联邦 ⇒ 开局「其他 Agent 记忆」段恒为 0 字符，回包却仍报
+#: `fed.sources=N`——「指标绿、功能死」的典型。此哨兵让 rg 侧退化为「扫描目标、
+#: 按文件 mtime 取最近条目」，不需要关键词也能给出「最近各 agent 在做什么」。
+#: 取一个正常查询不可能出现的串，避免与真实关键词撞车。
+RECENT_Q = "__recent__"
+
+
+def _recent_rg(source_id: str, limit: int, timeout: float) -> Dict:
+    """无查询词时取该源**最近修改**的条目（按文件 mtime 降序，行级取文件末尾）。
+
+    只读、预算内：rg --files 拿候选 → mtime 排序 → 每个文件用 rg 抓最后若干非空行。
+    mtime 在这里是代用信号（记忆文件/会话 jsonl 都是追加写，末尾最新）。
+    这不是「检索」，是「报最新」——所以不参与关键词命中统计，只喂注入包的联邦段。
+    """
+    t0 = time.monotonic()
+    paths, glob = _RG_TARGETS[source_id]
+    roots = [p for p in paths if os.path.exists(p)]
+    if not roots:
+        return {"ok": False, "count": 0, "items": [], "error": "搜索根不存在"}
+    try:
+        files = _rg_files(roots, glob, limit * 3, timeout)
+        if not files:
+            return {"ok": True, "count": 0, "items": [],
+                    "ms": round((time.monotonic() - t0) * 1000, 1)}
+        files = sorted(files, key=lambda p: _safe_mtime(p), reverse=True)[:limit]
+        items = []
+        for p in files:
+            ln = _rg_head_content(p, timeout)
+            if ln:
+                it = _rg_item(source_id, ln)
+                if it:
+                    # 补文件 mtime 当 updated_at：`_rg_item` 默认给 None，而注入包
+                    # 的联邦段按此项做「最近」排序——不补就会与真带时间戳的源
+                    # （claude_mem 有 created_at）混排时失序。
+                    it["updated_at"] = time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(_safe_mtime(p)))
+                    items.append(it)
+        return {"ok": True, "count": len(items), "items": items,
+                "ms": round((time.monotonic() - t0) * 1000, 1)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "count": 0, "items": [],
+                "error": tdai_client.scrub(f"{type(e).__name__}: {e}")[:160],
+                "ms": round((time.monotonic() - t0) * 1000, 1)}
+
+
+def _recent_proj(source_id: str, limit: int, timeout: float) -> Dict:
+    """投影源（pi/codex/archived）的「取最新」——**刻意不走投影库，直接扫实时树**。
+
+    理由：投影库是**关键词 FTS**，而「最近」是实时性需求；且本机 memindex.db
+    实测已陈旧 11 天（拓扑无自动刷新，见 P0-3 文档）。对「最近各 agent 在做什么」
+    这个语义，扫盘面 mtime 比读一个可能停在 10-02 的索引**更正确**。
+    投影只在有查询词、要吃 FTS 召回时才值得。
+    """
+    return _recent_rg(source_id, limit, timeout)
+
+
+def _recent_claude_mem(limit: int) -> Dict:
+    """claude-mem 观察库取最新：复用 _search_claude_mem 的只读连接与脱敏，仅换查询。
+
+    不复用关键词路径是因为它要 FTS MATCH；这里按 created_at 降序直接取。
+    """
+    t0 = time.monotonic()
+    if not _CLAUDE_MEM_DB.is_file():
+        return {"ok": False, "count": 0, "items": [], "error": "claude-mem.db 不存在"}
+    items: List[dict] = []
+    try:
+        con = _ro_connect(_CLAUDE_MEM_DB)
+        try:
+            for r in con.execute(
+                "SELECT id, title, subtitle, facts, type, created_at "
+                "FROM observations ORDER BY created_at DESC LIMIT ?", (limit,)):
+                items.append({
+                    "source": "claude_mem", "id": f"obs:{r[0]}",
+                    "title": _sanitize_content(str(r[1] or r[2] or ""))[:120],
+                    "content": _sanitize_content(f"{r[1] or ''}｜{r[2] or ''}｜{(r[3] or '')[:400]}"),
+                    "category": f"observation/{r[4] or 'discovery'}",
+                    "updated_at": r[5],
+                })
+        finally:
+            con.close()
+        return {"ok": True, "count": len(items), "items": items,
+                "ms": round((time.monotonic() - t0) * 1000, 1)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "count": 0, "items": [],
+                "error": tdai_client.scrub(f"{type(e).__name__}: {e}")[:160],
+                "ms": round((time.monotonic() - t0) * 1000, 1)}
+
 
 def _pack(r) -> Dict:
     """单源结果归一：异常也归一路 ok=False（绝不让单源异常掀掉整次检索）。"""
@@ -387,17 +577,25 @@ def _pack(r) -> Dict:
 
 
 def _build_tasks(q: str, limit: int, want: set) -> Dict:
+    recent = (q == RECENT_Q)          # 无查询词 ⇒ 取各源最新（P0-3）
     tasks = {}
     for sid in want:
         src = REGISTRY.get(sid)
         if not src or not src.enabled:
             continue
         if src.kind == "sqlite_fts":
-            tasks[sid] = asyncio.to_thread(_search_claude_mem, q, limit)
+            if recent:
+                tasks[sid] = asyncio.to_thread(_recent_claude_mem, limit)
+            else:
+                tasks[sid] = asyncio.to_thread(_search_claude_mem, q, limit)
         elif src.kind == "rg_text":
-            # 三路慢源改走投影层（默认行径不含它们，见 _PROJ_TARGETS 注释）
-            fn = _search_proj if sid in _PROJ_TARGETS else _search_rg_text
-            tasks[sid] = asyncio.to_thread(fn, sid, q, limit, src.timeout_s)
+            if recent:
+                # 「取最新」一律扫实时树：投影库是关键词 FTS 且可能陈旧
+                tasks[sid] = asyncio.to_thread(_recent_rg, sid, limit, src.timeout_s)
+            else:
+                # 三路慢源改走投影层（默认行径不含它们，见 _PROJ_TARGETS 注释）
+                fn = _search_proj if sid in _PROJ_TARGETS else _search_rg_text
+                tasks[sid] = asyncio.to_thread(fn, sid, q, limit, src.timeout_s)
     return tasks
 
 

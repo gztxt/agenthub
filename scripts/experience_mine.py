@@ -230,10 +230,14 @@ def main() -> int:
         from dataset_pipeline import _load_trajectories
         assert_free_model(args.model)
         trajs = _load_trajectories("profile")
+        done = extracted_trace_ids()
+        pending = [t for t in trajs if str(t.get("session_id")) not in done]
         got = asyncio.run(extract_trajectories(trajs, model=args.model,
                                                chat_fn=_model_chat_fn(), limit=args.limit))
-        print("[experience_mine] 轨迹 %d 条（取前 %s）→ 入库经验 %d 条"
-              % (len(trajs), args.limit, len(got)))
+        # 日志必**如实**：总轨迹 / 已抽跳过 / 本次实际送模型 三个数字分开报，
+        # 不把 `--limit` 冒充成「取前 N」（增量下两者不同，印错了会让人以为没生效）。
+        print("[experience_mine] 轨迹 %d 条（已抽跳过 %d，本次送模型 %d）→ 入库经验 %d 条"
+              % (len(trajs), len(done), min(args.limit, len(pending)), len(got)))
         for e in got:
             print("  + %s | %s → %s | src=%s"
                   % (e["kind"], e["situation"], e["action"], e["source_trace_ids"]))

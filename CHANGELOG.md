@@ -250,7 +250,43 @@ src/term.py:847   profiles.get_profile(...)        → 400 ← 被测的是这�
 闸门：L0 **1848/0/0**、对账 **1913=1913**、L1 65/0/0；
 新增 `tests/test_modelprofile.py`（17 例）。真数据探针 7/7。
 
-### 十、顺带发现，未处置（**报请，不擅自改**）
+### 十、P0-a/b 迁移专项验收脚本（重启后跑它）
+
+**为什么单独一个脚本**：`verify_prod_smoke.py` 是通用生产体检（hub.js md5、静态 404、
+WS 码、日志异常），**不覆盖**本轮迁移的三件事。两份**互补不重叠**。
+
+`tests/verify_migration_p0ab.py`，六组判据、一轮取齐、**不建 pty 会话**：
+
+| 判据 | 内容 |
+|---|---|
+| A1 | 版本已切 `0.13.114` + `code_stale=false` + `needs_restart=false` |
+| A2 | pid 与 systemd `MainPID` 一致（防「说起来了，其实在听这个口的是别的进程」） |
+| A3 | `tasks` 三列 `model`/`verdict`/`verify_reason` 到位 |
+| A4 | **存量行 `model`/`verdict` 必须 NULL**（NULL＝未观测；若被回填就是谎报）；且 `verdict` 取值 ⊆ `{pass,fail,insufficient}` |
+| A5 | 6 个端点回归，含 **`/api/audit/list` 必须 401**（读端点要鉴权，200 反而是鉴权被绕过） |
+| A6 | 迁移幂等（**在库副本上**跑，连跑三遍列数不变） |
+
+跑法：
+```bash
+venv/bin/python tests/verify_migration_p0ab.py            # 全查
+venv/bin/python tests/verify_migration_p0ab.py --db-only  # 只查库，不碰 HTTP
+```
+
+#### 写这个脚本时踩的两个坑（都写进注释了）
+
+1. **验收脚本自己制造了它要验证的变更。** A6 幂等判据原本直接对**生产库**调
+   `ensure_schema` ⇒ 首跑必然加列 ⇒ 列数变化 ⇒ **误报 FAIL**；而且验收脚本对被验对象
+   不该有写权限（与账本那条 `mode=ro` 纪律同源）。已改为**复制副本**再跑。
+   ⚠ 副作用：首次运行时**生产库已被迁移（21→24 列）**。迁移本身无害且正确
+   （幂等 ALTER、存量 3 行 `model`/`verdict` 全 NULL，等价于重启时会做的事），
+   但**本该由重启触发，不该由验证脚本触发** —— 记此自省。
+2. **三列没到位时 A4 直接崩。** `SELECT ... model` 抛 `no such column` ⇒
+   验收脚本崩溃 = 没出报告。已降级成「本判据不适用」并继续跑完其余项。
+   **验收脚本崩掉等于没有报告** —— 它必须能在任何状态下把话说完。
+
+另修一处 `import db` 前漏挂 `sys.path`（被 `except` 吞成「幂等不可执行」，看不出真因）。
+
+### 十一、顺带发现，未处置（**报请，不擅自改**）
 
 P0-c 若要读 CCR 账本建模型画像，账本里有两类脏（本轮**只量不改**）：
 

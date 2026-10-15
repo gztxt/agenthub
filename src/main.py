@@ -122,6 +122,13 @@ VERSION = "0.13.114"  # 闭环地基：P0-a/b 接线 + 产物/账本口径 + P0-
 #      insufficient_sample（不是模型差，是没量够）/ unstable。阈值实测得来。
 #   闸门：L0 **1848/0/0**、对账 1913=1913、L1 65/0/0；新测 70 例
 #   （task_attribution 14 + outputguard 13 + ledgernorm 22 + token_hygiene 4 + modelprofile 17）。
+#   ⑨ **迁移专项验收脚本** tests/verify_migration_p0ab.py（六组判据、一轮取齐、不建 pty）：
+#      与 verify_prod_smoke **互补不重叠**（那个查通用健康，这个只管迁移）。
+#      A4 钉「存量行 model/verdict 必须 NULL」；A5 钉「/api/audit/list 必须 401」。
+#      写它时踩两坑：**① 验收脚本自己制造了要验证的变更** —— 幂等判据原本直连生产库调
+#      `ensure_schema`，首跑必然加列 ⇒ 误报 FAIL；已改副本（与账本 mode=ro 同源纪律）。
+#      **② 三列没到位时脚本直接崩**（no such column）⇒ 没出报告；已降级为「不适用」并跑完。
+#      ⇒ **验收脚本崩掉等于没有报告，它必须能在任何状态下把话说完。**
 #   v0.13.113：接 D18。三件都是「让闭环**可比、可追溯**」，不是新功能。
 #   ① **D5 轨迹行 schema**：新增 `TRAJECTORY_SCHEMA="trajectory/1"` +
 #      `normalize_trajectory()`（补 `seq`/`metrics`，幂等）+ `validate_trajectory()`

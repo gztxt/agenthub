@@ -1,3 +1,40 @@
+## v0.13.111 — P0-1 收尾：真实轨迹源（`profile_events`）+ free 抽取 + 验收③ 真实召回取证
+
+> 接 `v0.13.110`。本批把闭环从「机制能跑」推到「**真数据上跑通**」。
+
+### 一、为什么要换轨迹源：原来源是空的
+
+`telemetry_events`（外部 Agent 主动推）在本机**实测只有 1 行** ⇒ 拿它当数据集输入，
+闭环**没有燃料**。而 `profile_events` 是 hub **自己**每个工具环都写的账本
+（实测 **2970 行**，其中 **438 行带 `trace_id`**）⇒ 以 `trace_id` 分组才是本机真有的执行轨迹。
+
+- 新增 `hook.build_traces()`（纯函数，无 `trace_id` 的行**不成轨迹**）与
+  `hook.traces_from_store()`；新增 `GET /telemetry/traces`。
+- 管线加 `--source profile|telemetry`（**默认 profile**）。
+
+### 二、抽取（模型，free）
+
+`experience_mine.extract_trajectories()` + `parse_experience()`：模型输出解成
+`{kind,situation,action,precondition}` 才入库，**解不出就丢弃**（不拿自然语言去填结构化列）。
+CLI：`--extract --limit N`，走 hub 自己的 LLM 通道（CCR :3456），非会话一律 `openrouter/free`。
+
+### 三、验收③ 真实取证（scratch DB，真数据）
+
+| 阶段 | 实测 |
+|---|---|
+| 真实轨迹 | **65** 条（`profile_events` 按 trace_id） |
+| 数据集 | **40** 样本（train 36 / holdout 4） |
+| split 隔离 | `assert_train_only(holdout)` **真抛**「掺入非 train 样本: [12, 14, 25, 27]」 |
+| free 抽取 | 3 条轨迹 → 入库经验 **1** 条（另 2 条模型未给出可解析经验 ⇒ 丢弃） |
+| **召回** | `query='list'` **命中 1 条**，来源 = 真实 `trace_id` `2pwbzylujwe` |
+
+### 四、守卫缺口修正
+
+`assert_free_model` 原先只认 `openrouter/free` 与 `*:free`，会把工作区军规写的
+**经 CCR 形式 `openrouter/openrouter/free`** 也拒掉 ⇒ 已一并认（并加闸门）。
+
+---
+
 ## v0.13.110 — P0-1 切片 B/C：声明式管线（模型在最后）+ 轨迹聚合 + 经验 Dreaming
 
 > 接 `v0.13.109`（切片 A：四表）。本批把闭环从「地基」接到「跑得起来」：

@@ -174,3 +174,41 @@ async def list_trajectories(limit: int = Query(default=200, le=2000)):
     """轨迹列表（数据集管线的只读来源）。"""
     trajs = trajectories_from_store(limit=limit)
     return {"trajectories": trajs, "count": len(trajs)}
+
+
+# ── P0-1：真实轨迹源（profile_events）──────────────────────────────
+# 为什么另有一条：`telemetry_events`（外部 Agent 主动推）在本机**实测只 1 行**，
+# 拿它当数据集输入 = 闭环没有燃料。而 `profile_events` 是 hub **自己**每个工具环都写的
+# 账本（实测 2970 行、438 行带 trace_id）⇒ 以 `trace_id` 分组才是本机真有的执行轨迹。
+def build_traces(rows: list) -> list:
+    """`profile_events` 行 → 执行轨迹（按 `trace_id` 分组，行序即事件序）。
+
+    无 `trace_id` 的行**不成轨迹**（无法归属到某次执行）——宁少不多。**纯函数**。
+    """
+    groups: Dict[str, dict] = {}
+    for r in rows or []:
+        tid = r.get("trace_id")
+        if not tid:
+            continue
+        g = groups.setdefault(str(tid), {"session_id": str(tid),
+                                         "source": r.get("source"),
+                                         "cwd": None, "events": []})
+        g["events"].append({"event": r.get("subject"), "status": r.get("status"),
+                             "duration_ms": r.get("duration_ms"),
+                             "detail": r.get("detail"), "created_at": r.get("created_at")})
+    return sorted(groups.values(), key=lambda g: g["session_id"])
+
+
+def traces_from_store(limit: int = 2000) -> list:
+    """从 `profile_events` 读事件并聚成轨迹（只读）。"""
+    rows = db.query("SELECT source, trace_id, subject, status, duration_ms, detail, created_at"
+                    " FROM profile_events WHERE trace_id IS NOT NULL AND trace_id<>''"
+                    " ORDER BY id ASC LIMIT ?", (limit,))
+    return build_traces(rows)
+
+
+@router.get("/telemetry/traces")
+async def list_traces(limit: int = Query(default=200, le=2000)):
+    """真实执行轨迹（来自 profile_events，按 trace_id 聚合）。"""
+    traces = traces_from_store(limit=limit)
+    return {"traces": traces, "count": len(traces)}

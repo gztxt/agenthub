@@ -59,6 +59,10 @@ class TestModelDiscipline(unittest.TestCase):
         dp.assert_free_model("openrouter/free")
         dp.assert_free_model("nvidia/nemotron-3-super-120b-a12b:free")
 
+    def test_ccr_form_of_free_router_is_accepted(self):
+        """工作区军规：**经 CCR 时写 `openrouter/openrouter/free`** —— 这种写法也得认。"""
+        dp.assert_free_model("openrouter/openrouter/free")
+
 
 class TestBuildItemsDeterministic(unittest.TestCase):
     def test_filters_out_empty_and_unknown_source(self):
@@ -129,6 +133,30 @@ class TestTrajectoryAggregation(unittest.TestCase):
 
     def test_empty_input_yields_no_trajectories(self):
         self.assertEqual([], hook.build_trajectories([]))
+
+
+class TestTraceAggregation(unittest.TestCase):
+    """profile_events → 轨迹（真实数据源）：按 trace_id 分组，无 trace_id 不成轨迹。"""
+
+    def test_groups_by_trace_id(self):
+        rows = [
+            {"source": "hubself_tool", "trace_id": "tr1", "subject": "shell_run",
+             "status": "success", "duration_ms": 10, "detail": None, "created_at": "t1"},
+            {"source": "hubself_tool", "trace_id": "tr1", "subject": "list_dir",
+             "status": "success", "duration_ms": 5, "detail": None, "created_at": "t2"},
+            {"source": "rest", "trace_id": None, "subject": "mem.search",
+             "status": "success", "duration_ms": 3, "detail": None, "created_at": "t3"},
+        ]
+        traces = hook.build_traces(rows)
+        self.assertEqual(1, len(traces))
+        self.assertEqual("tr1", traces[0]["session_id"])
+        self.assertEqual(["shell_run", "list_dir"], [e["event"] for e in traces[0]["events"]])
+
+    def test_rows_without_trace_id_are_dropped(self):
+        self.assertEqual([], hook.build_traces([{"source": "rest", "trace_id": ""}]))
+
+    def test_empty(self):
+        self.assertEqual([], hook.build_traces([]))
 
 
 class TestEnrich(unittest.TestCase):

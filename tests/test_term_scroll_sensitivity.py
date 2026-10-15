@@ -238,7 +238,14 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.110"
+    CURRENT_VERSION = "0.13.111"
+
+    #: v0.13.111（P0-1 收尾）：关键词取自版本注释里**实际写下的字句**。
+    #: 真实轨迹源（profile_events）+ free 抽取 + 验收③ 真实召回取证。
+    VERSION_ROOT_CAUSES["0.13.111"] = (
+        "profile_events", "真实轨迹", "extract_trajectories",
+        "openrouter/openrouter/free", "验收③",
+    )
 
     #: v0.13.110（P0-1 切片 B/C）：关键词取自版本注释里**实际写下的字句**。
     #: 管线声明式、模型在最后、轨迹级聚合、Dreaming 三类 reason。

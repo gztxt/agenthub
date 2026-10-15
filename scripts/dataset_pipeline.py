@@ -46,16 +46,20 @@ DEFAULT_SPEC = {
 
 
 def assert_free_model(model) -> None:
-    """非会话调模只允许 `openrouter/free` 或显式 `*:free`。
+    """非会话调模只允许免费路由：`openrouter/free`、**经 CCR 的**`openrouter/openrouter/free`、
+    或显式 `*:free`。
 
     **严禁 `openrouter/auto`**（2026-10-04 军规）：它的语义是「自动挑最便宜的可用模型」，
     最便宜的完全可能是**付费**模型 ⇒ 直接扣款。需要自动路由时唯一合法写法是 free 路由器。
+
+    ⚠ 为什么要同时认两种写法：工作区军规写明「经 CCR 时写 `openrouter/openrouter/free`」
+    —— 只认 `openrouter/free` 会把**按军规写的那一种**也拒掉（2026-10-15 实测发现）。
     """
     m = str(model or "")
-    if m == "openrouter/free" or m.endswith(":free"):
+    if m in ("openrouter/free", "openrouter/openrouter/free") or m.endswith(":free"):
         return
-    raise ValueError("非会话调模只允许 openrouter/free 或 *:free，得到 %r"
-                     "（严禁 openrouter/auto）" % model)
+    raise ValueError("非会话调模只允许 openrouter/free（经 CCR 写 openrouter/openrouter/free）"
+                     " 或 *:free，得到 %r（严禁 openrouter/auto）" % model)
 
 
 def _sha(s: str) -> str:
@@ -131,14 +135,18 @@ async def enrich(items: list, *, model: str = DEFAULT_MODEL, chat_fn=None) -> li
     return out
 
 
-def _load_trajectories() -> list:
-    rows = hook.trajectories_from_store()
-    return rows
+def _load_trajectories(source: str = "profile") -> list:
+    """轨迹来源：`profile` = hub 自己的执行账本（实测有真数据）；`telemetry` = 外部推送。"""
+    if source == "telemetry":
+        return hook.trajectories_from_store()
+    return hook.traces_from_store()
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="轨迹 → 数据集（确定性管线，模型最后）")
     ap.add_argument("--dataset", default="trajectories", help="数据集名（同名幂等）")
+    ap.add_argument("--source", choices=("profile", "telemetry"), default="profile",
+                    help="轨迹来源（profile=profile_events 真数据；telemetry=外部推送）")
     ap.add_argument("--grain", default="session", help="唯一键口径说明")
     ap.add_argument("--limit", type=int, default=DEFAULT_SPEC["limit"])
     ap.add_argument("--seed", type=int, default=DEFAULT_SPEC["seed"])
@@ -150,7 +158,7 @@ def main() -> int:
     db.init_db(Path(args.db) if args.db else config.db_path)
     dataset.ensure_schema()
 
-    trajs = _load_trajectories()
+    trajs = _load_trajectories(args.source)
     spec = {**DEFAULT_SPEC, "limit": args.limit, "seed": args.seed,
             "holdout_frac": args.holdout_frac}
     items = build_items(trajs, spec)

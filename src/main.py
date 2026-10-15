@@ -90,7 +90,21 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.110"  # P0-1 切片 B/C：声明式管线（模型在最后）+ 轨迹聚合 + 经验 Dreaming
+VERSION = "0.13.111"  # P0-1 收尾：真实轨迹源（profile_events）+ free 抽取 + 验收③取证
+#   v0.13.111：P0-1 的**收尾**（接切片 A/B/C）。
+#   ① **真实轨迹源**：`telemetry_events` 在本机**实测仅 1 行** ⇒ 闭环没有燃料。
+#      新增 `hook.build_traces()/traces_from_store()`：从 hub 自己的 `profile_events`
+#      （实测 2970 行、438 行带 trace_id）按 **trace_id** 分组成执行轨迹，
+#      管线加 `--source profile|telemetry`（默认 profile）；新增 `GET /telemetry/traces`。
+#   ② **抽取**：`experience_mine.extract_trajectories()` + `parse_experience()`（解不出就
+#      **不入库**，不拿自然语言填结构化列）；`--extract --limit N` 走 hub 自己的 LLM 通道，
+#      非会话一律 `openrouter/free`。
+#   ③ **验收③ 真实取证**（scratch DB，真数据）：真实轨迹 **65** 条 → 数据集 **40** 样本
+#      （train 36 / holdout 4，`assert_train_only` 对 holdout 真抛）；free 模型抽取 3 条轨迹
+#      → 入库经验 **1** 条（另 2 条模型没给出可解析经验 ⇒ 按设计丢弃）→
+#      召回 `query='list'` **命中 1 条且带真实 trace_id 来源**。
+#   ④ 守卫缺口修正：`assert_free_model` 原先只认 `openrouter/free`，会把军规写的
+#      **经 CCR 形式 `openrouter/openrouter/free`** 也拒掉 ⇒ 已一并认。
 #   v0.13.110：P0-1 的**切片 B/C**（接切片 A 的四表）。
 #   ① `scripts/dataset_pipeline.py`（**声明式管线**）：轨迹 → 确定性过滤 → 确定性采样 →
 #      按 grain 哈希切分 → **模型在最后**（`enrich()`）。`build_items()` 是纯函数，`output`

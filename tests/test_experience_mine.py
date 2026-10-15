@@ -120,5 +120,64 @@ class TestApply(_Base):
         self.assertEqual(new, dataset.get_experience(old)["superseded_by"])
 
 
+class TestExtract(unittest.TestCase):
+    """从轨迹抽取经验（模型，free）：产物必须过解析 + 字段校验，否则不入库。"""
+
+    def test_parse_valid_object(self):
+        c = em.parse_experience('{"kind":"pitfall","situation":"S","action":"A","precondition":"P"}')
+        self.assertEqual("S", c["situation"])
+        self.assertEqual("A", c["action"])
+
+    def test_parse_fenced_json(self):
+        c = em.parse_experience('```json\n{"situation":"S","action":"A"}\n```')
+        self.assertEqual("S", c["situation"])
+
+    def test_parse_empty_object_is_none(self):
+        self.assertIsNone(em.parse_experience("{}"))
+
+    def test_parse_missing_fields_is_none(self):
+        self.assertIsNone(em.parse_experience('{"situation":"S"}'))
+
+    def test_parse_garbage_is_none(self):
+        self.assertIsNone(em.parse_experience("no json here"))
+
+    def test_extract_rejects_non_free_model(self):
+        import asyncio
+        with self.assertRaises(ValueError):
+            asyncio.run(em.extract_trajectories([], model="openrouter/auto", chat_fn=None))
+
+    def test_extract_records_experiences(self):
+        import asyncio
+
+        async def chat(model, prompt):
+            return '{"kind":"pitfall","situation":"disk full","action":"clean tmp"}'
+        trajs = [{"session_id": "tr1", "source": "hubself_tool", "events": [{"event": "shell_run"}]}]
+        out = asyncio.run(em.extract_trajectories(trajs, chat_fn=chat, ds=_FakeDS()))
+        self.assertEqual(1, len(out))
+        self.assertEqual("disk full", out[0]["situation"])
+
+    def test_extract_unparseable_yields_nothing(self):
+        import asyncio
+
+        async def chat(model, prompt):
+            return "抱歉，我无法从这段轨迹中总结出经验。"
+        trajs = [{"session_id": "tr1", "source": "x", "events": [{"event": "e"}]}]
+        out = asyncio.run(em.extract_trajectories(trajs, chat_fn=chat, ds=_FakeDS()))
+        self.assertEqual([], out)
+
+
+class _FakeDS:
+    def __init__(self):
+        self.rows = []
+
+    def record_experience(self, kind, *, situation="", action="", precondition="",
+                          source_trace_ids=None):
+        eid = "e%d" % (len(self.rows) + 1)
+        self.rows.append({"id": eid, "kind": kind, "situation": situation,
+                          "action": action, "precondition": precondition,
+                          "source_trace_ids": source_trace_ids})
+        return eid
+
+
 if __name__ == "__main__":
     unittest.main()

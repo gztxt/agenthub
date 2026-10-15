@@ -238,7 +238,14 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.107"
+    CURRENT_VERSION = "0.13.108"
+
+    #: v0.13.108（P0-3）：关键词取自版本注释里**实际写下的字句**。
+    #: 主判据：执行者不得自证 success；等待态让出执行资源；判不了不放行。
+    VERSION_ROOT_CAUSES["0.13.108"] = (
+        "执行者不得自证", "verifier", "等待态", "让出执行资源",
+        "budget_exceeded", "insufficient", "verify_kind",
+    )
 
     #: v0.13.107（P0-5 修正）：关键词取自版本注释里**实际写下的字句**。
     #: ① label 按 kind 取词（exec 不得冒充只读）；② `covered`/`fail_closed` 由绕过面

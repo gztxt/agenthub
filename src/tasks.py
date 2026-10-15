@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 import db
+import verifier
 
 router = APIRouter()
 
@@ -26,6 +27,18 @@ TASK_TIMEOUT_S = int(os.getenv("TASK_TIMEOUT_S", "600"))
 MAX_CONCURRENCY = 4
 MAX_TASKS = 12
 UPSTREAM_TRIM = 4000
+#: 调度循环步长（秒）。做成常量是为了让 L0 闸门能把它压到毫秒级（不起真等待）。
+LOOP_SLEEP_S = float(os.getenv("TASK_LOOP_SLEEP_S", "1.5"))
+
+# ── 状态枚举（P0-3）─────────────────────────────────────────────────
+#: 全量状态。`verifying` 是执行者交产物后、验证器判定前的**短暂态**；
+#: `waiting_*` / `paused` 是**等待态**（parked）：既不占执行资源，也不算终态。
+TASK_STATUSES = ("pending", "running", "verifying", "success", "failed", "blocked",
+                 "cancelled", "waiting_input", "waiting_approval", "paused")
+#: 终态：run 的收敛条件。
+TERMINAL_STATUSES = ("success", "failed", "blocked", "cancelled")
+#: 等待态：让出执行资源，等外部输入/批准/恢复；run 在此**挂起**而非空转。
+PARKED_STATUSES = ("waiting_input", "waiting_approval", "paused")
 
 _ctx: Dict[str, Any] = {}
 _runners: Dict[str, asyncio.Task] = {}
@@ -42,6 +55,32 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+#: P0-3 新增列（幂等 ALTER 补建）。
+_TASK_COLUMNS = (
+    ("verify_kind", "TEXT NOT NULL DEFAULT 'nonempty'"),  # 产物由哪个验证 kind 判
+    ("verify_expect", "TEXT"),                            # contains 类判据（写在任务定义里，不由执行者给）
+    ("budget_ms", "INTEGER"),                              # 单任务耗时预算（毫秒）
+    ("budget_tokens", "INTEGER"),                          # 单任务 token 预算
+    ("spent_ms", "INTEGER"),                               # 实测耗时
+    ("spent_tokens", "INTEGER"),                           # 实测 token
+)
+
+
+def budget_exceeded(row: dict, spent_ms: Optional[int], spent_tokens: int = 0) -> Optional[str]:
+    """预算闸（纯函数，便于单测）：返回超限原因，未超返回 None。
+
+    预算为 None = **不设限**；预算与实测同时存在才比较（判不了就不拦 —— 与 P0-4 同口径，
+    但这里“不拦”是设计选择，因为预算是成本护栏、不是正确性判据）。
+    """
+    bm = row.get("budget_ms")
+    if bm is not None and spent_ms is not None and spent_ms > bm:
+        return "耗时 %sms 超预算 %sms" % (spent_ms, bm)
+    bt = row.get("budget_tokens")
+    if bt is not None and spent_tokens is not None and spent_tokens > bt:
+        return "token %s 超预算 %s" % (spent_tokens, bt)
+    return None
+
+
 SCHEMA_TASKS = """
 CREATE TABLE IF NOT EXISTS tasks (
     run_id TEXT NOT NULL,
@@ -51,9 +90,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     prompt TEXT NOT NULL,
     agent_id TEXT,
     deps TEXT NOT NULL DEFAULT '[]',
-    status TEXT NOT NULL DEFAULT 'pending',  -- pending|running|success|failed|blocked
+    status TEXT NOT NULL DEFAULT 'pending',  -- TASK_STATUSES（P0-3 起含等待态/verifying）
     output TEXT,
     error TEXT,
+    verify_kind TEXT NOT NULL DEFAULT 'nonempty',  -- 产物由哪个验证器判（P0-3）
     started_at TEXT,
     finished_at TEXT,
     duration_ms INTEGER,
@@ -67,12 +107,21 @@ CREATE INDEX IF NOT EXISTS idx_tasks_run ON tasks(run_id, status);
 
 def ensure_schema():
     db.execute_script(SCHEMA_TASKS)
+    # P0-3：幂等 ALTER 补建新列（存量库不动既有行；旧行 verify_kind 取 DEFAULT、预算 NULL）。
+    have = {r["name"] for r in db.query("PRAGMA table_info(tasks)")}
+    for col, decl in _TASK_COLUMNS:
+        if col not in have:
+            db.execute("ALTER TABLE tasks ADD COLUMN %s %s" % (col, decl))
 
 
 class DecomposeIn(BaseModel):
     goal: str = Field(min_length=4, max_length=4000)
     default_agent: Optional[str] = None
     auto_run: bool = False
+    # P0-3：产物验证 kind + 单任务预算（执行者只能产出，不能自定判据）。
+    verify_kind: str = "nonempty"
+    budget_ms: Optional[int] = None
+    budget_tokens: Optional[int] = None
 
 
 class RetryIn(BaseModel):
@@ -137,6 +186,9 @@ def _validate_dag(items: list, known_agents: set, default_agent: str) -> List[di
 @router.post("/api/tasks/decompose")
 async def decompose(body: DecomposeIn):
     import llm
+    if body.verify_kind not in verifier.known_kinds():
+        raise HTTPException(400, "未知 verify_kind: %s（可用 %s）"
+                            % (body.verify_kind, ", ".join(verifier.known_kinds())))
     if not llm.configured():
         raise HTTPException(503, "LLM 未配置，无法拆解")
     known = set()
@@ -160,10 +212,12 @@ async def decompose(body: DecomposeIn):
     now = _now()
     for it in items:
         db.execute(
-            "INSERT INTO tasks(run_id,task_id,trace_id,goal,prompt,agent_id,deps,status,created_at,updated_at)"
-            " VALUES(?,?,?,?,?,?,?,'pending',?,?)",
+            "INSERT INTO tasks(run_id,task_id,trace_id,goal,prompt,agent_id,deps,status,"
+            "verify_kind,budget_ms,budget_tokens,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?)",
             (run_id, it["id"], run_id, body.goal, it["task"], it["agent_id"],
-             json.dumps(it["deps"]), now, now))
+             json.dumps(it["deps"]), body.verify_kind, body.budget_ms,
+             body.budget_tokens, now, now))
     if body.auto_run:
         _start_runner(run_id)
     return {"run_id": run_id, "goal": body.goal, "tasks": items,
@@ -178,11 +232,14 @@ async def list_runs(limit: int = Query(default=20, le=100)):
                SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed,
                SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) running,
                SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending,
+               SUM(CASE WHEN status IN ('waiting_input','waiting_approval','paused')
+                        THEN 1 ELSE 0 END) waiting,
                MIN(created_at) created_at, MAX(finished_at) finished_at
         FROM tasks GROUP BY run_id ORDER BY created_at DESC LIMIT ?""", (limit,))
     for r in rows:
         r["state"] = ("running" if r["running"] else
                       "success" if r["success"] == r["total"] else
+                      "waiting" if r["waiting"] else
                       "failed" if r["failed"] and r["pending"] == r["running"] == 0 else
                       "pending" if r["pending"] == r["total"] else "partial")
     return {"runs": rows}
@@ -217,6 +274,59 @@ async def retry_run(run_id: str, body: RetryIn):
                    "WHERE run_id=? AND status IN ('failed','blocked')", (_now(), run_id))
     _start_runner(run_id)
     return {"run_id": run_id, "status": "retry-scheduled"}
+
+
+def requeue_waiting(run_id: str) -> int:
+    """等待态（waiting_*/paused）→ pending，返回改动行数（P0-3）。
+
+    等待态让出了执行资源，run 已挂起；恢复必须**显式**把任务重新排队，
+    再重启 runner（由调用方 `_start_runner`）。
+    """
+    now = _now()
+    ph = ",".join("?" * len(PARKED_STATUSES))
+    return db.execute(
+        "UPDATE tasks SET status='pending',error=NULL,updated_at=? "
+        "WHERE run_id=? AND status IN (%s)" % ph,
+        (now, run_id, *PARKED_STATUSES))
+
+
+@router.post("/api/tasks/{run_id}/resume")
+async def resume_run(run_id: str):
+    """等待态 → pending 并重启 runner（人在外部输入/批准后调）。"""
+    n = requeue_waiting(run_id)
+    if not n:
+        raise HTTPException(404, "no waiting task for run")
+    _start_runner(run_id)
+    return {"run_id": run_id, "status": "resumed", "requeued": n}
+
+
+@router.post("/api/tasks/{run_id}/pause")
+async def pause_run(run_id: str):
+    """把可停的任务（pending / 等待态）置 paused。**不动正在执行的任务**。"""
+    now = _now()
+    n = db.execute(
+        "UPDATE tasks SET status='paused',updated_at=? "
+        "WHERE run_id=? AND status IN ('pending','waiting_input','waiting_approval')",
+        (now, run_id))
+    if not n:
+        raise HTTPException(404, "no pausable task for run")
+    return {"run_id": run_id, "status": "paused", "paused": n}
+
+
+@router.post("/api/tasks/{run_id}/cancel")
+async def cancel_run(run_id: str):
+    """取消整条 run：停 runner + 非终态任务→cancelled（终态）。"""
+    if run_id in _runners:
+        _runners[run_id].cancel()
+        _runners.pop(run_id)
+    now = _now()
+    n = db.execute(
+        "UPDATE tasks SET status='cancelled',finished_at=?,updated_at=? "
+        "WHERE run_id=? AND status NOT IN ('success','failed','blocked','cancelled')",
+        (now, now, run_id))
+    if not n:
+        raise HTTPException(404, "no cancellable task for run")
+    return {"run_id": run_id, "status": "cancelled", "cancelled": n}
 
 
 @router.delete("/api/tasks/{run_id}")
@@ -263,20 +373,64 @@ async def _run_task(run_id: str, row: dict):
                     f"task-{row['trace_id']}-{row['task_id']}"),
             timeout=TASK_TIMEOUT_S)
         dur = int((asyncio.get_event_loop().time() - t0) * 1000)
-        if result.get("success"):
-            db.execute("UPDATE tasks SET status='success',output=?,duration_ms=?,"
+        spent_tokens = int(((result.get("usage") or {}).get("total_tokens")) or 0)
+        # ① 等待态：执行者说「卡在等人/等批」⇒ 让出执行资源，不占槽、不算终态。
+        waiting = result.get("waiting")
+        if waiting in PARKED_STATUSES:
+            db.execute("UPDATE tasks SET status=?,spent_ms=?,spent_tokens=?,updated_at=?"
+                       " WHERE run_id=? AND task_id=?",
+                       (waiting, dur, spent_tokens, _now(), run_id, row["task_id"]))
+            db.log_profile_event("task_exec", row["agent_id"], "parked", dur,
+                                 trace_id=row["trace_id"],
+                                 detail={"task": row["task_id"], "waiting": waiting})
+            return
+        # ② 预算：超限一律 failed（不静默放过）。
+        over = budget_exceeded(row, dur, spent_tokens)
+        if over:
+            db.execute("UPDATE tasks SET status='failed',error=?,spent_ms=?,spent_tokens=?,"
                        "finished_at=?,updated_at=? WHERE run_id=? AND task_id=?",
-                       (result.get("response", "")[:20000], dur, _now(), _now(),
+                       ("预算耗尽: " + over, dur, spent_tokens, _now(), _now(),
                         run_id, row["task_id"]))
-            db.log_profile_event("task_exec", row["agent_id"], "success", dur,
-                                 trace_id=row["trace_id"], detail={"task": row["task_id"]})
-        else:
+            db.log_profile_event("task_exec", row["agent_id"], "fail", dur,
+                                 trace_id=row["trace_id"],
+                                 detail={"task": row["task_id"], "budget": over})
+            return
+        # ③ 执行者自称失败 ⇒ 直接 failed（失败方向保守，不必再过验证器）。
+        if not result.get("success"):
             err = (result.get("error") or "unknown")[:500]
-            db.execute("UPDATE tasks SET status='failed',error=?,duration_ms=?,"
-                       "finished_at=?,updated_at=? WHERE run_id=? AND task_id=?",
-                       (err, dur, _now(), _now(), run_id, row["task_id"]))
+            db.execute("UPDATE tasks SET status='failed',error=?,duration_ms=?,spent_ms=?,"
+                       "spent_tokens=?,finished_at=?,updated_at=? WHERE run_id=? AND task_id=?",
+                       (err, dur, dur, spent_tokens, _now(), _now(), run_id, row["task_id"]))
             db.log_profile_event("task_exec", row["agent_id"], "fail", dur,
                                  trace_id=row["trace_id"], detail={"task": row["task_id"]})
+            return
+        # ④ **执行者不自证**：先 verifying，再由 verifier 独立判产物（P0-3 主判据）。
+        kind = row.get("verify_kind") or verifier.DEFAULT_KIND
+        db.execute("UPDATE tasks SET status='verifying',spent_ms=?,spent_tokens=?,updated_at=?"
+                   " WHERE run_id=? AND task_id=?",
+                   (dur, spent_tokens, _now(), run_id, row["task_id"]))
+        verdict = verifier.verify(kind, output=result.get("response"),
+                                  expect=row.get("verify_expect"))
+        if verdict["status"] == verifier.STATUS_PASS:
+            db.execute("UPDATE tasks SET status='success',output=?,duration_ms=?,spent_ms=?,"
+                       "spent_tokens=?,finished_at=?,updated_at=?"
+                       " WHERE run_id=? AND task_id=?",
+                       (str(result.get("response") or "")[:20000], dur, dur, spent_tokens,
+                        _now(), _now(), run_id, row["task_id"]))
+            db.log_profile_event("task_exec", row["agent_id"], "success", dur,
+                                 trace_id=row["trace_id"],
+                                 detail={"task": row["task_id"], "verify": kind})
+        else:
+            gaps = "; ".join("%s: %s" % (g["id"], g["detail"]) for g in verdict["gaps"])
+            err = ("verifier %s (%s): %s" % (verdict["status"], kind, gaps))[:500]
+            db.execute("UPDATE tasks SET status='failed',error=?,duration_ms=?,spent_ms=?,"
+                       "spent_tokens=?,finished_at=?,updated_at=?"
+                       " WHERE run_id=? AND task_id=?",
+                       (err, dur, dur, spent_tokens, _now(), _now(), run_id, row["task_id"]))
+            db.log_profile_event("task_exec", row["agent_id"], "fail", dur,
+                                 trace_id=row["trace_id"],
+                                 detail={"task": row["task_id"], "verify": kind,
+                                         "verify_status": verdict["status"]})
     except asyncio.TimeoutError:
         db.execute("UPDATE tasks SET status='failed',error='超时熔断 %ds',finished_at=?,"
                    "updated_at=? WHERE run_id=? AND task_id=?",
@@ -296,14 +450,14 @@ async def _execute_run(run_id: str):
         while True:
             rows = db.query("SELECT * FROM tasks WHERE run_id=? ORDER BY created_at", (run_id,))
             status = {r["task_id"]: r["status"] for r in rows}
-            finished = all(s in ("success", "failed", "blocked") for s in status.values())
+            finished = all(s in TERMINAL_STATUSES for s in status.values())
             if finished:
                 return
             for r in rows:
                 if r["task_id"] in live or r["status"] != "pending":
                     continue
                 deps = json.loads(r["deps"] or "[]")
-                if any(status.get(d) == "failed" or status.get(d) == "blocked" for d in deps):
+                if any(status.get(d) in ("failed", "blocked", "cancelled") for d in deps):
                     db.execute("UPDATE tasks SET status='blocked',error='上游失败',finished_at=?,"
                                "updated_at=? WHERE run_id=? AND task_id=?",
                                (_now(), _now(), run_id, r["task_id"]))
@@ -318,17 +472,20 @@ async def _execute_run(run_id: str):
                             await _run_task(run_id, row)
                     live[r["task_id"]] = asyncio.create_task(guarded())
             if not live:
-                # 没有任何在跑且未结束 → 剩余 pending 的上游都在 running 之外，等待或死锁
+                parked = [t for t, s in status.items() if s in PARKED_STATUSES]
                 pend = [t for t, s in status.items() if s == "pending"]
-                runn = [t for t, s in status.items() if s == "running"]
-                if not runn and pend:
+                if parked:
+                    # 整条 run 挂起等外部输入/批准/恢复 ⇒ 释放执行资源，不空转、不算死锁。
+                    return
+                if pend:
                     db.execute("UPDATE tasks SET status='failed',error='无法调度(疑似悬挂)',"
                                "updated_at=? WHERE run_id=? AND status='pending'", (_now(), run_id))
                     return
+                return
             done = [tid for tid, t in live.items() if t.done()]
             for tid in done:
                 live.pop(tid)
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(LOOP_SLEEP_S)
     except asyncio.CancelledError:
         for t in live.values():
             t.cancel()

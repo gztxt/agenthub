@@ -1,3 +1,66 @@
+## v0.13.108 — P0-3 任务状态机：执行者不得自证 success + 等待态 + 预算 + Verifier
+
+> 触发：P0 立项施工书排序第四项（`P0-2 → P0-4 → P0-5 → **P0-3** → P0-1`，逐项串行）。
+> 依赖 P0-4（已闭合）：证据三态口径直接复用到产物验证层。
+
+### 一、缺口：执行者既是被测对象，又握着判定权
+
+`tasks._run_task` 原先：
+
+```python
+if result.get("success"):      # ← 执行者自己说成了
+    UPDATE tasks SET status='success'
+```
+
+执行者回一个 `success=True`（哪怕产物是空的）就置 `success`。这与本仓反复出事的
+那类静默同族：**判据在谁手里，结果就是谁说了算**。
+
+### 二、`src/verifier.py`（新，叶子模块）
+
+三态：`pass` / `fail` / `insufficient`。**判不了绝不放行**：
+
+| 情形 | 结论 |
+|---|---|
+| 未知 kind | `insufficient`（永不 pass） |
+| 产物缺失（`output is None`） | `insufficient` |
+| `contains` 但没给 `expect` | `insufficient` |
+| 产物空/全空白 | `fail` + `repairable=True` |
+| JSON 顶层非数组 | `fail` + gap `not_array` |
+
+`fail` 带结构化缺口 `gaps:[{id,detail}…]` + `repairable`，调用方据此决定重跑还是上报。
+kinds：`nonempty`（默认）/ `json_array` / `contains`。
+
+### 三、tasks 状态机扩到十态
+
+```
+pending running verifying success failed blocked cancelled
+waiting_input waiting_approval paused
+```
+
+- **终态** `TERMINAL_STATUSES`：success/failed/blocked/cancelled。
+- **等待态** `PARKED_STATUSES`：waiting_input/waiting_approval/paused —— 让出执行资源，
+  run **挂起**而非空转；下游 pending 保持 pending，**不**误判「疑似悬挂」。
+- `_run_task` 流程：等待态→parked；超预算→failed；执行者自称失败→failed；
+  自称成功→**先 `verifying`，再由 verifier 判**（未过则 failed，错误里带缺口）。
+
+### 四、预算 + 端点
+
+- 幂等 ALTER 补列：`verify_kind` / `verify_expect` / `budget_ms` / `budget_tokens` /
+  `spent_ms` / `spent_tokens`（旧行 budget=NULL=不限）。
+- `budget_exceeded(row, spent_ms, spent_tokens)` 纯函数，超限一律 failed。
+- 新增 `POST /api/tasks/{run_id}/resume|pause|cancel` + `requeue_waiting()`；
+  `GET /api/tasks/runs` 新增 `waiting` 计数与 `state="waiting"`。
+- `POST /api/tasks/decompose` 接受 `verify_kind` / `budget_ms` / `budget_tokens`，
+  未知 `verify_kind` ⇒ 400（不把判据自由交给执行者）。
+
+### 五、闸门
+
+`tests/test_verifier.py` **19 例**；`tests/test_task_statemachine.py` **12 例**。
+主判据（RED→GREEN）：`test_runner_success_with_empty_output_is_not_success` ——
+执行者自称 success 但产物为空 ⇒ **不得**置 success。
+
+---
+
 ## v0.13.107 — P0-5 修正：label 按 kind 取词 + 「覆盖全路径」由绕过面机械导出
 
 > 触发：用户 2026-10-15 对 P0-5 报告的两项遗留逐条裁定（均未擅动项）：

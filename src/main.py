@@ -88,7 +88,24 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.107"  # P0-5 修正：label 按 kind 取词 + 覆盖由「绕过面清单」机械导出
+VERSION = "0.13.108"  # P0-3 任务状态机：执行者不得自证 success + 等待态 + 预算 + Verifier
+#   v0.13.108：P0 施工排序第四项（P0-3）。治的是「**执行者既是被测对象、又握着判定权**」。
+#   ① 新增 src/verifier.py（叶子模块，纯函数）：三态 `pass` / `fail` / `insufficient`。
+#      **判不了绝不放行**（未知 kind / 产物缺失 / 判据缺失 ⇒ insufficient，永不 pass）——
+#      这是 P0-4 `evidence.py` 口径在**产物验证层**的复用。fail 带结构化缺口（id+detail）
+#      与 `repairable`，调用方据此决定重跑还是上报，不解析自然语言。
+#   ② tasks 状态机扩到十态：新增 `waiting_input|waiting_approval|paused`（**等待态**）
+#      与 `verifying`（交产物后、判定前的短暂态）、`cancelled`（终态）。
+#      `_run_task` 不再信 `result["success"]` 就置 success：先置 verifying，再由
+#      verifier 判产物；未过则 failed（错误里带 verifier 缺口）。
+#      执行者回 `{"waiting": "waiting_input"}` ⇒ 任务进等待态、**让出执行资源**、
+#      run 挂起等外部输入（不空转、不误判「疑似悬挂」）；下游 pending 保持 pending。
+#   ③ 预算：tasks 幂等 ALTER 补 `verify_kind/verify_expect/budget_ms/budget_tokens/
+#      spent_ms/spent_tokens`（旧行 budget=NULL=不限、verify_kind='nonempty'）；
+#      `budget_exceeded()` 是纯函数（超限一律 failed，不静默放过）。
+#      新增 `POST /api/tasks/{run_id}/resume|pause|cancel` + `requeue_waiting()`。
+#   ④ 闸门 tests/test_verifier.py(19) + tests/test_task_statemachine.py(12)；
+#      其中「回包 success=True 但产物为空 ⇒ **不得**置 success」是 RED→GREEN 的负向主判据。
 #   v0.13.107：P0-5 两处**改判**（用户 2026-10-15 裁定，均指向「一句话自称」的余留形态）：
 #   ① **label 按 kind 取词**：原先 `enforced_covered` 一律叫「只读」，但 `exec` 边界
 #      讲的是「拉起进程走唯一受闸入口」，不是「文件只读」⇒ 对终端型 agent 用词过强。

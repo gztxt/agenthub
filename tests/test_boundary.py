@@ -250,12 +250,21 @@ class TestProofRegistryGate(unittest.TestCase):
 
 
 class TestExecBoundaryNegative(unittest.TestCase):
-    """绕过路径真被拒：没有终端入口的 agent 拉不起来。"""
+    """绕过路径真被拒：没有终端入口的 agent 拉不起来。
+
+    ⚠ 2026-10-16 修：这两个用例原先送**硬编码占位 token**，期望撞边界闸的 400，
+    实际撞的是 token 闸的 401 —— 从来没走到被测的边界判定。
+    根因是本文件模块头的 `os.environ.setdefault("TERM_TOKEN", ...)` **是空操作**：
+    `src/config.py` 顶部 `load_dotenv(env_path, override=True)` 无条件用 `.env` 覆盖环境，
+    `scripts/run_tier.py` 也不清 `TERM_TOKEN` ⇒ 模块级占位值设不进去。
+    修法：**用 `term.TERM_TOKEN` 本身**送进去 —— 先过鉴权、再验边界，
+    且不再依赖任何环境/顺序假设。token 闸本身由 `test_bad_token_is_rejected` 单独钉。
+    """
 
     def _call(self, agent_id):
         import term
         req = types.SimpleNamespace(
-            headers={"x-term-token": "unit-test-token-not-production"},
+            headers={"x-term-token": term.TERM_TOKEN},
             query_params={})
         return asyncio.run(term.create_session(term.CreateIn(agent_id=agent_id), req))
 

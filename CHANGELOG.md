@@ -1,3 +1,178 @@
+## v0.13.114 — P0-a + P0-b：成本归因接线 + 验收裁决落库
+
+> 接 `v0.13.113`。**不引入任何新概念**，只把两处「数据本来就在、却被丢弃」接上。
+> 目的是给下一步 P0-c（模型/Agent 画像）提供可 JOIN 的底座 —— 没有底座，
+> 画像字段无从定义，闭环永远停在「只写不读」。
+
+### 一、P0-a：成本归因接线（`tasks.model`）
+
+**数据一直都在，此前被丢掉。** `adapters/openai_compat.py` 的 `chat()` **本来就返回**
+`model` 与 `usage`，但 `_run_task` 只取了 `usage.total_tokens` 就丢，`model`
+**一次都没被读过** ⇒ 「任务 → Agent → 模型 → token」无法 JOIN，成本归因断在最后一米。
+
+- `tasks` 表加 `model` 列（幂等 ALTER，走既有 `_TASK_COLUMNS` 机制）；
+- **`model` 取 adapter 回包值，不取我方请求值**：上游可能改写模型名，记请求值
+  就是把「我们以为用了谁」当成「实际用了谁」，恰好毁掉归因的意义；
+- **回包缺 `model` 时留 NULL**，不拿请求值兜底 —— 那是猜测，不是观测；
+- 五条落库路径（等待态 / 预算耗尽 / 自称失败 / 验收通过 / 验收失败）**都记 model**：
+  验收失败照样花钱，成本不能跟着 verdict 一起消失。
+
+### 二、P0-b：验收裁决落库（`tasks.verdict` / `verify_reason`）
+
+P0-3 落地了「执行者不得自证 success」，但**裁决结果本身没被保存**：
+三态只被折叠进 `status`/`error` 文本就丢了 ⇒ 验收做了，却没有任何查询面能回答
+「这批任务里有多少是 verifier 判的通过、多少是证据不足」。
+
+- 新增 `verdict`（三态照 `verifier.STATUS_*`）+ `verify_reason`；
+- **`NULL` 语义严格区分于 `'fail'`**：`NULL` = 未走到验收这一步
+  （等待 / 预算耗尽 / 自称失败 / 超时）。把它们记成 `fail` 会虚增失败率、
+  污染后续任何统计 —— 单元测试逐条钉住这四条早退路径；
+- `insufficient` 是「判不了且未放行」的第三态，与 pass/fail 都可区分。
+
+### 三、顺带修掉一个既存缺陷（**非本次引入**）
+
+`_run_task` 的超时分支把 `'超时熔断 %ds'` 写成**字面量**却按 5 个参数传
+（SQL 只有 4 个占位符）⇒ `sqlite3.ProgrammingError` **在超时这个异常处理器内部**抛出
+⇒ **任务永远停在 `running`**，异常继续冒泡进 `_execute_run`。
+由新测试 `test_verdict_null_on_timeout` 撞出（备份 `tasks.py.bak-20261015_232949` 可见原样）。
+改为正常绑定，顺带把 model 记上。**这是 P0-3 以来潜伏的缺陷，与本轮接线无关。**
+
+### 四、标签型产物清洗（P0-c 的前置，同版本并入）
+
+P0-a 接上线后，P0-c 要按模型聚合「擅长什么」。但上面 A2 那条假绿必须先解决：
+**免费池会把请求路由到审核/分类类模型**，返回 `'User Safety: safe'` 这类**标签**而非正文，
+而 `nonempty` 只判非空 ⇒ 标签被记成「模型成功产出了内容」。
+
+- 新增纯函数层 **`src/outputguard.py`**：`content` / `label` / `empty` 三档 + **恒非空 reason**
+  （无理由的分类器一旦被 P0-c 引用，等于把黑箱接进决策链）。
+  纯函数、stdlib-only、不读盘不碰 db —— 与 `healthx.py` / `staticguard.py` 同范式（L0 可红绿对照）。
+- **只认强信号，宁漏勿伤**：真实正文被误判成标签 = 丢真证据，比漏一条更坏。
+  两条规则：① 模型 ID 属审核/分类/嵌入/重排/语音族；
+  ② 产物是「标签: 值」形状**且值落在分类器封闭枚举**里。
+- ⚠ **值判据为什么不用「长度」**：`'User Safety: 这是一段真正的说明性正文而不是标签'`
+  只有 18 字，长度判据放它过去（这条是本轮自测真撞出来的）。
+  而分类器返回值本就来自封闭枚举（safe/unsafe/borderline/toxic/low/high…），
+  正常回答的「值」几乎不可能**恰好**是这些词 —— 这才是强信号。
+- **同族通用生成模型不得连带误伤**：`nemotron-3.5-lightning` / `nemotron-3-super-*`
+  不在审核族词表内（有单测钉死），否则会误伤大量真正文。
+- 审计脚本 `work/probe/audit_output_cleanliness.py`：**只读**扫三处数据面
+  （`tasks` / `dataset_items` / `experiences`），**不物理删除**
+  ——与 Dreaming「只退役不删」同口径。退出码 0=洁净 / 1=须隔离。
+
+**实测结果（红绿自证）**：
+
+| 库 | tasks | label | 判定 |
+|---|---|---|---|
+| 生产 `data/agents.db` | 3 行 | **0** | 洁净（3 条全是真实 Python/Rust 问答正文） |
+| 脏样本 `work/p0ab-acceptance/acceptance.db` | 5 行 | **1** | 命中 `s_ok`（content-safety 模型 + `'User Safety: safe'`） |
+
+`dataset_items` 65 行 `output` **恒空**（P0-1 `build_items()` 的设计如此）⇒ 该面无污染可能；
+`experiences` 活跃 4 条全为真实 recipe/pitfall ⇒ 无污染。
+**结论：生产数据当前洁净，可直接进入 P0-c 画像字段定义。**
+
+### 五、验收（真数据，非「接口返回 200」）
+
+探针 `work/probe/p0ab_acceptance.py` + `p0ab_runner.py`，**15/15 通过**：
+A1 生产库副本迁移（存量 3 行 verdict 留 NULL，不谎称已验收）；
+A2/A3 走**生产同一条链路**（真实 adapter → CCR:3456 → 上游）真打两次调用，
+`model` 非空、`spent_tokens` 521/229、`verdict` pass/fail 各自落库、判负样本
+`verify_reason` = `missing_expectation: 产物不含 'ZZZ_NEVER_PRESENT_TOKEN'`；
+A4 按模型分组聚合可用；**A5 生产库指纹（mtime/size/行数）前后完全一致**。
+闸门：L0 1805 例、`test_task_attribution.py`(14) + `test_outputguard.py`(13) 全绿、
+收集器对账 1870=1870。
+
+### 六、账本归一口径（P0-c 的第二条前置，同版本并入）
+
+P0-c 要按模型建画像就得读 CCR 账本，而账本是**只读生命线资产**（`usage_ledger` 一律 `mode=ro`）
+⇒ 只能在**读取侧**归一。实测（37583 行全量）发现三处口径缺失，直接 `GROUP BY` 会读出假结论：
+
+| # | 问题 | 实测 |
+|---|---|---|
+| a | 同一模型带不同**网关前缀** | `nvidia/nemotron-3-ultra-550b-a55b:free` 1446 条 / `openrouter/…` 3 / `open_router/…` 4 / `openrouter-free/…` 1 / `anthropic/openrouter/…` 1（**双层嵌套**） |
+| b | `provider` **一名两写** | `alibaba` 18978 vs `provider-alibaba-b600d5a733::openai_chat_completions` 1344 |
+| c | 占位/路由器/测试残留混入 | `unknown` 220、`openrouter/free` 37（**路由器不是模型**）、`gpt-9-no-such-model-e2e-20260923` 3、`default` 1 |
+
+口径落 **`src/ledgernorm.py`**（纯函数、stdlib-only、不碰 sqlite）：
+
+- **只剥网关前缀，不剥厂商前缀。** `openrouter` `open_router` `openrouter-free`
+  `tokenrouter` `anthropic` 是**传输路径**（后者是 Anthropic 兼容层包装，由
+  `anthropic/open_router/minimax/…` 双层嵌套实证），**反复剥离**至底。
+  而 `nvidia/` `minimax/` `stealth/` `qwen/`… 是**模型身份的一部分**，剥了会把不同模型
+  并成假的「同一个」—— `VENDOR_PREFIXES` 列出并断言与网关集**无交集**。
+- **`:free` 分两轴**：成本/用量口径用 `canonical`（**保留**档位），
+  能力画像口径用 `base`（去档位）。理由：免费模型 `cost_usd` 落库 **NULL** 是实测事实
+  （静默当 0 就是谎报），而「这个模型会什么」不该因计费档裂成两条。
+  实测能力口径因此合并 **4 个**跨档模型。
+- **非模型只认精确字面量 + 显式测试痕迹**（`unknown`/`default`/`free`/`auto`/`none`/`null`
+  与含 `no-such-model`）。**不靠「名字看着怪」猜** —— 启发式会在上游新增正经模型时误杀。
+- **provider 内部逻辑名要拆成两半**：`provider-<name>-<hash>::<api_shape>`
+  ⇒ name + `api_shape`。名字要合并（否则 alibaba 被拆成两桶），
+  **协议形状必须留**（`openai_chat_completions` / `openai_responses` 决定口径）。
+- **大小写统一**：实测全量**零**组「仅大小写不同的同模型」⇒ 统一小写是安全的防御性归一。
+
+**真数据验证** `work/probe/verify_ledgernorm.py` **9/9 通过**：
+A1 归一 98→91 个 key、合并 3 组、涉及 **12398 行（33.0%）**；
+A2 逐组打印成员供人工核对（全部确为同一模型）；
+**A3 模型名（最后一段）逐条未被改动（破例 0 条）**——这是「没误并」的真正判据；
+A4 非模型 4 个 key / 261 行（0.69%）独立成桶、与真实模型桶**不相交**；
+附加 能力口径确实跨档合并 4 个。
+
+### 七、清掉 `test_boundary` 的既存红（**非本次引入**，卡了三轮提交）
+
+两个用例期望 400、实得 401：`test_unknown_agent_is_rejected` / `test_unlisted_agent_is_rejected`。
+
+**真相不是「闸坏了」，而是「测试从没走到它声称在测的那道闸」。**
+`term.create_session` 的顺序是先 token 后边界：
+
+```
+src/term.py:845   _check_term_token(...)           → 401
+src/term.py:847   profiles.get_profile(...)        → 400 ← 被测的是这道
+```
+
+根因是**两个都正确的设计合在一起让夹具失效**：
+
+- 测试模块头 `os.environ.setdefault("TERM_TOKEN", "unit-test-token-not-production")`
+  —— 看着是标准假凭据，实际是**空操作**；
+- `src/config.py:5` 起 `load_dotenv(env_path, override=True)` **无条件**用仓内 `.env`
+  覆盖 `os.environ`（**有意设计**，有 `tests/test_config_env_isolation.py` 钉它的顺序）；
+- `scripts/run_tier.py` 只 fake `HOME`、**不清** `TERM_TOKEN`；
+
+⇒ 模块执行到那一行时环境里已是 `.env` 的**生产 token**，setdefault 静默无效。
+
+**修法**：改送 `term.TERM_TOKEN` **本身** —— 先过鉴权、再验边界，
+不再依赖环境值 / `.env` / 用例执行顺序。token 闸本身由同类的
+`test_bad_token_is_rejected`（送错 token 期望 401）单独钉，**覆盖面没有减少**。
+
+**双向自证（光看 28 passed 不够）**：
+
+| 输入 | 结果 | 含义 |
+|---|---|---|
+| `ccr`（gateway 无 terminal） | **400**「无终端入口（仅画像白名单可拉起）」 | 正是被测的边界闸 |
+| `no-such-agent-xyz` | **400** 同上 | 未登记 agent 同路径 |
+| `claude`（**有** terminal） | **200**，真起了会话 | 证明 400 不是恒真断言 |
+| 错 token + `ccr` | **401** | 反向自证：闸未被绕过 |
+
+**它为什么昨天还是绿的**：`term.py` / 本测试 / `.env` **自 v0.13.107 起都没变**
+（git log 与 `.env` mtime 均已核对），而 v0.13.112 台账记 L0 为 `1742/0/0`。
+唯一变量是**执行环境** —— 无 `.env` 的干净 runner 上 setdefault 生效即绿。
+⇒ **L0「hermetic」对仓内 `.env` 是假的**（`hermetic-clean` 只 fake HOME）。
+
+### 八、顺带发现，未处置（**报请，不擅自改**）
+
+P0-c 若要读 CCR 账本建模型画像，账本里有两类脏（本轮**只量不改**）：
+
+- **非模型 ID 224 条 / 37583（0.60%）**：`unknown` 220、`gpt-9-no-such-model-e2e-20260923` 3
+  （后者是 09-23 一次 e2e 测试故意造的假 ID）、`default` 1。
+- **同一模型多种前缀写法，聚合会被拆散**：`nemotron-3-ultra-550b-a55b` 有 **8 种**写法、
+  `minimax-m3` 有 **4 种**（`anthropic/open_router/…` / `openrouter/…` / 裸名混存）。
+  按 `model` 直接 GROUP BY 会把同一个模型拆成好几行。
+
+两者都会直接污染 P0-c 的「模型能力」统计口径。**账本是生命线资产（只读打开），
+规范化应在 agenthub 侧读的时候做，不改账本** —— 但具体口径需你裁定。
+
+
+---
+
 ## v0.13.113 — P0-1 收尾三项：D5 轨迹行 schema + D13 版本推进 + D16 badcase 回写
 
 > 接 `v0.13.112`。三件都是让闭环**可比、可追溯**的地基，不是新功能。

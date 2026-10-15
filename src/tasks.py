@@ -63,6 +63,11 @@ _TASK_COLUMNS = (
     ("budget_tokens", "INTEGER"),                          # 单任务 token 预算
     ("spent_ms", "INTEGER"),                               # 实测耗时
     ("spent_tokens", "INTEGER"),                           # 实测 token
+    # P0-a：实发模型（取 adapter 回包的 data.model，不是我们请求的值 —— 上游可能改写）
+    ("model", "TEXT"),
+    # P0-b：验收裁决。三态照 verifier.STATUS_*；NULL = 未走到验收这一步。
+    ("verdict", "TEXT"),
+    ("verify_reason", "TEXT"),
 )
 
 
@@ -94,6 +99,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     output TEXT,
     error TEXT,
     verify_kind TEXT NOT NULL DEFAULT 'nonempty',  -- 产物由哪个验证器判（P0-3）
+    -- P0-a：把「任务 → Agent → 模型 → token」变成可 JOIN 的记录。
+    -- 数据本来就在 adapter 返回里（openai_compat.py 返回 model+usage），此前被丢弃。
+    model TEXT,                                  -- 实发模型（上游回包，非我方请求值）
+    -- P0-b：验收裁决落库。verdict 三态照 verifier.STATUS_*，
+    -- NULL = 未走到验收（等待/预算/自称失败/超时）—— 与 'fail' 语义不同，不可混同。
+    verdict TEXT,
+    verify_reason TEXT,
     started_at TEXT,
     finished_at TEXT,
     duration_ms INTEGER,
@@ -374,12 +386,16 @@ async def _run_task(run_id: str, row: dict):
             timeout=TASK_TIMEOUT_S)
         dur = int((asyncio.get_event_loop().time() - t0) * 1000)
         spent_tokens = int(((result.get("usage") or {}).get("total_tokens")) or 0)
+        # P0-a：实发模型。取 **adapter 回包** 的 model 而非请求值 —— 上游可能改写，
+        # 记请求值会把「我们以为用了谁」当成「实际用了谁」，正好毁掉归因的意义。
+        # 回包缺 model 时留 NULL，不拿请求值兜底（那是猜测，不是观测）。
+        used_model = result.get("model") or None
         # ① 等待态：执行者说「卡在等人/等批」⇒ 让出执行资源，不占槽、不算终态。
         waiting = result.get("waiting")
         if waiting in PARKED_STATUSES:
-            db.execute("UPDATE tasks SET status=?,spent_ms=?,spent_tokens=?,updated_at=?"
+            db.execute("UPDATE tasks SET status=?,spent_ms=?,spent_tokens=?,model=?,updated_at=?"
                        " WHERE run_id=? AND task_id=?",
-                       (waiting, dur, spent_tokens, _now(), run_id, row["task_id"]))
+                       (waiting, dur, spent_tokens, used_model, _now(), run_id, row["task_id"]))
             db.log_profile_event("task_exec", row["agent_id"], "parked", dur,
                                  trace_id=row["trace_id"],
                                  detail={"task": row["task_id"], "waiting": waiting})
@@ -388,9 +404,9 @@ async def _run_task(run_id: str, row: dict):
         over = budget_exceeded(row, dur, spent_tokens)
         if over:
             db.execute("UPDATE tasks SET status='failed',error=?,spent_ms=?,spent_tokens=?,"
-                       "finished_at=?,updated_at=? WHERE run_id=? AND task_id=?",
-                       ("预算耗尽: " + over, dur, spent_tokens, _now(), _now(),
-                        run_id, row["task_id"]))
+                       "model=?,finished_at=?,updated_at=? WHERE run_id=? AND task_id=?",
+                       ("预算耗尽: " + over, dur, spent_tokens, used_model,
+                        _now(), _now(), run_id, row["task_id"]))
             db.log_profile_event("task_exec", row["agent_id"], "fail", dur,
                                  trace_id=row["trace_id"],
                                  detail={"task": row["task_id"], "budget": over})
@@ -399,8 +415,10 @@ async def _run_task(run_id: str, row: dict):
         if not result.get("success"):
             err = (result.get("error") or "unknown")[:500]
             db.execute("UPDATE tasks SET status='failed',error=?,duration_ms=?,spent_ms=?,"
-                       "spent_tokens=?,finished_at=?,updated_at=? WHERE run_id=? AND task_id=?",
-                       (err, dur, dur, spent_tokens, _now(), _now(), run_id, row["task_id"]))
+                       "spent_tokens=?,model=?,finished_at=?,updated_at=?"
+                       " WHERE run_id=? AND task_id=?",
+                       (err, dur, dur, spent_tokens, used_model, _now(), _now(),
+                        run_id, row["task_id"]))
             db.log_profile_event("task_exec", row["agent_id"], "fail", dur,
                                  trace_id=row["trace_id"], detail={"task": row["task_id"]})
             return
@@ -413,28 +431,39 @@ async def _run_task(run_id: str, row: dict):
                                   expect=row.get("verify_expect"))
         if verdict["status"] == verifier.STATUS_PASS:
             db.execute("UPDATE tasks SET status='success',output=?,duration_ms=?,spent_ms=?,"
-                       "spent_tokens=?,finished_at=?,updated_at=?"
+                       "spent_tokens=?,model=?,verdict=?,verify_reason=?,"
+                       "finished_at=?,updated_at=?"
                        " WHERE run_id=? AND task_id=?",
                        (str(result.get("response") or "")[:20000], dur, dur, spent_tokens,
+                        used_model, verdict["status"], None,
                         _now(), _now(), run_id, row["task_id"]))
             db.log_profile_event("task_exec", row["agent_id"], "success", dur,
                                  trace_id=row["trace_id"],
-                                 detail={"task": row["task_id"], "verify": kind})
+                                 detail={"task": row["task_id"], "verify": kind,
+                                         "model": used_model})
         else:
             gaps = "; ".join("%s: %s" % (g["id"], g["detail"]) for g in verdict["gaps"])
             err = ("verifier %s (%s): %s" % (verdict["status"], kind, gaps))[:500]
             db.execute("UPDATE tasks SET status='failed',error=?,duration_ms=?,spent_ms=?,"
-                       "spent_tokens=?,finished_at=?,updated_at=?"
+                       "spent_tokens=?,model=?,verdict=?,verify_reason=?,"
+                       "finished_at=?,updated_at=?"
                        " WHERE run_id=? AND task_id=?",
-                       (err, dur, dur, spent_tokens, _now(), _now(), run_id, row["task_id"]))
+                       (err, dur, dur, spent_tokens, used_model, verdict["status"], gaps[:500],
+                        _now(), _now(), run_id, row["task_id"]))
             db.log_profile_event("task_exec", row["agent_id"], "fail", dur,
                                  trace_id=row["trace_id"],
                                  detail={"task": row["task_id"], "verify": kind,
-                                         "verify_status": verdict["status"]})
+                                         "verify_status": verdict["status"],
+                                         "model": used_model})
     except asyncio.TimeoutError:
-        db.execute("UPDATE tasks SET status='failed',error='超时熔断 %ds',finished_at=?,"
-                   "updated_at=? WHERE run_id=? AND task_id=?",
-                   (TASK_TIMEOUT_S, _now(), _now(), run_id, row["task_id"]))
+        # 2026-10-15 P0-a 取证时发现既存缺陷（非本次引入）：原句把 `'超时熔断 %ds'`
+        # 写成字面量却按 5 个参数传（SQL 只有 4 个占位符）⇒ sqlite3.ProgrammingError
+        # 在**超时这个异常处理器内部**抛出，任务永远停在 running，且异常冒泡进
+        # `_execute_run`。改成正常绑定，顺带把 model 一起记上。
+        db.execute("UPDATE tasks SET status='failed',error=?,finished_at=?,updated_at=?"
+                   " WHERE run_id=? AND task_id=?",
+                   ("超时熔断 %ds" % TASK_TIMEOUT_S, _now(), _now(),
+                    run_id, row["task_id"]))
         db.log_profile_event("task_exec", row["agent_id"], "fail", TASK_TIMEOUT_S * 1000,
                              trace_id=row["trace_id"], detail={"task": row["task_id"], "timeout": True})
     except Exception as e:  # noqa: BLE001

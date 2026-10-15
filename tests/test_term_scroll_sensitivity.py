@@ -238,7 +238,18 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.113"
+    CURRENT_VERSION = "0.13.114"
+
+    #: v0.13.114（P0-a + P0-b）：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是两条不可退让的口径：**取 adapter 回包值而非请求值**（否则归因自欺）、
+    #: **NULL 严格区别于 'fail'**（否则失败率被虚增）。
+    VERSION_ROOT_CAUSES["0.13.114"] = (
+        "adapter 回包值", "NULL", "verdict", "verify_reason",
+        "insufficient", "total_tokens", "超时",
+        "outputguard", "标签型", "封闭枚举", "audit_output_cleanliness",
+        "ledgernorm", "网关前缀", "厂商前缀", "只读生命线资产", "协议形状",
+        "setdefault", "空操作", "override=True", "先过鉴权", "再验边界",
+    )
 
     #: v0.13.113（P0-1 收尾三项）：关键词取自版本注释里**实际写下的字句**。
     #: D5 轨迹 schema / D13 版本推进与陈旧判定 / D16 badcase 回写。

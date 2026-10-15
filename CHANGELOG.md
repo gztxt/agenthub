@@ -1,3 +1,53 @@
+## v0.13.107 — P0-5 修正：label 按 kind 取词 + 「覆盖全路径」由绕过面机械导出
+
+> 触发：用户 2026-10-15 对 P0-5 报告的两项遗留逐条裁定（均未擅动项）：
+> ① 把 label 按 kind 改（如「受闸」）；② 修「覆盖全路径」仍是判断、不是断言。
+
+### 一、label 按 kind 取词：`exec` 不得冒充「只读」
+
+`enforced_covered` 原先一律挂 `label="只读"`。但终端型 agent 的强制边界是 `exec`
+（拉起进程走唯一受闸入口），**不是**「文件只读」⇒ 对 coding agent 用词过强。现：
+
+| kind | enforced_covered 的 label |
+|---|---|
+| `config_write` | **只读** |
+| `exec` | **受闸** |
+| （未登记 kind） | 受控 |
+| 任何非强制格子 | 未观察到写操作 |
+
+### 二、`covered` / `fail_closed` 从手填布尔改成机械导出
+
+旧登记表写 `{"covered": True, "fail_closed": True}` —— 那正是 P0-5 要治的形态
+（「一句话自称覆盖」）。现改为逐条枚举**绕过面清单**：
+
+```python
+NEGATIVE_PROOFS["exec"]["surface"] = [
+    {"id": "agent_without_terminal_entry", "test": "tests/…::…::test_unlisted_agent_is_rejected", …},
+    {"id": "unknown_agent", …}, {"id": "bad_token", …},
+]
+```
+
+`derive_coverage(kind)` 机械导出：
+
+```
+covered     = 绕过面清单非空 且 每条路径的测试节点 AST 解析得到
+fail_closed = fail_closed_by 指向的节点解析得到
+```
+
+所以「覆盖全路径」从**手填布尔**变成**对已枚举绕过面的断言**：清单空 / 任一节点缺失 ⇒
+自动不算 covered，一律降级。**枚举本身是否完整仍是人的判断**，但至少不能再一句话自称，
+必须逐条列出、每条可对账；且绕过面 id 集合有**冻结钉**，静默增删即红。
+
+### 三、闸门
+
+`tests/test_boundary.py` **28 例 + 14 subtests**（旧实现下先红 16 例，实阅 RED→GREEN）。
+新增/改判的关键用例：`test_exec_full_surface_says_gated_not_readonly`、
+`test_missing_surface_node_downgrades`、`test_empty_surface_is_not_covered`、
+`test_missing_fail_closed_node_downgrades`、`test_registry_has_no_hand_set_covered_boolean`、
+`test_surface_ids_are_frozen`。
+
+---
+
 ## v0.13.106 — P0-5 纳管边界四维：强制/观测 × 覆盖/未覆盖，只读须负向测试兑换
 
 > 触发：P0 立项施工书排序第三项（`P0-2 → P0-4 → **P0-5** → P0-3 → P0-1`，逐项串行）。

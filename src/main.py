@@ -88,7 +88,20 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.106"  # P0-5 纳管边界四维：强制/观测 × 覆盖/未覆盖，只读须负向测试兑换
+VERSION = "0.13.107"  # P0-5 修正：label 按 kind 取词 + 覆盖由「绕过面清单」机械导出
+#   v0.13.107：P0-5 两处**改判**（用户 2026-10-15 裁定，均指向「一句话自称」的余留形态）：
+#   ① **label 按 kind 取词**：原先 `enforced_covered` 一律叫「只读」，但 `exec` 边界
+#      讲的是「拉起进程走唯一受闸入口」，不是「文件只读」⇒ 对终端型 agent 用词过强。
+#      现改为 `LABEL_BY_KIND = {"config_write": "只读", "exec": "受闸"}`，未登记 kind
+#      保守叫「受控」；纯观测仍只一个说法「未观察到写操作」。
+#   ② **`covered` / `fail_closed` 不再手填布尔**：旧登记表写 `{"covered": True}` 正
+#      是 P0-5 要治的形态。现改为逐条枚举**绕过面清单**（每条挂一个证明「该路径被拒」
+#      的测试节点）+ `fail_closed_by`，由 `derive_coverage()` 机械导出：
+#      `covered` = 清单非空 **且** 每条路径的 AST 节点都真实存在；
+#      `fail_closed` = `fail_closed_by` 节点存在。删/改清单或节点 ⇒ 自动不算覆盖。
+#      并加冻结钉钉住绕过面 id 集合，防静默缩水（“覆盖全路径”从手填布尔→对已枚举
+#      绕过面的断言；枚举是否完整仍是人判，但必须逐条列出、逐条可对账）。
+#   ③ 闸门 tests/test_boundary.py 28 例 + 14 subtests（含 RED→GREEN 实阅）。
 #   v0.13.106：P0 施工排序第三项（P0-5），治本仓旧账「纳管 ≠ 可用 / 只读未证」
 #   （09-23 opencode 首扫假阴性同族）。手册 C12 给的判据是：一个边界只有**同时**
 #   满足 ①覆盖全部绕过路径 ②fail-closed（判不了就拒）③有负向测试证明绕过被拒，

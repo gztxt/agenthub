@@ -238,7 +238,15 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.106"
+    CURRENT_VERSION = "0.13.107"
+
+    #: v0.13.107（P0-5 修正）：关键词取自版本注释里**实际写下的字句**。
+    #: ① label 按 kind 取词（exec 不得冒充只读）；② `covered`/`fail_closed` 由绕过面
+    #: 机械导出，不再手填布尔。
+    VERSION_ROOT_CAUSES["0.13.107"] = (
+        "label 按 kind", "受闸", "绕过面清单", "derive_coverage",
+        "手填布尔", "覆盖全路径",
+    )
 
     #: v0.13.106（P0-5）：关键词取自版本注释里**实际写下的字句**。闸门意图是
     #: 「注释掉了根因就红」——这条治的是「纳管 ≠ 可用 / 只读未证」：

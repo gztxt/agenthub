@@ -38,16 +38,27 @@ import verifier                             # noqa: E402
 DEFAULT_MODEL = "openrouter/free"
 DEFAULT_SPLIT = "holdout"
 
-#: 评估题面模板。**明确不告诉被评对象「你在被评估」**，避免它改行为去讨好评审。
-EVAL_PROMPT = """下面是某次执行任务的描述（来自真实执行轨迹的摘要）。请直接给出你的处理结论\
-（中文，200 字以内，可操作）。不要解释你在被评估。 
+#: 评估题面模板（**按判据 kind 选**，否则题面与判据对不上 —— 问「给结论」却用 JSON 判，
+#: 那不是模型的错）。**明确不告诉被评对象「你在被评估」**，避免它改行为去讨好评审。
+EVAL_PROMPTS = {
+    "nonempty": """下面是某次执行任务的描述（来自真实执行轨迹的摘要）。请直接给出你的处理结论\
+（中文，200 字以内，可操作）。不要解释你在被评估。
 
 任务：%s
-"""
+""",
+    # 可证伪的判据：应用需要**结构化**产物，不依格式输出的就是不合格。
+    "json_array": """下面是某次执行任务的描述（来自真实执行轨迹的摘要）。请把你的处理步骤\
+用 **JSON 数组**回复（每个元素是一个字符串，最多 5 项），**只输出 JSON 数组本身**，\
+不要 Markdown 围栏、不要任何解释文字。
+
+任务：%s
+""",
+}
 
 
-def build_prompt(item: dict) -> str:
-    return EVAL_PROMPT % (item.get("input") or "")
+def build_prompt(item: dict, kind: str = "nonempty") -> str:
+    tmpl = EVAL_PROMPTS.get(kind) or EVAL_PROMPTS["nonempty"]
+    return tmpl % (item.get("input") or "")
 
 
 def verdict_for(answer, kind: str = "nonempty"):
@@ -67,7 +78,7 @@ async def evaluate_items(items: list, *, chat_fn, model: str, kind: str = "nonem
     out = []
     todo = items[:int(limit)] if limit else items
     for it in todo:
-        ans = await chat_fn(model, build_prompt(it))
+        ans = await chat_fn(model, build_prompt(it, kind))
         st, score = verdict_for(ans, kind)
         out.append({"item_id": it["id"], "verdict": st, "score": score,
                     "answer": (ans or "")[:500]})

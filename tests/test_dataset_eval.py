@@ -62,6 +62,13 @@ class TestVerdictMapping(unittest.TestCase):
     def test_nonempty_answer_passes(self):
         self.assertEqual("pass", de.verdict_for("ok")[0])
 
+    def test_prompt_follows_kind(self):
+        """题面与判据必须对得上：问「给结论」而判「JSON」是把模型当替罪羊。"""
+        item = {"input": "do X"}
+        self.assertIn("JSON 数组", de.build_prompt(item, "json_array"))
+        self.assertNotIn("JSON 数组", de.build_prompt(item, "nonempty"))
+        self.assertIn("do X", de.build_prompt(item, "json_array"))
+
     def test_empty_answer_is_not_pass(self):
         v, score = de.verdict_for("")
         self.assertNotEqual("pass", v)
@@ -122,6 +129,17 @@ class TestRunEval(_Base):
         asyncio.run(de.run_eval(ds, chat_fn=chat, limit=1))
         untouched = [r for r in dataset.list_items(ds, "holdout") if r["last_verdict"] is None]
         self.assertEqual(2, len(untouched))
+
+    def test_json_array_kind_fails_prose_answers(self):
+        """可证伪的判据：要求 JSON 数组时，散文式回答应落 badcase。"""
+        import asyncio
+        ds = self._fixture(2)
+
+        async def chat(model, prompt):
+            return "我建议先看日志，然后重启服务。"        # 非 JSON
+        out = asyncio.run(de.run_eval(ds, chat_fn=chat, limit=2, kind="json_array"))
+        self.assertEqual(0, out["passed"])
+        self.assertEqual(2, len(dataset.badcases(ds)))
 
     def test_non_free_model_rejected(self):
         import asyncio

@@ -28,6 +28,20 @@ import db
 
 SPLITS = ("train", "holdout")
 
+#: 评估研判三态（与 P0-4 `evidence.py` / P0-3 `verifier.py` 同口径）
+EVAL_VERDICTS = ("pass", "fail", "insufficient")
+
+#: D5：轨迹行的**统一 schema 版本**。落库前必须过 `normalize_trajectory()`。
+TRAJECTORY_SCHEMA = "trajectory/1"
+
+#: D16：回写到 `dataset_items` 的四列（幂等 ALTER 补建；旧行 NULL = 未判，不回填）
+_ITEM_COLUMNS = (
+    ("last_eval_id", "TEXT"),
+    ("last_verdict", "TEXT"),
+    ("last_score", "REAL"),
+    ("last_eval_at", "TEXT"),
+)
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS datasets (
     id TEXT PRIMARY KEY,
@@ -69,6 +83,14 @@ CREATE TABLE IF NOT EXISTS experiences (
 );
 CREATE INDEX IF NOT EXISTS idx_items_ds_split ON dataset_items(dataset_id, split);
 CREATE INDEX IF NOT EXISTS idx_experiences_live ON experiences(retired_at);
+-- D13：版本推进的**只读快照**（每次 bump 记一行；eval_runs.dataset_version 引用它）
+CREATE TABLE IF NOT EXISTS dataset_versions (
+    dataset_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    note TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (dataset_id, version)
+);
 """
 
 
@@ -78,6 +100,63 @@ def _now() -> str:
 
 def ensure_schema() -> None:
     db.execute_script(SCHEMA)
+    # D16：存量 `dataset_items` 幂等补列（不动既有行；旧行 last_verdict 保持 NULL=未判）。
+    have = {r["name"] for r in db.query("PRAGMA table_info(dataset_items)")}
+    for col, decl in _ITEM_COLUMNS:
+        if col not in have:
+            db.execute("ALTER TABLE dataset_items ADD COLUMN %s %s" % (col, decl))
+
+
+# ── D5：轨迹行 schema ────────────────────────────────────────────────
+def normalize_trajectory(traj: dict) -> dict:
+    """把轨迹折成**统一结构**（补 `seq` 与 `metrics`）。幂等：已规范的直接返回。
+
+    D5 的痛点不是「没存轨迹」，而是「每条轨迹形状各不同」⇒ 追得到结果追不到原因。
+    """
+    if not isinstance(traj, dict):
+        raise ValueError("轨迹必须是对象")
+    if traj.get("schema") == TRAJECTORY_SCHEMA and isinstance(traj.get("steps"), list):
+        return traj
+    events = traj.get("events") or []
+    steps, errors, total = [], 0, 0
+    for i, e in enumerate(events):
+        e = e or {}
+        status = e.get("status")
+        dur = e.get("duration_ms")
+        steps.append({"seq": i, "event": e.get("event"), "status": status,
+                      "duration_ms": dur, "detail": e.get("detail"),
+                      "at": e.get("created_at") or e.get("at")})
+        if status not in (None, "", "success", "ok"):
+            errors += 1
+        if isinstance(dur, int):
+            total += dur
+    return {"schema": TRAJECTORY_SCHEMA,
+            "session_id": traj.get("session_id"), "source": traj.get("source"),
+            "cwd": traj.get("cwd"), "steps": steps,
+            "metrics": {"steps": len(steps), "errors": errors, "total_ms": total},
+            "source_ref": traj.get("source_ref") or ("trajectory:%s" % traj.get("session_id"))}
+
+
+def validate_trajectory(d: dict) -> List[str]:
+    """返回**缺口清单**（空 = 合格）。不抛异常 —— 调用方决定是拒还是记。"""
+    if not isinstance(d, dict):
+        return ["轨迹不是对象"]
+    gaps = []
+    if d.get("schema") != TRAJECTORY_SCHEMA:
+        gaps.append("schema 不是 %s" % TRAJECTORY_SCHEMA)
+    steps = d.get("steps")
+    if not isinstance(steps, list) or not steps:
+        gaps.append("steps 缺失或为空")
+    else:
+        for i, s in enumerate(steps):
+            if not isinstance(s, dict) or s.get("seq") != i:
+                gaps.append("steps[%d].seq 不是 %d" % (i, i))
+                break
+    return gaps
+
+
+def dumps_trajectory(traj: dict) -> str:
+    return json.dumps(normalize_trajectory(traj), ensure_ascii=False, sort_keys=True)
 
 
 def grain_hash(grain: str, key_fields: dict) -> str:
@@ -224,6 +303,70 @@ def record_experience(kind: str, *, situation: str = "", action: str = "",
         (eid, kind, situation, action, precondition,
          json.dumps(list(source_trace_ids or []), ensure_ascii=False), _now()))
     return eid
+
+
+def bump_version(dataset_id: str, note: Optional[str] = None) -> int:
+    """D13：推进数据集版本（**只增不减**）并记一行快照。返回新版本号。"""
+    ds = get_dataset(dataset_id)
+    if ds is None:
+        raise KeyError("dataset 不存在: %s" % dataset_id)
+    new_v = int(ds["version"]) + 1
+    db.execute("UPDATE datasets SET version=? WHERE id=?", (new_v, dataset_id))
+    db.execute("INSERT INTO dataset_versions(dataset_id,version,note,created_at)"
+               " VALUES(?,?,?,?)", (dataset_id, new_v, note, _now()))
+    return new_v
+
+
+def list_versions(dataset_id: str) -> List[dict]:
+    return db.query("SELECT * FROM dataset_versions WHERE dataset_id=? ORDER BY version",
+                    (dataset_id,))
+
+
+def eval_is_stale(eval_id: str) -> bool:
+    """评估是否陈旧（D13）：跑完才发现题集被改过 ⇒ 两个分数不可比。
+
+    拿不到评估行 ⇒ 也回 True（判不了按陈旧算 —— 与 P0-4「判不了不放行」同向）。
+    """
+    ev = get_eval_run(eval_id)
+    if not ev:
+        return True
+    ds = get_dataset(ev["dataset_id"])
+    if not ds:
+        return True
+    return int(ev["dataset_version"]) != int(ds["version"])
+
+
+def record_eval_result(eval_id: str, item_id: int, *, verdict: str,
+                       score: Optional[float] = None) -> None:
+    """D16：把评估结果**回写**到 `dataset_item`（badcase 池从库里长出来）。
+
+    三条硬闸：verdict 必须是 `EVAL_VERDICTS`；题必须存在且属于该评估的数据集；
+    评估**不得陈旧**（版本变了就不许回写 —— 那条结果对不上题目集）。
+    """
+    if verdict not in EVAL_VERDICTS:
+        raise ValueError("verdict 必须是 %s，得到 %r" % (EVAL_VERDICTS, verdict))
+    ev = get_eval_run(eval_id)
+    if ev is None:
+        raise KeyError("eval_run 不存在: %s" % eval_id)
+    item = get_item(item_id)
+    if item is None or item.get("dataset_id") != ev["dataset_id"]:
+        raise KeyError("样本 %r 不属于数据集 %s" % (item_id, ev["dataset_id"]))
+    dataset_id = ev["dataset_id"]
+    # 这一行必须在**写之前**判：否则陈旧结果会先污染再被纠正
+    if eval_is_stale(eval_id):
+        raise ValueError("评估 %s 已陈旧（版本已变）—— 结果不可回写" % eval_id)
+    db.execute("UPDATE dataset_items SET last_eval_id=?,last_verdict=?,last_score=?,"
+               "last_eval_at=?,updated_at=? WHERE id=?",
+               (eval_id, verdict, score, _now(), _now(), item_id))
+    db.execute("UPDATE eval_runs SET status=? WHERE id=?", ("scored", eval_id))
+
+
+def badcases(dataset_id: str) -> List[dict]:
+    """badcase 池 = 回写过且 **verdict != pass** 的题（含 insufficient：判不了也是候选）。
+    没跑过的（`last_verdict IS NULL`）不算 —— 不能把「没测」当成「测坏了」。"""
+    return db.query(
+        "SELECT * FROM dataset_items WHERE dataset_id=? AND last_verdict IS NOT NULL "
+        "AND last_verdict != 'pass' ORDER BY id", (dataset_id,))
 
 
 def get_experience(exp_id: str) -> Optional[dict]:

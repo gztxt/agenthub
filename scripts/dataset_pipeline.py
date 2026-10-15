@@ -110,7 +110,7 @@ def build_items(trajectories: list, spec: dict = None) -> list:
             "grain_hash": gh,
             "input": _goal(t)[:int(spec.get("goal_chars") or 200)],
             "output": "",                      # 模型在最后一步才填
-            "trajectory": json.dumps(t, ensure_ascii=False, sort_keys=True),
+            "trajectory": dataset.dumps_trajectory(t),      # D5：统一 schema（trajectory/1）
             "trace_id": t.get("session_id"),
             "session_id": t.get("session_id"),
             "source_ref": "trajectory:%s" % t.get("session_id"),

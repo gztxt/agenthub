@@ -1,3 +1,44 @@
+## v0.13.113 — P0-1 收尾三项：D5 轨迹行 schema + D13 版本推进 + D16 badcase 回写
+
+> 接 `v0.13.112`。三件都是让闭环**可比、可追溯**的地基，不是新功能。
+
+### 一、D5 轨迹行 schema
+
+痛点不是「没存轨迹」，而是「每条轨迹形状各不同」⇒ **追得到结果、追不到原因**（D4）。
+
+- `TRAJECTORY_SCHEMA = "trajectory/1"`；
+- `normalize_trajectory()`：把 `events` 折成统一的 `steps[{seq,event,status,duration_ms,detail,at}]`
+  并算 `metrics{steps,errors,total_ms}`，**幂等**；
+- `validate_trajectory()`：回**缺口清单**（空=合格），不抛异常；
+- 管线 `build_items()` 改走 `dumps_trajectory()` ⇒ 落库的每条轨迹都已带 schema 标签。
+
+### 二、D13 版本推进 + 陈旧判定
+
+- 新表 `dataset_versions(dataset_id,version,note,created_at)`（**只增不减**）；
+- `bump_version()` / `list_versions()`；
+- `eval_is_stale(eval_id)`：拿当前 `datasets.version` 与评估钉的 `dataset_version` 比 ——
+  **跑完才发现题集被改过**当场判陈旧，而不是拿两个不可比的分数去比。判不了（评估行缺失）
+  也回 `True`（与 P0-4「判不了不放行」同向）。
+
+### 三、D16 badcase 回写
+
+- `dataset_items` 幂等 ALTER 补 `last_eval_id/last_verdict/last_score/last_eval_at`
+  （**旧行 NULL = 未判，不回填**）；
+- `record_eval_result(eval_id,item_id,verdict,score)` 三道硬闸：verdict ∈ `pass|fail|insufficient`、
+  题必须存在且属于该评估的数据集、**陈旧评估不许回写**（否则污染只在事后被发现）；
+- `badcases()` = 回写过且 `verdict != pass`（含 `insufficient`）。**没跑过的不算** ——
+  不能把「没测」当成「测坏了」。
+
+### 四、路由
+
+只读加 `/api/dataset/{id}/versions`、`/api/dataset/{id}/badcases`。
+
+### 五、闸门
+
+`tests/test_dataset_d5d16.py` **17 例**（含存量表幂等补列、不动既有行）。
+
+---
+
 ## v0.13.112 — P0-1 D18：经验库接入记忆联邦（只召回活跃条）
 
 > 接 `v0.13.111`。经验库若只躺在 db 里，就不是「记忆」——本批把它接成联邦的一路源。

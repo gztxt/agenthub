@@ -47,6 +47,25 @@ async def dataset_train(dataset_id: str):
             "holds_no_holdout": True}
 
 
+@router.get("/api/dataset/{dataset_id}/versions")
+async def dataset_versions(dataset_id: str):
+    """版本推进记录（D13）：每次 bump 一行（只增不减）。"""
+    if dataset.get_dataset(dataset_id) is None:
+        raise HTTPException(404, "dataset not found")
+    rows = dataset.list_versions(dataset_id)
+    return {"dataset_id": dataset_id, "versions": rows, "count": len(rows),
+            "current": dataset.get_dataset(dataset_id)["version"]}
+
+
+@router.get("/api/dataset/{dataset_id}/badcases")
+async def dataset_badcases(dataset_id: str):
+    """badcase 池（D16）：回写过且 verdict != pass 的题（没跑过的不算）。"""
+    if dataset.get_dataset(dataset_id) is None:
+        raise HTTPException(404, "dataset not found")
+    rows = dataset.badcases(dataset_id)
+    return {"dataset_id": dataset_id, "badcases": rows, "count": len(rows)}
+
+
 @router.get("/api/experience/list")
 async def experience_list(active_only: bool = Query(default=True)):
     rows = dataset.list_experiences(active_only=active_only)

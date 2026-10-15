@@ -85,6 +85,15 @@ class TestBuildItemsDeterministic(unittest.TestCase):
         for it in dp.build_items(TRAJS, SPEC):
             self.assertEqual("", it["output"])
 
+    def test_build_items_emits_schema_tagged_trajectory(self):
+        """D5：管线产出的轨迹必须已是统一 schema（不是原始 events 堆）。"""
+        import json
+        import dataset
+        it = dp.build_items(TRAJS, SPEC)[0]
+        d = json.loads(it["trajectory"])
+        self.assertEqual(dataset.TRAJECTORY_SCHEMA, d["schema"])
+        self.assertEqual([], dataset.validate_trajectory(d))
+
     def test_item_carries_explicit_field_mapping(self):
         it = dp.build_items(TRAJS, SPEC)[0]
         for k in ("input", "output", "trajectory", "trace_id", "session_id",

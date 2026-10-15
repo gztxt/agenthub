@@ -90,7 +90,19 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.112"  # P0-1 D18：经验库接入记忆联邦（只召回活跃条）
+VERSION = "0.13.113"  # P0-1 收尾三项：D5 轨迹行 schema + D13 版本推进 + D16 badcase 回写
+#   v0.13.113：接 D18。三件都是「让闭环**可比、可追溯**」，不是新功能。
+#   ① **D5 轨迹行 schema**：新增 `TRAJECTORY_SCHEMA="trajectory/1"` +
+#      `normalize_trajectory()`（补 `seq`/`metrics`，幂等）+ `validate_trajectory()`
+#      （回缺口清单，不抛）。管线 `build_items()` 改用它落轨迹 ⇒ 每条轨迹形状一致。
+#   ② **D13 版本推进**：新增 `dataset_versions` 快照表 + `bump_version()`/`list_versions()`；
+#      `eval_is_stale()` 把「跑完才发现题集被改过」当场判陈旧（拿不到评估行也回 True）。
+#   ③ **D16 badcase 回写**：`dataset_items` 幂等 ALTER 补 `last_eval_id/last_verdict/
+#      last_score/last_eval_at`（旧行 NULL=未判，不回填）；`record_eval_result()` 三道硬闸
+#      （verdict 三态、题必须属该数据集、**陈旧评估不许回写**）；`badcases()` = 回写过且
+#      `verdict != pass`（含 insufficient；没跑过的不算）。
+#   ④ 只读路由加 `/api/dataset/{id}/versions`、`/api/dataset/{id}/badcases`。
+#   闸门：tests/test_dataset_d5d16.py（17 例）。
 #   v0.13.112：P0-1 的 **D18**（经验接入记忆联邦）。经验库若只躺在 db 里就不是「记忆」。
 #   ① `memfed.REGISTRY` 新起一路 `experiences`（kind=`hub_sqlite`，weight=0.65，enabled）：
 #      查的是 hub **自己的** agents.db（同进程连接，毫秒级），不是第二份权威副本。

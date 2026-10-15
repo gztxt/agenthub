@@ -238,7 +238,14 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.112"
+    CURRENT_VERSION = "0.13.113"
+
+    #: v0.13.113（P0-1 收尾三项）：关键词取自版本注释里**实际写下的字句**。
+    #: D5 轨迹 schema / D13 版本推进与陈旧判定 / D16 badcase 回写。
+    VERSION_ROOT_CAUSES["0.13.113"] = (
+        "TRAJECTORY_SCHEMA", "trajectory/1", "dataset_versions", "eval_is_stale",
+        "record_eval_result", "badcases",
+    )
 
     #: v0.13.112（D18）：关键词取自版本注释里**实际写下的字句**。
     #: 经验库接入联邦：新 kind hub_sqlite + 只召回活跃条 + 进默认集。

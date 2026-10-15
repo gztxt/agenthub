@@ -10,6 +10,7 @@ kind 语义：
 检测三路合并（任一命中即 running）：/proc 进程正则、systemd user 单元、docker 容器。
 CLI 型 Agent 无进程时按 which/单元存在 → installed（可拉起终端会话）。
 """
+import boundary
 import os
 import re
 import shutil
@@ -342,17 +343,26 @@ AGENT_PROBE: Dict[str, dict] = {
 }
 
 
+def boundary_claims(p: dict) -> Dict[str, dict]:
+    """画像声明的**纳管边界**（P0-5）：有终端入口 ⇒ `exec` 声明为强制，其余只观测。
+
+    声明不等于成立 —— 强制的真伪由 `boundary.NEGATIVE_PROOFS` 里登记的负向测试兑换；
+    换不出负向测试的 enforced 声明会被 `boundary.classify_claims` 自动降级为观测，
+    文字上只能说「未观察到写操作」。这里只做**数据驱动**的声明，不手抄 agent 名单。"""
+    return boundary.claims_for_profile(p)
+
+
 def _enrich(p: dict) -> dict:
-    """把 AGENT_PROBE + CLI_ALIASES 的候选名/探针注入画像（不新增条目，只补字段）"""
+    """把 AGENT_PROBE + CLI_ALIASES 的候选名/探针注入画像（不新增条目，只补字段），
+    并挂上 P0-5 的纳管边界四维（`boundary`）——四维必须**每个画像都有**（含无探针的）。"""
     spec = dict(AGENT_PROBE.get(p.get("id"), {}))
     alias = CLI_ALIASES.get(p.get("id"))
     if alias:
         spec.setdefault("aliases", alias["names"])
-    if not spec:
-        return p
     out = dict(p)
     for k, v in spec.items():
         out.setdefault(k, v)
+    out.setdefault("boundary", boundary.cell_for_profile(out))
     return out
 
 

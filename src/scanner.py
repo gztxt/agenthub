@@ -170,6 +170,16 @@ def scan_cli_installed() -> List[Dict]:
     return installed
 
 
+def add_boundary(prod: Dict) -> Dict:
+    """给扫描产物挂 P0-5 的纳管边界四维（原地补字段并返回同一对象）。
+
+    扫描候选来自 docker/systemd 等第三方服务 —— agenthub 只读探测、**无拦截能力**
+    ⇒ 四维永远是 `observed_*`，文字上只能说「未观察到写操作」，不得写「只读」。"""
+    import boundary
+    prod["boundary"] = boundary.observed_product()
+    return prod
+
+
 def run_scan(auto_register: bool = False, db=None) -> Dict:
     candidates = scan_docker() + scan_systemd()
     # 候选间去重（同名同端口）
@@ -181,6 +191,8 @@ def run_scan(auto_register: bool = False, db=None) -> Dict:
             continue
         seen.add(key)
         deduped.append(c)
+    for c in deduped:                 # 每条候选都带四维（P0-5：纳管边界进契约）
+        add_boundary(c)
     result = {"found": deduped, "added": [], "skipped_existing": [],
               "cli_installed": scan_cli_installed()}
     if auto_register and db is not None:

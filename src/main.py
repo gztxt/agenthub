@@ -88,7 +88,24 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.105"  # P0-4 证据分层：研判三态（confirmed/dismissed/insufficient）可断言
+VERSION = "0.13.106"  # P0-5 纳管边界四维：强制/观测 × 覆盖/未覆盖，只读须负向测试兑换
+#   v0.13.106：P0 施工排序第三项（P0-5），治本仓旧账「纳管 ≠ 可用 / 只读未证」
+#   （09-23 opencode 首扫假阴性同族）。手册 C12 给的判据是：一个边界只有**同时**
+#   满足 ①覆盖全部绕过路径 ②fail-closed（判不了就拒）③有负向测试证明绕过被拒，
+#   才可称**强制边界**；缺任一条 ⇒ 文字上只能写「未观察到写操作」，不得写「只读」。
+#   ① 新增 src/boundary.py：**纳管四维** = 强制/观测 × 覆盖/未覆盖，恰好四个格子
+#      （`enforced_covered` / `enforced_uncovered` / `observed_covered` /
+#      `observed_uncovered`）。核心不变量是**只降不升**：`classify_claims` 把
+#      强制声明折成四维时，唯一升级通道是 `NEGATIVE_PROOFS` —— 一张
+#      「kind → 真实存在的负向测试」登记表；登记表里找不到 ⇒ 自动降级为
+#      observed_uncovered，且只有 `enforced_covered` 才配 `label="只读"`。
+#   ② 接线：`profiles._enrich` 给**每个画像**挂 `boundary`（`profiles.boundary_claims`
+#      数据驱动声明：有 terminal ⇒ exec 声明为强制）；`scanner.add_boundary` 给扫描
+#      产物挂 `observed_product()`（第三方服务只能观测，永不 enforced）；
+#      `discovery.AgentInfo` 增 `boundary` 字段 ⇒ 四维进 `/api/agents` 契约。
+#   ③ tests/test_boundary.py：负向测试登记表的节点用 AST 对账（改名即红）+
+#      绕过路径真被拒（无终端入口 agent ⇒ 400、token 错 ⇒ 401；写闸门缺口令 ⇒
+#      misconfig、错口令 ⇒ deny，**从不放行**）。
 #   v0.13.105：P0 施工排序第二项（P0-4）。要解决的是本仓**反复出事的那一种静默**：
 #   「判不了」在二元口径里没有位置 —— 于是它被读成「没问题」。原话是「禁把 SKIP 当 PASS」，
 #   写在纸上很久，每次都得靠人记得；本批把它做成**可断言的对象**。

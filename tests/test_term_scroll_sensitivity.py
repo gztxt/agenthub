@@ -238,7 +238,17 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.105"
+    CURRENT_VERSION = "0.13.106"
+
+    #: v0.13.106（P0-5）：关键词取自版本注释里**实际写下的字句**。闸门意图是
+    #: 「注释掉了根因就红」——这条治的是「纳管 ≠ 可用 / 只读未证」：
+    #: ① 判据三条（覆盖全部绕过路径 + fail-closed + 负向测试）才配叫**强制边界**；
+    #: ② 唯一升级通道是 `NEGATIVE_PROOFS` 登记表，核心不变式是**只降不升**，
+    #:    降级后只能说「未观察到写操作」。
+    VERSION_ROOT_CAUSES["0.13.106"] = (
+        "纳管四维", "强制边界", "未观察到写操作", "只降不升",
+        "NEGATIVE_PROOFS", "observed_uncovered", "fail-closed",
+    )
 
     #: v0.13.105 的两条根因都要在版本注释里可寻址（该闸门的作用是「注释掉了根因就红」）：
     #: ① 三层链路（原始事实 → 候选信号 → 研判）+ **空证据集不许投票**：

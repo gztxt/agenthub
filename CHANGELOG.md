@@ -1,3 +1,67 @@
+## v0.13.106 — P0-5 纳管边界四维：强制/观测 × 覆盖/未覆盖，只读须负向测试兑换
+
+> 触发：P0 立项施工书排序第三项（`P0-2 → P0-4 → **P0-5** → P0-3 → P0-1`，逐项串行）。
+> 立项书：`docs/AI-AGENT-HANDBOOK-P0-立项施工-20261014.md`。
+
+### 一、缺口：文案里写「只读」零成本，于是「没看见它写」被写成「它写不了」
+
+本仓有一条旧账叫「**纳管 ≠ 可用 / 只读未证**」（09-23 opencode 首扫假阴性同族）。
+它的形状不是代码写错，而是**一句话写得太满**：
+
+| 想说的话 | 实际能说的话 | 差距 |
+|---|---|---|
+| 「这个 agent 是只读的」 | 「我没观察到它写过」 | 前者是**强制边界**，后者是**观测边界** |
+
+手册 C12 给了一条可检验的判据：一个边界只有**同时**满足三条，才配叫**强制边界**——
+① 覆盖全部绕过路径；② **fail-closed**（判不了就拒，绝不放行）；
+③ 有**负向测试**证明绕过路径被拒。缺任何一条 ⇒ 文字上只能写「未观察到写操作」。
+
+### 二、落法：把这句话变成一条**只降不升**的降级链
+
+新增 `src/boundary.py`（叶子模块，不读盘不打网络）：**纳管四维** = 强制/观测 × 覆盖/未覆盖，
+恰好四个格子：
+
+| boundary_class | 含义 | label |
+|---|---|---|
+| `enforced_covered` | 强制且覆盖全路径 | **只读** |
+| `enforced_uncovered` | 强制但覆盖不全 | 未观察到写操作 |
+| `observed_covered` | 纯观测但已知全覆盖 | 未观察到写操作 |
+| `observed_uncovered` | 纯观测且覆盖未知 | 未观察到写操作 |
+
+核心不变式是**只降不升**：`classify_claims` 把 `enforced` 声明折成四维时，唯一升级通道是
+`NEGATIVE_PROOFS` —— 一张「kind → 真实存在的负向测试」登记表。登记表里找不到 ⇒
+自动降级为 `observed_uncovered`；登记了但没同时证明「覆盖全路径」与 `fail-closed` ⇒
+降为 `enforced_uncovered`。**只有 `enforced_covered` 才配 `label="只读"`**。
+聚合一条 agent 的多个边界时取**最弱**那条（一条链的强度 = 最弱环）。
+
+### 三、接线（四维进契约）
+
+- `profiles._enrich` 给**每个画像**挂 `boundary`（含无探针的画像）；`profiles.boundary_claims`
+  数据驱动声明：有 `terminal` ⇒ `exec` 声明为强制，其余（gateway/service/memory/tool）只观测。
+- `scanner.add_boundary` 给扫描产物挂 `observed_product()` —— 第三方服务只能观测、
+  **永不 enforced**（`run_scan` 的 `found` 逐条带上）。
+- `discovery.AgentInfo` 增 `boundary` 字段 ⇒ `to_dict()` 带出，四维字段进 `/api/agents` 契约。
+
+### 四、负向测试（不是读注释，是调被测代码）
+
+`tests/test_boundary.py`（L0 hermetic，零 SKIP）：
+
+- 四维枚举恰好四个（少一维＝有格子被吞；多一维＝非法分类能混进来）、两个契约字符串逐字钉死。
+- `enforced` 抽掉 proof ⇒ 降级且 label 不含「只读」；partial proof ⇒ 停在 `enforced_uncovered`。
+- `NEGATIVE_PROOFS` 的每个节点用 **AST 对账**（`Class::method` 改名/删除即红）。
+- 绕过路径真被拒：
+  - exec 边界：无终端入口的 agent（`ccr`）与未知 agent ⇒ `term.create_session` **400**；
+    token 错 ⇒ **401**。
+  - config_write 边界：未配口令 ⇒ `writeauth.decide` **misconfig**；错口令 ⇒ **deny**；
+    空口令不算口令（**从不放行**）。
+
+### 五、验收
+
+- `tests/test_boundary.py` **19 例 + 2 subtests 全绿**（`venv/bin/python -m pytest tests/test_boundary.py`）。
+- 全量闸门与生产取证见 `PENDING-TASKS.md` / 会话快照；本轮**未重启生产**（不打断在跑会话）。
+
+---
+
 ## v0.13.105 — P0-4 证据分层：研判三态（`confirmed` / `dismissed` / `insufficient`）可断言
 
 > 触发：P0 立项施工书排序第二项（`P0-2 → **P0-4** → P0-5 → P0-3 → P0-1`，逐项串行）。

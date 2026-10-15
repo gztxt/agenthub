@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 
 import aiohttp
 
+import boundary
 import profiles
 import vitals
 
@@ -102,6 +103,9 @@ class AgentInfo:
     rt_state: str = ""
     rt_note: Optional[str] = None
     rt_model: Optional[str] = None
+    # ── 纳管边界四维（P0-5，2026-10-15）：强制/观测 × 覆盖/未覆盖。
+    # `label` 只可能是「只读」或「未观察到写操作」；后者是默认值 —— 不写就降级。
+    boundary: Optional[dict] = None
 
     def to_dict(self):
         return asdict(self)
@@ -175,7 +179,8 @@ class AgentDiscovery:
                 verdict_confidence=vv["confidence"], verdict_at=vv["at"],
                 attested=vv["attested"],
                 rt_state=vv.get("rt_state") or "", rt_note=vv.get("rt_note"),
-                rt_model=vv.get("rt_model")))
+                rt_model=vv.get("rt_model"),
+                boundary=p.get("boundary") or boundary.cell_for_profile(p)))
         # 动态注册/扫描项（一律 service 类，仅快捷方式）
         for c in self._custom_agents():
             port = c.get("port")
@@ -186,6 +191,7 @@ class AgentDiscovery:
                 endpoint=c.get("endpoint") or "", port=port, auth_required=False,
                 description=c.get("description") or "", last_seen=self._iso_now(),
                 builtin=False, working_dir=c.get("working_dir"),
+                boundary=boundary.observed_product(),
                 entries=([{"type": "open", "label": "打开面板", "url": c["endpoint"]}]
                          if c.get("endpoint") else []) + [{"type": "detail", "label": "详情"}]))
         for a in agents:

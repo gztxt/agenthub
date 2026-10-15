@@ -182,5 +182,30 @@ class TestExperience(_Base):
         self.assertEqual("newer", dataset.get_experience(eid)["superseded_by"])
 
 
+class TestListAndSearch(_Base):
+    """只读门面（路由层用）：数据集清单 + 经验搜索（召回路径）。"""
+
+    def test_list_datasets_returns_created(self):
+        ds = self._ds("d1")
+        rows = dataset.list_datasets()
+        self.assertEqual([ds], [r["id"] for r in rows])
+
+    def test_search_experiences_hits_situation(self):
+        dataset.record_experience("pitfall", situation="disk full", action="clean tmp")
+        dataset.record_experience("recipe", situation="other", action="x")
+        hits = dataset.search_experiences("disk")
+        self.assertEqual(1, len(hits))
+        self.assertEqual("disk full", hits[0]["situation"])
+
+    def test_search_excludes_retired(self):
+        eid = dataset.record_experience("pitfall", situation="disk full", action="clean")
+        dataset.retire_experience(eid)
+        self.assertEqual([], dataset.search_experiences("disk"))
+
+    def test_search_empty_query_returns_nothing(self):
+        dataset.record_experience("pitfall", situation="disk full", action="clean")
+        self.assertEqual([], dataset.search_experiences(""))
+
+
 if __name__ == "__main__":
     unittest.main()

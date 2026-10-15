@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""L0 hermetic：经验挖掘（scripts/experience_mine.py）P0-1 切片 C（AMR「Dreaming」职责）。
+
+【这条判据治什么】
+经验库若只进不出，会退化成又一份「只增不减」的日志。Dreaming 的三件事是
+**合并重复 / 删过期 / 解冲突** —— 本文件把三件事钉成**确定性计划**（谁退役、谁顶替、为什么），
+再交给 `dataset.retire_experience` 落库（不物理删，留 `superseded_by` 追溯）。
+
+【本文件守四条】
+1. **三件事各有一类 reason**：`duplicate` / `conflict` / `expired`，互不混同。
+2. **只退役旧的**：每组里保留最新的那条（按 `created_at`），其余退役并记 `superseded_by`。
+3. **不同 key 不动**：不相关的经验不得被顺手退役。
+4. **非会话模型一律 `openrouter/free`**（模型只用于「从轨迹抽取经验」，不在计划阶段调）。
+
+分层口径（tests/tiers.py）：纯函数 + 临时 db。
+"""
+import pathlib
+import sys
+import unittest
+import uuid
+
+_REPO = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO / "scripts"))
+sys.path.insert(0, str(_REPO / "src"))
+
+import db               # noqa: E402
+import dataset          # noqa: E402
+import experience_mine as em  # noqa: E402
+
+NOW = "2026-10-15T00:00:00+00:00"
+
+
+def _exp(situation, action, precondition="", created="2026-10-01T00:00:00+00:00",
+         exp_id=None):
+    return {"id": exp_id or uuid.uuid4().hex[:8], "kind": "pitfall",
+            "situation": situation, "action": action, "precondition": precondition,
+            "source_trace_ids": "[]", "created_at": created,
+            "retired_at": None, "superseded_by": None}
+
+
+class TestModelDiscipline(unittest.TestCase):
+    def test_default_model_is_free_router(self):
+        self.assertEqual(em.DEFAULT_MODEL, "openrouter/free")
+
+    def test_auto_router_rejected(self):
+        with self.assertRaises(ValueError):
+            em.assert_free_model("openrouter/auto")
+
+
+class TestNormKey(unittest.TestCase):
+    def test_whitespace_and_case_insensitive(self):
+        a = _exp("Disk  Full", "act", precondition="P")
+        b = _exp("disk full", "act", precondition="p")
+        self.assertEqual(em.norm_key(a), em.norm_key(b))
+
+    def test_different_situation_differs(self):
+        self.assertNotEqual(em.norm_key(_exp("a", "x")), em.norm_key(_exp("b", "x")))
+
+
+class TestPlan(unittest.TestCase):
+    def test_duplicate_pair_retires_older(self):
+        old = _exp("disk full", "clean tmp", created="2026-10-01T00:00:00+00:00", exp_id="old1")
+        new = _exp("disk full", "clean tmp", created="2026-10-10T00:00:00+00:00", exp_id="new1")
+        p = em.plan([old, new], now=NOW)
+        retires = {r["id"]: r for r in p["retire"]}
+        self.assertIn("old1", retires)
+        self.assertNotIn("new1", retires)
+        self.assertEqual(retires["old1"]["reason"], "duplicate")
+        self.assertEqual(retires["old1"]["superseded_by"], "new1")
+
+    def test_conflicting_actions_retire_older_as_conflict(self):
+        old = _exp("disk full", "rm -rf", created="2026-10-01T00:00:00+00:00", exp_id="old2")
+        new = _exp("disk full", "clean tmp", created="2026-10-10T00:00:00+00:00", exp_id="new2")
+        p = em.plan([old, new], now=NOW)
+        retires = {r["id"]: r for r in p["retire"]}
+        self.assertEqual(retires["old2"]["reason"], "conflict")
+        self.assertEqual(retires["old2"]["superseded_by"], "new2")
+
+    def test_expired_retires_by_age(self):
+        stale = _exp("s", "a", created="2020-01-01T00:00:00+00:00", exp_id="stale1")
+        p = em.plan([stale], now=NOW, expire_days=180)
+        retires = {r["id"]: r for r in p["retire"]}
+        self.assertEqual(retires["stale1"]["reason"], "expired")
+
+    def test_unrelated_experiences_are_untouched(self):
+        a = _exp("situation A", "x", exp_id="a1")
+        b = _exp("situation B", "y", exp_id="b1")
+        p = em.plan([a, b], now=NOW)
+        self.assertEqual([], p["retire"])
+
+    def test_already_retired_is_skipped(self):
+        e = _exp("s", "a", exp_id="r1")
+        e["retired_at"] = "2026-03-01T00:00:00+00:00"
+        self.assertEqual([], em.plan([e], now=NOW)["retire"])
+
+
+class _Base(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="l0expmine-"))
+        self._saved = db._conn
+        db.init_db(self.tmp / "t.db")
+        dataset.ensure_schema()
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        db._conn = self._saved
+
+
+class TestApply(_Base):
+    def test_apply_plan_retires_in_store(self):
+        old = dataset.record_experience("pitfall", situation="disk full", action="clean")
+        new = dataset.record_experience("pitfall", situation="disk full", action="clean")
+        exps = dataset.list_experiences(active_only=False)
+        p = em.plan(exps, now=NOW)
+        em.apply_plan(p)
+        live = {e["id"] for e in dataset.list_experiences()}
+        self.assertEqual({new}, live)
+        self.assertEqual(new, dataset.get_experience(old)["superseded_by"])
+
+
+if __name__ == "__main__":
+    unittest.main()

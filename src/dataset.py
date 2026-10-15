@@ -103,6 +103,10 @@ def get_dataset(dataset_id: str) -> Optional[dict]:
     return rows[0] if rows else None
 
 
+def list_datasets() -> List[dict]:
+    return db.query("SELECT * FROM datasets ORDER BY created_at DESC, id")
+
+
 # ── dataset_items ────────────────────────────────────────────────────
 def add_item(dataset_id: str, *, split: str, input: str, output: str = "",
              trajectory: str = "", trace_id: str = "", session_id: str = "",
@@ -238,3 +242,20 @@ def retire_experience(exp_id: str, superseded_by: Optional[str] = None) -> None:
     """退役一条经验（Dreaming 的「删过期」）：不物理删，记 `retired_at`/`superseded_by`。"""
     db.execute("UPDATE experiences SET retired_at=?, superseded_by=? WHERE id=?",
                (_now(), superseded_by, exp_id))
+
+
+def search_experiences(q: str, limit: int = 20) -> List[dict]:
+    """在**活跃**经验里按关键词召回（LIKE；空查询返回空 —— 不给「全部」）。
+
+    这是经验库的「召回」路径：只召回 `retired_at IS NULL` 的条目，退役的只能
+    按 id 追溯（`get_experience`），不会汿回来。
+    """
+    needle = str(q or "").strip()
+    if not needle:
+        return []
+    like = "%" + needle + "%"
+    return db.query(
+        "SELECT * FROM experiences WHERE retired_at IS NULL AND ("
+        "situation LIKE ? OR action LIKE ? OR precondition LIKE ? OR kind LIKE ?)"
+        " ORDER BY created_at DESC, id LIMIT ?",
+        (like, like, like, like, int(limit)))

@@ -77,6 +77,7 @@ import prefs as prefs_mod           # 应用级偏好 KV（v0.13.36）：两项�
 import modelcfg as modelcfg_mod     # 各 Agent 默认模型统一设置（v0.13.41：设置→模型子菜单）
 import ghsettings as ghsettings_mod  # GitHub 地址/key/落点（v0.13.42：设置→GitHub 子菜单）
 import hublog as hublog_mod        # 日志中心（v0.13.46：设置→日志子菜单，journald + 操作事件聚合）
+import api_dataset as api_dataset_mod  # P0-1：数据集/经验库只读门面（无写端点）
 
 # C2（2026-10-12）：领域路由从本文件抽成独立 module —— main 只留组装职责。
 import appstate                     # 组装方写、领域方读的共享可变状态（discovery）
@@ -89,8 +90,23 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.109"  # P0-1 切片 A：数据集/评估/经验库四表 + grain 唯一键 + split 隔离
-#   v0.13.109：P0 施工排序末项（P0-1）的**切片 A**（确定性地基，不调模型不联网）。
+VERSION = "0.13.110"  # P0-1 切片 B/C：声明式管线（模型在最后）+ 轨迹聚合 + 经验 Dreaming
+#   v0.13.110：P0-1 的**切片 B/C**（接切片 A 的四表）。
+#   ① `scripts/dataset_pipeline.py`（**声明式管线**）：轨迹 → 确定性过滤 → 确定性采样 →
+#      按 grain 哈希切分 → **模型在最后**（`enrich()`）。`build_items()` 是纯函数，`output`
+#      恒为空；`assign_split(grain_hash,frac)` 只由 grain 哈希决定 ⇒ 重跑不洗牌。
+#   ② `src/hook.py` 轨迹级聚合：`build_trajectories()` 按 `(source,session_id)` 分组保序，
+#      `trajectories_from_store()` 只读拉事件；新增 `GET /telemetry/trajectories`。
+#   ③ `scripts/experience_mine.py`（AMR「Dreaming」）：**合并重复 / 删过期 / 解冲突**，
+#      三类 reason `duplicate`/`conflict`/`expired`；只**退役**（`retired_at`+`superseded_by`）
+#      不物理删。`plan()` 是纯函数，`apply_plan()` 才落库。
+#   ④ `src/api_dataset.py`（只读路由）：`/api/dataset/*` + `/api/experience/*`；
+#      `/api/dataset/{id}/train` 当场用 `assert_train_only()` 自证不含 holdout。
+#   ⑤ 模型纪律：非会话一律 `openrouter/free`，`openrouter/auto` 直接 `ValueError`
+#      （`assert_free_model`，两脚本共用）。
+#   闸门：tests/test_dataset.py / test_dataset_pipeline.py / test_experience_mine.py。
+#   未做：systemd user timer（unit 属受保护面，待单独授权）⇒ 本批只做端点触发。
+#   v0.13.109：P0-1 切片 A。
 #   闭环位置：轨迹（hook/profile_events）→ **数据集** → 评估（eval_run）→ **经验库**（experiences）。
 #   ① 新增 src/dataset.py：四表 `datasets/dataset_items/eval_runs/experiences`（幂等建表，
 #      在 main lifespan 与 tasks 同处创建）。
@@ -730,6 +746,7 @@ app.include_router(mcpgw_mod.router)
 app.include_router(cronjobs_mod.router)
 app.include_router(term_mod.router)
 app.include_router(audit_mod.router)
+app.include_router(api_dataset_mod.router)   # P0-1：/api/dataset/* + /api/experience/*（只读）
 app.include_router(runlog_mod.router)
 app.include_router(cloudcli_mod.router)
 app.include_router(localprojects_mod.router)

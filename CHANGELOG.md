@@ -1,3 +1,56 @@
+## v0.13.110 — P0-1 切片 B/C：声明式管线（模型在最后）+ 轨迹聚合 + 经验 Dreaming
+
+> 接 `v0.13.109`（切片 A：四表）。本批把闭环从「地基」接到「跑得起来」：
+> 轨迹进、经验出，中间由**确定性优先**的管线与 Dreaming 连接。
+
+### 一、`scripts/dataset_pipeline.py`（声明式管线）
+
+```
+轨迹 → [过滤(确定性)] → [采样(确定性)] → [切分(确定性)] → [enrich(模型，最后)]
+```
+
+- `build_items()` 是**纯函数**：产物 `output` 恒为空 —— 模型**只准在最后一步**。
+  调模型 = 不可复现 + 花钱；掺进地基就没了比较基线（D1/D13）。
+- `assign_split(grain_hash, frac)` 只由 **grain 哈希**决定 split ⇒ 同一逻辑样本永远同一
+  split，重跑不洗牌（否则 holdout 会被无声洗进 train）。
+- `enrich(model=…)` 默认 `openrouter/free`；`assert_free_model` 对 `openrouter/auto`
+  直接 `ValueError`（2026-10-04 军规：auto 可能挑到**付费**模型）。
+
+### 二、`src/hook.py` 轨迹级聚合
+
+`build_trajectories()` 按 `(source, session_id)` 分组、事件保序（纯函数）；
+`trajectories_from_store()` 只读拉事件；新增 `GET /telemetry/trajectories`。
+
+### 三、`scripts/experience_mine.py`（AMR「Dreaming」）
+
+| reason | 语义 |
+|---|---|
+| `duplicate` | 同 `norm_key`（情况+适用条件）且 action 相同 |
+| `conflict` | 同 `norm_key` 但 action 不同 ⇒ 保留最新 |
+| `expired` | 创建早于 `expire_days`（默认 180） |
+
+只**退役**（`retired_at`+`superseded_by`）不物理删 —— 保留「谁顶替了谁」的追溯链。
+`plan()` 纯函数出计划，`apply_plan()` 才落库。
+
+### 四、`src/api_dataset.py`（只读路由）+ main 挂载
+
+`/api/dataset/list|{id}/items|{id}/train` + `/api/experience/list|search`。
+`/{id}/train` 当场用 `assert_train_only()` **自证**不含 holdout。**本模块无写端点**
+（入样走离线管线、退役走离线 Dreaming），所以路由面没有需要鉴权的写路径。
+
+### 五、闸门
+
+`tests/test_dataset_pipeline.py`（含轨迹聚合）、`tests/test_experience_mine.py`、
+`tests/test_dataset.py`（+4 只读门面）。
+
+### 六、未做（诚实声明）
+
+- **systemd user timer 未装**（`~/.config/systemd/user/*` 属受保护面，须单独授权）
+  ⇒ 本批**只做端点触发**：`python scripts/dataset_pipeline.py` / `experience_mine.py`。
+- 验收③「一次真实召回取证」需在真实数据上跑一遍并留命中+来源（下批）。
+
+---
+
 ## v0.13.109 — P0-1 切片 A：数据集/评估/经验库四表 + `grain` 唯一键 + `split` 隔离
 
 > 触发：P0 立项施工书排序末项（P0-1，已合并 AMR「Dreaming」）。本批为**切片 A**：

@@ -238,7 +238,14 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.109"
+    CURRENT_VERSION = "0.13.110"
+
+    #: v0.13.110（P0-1 切片 B/C）：关键词取自版本注释里**实际写下的字句**。
+    #: 管线声明式、模型在最后、轨迹级聚合、Dreaming 三类 reason。
+    VERSION_ROOT_CAUSES["0.13.110"] = (
+        "声明式管线", "模型在最后", "轨迹级聚合", "Dreaming",
+        "duplicate", "conflict", "expired", "assert_free_model",
+    )
 
     #: v0.13.109（P0-1 切片 A）：关键词取自版本注释里**实际写下的字句**。
     #: 地基：四表 + grain 唯一键 + split 隔离（holdout 永不进优化批次）。

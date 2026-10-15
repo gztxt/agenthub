@@ -138,3 +138,39 @@ async def usage_summary():
                 "success_rate": round(100.0 * (p["ok"] or 0) / p["n"], 1),
                 "avg_ms": round(p["avg_ms"] or 0), "max_ms": p["max_ms"]} for p in prof]
     return {"by_source": agg, "total": total, "profile": profile}
+
+
+# ── P0-1：轨迹级聚合 ────────────────────────────────────────────────
+def build_trajectories(rows: list) -> list:
+    """把 telemetry 事件行聚成**轨迹**（按 `(source, session_id)` 分组，行序即事件序）。
+
+    「轨迹级聚合」是 P0-1 的前置：数据集管线（`scripts/dataset_pipeline.py`）以**轨迹**
+    为单位过滤/采样/切分，而不是以单条事件为单位 —— 否则同一件事会被拆成许多样本。
+    **纯函数**：不查库、不调模型。
+    """
+    groups: Dict[tuple, dict] = {}
+    for r in rows or []:
+        key = (r.get("source"), r.get("session_id"))
+        g = groups.setdefault(key, {"session_id": r.get("session_id"),
+                                    "source": r.get("source"),
+                                    "cwd": r.get("cwd"), "events": []})
+        if r.get("cwd"):
+            g["cwd"] = r["cwd"]
+        g["events"].append({"event": r.get("event"), "usage_scope": r.get("usage_scope"),
+                             "payload": r.get("payload"), "created_at": r.get("created_at")})
+    return sorted(groups.values(),
+                  key=lambda g: (str(g["source"] or ""), str(g["session_id"] or "")))
+
+
+def trajectories_from_store(limit: int = 2000) -> list:
+    """从 telemetry 账本读事件并聚成轨迹（只读）。"""
+    rows = db.query("SELECT source, session_id, cwd, event, payload, usage_scope, created_at"
+                    " FROM telemetry_events ORDER BY id ASC LIMIT ?", (limit,))
+    return build_trajectories(rows)
+
+
+@router.get("/telemetry/trajectories")
+async def list_trajectories(limit: int = Query(default=200, le=2000)):
+    """轨迹列表（数据集管线的只读来源）。"""
+    trajs = trajectories_from_store(limit=limit)
+    return {"trajectories": trajs, "count": len(trajs)}

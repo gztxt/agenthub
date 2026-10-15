@@ -249,6 +249,7 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "outputguard", "标签型", "封闭枚举", "audit_output_cleanliness",
         "ledgernorm", "网关前缀", "厂商前缀", "只读生命线资产", "协议形状",
         "setdefault", "空操作", "override=True", "先过鉴权", "再验边界",
+        "token 夹具守卫", "顺序无关", "行为判据", "红绿自证",
     )
 
     #: v0.13.113（P0-1 收尾三项）：关键词取自版本注释里**实际写下的字句**。

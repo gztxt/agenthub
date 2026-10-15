@@ -157,7 +157,36 @@ src/term.py:847   profiles.get_profile(...)        → 400 ← 被测的是这�
 唯一变量是**执行环境** —— 无 `.env` 的干净 runner 上 setdefault 生效即绿。
 ⇒ **L0「hermetic」对仓内 `.env` 是假的**（`hermetic-clean` 只 fake HOME）。
 
-### 八、顺带发现，未处置（**报请，不擅自改**）
+### 八、token 夹具守卫（**更正上一轮的错误结论**）
+
+上一轮报「16 个测试模块的 token 夹具有系统性隐患」。**实测后确认该结论不成立**：
+
+| 上轮说法 | 实测 |
+|---|---|
+| 16 个模块受影响 | 14 个的 token 字面量**只出现在 `setdefault` 那一行**，压根没被使用 ⇒ 死代码 |
+| 顺序有风险 | **强制 `config` 先导入跑全量：1892 全绿** |
+| `.env` 缺 `TERM_TOKEN` 会集体变行为 | 不会 —— 真正用 token 的模块走无条件 `=` |
+
+根因是 `tests/test_prefs.py` **早就修对了**：`_force_test_token()` 用无条件 `=` 而非
+`setdefault`，docstring 写明「同进程全量跑时其它用例可能改写 TERM_TOKEN ⇒ 401 假红
+（**09-26 全量跑实测**）」。**维护者 09-26 就撞过这个坑并修好了**，本轮只是把同一个坑
+又发现一遍。教训见 `180`。
+
+真正值得做的是把那个**一次性验证**（强制 config 先导入跑全量）**固化成守卫**：
+`tests/test_token_fixture_hygiene.py`（4 例，7.8s）——
+子进程里先 `import config`（= `.env` 已 override 环境），token 相关三模块仍须全绿。
+
+**判据选行为而非静态**：先写过静态 lint（扫源码找「只有 setdefault 没有无条件赋值」），
+**误报 3 个**：`test_boundary`（合法地用 `term.TERM_TOKEN` 本身，判例 179 的修法）、
+`test_ghsettings` / `test_github_projects`（字面量根本没被使用）。
+⇒ 「这个用例依不依赖环境 token」静态建模不了，改测行为。
+
+**红绿自证**：把 `test_prefs` 的无条件赋值退化成 `setdefault` ⇒ 守卫**转红** ✅；还原 ⇒ 转绿 ✅。
+
+另加两条静态断言：`TERM_TOKEN` 不得进 `config.ENV_OVERRIDABLE`（进去就意味着有人
+指望 `setdefault` 能生效）、该白名单不得含凭据类键。
+
+### 九、顺带发现，未处置（**报请，不擅自改**）
 
 P0-c 若要读 CCR 账本建模型画像，账本里有两类脏（本轮**只量不改**）：
 

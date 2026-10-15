@@ -123,8 +123,15 @@ VERSION = "0.13.114"  # P0-a/b 接线 + 产物/账本口径 + 清既存红（闭
 #      修法：改送 `term.TERM_TOKEN` 本身，**先过鉴权**、**再验边界**，
 #      不再依赖环境/.env/用例顺序；token 闸由 test_bad_token_is_rejected(401) 单独钉。
 #      双向自证：ccr/未登记→400「无终端入口」、claude(有 terminal)→200 证非恒真、错 token→401。
-#   闸门：L0 1827/0/0（首次全绿）、对账 1892=1892、L1 65/0/0、prepush 六步全绿；
-#   tests/test_task_attribution.py(14)+test_outputguard.py(13)+test_ledgernorm.py(22)。
+#   ⑦ **token 夹具守卫**（`tests/test_token_fixture_hygiene.py`，4 例）：把「顺序无关」
+#      变成常驻断言 —— 子进程里**先 import config**（= `.env` 已 override 环境），
+#      token 相关三模块仍须全绿。**行为判据，不是静态 lint**：先写过静态版，
+#      误报 3 个（test_boundary 合法用 `term.TERM_TOKEN`、另两个字面量根本没被使用）
+#      ⇒ 「这个用例依不依赖环境 token」静态建模不了。
+#      红绿自证：把 test_prefs 的无条件赋值退化成 setdefault ⇒ 守卫转红 ✅，还原转绿 ✅。
+#   闸门：L0 **1831/0/0**、对账 1896=1896、L1 65/0/0；
+#   tests/test_task_attribution.py(14)+test_outputguard.py(13)+test_ledgernorm.py(22)
+#   +test_token_fixture_hygiene.py(4)。
 #   v0.13.113：接 D18。三件都是「让闭环**可比、可追溯**」，不是新功能。
 #   ① **D5 轨迹行 schema**：新增 `TRAJECTORY_SCHEMA="trajectory/1"` +
 #      `normalize_trajectory()`（补 `seq`/`metrics`，幂等）+ `validate_trajectory()`

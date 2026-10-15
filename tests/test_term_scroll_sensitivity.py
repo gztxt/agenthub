@@ -246,10 +246,11 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     VERSION_ROOT_CAUSES["0.13.114"] = (
         "adapter 回包值", "NULL", "verdict", "verify_reason",
         "insufficient", "total_tokens", "超时",
-        "outputguard", "标签型", "封闭枚举", "audit_output_cleanliness",
+        "outputguard", "标签型", "封闭枚举",
         "ledgernorm", "网关前缀", "厂商前缀", "只读生命线资产", "协议形状",
         "setdefault", "空操作", "override=True", "先过鉴权", "再验边界",
-        "token 夹具守卫", "顺序无关", "行为判据", "红绿自证",
+        "顺序无关", "modelprofile", "边界画像",
+        "负载信号", "质量信号", "insufficient_sample", "unstable", "剔除",
     )
 
     #: v0.13.113（P0-1 收尾三项）：关键词取自版本注释里**实际写下的字句**。

@@ -90,48 +90,38 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.114"  # P0-a/b 接线 + 产物/账本口径 + 清既存红（闭环地基，不引入新概念）
+VERSION = "0.13.114"  # 闭环地基：P0-a/b 接线 + 产物/账本口径 + P0-c 模型边界画像
 #   叙事全文见 CHANGELOG.md 同版本；此处只留「为何这么改」的根因。
 #   ① **P0-a 成本归因**：`adapter.chat` 本就返回 model+usage，`_run_task` 却只取
 #      total_tokens 就丢、`model` 一次没读过 ⇒ 任务↔模型↔token 无法 JOIN。
-#      新增 `tasks.model`，**取 adapter 回包值**而非我方请求值（上游会改写模型名）；
-#      回包缺则留 NULL 不兜底；五条落库路径都记 —— 验收失败照样花钱，
-#      成本不随 verdict 消失。
+#      取 adapter 回包值而非我方请求值；缺则留 NULL 不兜底；五条落库路径都记 ——
+#      验收失败照样花钱，成本不随 verdict 消失。
 #   ② **P0-b 验收落库**：P0-3 已实现「执行者不自证」，但三态只折叠进 status/error
-#      就丢了 ⇒ 验收做了却无查询面。新增 verdict+verify_reason；
-#      **NULL 严格区别于 'fail'**（NULL＝未走到验收：等待/预算/自称失败/超时，
-#      记成 fail 会虚增失败率）；`insufficient` 是第三态。
-#   ③ **顺带修潜伏缺陷（非本次引入）**：超时分支把 '超时熔断 %ds' 写成字面量却按 5 个
-#      参数传（SQL 只 4 占位符）⇒ ProgrammingError 在**异常处理器内部**抛出，
-#      任务永远停在 running。
-#   ④ **标签型产物**（src/outputguard.py）：免费池会把请求路由到**审核/分类类模型**，
-#      返回 'User Safety: safe' 这类标签而非正文，而 nonempty 只判非空 ⇒ 标签被记成
-#      「成功产出内容」。三档 content/label/empty + 恒非空 reason；只认强信号
-#      （模型属审核族，或「标签: 值」且值属分类**封闭枚举** —— 靠长度判据拦不住
-#      'User Safety: <中文正文>'，只有封闭词表能分开）。
-#      审计 work/probe/audit_output_cleanliness.py 只读，生产实测 0/3 标签。
-#   ⑤ **账本归一口径**（src/ledgernorm.py）：账本是**只读生命线资产**，改不得 ⇒ 读取侧归一。
-#      只剥**网关前缀**（openrouter/open_router/tokenrouter/anthropic，反复剥）**不剥厂商前缀**
-#      （剥了会把不同模型并成假的同一个）；`:free` 分两轴（成本用 canonical / 能力用 base）；
-#      provider 内部逻辑名 `provider-<name>-<hash>::<api>` 要拆两半 —— 名字合并、
-#      **协议形状**必须留。实测 98→91 key、合并 12398 行（33%）。
-#   ⑥ **清 test_boundary 既存红**（非本次引入，卡了三轮提交）：期望 400 实得 401 ——
-#      **测试从没走到它声称在测的那道闸**（term.py:845 token 闸先于 847 边界闸）。
+#      就丢了。新增 verdict+verify_reason；**NULL 严格区别于 'fail'**（NULL＝未走到验收：
+#      等待/预算/自称失败/超时，记成 fail 会虚增失败率）；`insufficient` 是第三态。
+#   ③ **潜伏缺陷（非本次引入）**：超时分支把 '超时熔断 %ds' 写成字面量却按 5 个参数传
+#      （SQL 只 4 占位符）⇒ ProgrammingError 在**异常处理器内部**抛出，任务永远 running。
+#   ④ **标签型产物**（src/outputguard.py）：免费池会把请求路由到审核/分类模型，返回
+#      'User Safety: safe' 这类标签而非正文，而 nonempty 只判非空 ⇒ 标签被记成「成功
+#      产出内容」。三档 content/label/empty + 恒非空 reason；只认强信号（模型属审核族，
+#      或「标签: 值」且值属分类**封闭枚举** —— 靠长度判据拦不住 'User Safety: <中文正文>'）。
+#   ⑤ **账本归一口径**（src/ledgernorm.py）：账本是**只读生命线资产** ⇒ 只在读取侧归一。
+#      只剥**网关前缀**（反复剥）**不剥厂商前缀**；`:free` 分两轴（成本 canonical /
+#      能力 base）；provider 内部逻辑名拆两半 —— 名字合并、**协议形状**必须留。
+#      实测 98→91 key、合并 12398 行（33%）。
+#   ⑥ **清 test_boundary 既存红**：期望 400 实得 401 —— 测试从没走到它声称在测的那道闸。
 #      根因：模块头 `os.environ.setdefault("TERM_TOKEN", 假值)` 是**空操作** ——
-#      config.py 的 `load_dotenv(override=True)` 无条件用仓内 .env 覆盖环境，
-#      run_tier.py 也不清它 ⇒ 夹具设不进去，测试实际拿生产 token 在跑。
-#      修法：改送 `term.TERM_TOKEN` 本身，**先过鉴权**、**再验边界**，
-#      不再依赖环境/.env/用例顺序；token 闸由 test_bad_token_is_rejected(401) 单独钉。
-#      双向自证：ccr/未登记→400「无终端入口」、claude(有 terminal)→200 证非恒真、错 token→401。
-#   ⑦ **token 夹具守卫**（`tests/test_token_fixture_hygiene.py`，4 例）：把「顺序无关」
-#      变成常驻断言 —— 子进程里**先 import config**（= `.env` 已 override 环境），
-#      token 相关三模块仍须全绿。**行为判据，不是静态 lint**：先写过静态版，
-#      误报 3 个（test_boundary 合法用 `term.TERM_TOKEN`、另两个字面量根本没被使用）
-#      ⇒ 「这个用例依不依赖环境 token」静态建模不了。
-#      红绿自证：把 test_prefs 的无条件赋值退化成 setdefault ⇒ 守卫转红 ✅，还原转绿 ✅。
-#   闸门：L0 **1831/0/0**、对账 1896=1896、L1 65/0/0；
-#   tests/test_task_attribution.py(14)+test_outputguard.py(13)+test_ledgernorm.py(22)
-#   +test_token_fixture_hygiene.py(4)。
+#      config.py 的 `load_dotenv(override=True)` 无条件用仓内 .env 覆盖环境。改送
+#      `term.TERM_TOKEN` 本身，**先过鉴权**、**再验边界**。守卫见 test_token_fixture_hygiene
+#      （子进程先 import config 仍须全绿 ⇒ **顺序无关**已自动盯住）。
+#   ⑦ **P0-c 模型边界画像**（src/modelprofile.py）：勘察确认 CCR /v1/models **不给任何
+#      能力元数据**、账本**无输出正文** ⇒ 只出**边界**（能否成/多快/多贵/哪些协议形状），
+#      语义能力不编。**最关键：429 是负载信号不是质量信号**，须单独计并从质量口径**剔除** ——
+#      实测把 `agnes-3.0-flash` 44.0%→99.8%、`qwen3.7-max` 40.2%→93.3% 翻成「近乎完美」，
+#      混算就会把这三个永久误判成「一半都在失败」。三态与 verifier 同构：ok /
+#      insufficient_sample（不是模型差，是没量够）/ unstable。阈值实测得来。
+#   闸门：L0 **1848/0/0**、对账 1913=1913、L1 65/0/0；新测 70 例
+#   （task_attribution 14 + outputguard 13 + ledgernorm 22 + token_hygiene 4 + modelprofile 17）。
 #   v0.13.113：接 D18。三件都是「让闭环**可比、可追溯**」，不是新功能。
 #   ① **D5 轨迹行 schema**：新增 `TRAJECTORY_SCHEMA="trajectory/1"` +
 #      `normalize_trajectory()`（补 `seq`/`metrics`，幂等）+ `validate_trajectory()`

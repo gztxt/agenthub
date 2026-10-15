@@ -49,6 +49,7 @@ import memory as memory_mod
 import memfed as memfed_mod
 import kb as kb_mod
 import skill as skill_mod
+import dataset as dataset_mod
 import tasks as tasks_mod
 import mcpgw as mcpgw_mod
 import cronjobs as cronjobs_mod
@@ -88,7 +89,20 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.108"  # P0-3 任务状态机：执行者不得自证 success + 等待态 + 预算 + Verifier
+VERSION = "0.13.109"  # P0-1 切片 A：数据集/评估/经验库四表 + grain 唯一键 + split 隔离
+#   v0.13.109：P0 施工排序末项（P0-1）的**切片 A**（确定性地基，不调模型不联网）。
+#   闭环位置：轨迹（hook/profile_events）→ **数据集** → 评估（eval_run）→ **经验库**（experiences）。
+#   ① 新增 src/dataset.py：四表 `datasets/dataset_items/eval_runs/experiences`（幂等建表，
+#      在 main lifespan 与 tasks 同处创建）。
+#   ② **grain 唯一键**：`grain_hash = sha256(grain + 规范化 key_fields)[:32]`，
+#      `UNIQUE(dataset_id, grain_hash)` ⇒ 同一逻辑样本重复写入**复用同一行**
+#      （否则同一件事会灌进数据集多次、指标失真）。
+#   ③ **split 隔离（验收②）**：`holdout` 样本**永不**进 train 批次；`assert_train_only()`
+#      是给切片 B 管线用的硬闸（掺入即抛 ValueError）；已入样样本的 split **不可改**。
+#   ④ **字段映射显式**（手册 D7）：input/output/trajectory 三列各义，input 空⇒拒；
+#      `eval_runs` 记 `dataset_version` 快照（D13）；`experiences{situation,action,
+#      precondition,source_trace_ids}`（D17），退役走 `retired_at`（不物理删）。
+#   闸门：tests/test_dataset.py（17 例）。切片 B（管线）/C（经验挖掘）/调度载体待做。
 #   v0.13.108：P0 施工排序第四项（P0-3）。治的是「**执行者既是被测对象、又握着判定权**」。
 #   ① 新增 src/verifier.py（叶子模块，纯函数）：三态 `pass` / `fail` / `insufficient`。
 #      **判不了绝不放行**（未知 kind / 产物缺失 / 判据缺失 ⇒ insufficient，永不 pass）——
@@ -1044,6 +1058,8 @@ async def startup():
     gwprobe.configure(config.manager_llm_base, config.manager_llm_key,
                       watch=[config.manager_llm_model, vitals_mod.RT_MODEL])
     tasks_mod.ensure_schema()
+    # P0-1：数据集/评估/经验库四表（幂等建表，切片 A）
+    dataset_mod.ensure_schema()
     tasks_mod.set_context(
         chat_fn=lambda a, m, s=None, mo=None, tr=None: _chat_dispatch(a, m, s, mo, tr),
         agent_ids_fn=lambda: [c["id"] for c in appstate.discovery.all_configs()])

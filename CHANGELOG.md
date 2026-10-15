@@ -1,3 +1,34 @@
+## v0.13.109 — P0-1 切片 A：数据集/评估/经验库四表 + `grain` 唯一键 + `split` 隔离
+
+> 触发：P0 立项施工书排序末项（P0-1，已合并 AMR「Dreaming」）。本批为**切片 A**：
+> 只落**确定性地基**（建表/入样/隔离断言），**不调模型、不联网**；
+> 管线（切片 B）/ 经验挖掘（切片 C）/ 调度载体待做。
+
+### 一、位置
+
+```
+轨迹(hook/profile_events) → 数据集(dataset_items) → 评估(eval_runs) → 经验库(experiences)
+```
+
+### 二、四条不变量
+
+1. **`grain` 唯一键**：`grain_hash = sha256(grain + 规范化 grain_key)[:32]`，
+   `UNIQUE(dataset_id, grain_hash)` ⇒ 同一逻辑样本重复写入**复用同一行**。
+   （否则同一件事会被灌进数据集多次，指标随之失真。）
+2. **`split` 隔离（验收②）**：`holdout` **永不**出现在 `training_items()`；
+   `assert_train_only()` 是给管线用的硬闸（掺入即抛 `ValueError`）；
+   已入样样本的 split **不可改**（否则隔离可被一次改写抹掉）。
+3. **字段映射显式**（D7）：`input`/`output`/`trajectory` 三列各义；`input` 空 ⇒ 拒。
+4. **版本快照**（D13）：`eval_runs.dataset_version`；**经验退役**走 `retired_at`
+   （不物理删，保留 Dreaming 的「解冲突」追溯）。
+
+### 三、闸门
+
+`tests/test_dataset.py` **17 例**（L0 hermetic，临时 db）：四表幂等、grain 不重复、
+holdout 不进 train、split 不可改、input/output 回环、eval 版本快照、经验退役。
+
+---
+
 ## v0.13.108 — P0-3 任务状态机：执行者不得自证 success + 等待态 + 预算 + Verifier
 
 > 触发：P0 立项施工书排序第四项（`P0-2 → P0-4 → P0-5 → **P0-3** → P0-1`，逐项串行）。

@@ -238,7 +238,14 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.108"
+    CURRENT_VERSION = "0.13.109"
+
+    #: v0.13.109（P0-1 切片 A）：关键词取自版本注释里**实际写下的字句**。
+    #: 地基：四表 + grain 唯一键 + split 隔离（holdout 永不进优化批次）。
+    VERSION_ROOT_CAUSES["0.13.109"] = (
+        "grain 唯一键", "split 隔离", "assert_train_only", "dataset_version",
+        "experiences", "经验库",
+    )
 
     #: v0.13.108（P0-3）：关键词取自版本注释里**实际写下的字句**。
     #: 主判据：执行者不得自证 success；等待态让出执行资源；判不了不放行。

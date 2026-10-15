@@ -1,3 +1,41 @@
+## v0.13.112 — P0-1 D18：经验库接入记忆联邦（只召回活跃条）
+
+> 接 `v0.13.111`。经验库若只躺在 db 里，就不是「记忆」——本批把它接成联邦的一路源。
+
+### 一、新起一路 `experiences`（kind=`hub_sqlite`）
+
+| 属性 | 值 | 为何 |
+|---|---|---|
+| kind | `hub_sqlite` | 查 hub 自己的 `agents.db`（同进程连接，毫秒级），不是第二份权威副本 |
+| weight | `0.65` | 取在「成文事实(0.7~0.8)」与「原始会话(0.5)」之间 |
+| enabled | `True` | 本地 sqlite，无 rg 扫树成本 |
+
+新增 `_search_experiences()`（LIKE）与 `_recent_experiences()`（`RECENT_Q` 哨兵路），
+以及 `_probe_one` 分支（计数 = 活跃经验数）。
+
+### 二、**只召回活跃条**
+
+检索与「取最新」都只出 `retired_at IS NULL` 的条目；退役条只能按 id 追溯（`get_experience`），
+不回流。否则 Dreaming 的「删过期」会被自己撤销。
+
+### 三、进默认集
+
+`memory.FED_FAST_SOURCES` 加 `experiences` ⇒ `/api/memory/search` 的默认源与注入包都含它；
+`hubmcp.hub_memory_search` 的默认值本就从 `memfed.enabled_ids()` 派生 ⇒ 自动跟随。
+
+### 四、前端同源
+
+`templates/index.html` 源多选多一个 option（默认选中）、`SRC_ABBR` 加 `experiences: 'EX'`，
+并重建 `static/hub.js`（`scripts/build_hubjs.sh`，内容派生 `?v=`）。
+`tests/test_center_ui_l0.py` 钉「前端枚举 = REGISTRY」，加源不同步前端会当场红。
+
+### 五、闸门
+
+`tests/test_experience_fed.py` **7 例**：源已注册且启用、item 形状与其它源一致、
+**退役条不得从检索路回来**、probe 计数正确。
+
+---
+
 ## v0.13.111 — P0-1 收尾：真实轨迹源（`profile_events`）+ free 抽取 + 验收③ 真实召回取证
 
 > 接 `v0.13.110`。本批把闭环从「机制能跑」推到「**真数据上跑通**」。

@@ -113,6 +113,14 @@ REGISTRY: Dict[str, FedSource] = {
     "amr_memory": FedSource(
         id="amr_memory", label="AMR 格式记忆仓", kind="rg_text", weight=0.7,
         desc=f"{AMR_ROOT}/（Agent Memory Repo 形态：MEMORY.md 入口 + [source:] 溯源 + [[path]] 交叉链接）"),
+    # P0-1 D18（2026-10-15）：**经验库**接入联邦。它是 hub 自己**蒸馏**出来的可复用单元
+    # （情况→处理 + 适用条件 + 回源 trace），不是权威库的第二份副本 —— 权重取在
+    # 「成文事实(0.7~0.8)」与「原始会话(0.5)」之间，且**只召回活跃条**（退役条不回来）。
+    # kind 单起一路 `hub_sqlite`：它查的是 hub 自己的 agents.db（同进程连接，毫秒级）。
+    "experiences": FedSource(
+        id="experiences", label="经验库（Dreaming）", kind="hub_sqlite", weight=0.65,
+        desc="hub data/agents.db 的 experiences 表（P0-1：情况→处理 + 适用条件，只召回活跃条）",
+        timeout_s=1.0),
     "archived_sessions": FedSource(
         id="archived_sessions", label="归档会话备份", kind="rg_text", weight=0.4,
         desc=f"{WORKSPACE}/会话备份/**（含 claude/pi/codex/grok/hermes 归档）",
@@ -353,6 +361,53 @@ def _rg_head_content(path: str, timeout: float) -> Optional[str]:
     return None
 
 
+def _exp_item(r: dict) -> dict:
+    """经验行 → 联邦统一 item（形状与 `_rg_item` 一致，RRF/前端才对得上）。"""
+    sit = r.get("situation") or ""
+    act = r.get("action") or ""
+    pre = r.get("precondition") or ""
+    content = "%s → %s" % (sit, act)
+    if pre:
+        content += "（适用：%s）" % pre
+    return {
+        "source": "experiences", "id": str(r.get("id")),
+        "title": _sanitize_content(sit)[:120],
+        "content": _sanitize_content(content),
+        "category": "experience",
+        "updated_at": r.get("created_at"),
+    }
+
+
+def _search_experiences(q: str, limit: int, timeout: float) -> Dict:
+    """搜活跃经验（LIKE；退役条不回来）。**降级一律显式报错，不静默返空**。"""
+    t0 = time.monotonic()
+    try:
+        import dataset
+        rows = dataset.search_experiences(q, limit=min(limit, RG_ITEM_CAP))
+        items = [_exp_item(r) for r in rows]
+        return {"ok": True, "count": len(items), "items": items,
+                "ms": round((time.monotonic() - t0) * 1000, 1)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "count": 0, "items": [],
+                "error": tdai_client.scrub(f"{type(e).__name__}: {e}")[:160],
+                "ms": round((time.monotonic() - t0) * 1000, 1)}
+
+
+def _recent_experiences(limit: int, timeout: float) -> Dict:
+    """取最新活跃经验（`RECENT_Q` 哨兵路径：会话开局无查询词时用）。"""
+    t0 = time.monotonic()
+    try:
+        import dataset
+        rows = dataset.list_experiences()[:max(1, limit)]
+        items = [_exp_item(r) for r in rows]
+        return {"ok": True, "count": len(items), "items": items,
+                "ms": round((time.monotonic() - t0) * 1000, 1)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "count": 0, "items": [],
+                "error": tdai_client.scrub(f"{type(e).__name__}: {e}")[:160],
+                "ms": round((time.monotonic() - t0) * 1000, 1)}
+
+
 def _rg_item(source_id: str, line: str) -> Optional[dict]:
     """`path:line:content` → 统一 item。path 用绝对路径（前端直接可溯源），行号做 id。"""
     m = re.match(r"^(.*?):(\d+):(.*)$", line, re.S)
@@ -441,6 +496,15 @@ def _probe_one(source_id: str) -> Dict:
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "count": 0,
                     "note": tdai_client.scrub(f"{type(e).__name__}")[:80],
+                    "ms": round((time.monotonic() - t0) * 1000, 1)}
+    if source_id == "experiences":
+        try:
+            import dataset
+            n = len(dataset.list_experiences())
+            return {"ok": True, "count": int(n), "note": "活跃经验数",
+                    "ms": round((time.monotonic() - t0) * 1000, 1)}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "count": 0, "note": type(e).__name__,
                     "ms": round((time.monotonic() - t0) * 1000, 1)}
     if source_id in _PROJ_TARGETS:
         # 投影源不跑 `rg --files`（O(文件数) 的老毛病）：读 meta，毫秒级
@@ -588,6 +652,12 @@ def _build_tasks(q: str, limit: int, want: set) -> Dict:
                 tasks[sid] = asyncio.to_thread(_recent_claude_mem, limit)
             else:
                 tasks[sid] = asyncio.to_thread(_search_claude_mem, q, limit)
+        elif src.kind == "hub_sqlite":
+            # hub 自己的库（经验库）：同进程连接，无需 rg/sqlite 外部句柄
+            if recent:
+                tasks[sid] = asyncio.to_thread(_recent_experiences, limit, src.timeout_s)
+            else:
+                tasks[sid] = asyncio.to_thread(_search_experiences, q, limit, src.timeout_s)
         elif src.kind == "rg_text":
             if recent:
                 # 「取最新」一律扫实时树：投影库是关键词 FTS 且可能陈旧

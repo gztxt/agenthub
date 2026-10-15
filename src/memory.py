@@ -47,7 +47,10 @@ PROFILE_CHARS = int(os.getenv("MEMORY_PROFILE_CHARS", "1200"))
 #: / archived_sessions 2506(超时，要扫 5622 个文件)。
 #: 为何不含后三路：默认行径上烧 3s 且三路必然超时——它们等 A4 的索引投影，不在这里硬开。
 #: 为何 claude_mem 在列：9 路里**只有它有真索引**（sqlite FTS5），其余是每次全树 rg。
-FED_FAST_SOURCES = "local,tdai,claude_mem,workbuddy_memory,claude_projects"
+#: 为何把 experiences（P0-1 D18）加进来：它查的是 hub **自己的** agents.db（同进程连接，
+#: 毫秒级，无 rg 扫树成本），且是**蒸馏过**的可复用单元 —— 默认召回它才是「经验接入联邦」
+#: 的实际含义（只登记不默认召＝注册了但没人用）。
+FED_FAST_SOURCES = "local,tdai,claude_mem,workbuddy_memory,claude_projects,experiences"
 #: 注入段里单条记忆的截断长度（与 pi 扩展 fmtMem 的 160 字同口径，跨入口看起来一致）。
 FED_ITEM_CHARS = 160
 

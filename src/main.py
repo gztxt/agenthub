@@ -90,7 +90,17 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.111"  # P0-1 收尾：真实轨迹源（profile_events）+ free 抽取 + 验收③取证
+VERSION = "0.13.112"  # P0-1 D18：经验库接入记忆联邦（只召回活跃条）
+#   v0.13.112：P0-1 的 **D18**（经验接入记忆联邦）。经验库若只躺在 db 里就不是「记忆」。
+#   ① `memfed.REGISTRY` 新起一路 `experiences`（kind=`hub_sqlite`，weight=0.65，enabled）：
+#      查的是 hub **自己的** agents.db（同进程连接，毫秒级），不是第二份权威副本。
+#      新增 `_search_experiences/_recent_experiences`（`RECENT_Q` 哨兵路）与 `_probe_one` 分支。
+#   ② **只召回活跃条**：`retired_at IS NULL`（退役条只能按 id 追溯，不回流）。
+#   ③ 进默认集：`memory.FED_FAST_SOURCES` 加 `experiences` ⇒ 默认检索/注入包都含它；
+#      `hubmcp.hub_memory_search` 的默认值本就从 `enabled_ids()` 派生，自动跟随。
+#   ④ 前端同源：`templates/index.html` 源选多一个 option、`SRC_ABBR` 加 `EX`
+#      （`tests/test_center_ui_l0.py` 钉「前端枚举 = REGISTRY」）。
+#   闸门：tests/test_experience_fed.py（7 例）。
 #   v0.13.111：P0-1 的**收尾**（接切片 A/B/C）。
 #   ① **真实轨迹源**：`telemetry_events` 在本机**实测仅 1 行** ⇒ 闭环没有燃料。
 #      新增 `hook.build_traces()/traces_from_store()`：从 hub 自己的 `profile_events`

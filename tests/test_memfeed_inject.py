@@ -328,7 +328,10 @@ class TestDefaults(unittest.TestCase):
                 continue
             src = memfed.REGISTRY[sid]
             self.assertTrue(src.enabled, "%s 不该出现在默认行径（未启用）" % sid)
-            self.assertIn(src.kind, ("sqlite_fts", "rg_text"))
+            # 允许的 kind：两种外部句柄 + `hub_sqlite`（hub **自己**的 SQLite，同进程连接，
+            # 毫秒级）—— D18 把经验库接进来时新增的第三种。判据的本意是「默认行径里不许有
+            # 需要扫全树的慢源」，hub_sqlite 不扫树，符合本意。
+            self.assertIn(src.kind, ("sqlite_fts", "rg_text", "hub_sqlite"))
 
 
 # ── G6 只读：联邦源是别的 agent 的私有资产，这段代码不许有写能力 ────────

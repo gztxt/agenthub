@@ -55,6 +55,27 @@ def _parse(ts):
         return None
 
 
+def extracted_trace_ids(ds=dataset) -> set:
+    """已抽过经验的 trace id 集合（来自 `experiences.source_trace_ids`，**含已退役条**）。
+
+    为何含已退役：退役是 Dreaming 的「合并重复/删过期」，不代表那段轨迹没抽过；
+    若只看活跃条，退役后明天会把同一条轨迹重新抽一遍（白花模型调用）。
+    """
+    lister = getattr(ds, "list_experiences", None)
+    if not lister:
+        return set()
+    ids = set()
+    for e in lister(active_only=False):
+        try:
+            ts = json.loads(e.get("source_trace_ids") or "[]")
+        except Exception:  # noqa: BLE001
+            ts = []
+        for x in (ts or []):
+            if x:
+                ids.add(str(x))
+    return ids
+
+
 def _newest(group: list) -> dict:
     return max(group, key=lambda e: (str(e.get("created_at") or ""), str(e.get("id") or "")))
 
@@ -137,13 +158,28 @@ def parse_experience(text):
 
 
 async def extract_trajectories(trajs: list, *, model: str = DEFAULT_MODEL,
-                               chat_fn=None, ds=dataset, limit: int = None) -> list:
-    """对轨迹逐条调模型抽经验并入库（**非会话模型必须 free**）。返回入库的经验列表。"""
+                               chat_fn=None, ds=dataset, limit: int = None,
+                               skip=None) -> list:
+    """对轨迹逐条调模型抽经验并入库（**非会话模型必须 free**）。返回入库的经验列表。
+
+    **增量**（②自动化，2026-10-15）：默认跳过**已抽过**的轨迹（`extracted_trace_ids`，
+    含已退役条）—— 定时任务不会每天把同前 N 条轨迹再花钱抽一遍。`skip` 可显式覆盖。
+    """
     assert_free_model(model)
     if chat_fn is None:
         raise RuntimeError("extract_trajectories 需要 chat_fn")
+    done = set(str(x) for x in (skip if skip is not None else extracted_trace_ids(ds)))
+    todo, seen = [], set()
+    for t in (trajs or []):
+        sid = str(t.get("session_id"))
+        if not sid or sid in done or sid in seen:
+            continue
+        seen.add(sid)
+        todo.append(t)
+    if limit:
+        todo = todo[:int(limit)]
     out = []
-    for t in (trajs or [])[:limit] if limit else (trajs or []):
+    for t in todo:
         prompt = EXTRACT_PROMPT % json.dumps(t, ensure_ascii=False, sort_keys=True)
         ans = await chat_fn(model, prompt)
         exp = parse_experience(ans)

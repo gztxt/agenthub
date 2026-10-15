@@ -166,6 +166,44 @@ class TestExtract(unittest.TestCase):
         self.assertEqual([], out)
 
 
+class TestIncrementalExtract(_Base):
+    """②自动化：抽取必须**增量** —— 已抽过的轨迹别再花钱抽一遍。"""
+
+    def test_extracted_trace_ids_reads_source_trace_ids(self):
+        dataset.record_experience("pitfall", situation="s", action="a",
+                                  source_trace_ids=["tr1", "tr2"])
+        self.assertEqual({"tr1", "tr2"}, em.extracted_trace_ids())
+
+    def test_extracted_trace_ids_empty_when_none(self):
+        self.assertEqual(set(), em.extracted_trace_ids())
+
+    def test_extract_skips_already_done_traces(self):
+        import asyncio
+        dataset.record_experience("pitfall", situation="s", action="a",
+                                  source_trace_ids=["tr1"])
+        calls = []
+
+        async def chat(model, prompt):
+            calls.append(prompt)
+            return '{"kind":"pitfall","situation":"new","action":"act"}'
+        trajs = [{"session_id": "tr1", "source": "x", "events": [{"event": "e"}]},
+                 {"session_id": "tr2", "source": "x", "events": [{"event": "e"}]}]
+        out = asyncio.run(em.extract_trajectories(trajs, chat_fn=chat, limit=None))
+        self.assertEqual(1, len(calls), "已抽过的 tr1 不该再调模型")
+        self.assertEqual(1, len(out))
+        self.assertEqual(["tr2"], out[0]["source_trace_ids"])
+
+    def test_extract_limit_applies_after_skip(self):
+        import asyncio
+
+        async def chat(model, prompt):
+            return '{"kind":"pitfall","situation":"s","action":"a"}'
+        trajs = [{"session_id": "t%d" % i, "source": "x", "events": [{"event": "e"}]}
+                 for i in range(5)]
+        out = asyncio.run(em.extract_trajectories(trajs, chat_fn=chat, limit=2))
+        self.assertEqual(2, len(out))
+
+
 class _FakeDS:
     def __init__(self):
         self.rows = []

@@ -27,6 +27,11 @@ TASK_TIMEOUT_S = int(os.getenv("TASK_TIMEOUT_S", "600"))
 MAX_CONCURRENCY = 4
 MAX_TASKS = 12
 UPSTREAM_TRIM = 4000
+#: P1-3：截断预算**只算正文**，标记开销另计（标记必须存在，否则下游无法分辨
+#: 「上游只写了这么多」与「被我砍掉了」—— 静默截断是最坏形态，见 format_upstream 文档串）。
+#: 头尾比例 1:1：结论通常在尾部，整体砍尾丢的正是结论。
+UPSTREAM_HEAD = UPSTREAM_TRIM // 2
+UPSTREAM_TAIL = UPSTREAM_TRIM - UPSTREAM_HEAD
 #: 调度循环步长（秒）。做成常量是为了让 L0 闸门能把它压到毫秒级（不起真等待）。
 LOOP_SLEEP_S = float(os.getenv("TASK_LOOP_SLEEP_S", "1.5"))
 
@@ -84,6 +89,35 @@ def budget_exceeded(row: dict, spent_ms: Optional[int], spent_tokens: int = 0) -
     if bt is not None and spent_tokens is not None and spent_tokens > bt:
         return "token %s 超预算 %s" % (spent_tokens, bt)
     return None
+
+
+def format_upstream(task_id: str, text: str) -> str:
+    """上游产物注入下游 prompt 时的**交接块**（P1-3，纯函数）。
+
+    原实现是 `upstream[d][:UPSTREAM_TRIM]` —— **静默整体截断**：不留标记、不保尾部。
+    那个形态最坏，有两个独立的原因：
+
+    1. **下游无从分辨**「上游本来就只写了 4000 字」与「上游写了 8000 字被我砍到 4000」。
+       两种情况的 prompt 长得一模一样，下游只能猜；猜错就是**基于缺失内容下结论**。
+    2. **事后不可复盘**。任务表里不留「这条被截了多少」，出了错只能回放原始 DB 才知道。
+
+    所以截断必须**自带可断言的标记**：原始长度 + 省略量，且**保留头尾**
+    （结论通常在尾部，砍尾丢的正是结论）。
+
+    短文本（≤ `UPSTREAM_TRIM`）**逐字节原样返回，不加任何标记** —— 绝大多数任务走这条路，
+    给它们套一层壳纯属噪声（这也是最容易写坏的地方，见 tests 的红向自证）。
+
+    超长时返回四段：`头` + 省略标记（含原始总长与省略量）+ `尾` + 任务标题。
+    正文字符数**恒 ≤ `UPSTREAM_TRIM`**；标记与标题是固定开销，不占正文预算。
+    """
+    body = text or ""
+    if len(body) <= UPSTREAM_TRIM:
+        return "—— 任务 %s 的结果 ——\n%s" % (task_id, body)
+    omitted = len(body) - UPSTREAM_TRIM
+    return ("—— 任务 %s 的结果 ——（原文 %d 字符，已省略中间 %d 字符，"
+            "保留头 %d + 尾 %d）——\n%s\n……（以上省略 %d 字符）……\n%s"
+            % (task_id, len(body), omitted, UPSTREAM_HEAD, UPSTREAM_TAIL,
+               body[:UPSTREAM_HEAD], omitted, body[-UPSTREAM_TAIL:]))
 
 
 SCHEMA_TASKS = """
@@ -375,7 +409,7 @@ async def _run_task(run_id: str, row: dict):
     dep_outputs = []
     for d in json.loads(row["deps"] or "[]"):
         if d in upstream:
-            dep_outputs.append(f"—— 任务 {d} 的结果 ——\n{upstream[d][:UPSTREAM_TRIM]}")
+            dep_outputs.append(format_upstream(d, upstream[d]))
     if dep_outputs:
         prompt = f"总目标：{row['goal']}\n\n你的子任务：{prompt}\n\n" + "\n\n".join(dep_outputs)
     t0 = asyncio.get_event_loop().time()

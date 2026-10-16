@@ -1,3 +1,38 @@
+## v0.13.116 — `170` §7 前两项：执行者不得自证失败 + run 级预算（派发前止损）
+
+> 来源：`agent-knowledge/170` §7「已知保证边界」四项（P0-3 的设计取舍），用户 2026-10-16 授权。
+> 本批做**前两项**（③④），另两项（verifying 瞬时态 / waiting 需外部唤醒）在后续批。
+
+### 一、§7-④ 执行者不得自证 **fail**（「不自证」是双向的）
+
+旧 `_run_task`：`if not result.get("success"): status='failed'` —— **不看产物、不留结论**。
+方向保守（失败不会伪装成成功），但「其实产物合格」被**静默掩盖**、事后不可复核。
+
+现：仍保守判 `failed`（不因产物非空就升级为成功），但**必跑一遍 verifier**，并把复核结论写进
+`verify_reason`；当自称失败而产物被复核为**合格**时，另发一条 `mismatch` 事件（可查、可统计）。
+
+**口径冲突已消解**：`P0-b` 的契约是「没过 verifier 的路径 `verdict` 必须 NULL」
+（闸门 `test_verdict_null_on_self_reported_failure` 钉着）⇒ 本条**不写 `verdict`**，
+复核结论走 `verify_reason` —— 目的（不再静默）达成，且不破他人契约。
+
+### 二、§7-③ run 级预算（不只是任务级）
+
+新表 `task_run_budgets(run_id PRIMARY KEY, budget_ms, budget_tokens, created_at)`（**一 run 一行**）；
+`set_run_budget()` upsert、`run_spent()` 汇总、`run_budget_exceeded()` 判限（**未设预算 ⇒ None = 不设限**，
+不是「超了」）。
+
+`_execute_run` 在**派发前**逐 pending 查累计消耗 ⇒ 剩余 pending 一律 `failed`（`run 预算耗尽: …`），
+**已跑的不打断**。为何放内层逐条而非整轮 `continue`：不为预算引入新的循环出口，
+避免与 `parked`/`submitted` 的挂起逻辑打架。
+
+### 三、闸门
+
+`tests/test_task_statemachine.py` 新增 `TestExecutorCannotSelfDeny`(5) 与 `TestRunBudget`(5)。
+⚠ 自抓一条**非确定性**用例：run 预算用 `budget_ms=0` 判「已花超 0」，而假 chat 瞬时返回时
+`dur` 可能是 **0ms** ⇒ `0 > 0` 不成立、断言时红时绿。改为让假 chat `sleep 20ms`。
+
+---
+
 ## v0.13.115 — 出站韧性层 + 依赖锁版本 + token 取用 + 知识索引 + 配置包导入导出
 
 > 接 `v0.13.114`。来源是一份针对本仓的**第三方评估意见**：逐条对代码取证后，

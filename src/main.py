@@ -94,7 +94,20 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.115"  # 出站韧性层 + 依赖锁版本 + token 取用 + 知识索引 + 配置包导入导出（PT-20260927-12/13/14/15）
+VERSION = "0.13.116"  # 170 §7 两项：执行者不得自证失败 + run 级预算（派发前止损）
+#   v0.13.116：`agent-knowledge/170` §7 四项里的**前两项**（用户 2026-10-16 授权）。
+#   ① **§7-④ 执行者不得自证 fail**：旧 `_run_task` 遇 `result["success"]=False` 直接置 failed，
+#      **不看产物、不留结论** ⇒「其实产物合格」被静默掩盖、事后不可复核。现：失败方向仍保守
+#      （不因产物非空就升级为 success），但**必跑一遍 verifier** 并把结论写进 `verify_reason`；
+#      自称失败而产物被复核为合格时另发一条 `mismatch` 事件（可查）。
+#      ⚠ 口径冲突已消解：P0-b 契约「没过 verifier 的路径 `verdict` 必须 NULL」被**保留**
+#      （不给自述失败写 verdict），复核结论走 `verify_reason`。
+#   ② **§7-③ run 级预算**：新表 `task_run_budgets`（一 run 一行，upsert）+ `run_spent()` +
+#      `run_budget_exceeded()`；`_execute_run` 在**派发前**逐 pending 查累计消耗 ⇒
+#      「run 预算耗尽」的剩余 pending 一律 failed（已跑的不打断）。
+#   闸门：`tests/test_task_statemachine.py` 新增两类（含红向修正：预算用例必须让 t1 真花时间，
+#   否则 dur 可能 0ms 让断言时红时绿）。
+#   v0.13.115：出站韧性层 + 依赖锁版本 + token 取用 + 知识索引 + 配置包导入导出（PT-20260927-12/13/14/15）
 #   叙事全文见 CHANGELOG.md 同版本；此处只留「为何这么改」的根因。
 #   ① **出站韧性层**（src/resilience.py）：本机8 处裸 urlopen 零重试。借鉴
 #      nathangtg/agent-hub 的熔断器 + 限流退避，但**只抄语义**（上游是 async + 硬时钟

@@ -221,6 +221,106 @@ class TestWaitingState(_Base):
         self.assertEqual(self._status("t1")["status"], "pending")
 
 
+class TestExecutorCannotSelfDeny(_Base):
+    """§7-④：「执行者不得自证」是**双向**的 —— 自称失败也要被独立复核并留痕。
+
+    旧行为：`success=False` ⇒ 直接 failed，**不看产物、不留复核结论** ⇒ 「其实产物合格」
+    这种情形被静默掩盖（不可复核）。现：仍保守判 failed（不因产物非空就升级），
+    但**必须**写下 `verdict`/`verify_reason`，裸的不一致另发 `mismatch` 事件。
+    """
+
+    def _row(self, tid):
+        return db.query("SELECT * FROM tasks WHERE task_id=?", (tid,))[0]
+
+    def test_claimed_failure_with_good_output_records_mismatch(self):
+        self._insert("rsd", "t1")
+        self._set_chat({"do t1": {"success": False, "error": "boom",
+                                   "response": "real answer"}})
+        self._run_task_once("t1")
+        r = self._row("t1")
+        self.assertEqual("failed", r["status"], "失败方向仍保守：不因产物非空就升级")
+        self.assertIsNone(r["verdict"], "P0-b 契约：没过 verifier 的路径 verdict 必须 NULL")
+        self.assertIn("executor_claimed_failure", r["verify_reason"] or "")
+
+    def test_claimed_failure_with_empty_output_records_insufficient(self):
+        self._insert("rsd2", "t1")
+        self._set_chat({"do t1": {"success": False, "error": "boom", "response": ""}})
+        self._run_task_once("t1")
+        r = self._row("t1")
+        self.assertEqual("failed", r["status"])
+        self.assertIsNone(r["verdict"])
+        self.assertTrue(r["verify_reason"], "判不了也要写清原因")
+
+    def test_mismatch_emits_profile_event(self):
+        self._insert("rsd3", "t1")
+        self._set_chat({"do t1": {"success": False, "error": "boom",
+                                   "response": "real answer"}})
+        self._run_task_once("t1")
+        rows = db.query("SELECT status FROM profile_events WHERE source='task_exec'")
+        self.assertIn("mismatch", [r["status"] for r in rows],
+                      "自述与复核不一致必须发一条可查的事件")
+
+    def test_no_mismatch_when_both_say_fail(self):
+        self._insert("rsd4", "t1")
+        self._set_chat({"do t1": {"success": False, "error": "boom", "response": ""}})
+        self._run_task_once("t1")
+        rows = db.query("SELECT status FROM profile_events WHERE source='task_exec'")
+        self.assertNotIn("mismatch", [r["status"] for r in rows])
+
+    def test_success_path_unaffected(self):
+        self._insert("rsd5", "t1")
+        self._set_chat({"do t1": {"success": True, "response": "ok"}})
+        self._run_task_once("t1")
+        r = self._row("t1")
+        self.assertEqual("success", r["status"])
+        self.assertEqual("pass", r["verdict"])
+
+
+class TestRunBudget(_Base):
+    """§7-③：预算不能只有任务粒度 —— run 级累计超限必须在**派发前**止损。"""
+
+    def test_absent_budget_never_exceeds(self):
+        self.assertIsNone(tasks.run_budget_exceeded("none"))
+
+    def test_exceeded_by_ms(self):
+        self._insert("rb1", "t1")
+        db.execute("UPDATE tasks SET spent_ms=500 WHERE task_id='t1'")
+        tasks.set_run_budget("rb1", budget_ms=100)
+        self.assertIn("耗时", tasks.run_budget_exceeded("rb1") or "")
+
+    def test_exceeded_by_tokens(self):
+        self._insert("rb2", "t1")
+        db.execute("UPDATE tasks SET spent_tokens=999 WHERE task_id='t1'")
+        tasks.set_run_budget("rb2", budget_tokens=10)
+        self.assertIn("token", tasks.run_budget_exceeded("rb2") or "")
+
+    def test_set_run_budget_is_upsert(self):
+        tasks.set_run_budget("rb3", budget_ms=100)
+        tasks.set_run_budget("rb3", budget_ms=200)
+        rows = db.query("SELECT budget_ms FROM task_run_budgets WHERE run_id='rb3'")
+        self.assertEqual(1, len(rows), "同一 run 只许一行")
+        self.assertEqual(200, rows[0]["budget_ms"])
+
+    def test_run_budget_stops_downstream_pending(self):
+        """t1 无依赖先跑；t2 依赖 t1。run 预算 0 ⇒ t1 跑完后 t2 **不得**再派发。"""
+        self._insert("rb4", "t1")
+        self._insert("rb4", "t2", deps=("t1",))
+        tasks.set_run_budget("rb4", budget_ms=0)
+        # 必须让 t1 **确实花掉时间**：假 chat 瞬间返回时 dur 可能是 0ms，`0 > 0` 不成立
+        # ⇒ 用例会时红时绿（第一版就踩了）。sleep 20ms 把「已花超 0」变成确定性事实。
+        import asyncio as _aio
+
+        async def chat(agent_id, message, trace_id=None):
+            await _aio.sleep(0.02)
+            return {"success": True, "response": "ok"}
+        tasks.set_context(chat_fn=chat)
+        self._run_once("rb4")
+        self.assertEqual("success", self._status("t1")["status"])
+        r2 = self._status("t2")
+        self.assertEqual("failed", r2["status"], "预算耗尽后下游不得再跑")
+        self.assertIn("run 预算耗尽", r2["error"])
+
+
 class TestBudget(_Base):
     def test_budget_exceeded_is_pure_and_typed(self):
         self.assertIsNone(tasks.budget_exceeded({"budget_ms": 1000, "budget_tokens": 100}, 10, 5))

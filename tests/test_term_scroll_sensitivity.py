@@ -238,7 +238,14 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.115"
+    CURRENT_VERSION = "0.13.116"
+
+    #: v0.13.116（170 §7 前两项）：关键词取自版本注释里**实际写下的字句**。
+    #: ① 执行者不得自证 fail（复核落 verify_reason + mismatch 事件）；② run 级预算派发前止损。
+    VERSION_ROOT_CAUSES["0.13.116"] = (
+        "执行者不得自证 fail", "verify_reason", "mismatch", "task_run_budgets",
+        "run_budget_exceeded", "派发前",
+    )
 
     #: v0.13.115（PT-20260927-12/13/14/15，外部评估蓝图链四项）：关键词取自版本注释
     #: 里**实际写下的字句**。挑的是「这四项最容易被后人顺手改坏/删掉」的点：

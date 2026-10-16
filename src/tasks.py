@@ -92,7 +92,7 @@ _TASK_COLUMNS = (
 
 
 def budget_exceeded(row: dict, spent_ms: Optional[int], spent_tokens: int = 0) -> Optional[str]:
-    """预算闸（纯函数，便于单测）：返回超限原因，未超返回 None。
+    """任务级预算闸（纯函数，便于单测）：返回超限原因，未超返回 None。
 
     预算为 None = **不设限**；预算与实测同时存在才比较（判不了就不拦 —— 与 P0-4 同口径，
     但这里“不拦”是设计选择，因为预算是成本护栏、不是正确性判据）。
@@ -103,6 +103,41 @@ def budget_exceeded(row: dict, spent_ms: Optional[int], spent_tokens: int = 0) -
     bt = row.get("budget_tokens")
     if bt is not None and spent_tokens is not None and spent_tokens > bt:
         return "token %s 超预算 %s" % (spent_tokens, bt)
+    return None
+
+
+# ── §7-③ run 级预算 ────────────────────────────────────────────────────
+def set_run_budget(run_id: str, budget_ms: Optional[int] = None,
+                   budget_tokens: Optional[int] = None) -> None:
+    """设/改 run 级预算（**upsert**：一个 run 只一行）。None = 该项不设限。"""
+    db.execute("INSERT INTO task_run_budgets(run_id,budget_ms,budget_tokens,created_at)"
+               " VALUES(?,?,?,?)"
+               " ON CONFLICT(run_id) DO UPDATE SET budget_ms=excluded.budget_ms,"
+               " budget_tokens=excluded.budget_tokens",
+               (run_id, budget_ms, budget_tokens, _now()))
+
+
+def run_spent(run_id: str) -> dict:
+    """run 累计消耗 = 各任务 `spent_ms` / `spent_tokens` 之和（未跑的不计）。"""
+    r = db.query("SELECT COALESCE(SUM(spent_ms),0) ms, COALESCE(SUM(spent_tokens),0) tk"
+                 " FROM tasks WHERE run_id=?", (run_id,))[0]
+    return {"ms": int(r["ms"] or 0), "tokens": int(r["tk"] or 0)}
+
+
+def run_budget_exceeded(run_id: str) -> Optional[str]:
+    """run 级累计超限原因；**未设预算 ⇒ None**（不设限，不是「超了」）。
+
+    与任务级同一口径：只有「预算与实测同时存在」才比较 ⇒ 判不了就不拦。
+    """
+    rows = db.query("SELECT * FROM task_run_budgets WHERE run_id=?", (run_id,))
+    if not rows:
+        return None
+    b, s = rows[0], run_spent(run_id)
+    bm, bt = b.get("budget_ms"), b.get("budget_tokens")
+    if bm is not None and s["ms"] > bm:
+        return "耗时 %sms 超 run 预算 %sms" % (s["ms"], bm)
+    if bt is not None and s["tokens"] > bt:
+        return "token %s 超 run 预算 %s" % (s["tokens"], bt)
     return None
 
 
@@ -174,6 +209,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     PRIMARY KEY (run_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_run ON tasks(run_id, status);
+-- §7-③：run 级预算（一个 run 一行；不设的行不存在 ⇒ 不设限）
+CREATE TABLE IF NOT EXISTS task_run_budgets (
+    run_id TEXT PRIMARY KEY,
+    budget_ms INTEGER,
+    budget_tokens INTEGER,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -528,16 +570,36 @@ async def _run_task(run_id: str, row: dict):
                                  trace_id=row["trace_id"],
                                  detail={"task": row["task_id"], "budget": over})
             return
-        # ③ 执行者自称失败 ⇒ 直接 failed（失败方向保守，不必再过验证器）。
+        # ③ 自称失败：**失败方向仍保守**（不因产物非空就升级），但必须过一遍独立复核并留痕。
+        #    §7-④：执行者不得自证 success（④），也**不得自证 fail**（本支）——旧实现直接 failed、
+        #    不看产物、不留结论 ⇒「其实产物合格」被静默掩盖、事后不可复核。
         if not result.get("success"):
             err = (result.get("error") or "unknown")[:500]
-            db.execute("UPDATE tasks SET status='failed',error=?,duration_ms=?,spent_ms=?,"
-                       "spent_tokens=?,model=?,finished_at=?,updated_at=?"
+            kind = row.get("verify_kind") or verifier.DEFAULT_KIND
+            verdict = verifier.verify(kind, output=result.get("response"),
+                                      expect=row.get("verify_expect"))
+            status_v = verdict["status"]
+            if status_v == verifier.STATUS_PASS:
+                reason = ("executor_claimed_failure_but_output_verified: %s" % err)[:500]
+                event = "mismatch"
+            else:
+                gaps = "; ".join("%s: %s" % (g["id"], g["detail"]) for g in verdict["gaps"])
+                reason = ("executor_claimed_failure; verifier %s (%s): %s"
+                          % (status_v, kind, gaps))[:500]
+                event = "fail"
+            # ⚠ 口径冲突处理（2026-10-16）：P0-b 的契约是「**没过 verifier（含自述失败）的路径
+            #   `verdict` 必须 NULL**」，而 P0-b 闸门 `test_verdict_null_on_self_reported_failure`
+            #   钉着这一条。所以本条修复**不写 `verdict`**（保持 NULL），复核结论落 `verify_reason`
+            #   + `mismatch` 事件 —— 目的（**不再静默**）达到了，且不破别人的契约。
+            db.execute("UPDATE tasks SET status='failed',error=?,verify_reason=?,"
+                       "duration_ms=?,spent_ms=?,spent_tokens=?,model=?,finished_at=?,updated_at=?"
                        " WHERE run_id=? AND task_id=?",
-                       (err, dur, dur, spent_tokens, used_model, _now(), _now(),
-                        run_id, row["task_id"]))
-            db.log_profile_event("task_exec", row["agent_id"], "fail", dur,
-                                 trace_id=row["trace_id"], detail={"task": row["task_id"]})
+                       (err, reason, dur, dur, spent_tokens, used_model,
+                        _now(), _now(), run_id, row["task_id"]))
+            db.log_profile_event("task_exec", row["agent_id"], event, dur,
+                                 trace_id=row["trace_id"],
+                                 detail={"task": row["task_id"], "verify": kind,
+                                         "verify_status": status_v, "claimed_failure": True})
             return
         # ④ **执行者不自证**：先 verifying，再由 verifier 独立判产物（P0-3 主判据）。
         kind = row.get("verify_kind") or verifier.DEFAULT_KIND
@@ -621,6 +683,20 @@ async def _execute_run(run_id: str):
                                (_now(), _now(), run_id, r["task_id"]))
                     continue
                 if all(status.get(d) == "success" for d in deps):
+                    # §7-③ run 级预算：在**派发前**查累计消耗（事后算 = 已经花完了）。
+                    # 放内层（逐 pending）而非整轮 continue：不为预算引入新的循环出口，
+                    # 避免与 parked/submitted 的挂起逻辑打架。
+                    r_over = run_budget_exceeded(run_id)
+                    if r_over:
+                        db.execute("UPDATE tasks SET status='failed',error=?,finished_at=?,"
+                                   "updated_at=? WHERE run_id=? AND task_id=?",
+                                   ("run 预算耗尽: " + r_over, _now(), _now(),
+                                    run_id, r["task_id"]))
+                        db.log_profile_event("task_exec", r.get("agent_id") or "-", "fail", None,
+                                             trace_id=r.get("trace_id"),
+                                             detail={"task": r["task_id"],
+                                                     "run_budget": r_over})
+                        continue
                     db.execute("UPDATE tasks SET status='running',started_at=?,updated_at=?"
                                " WHERE run_id=? AND task_id=?",
                                (_now(), _now(), run_id, r["task_id"]))

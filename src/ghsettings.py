@@ -32,7 +32,6 @@ API 基址 `https://api.github.com`、token 文件 `/fs/1000/ftp/技术文档/gi
 from __future__ import annotations
 
 import hmac
-import ipaddress
 import json
 import os
 import re
@@ -46,6 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 import db
+import outbound    # P2 C5：出站地址准入（与 mcpgw 共用同一份判据）
 import resilience
 import tdai_client
 from fastapi import APIRouter, HTTPException, Request
@@ -83,7 +83,8 @@ _TOKEN_PREFIXES = ("github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_")
 
 _HOSTNAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 _OWNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,98}[A-Za-z0-9]$|^[A-Za-z0-9]$")
-_BAD_NAME_SUFFIXES = (".local", ".localhost", ".internal", ".home.arpa")
+#: ⚠ `_BAD_NAME_SUFFIXES` 已随判定一起迁到 `outbound.BAD_NAME_SUFFIXES`（P2 C5），
+#: 本模块不再自留一份 —— 两份后缀表必然漂移。
 
 
 class GhSettingsError(Exception):
@@ -218,21 +219,17 @@ def token_view() -> Dict[str, Any]:
 
 # ── 校验层 ────────────────────────────────────────────────────────────────
 def _reject_private_host(host: str) -> None:
-    """字面 IP 与 localhost 家族一律拒（防把 token 发到内网/本机）。"""
-    h = (host or "").strip().lower().rstrip(".")
-    if not h:
+    """字面 IP 与 localhost 家族一律拒（防把 token 发到内网/本机）。
+
+    判定已抽到 `outbound`（P2 C5）：**一份判据两处用** —— mcpgw 的出站同样过它。
+    两份判据必然漂移，而漂移是**静默**的（漏一处＝那条出站路径没护栏）。
+    本函数保留只为抛 ghsettings 自己的错误类型（调用点与既有测试都不动）。
+    """
+    if not (host or "").strip():
         raise GhSettingsError(400, "主机名不能为空")
-    if h == "localhost" or h.endswith(_BAD_NAME_SUFFIXES):
-        raise GhSettingsError(400, f"拒绝本机/内网主机名：{host}")
-    if h.startswith("[") and h.endswith("]"):        # [::1] 形态
-        h = h[1:-1]
-    try:
-        ip = ipaddress.ip_address(h)
-    except ValueError:
-        return                                       # 普通域名：不做 DNS（保持零网络）
-    if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-            or ip.is_multicast or ip.is_unspecified):
-        raise GhSettingsError(400, f"拒绝内网/回环地址：{host}")
+    why = outbound.blocked_reason(host, allow_private=False)
+    if why:
+        raise GhSettingsError(400, why)
 
 
 def _check_api_base(v: str) -> str:

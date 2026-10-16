@@ -22,6 +22,13 @@ from contextlib import AsyncExitStack
 from fastapi import APIRouter, HTTPException, Request
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+import outbound    # P2 C5：出站地址准入（与 ghsettings 共用同一份判据）
+
+#: MCP server 是否允许指向本机/内网。**默认允许** —— MCP server 本来就常在 127.0.0.1
+#: （本机 stdio/http 桥），一刀切会把最正常的用法挡死（把安全做成可用性事故）。
+#: 但**云元数据端点任何场景都拒**（`outbound` 里硬编码，不受本开关影响）。
+MCP_ALLOW_PRIVATE = os.getenv("HUB_MCP_ALLOW_PRIVATE", "1").strip().lower() not in (
+    "0", "false", "no", "off")
 from mcp.client.streamable_http import streamable_http_client
 from pydantic import BaseModel
 
@@ -160,6 +167,12 @@ async def add_server(body: ServerIn, request: Request):
         raise HTTPException(400, "stdio 需要 command")
     if body.transport == "http" and not body.url:
         raise HTTPException(400, "http 需要 url")
+    # P2 C5：出站准入。注册处拦一次（挡住直白的内网/元数据写法），调用处再拦一次。
+    # 两处都拦是因为**注册先于调用**：库里的旧行可能来自本项落地之前。
+    if body.url:
+        why = outbound.check_url(body.url, allow_private=MCP_ALLOW_PRIVATE)
+        if why:
+            raise HTTPException(400, "出站准入拒绝：%s" % why)
     sid = f"{int(time.time()*1000):x}"
     now = _now()
     db.execute(
@@ -423,6 +436,13 @@ async def mcp_call(body: CallIn):
                     (body.server, body.server))
     if not rows:
         raise HTTPException(404, f"MCP server 未注册: {body.server}")
+    # P2 C5：调用前再过一次出站准入 —— 库里可能有**本项落地之前**注册的行。
+    # 零网络开销（纯字符串/ipaddress 判定，不做 DNS）。
+    srv = rows[0]
+    if srv.get("url"):
+        why = outbound.check_url(srv["url"], allow_private=MCP_ALLOW_PRIVATE)
+        if why:
+            raise HTTPException(400, "该 server 地址被出站准入拒绝：%s" % why)
     server = dict(rows[0])
     _acl_check(body.agent_id, server["id"], body.tool)
     t0 = time.monotonic()

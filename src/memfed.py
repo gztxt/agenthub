@@ -178,15 +178,42 @@ def _sanitize_content(text: str) -> str:
 
 
 def _fts_term(q: str) -> str:
-    """用户词 → FTS5 安全 MATCH 项：整个包成带引号短语，内部引号剔除。
+    """用户词 → FTS5 安全 MATCH 项：空白分段，段间 OR，段内按语种定分词粒度。
 
-    为什么不裸传：`q=a-b OR c` 会被 FTS5 当表达式解析，轻则语法错（ok=False 假降级），
-    重则被拆词后命中膨胀。短语包裹后语义=字面包含，与 rg -F 字面匹配对齐。
+    为什么不裸传：`q=a-b OR c` 会被 FTS5 当表达式解析，用户能注入语法（实测
+    裸传 `双层 OR c` 命中 33 条本不该命中的行）。每段引号包裹后语义=字面。
+
+    为什么不是整句包一个短语（v0.13.31 之前的做法）：整句成短语意味着
+    **多关键词必须连续出现**才命中——实测 `q=双层记忆架构 三模型联动`
+    （两词分处不同观察）返回 0 条，而两词各自都能命中 2~3 条。
+
+    段内分词粒度按语种分（这是本函数的关键取舍，纯 OR 拆词会炸）：
+    - **含 CJK 的段**：FTS5 不按空格切中文，用户的多词意图靠空格表达 ⇒ 按空格切 OR。
+      实测 `"双层记忆架构" OR "三模型联动"` → 2 条（整句短语是 0 条）。
+    - **纯 ASCII 的段**：空格通常是词内的一部分（`Claude Code` 是产品名），
+      拆开 OR 会把召回从 8 条放大到 55 条（`Code` 单独就43 条，噪声压过信号）
+      ⇒ **所有纯 ASCII 段整体合并为一个短语**，段间空格还原。
+    纯 ASCII 段内仍剔引号防注入（`a"b` → `ab`，字面量而非语法）。
+
+    混合输入（`Worker API 搜索`）走OR：ASCII 合并段 `"Worker API"` 与 CJK 段
+    `"搜索"` 并列，兼顾两类召回。
     """
-    inner = re.sub(r'["\s]+', " ", q or "").strip()
-    if not inner:
+    parts = [p.replace('"', "") for p in re.split(r"\s+", q or "") if p.strip()]
+    if not parts:
         return '""'
-    return f'"{inner}"'
+    cjk = re.compile(r"[一-鿿぀-ヿ]")
+    out: list[str] = []
+    ascii_parts: list[str] = []
+    for p in parts:
+        if cjk.search(p):
+            # CJK 段按空格继续切（用户可能写 `双层记忆 架构`）
+            out.extend(f'"{sub}"' for sub in re.split(r"\s+", p) if sub)
+        else:
+            ascii_parts.append(p)
+    if ascii_parts:
+        # 纯 ASCII 段整体成一个短语，不拆 OR
+        out.insert(0, '"' + " ".join(ascii_parts) + '"')
+    return " OR ".join(out)
 
 
 # ── sqlite_fts 源：claude-mem ──────────────────────────────────────────

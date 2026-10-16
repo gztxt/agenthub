@@ -37,6 +37,7 @@
 """
 import asyncio
 import glob
+import hashlib
 import json
 import jev_client
 import logging
@@ -324,6 +325,73 @@ def _inside(rp: str, allowed: List[str]) -> bool:
     return any(rp == a or rp.startswith(a + os.sep) for a in allowed)
 
 
+#: 整包摘要（C8）的上限：超限就**停止扫**并标 `truncated`，不让一个怪异目录把 /list 拖死。
+PKG_MAX_FILES = int(os.getenv("SKILL_PKG_MAX_FILES", "400"))
+PKG_MAX_BYTES = int(os.getenv("SKILL_PKG_MAX_BYTES", str(8 * 1024 * 1024)))
+
+
+def package_digest(root: str) -> Dict[str, Any]:
+    """**整包**摘要（手册 C8）：对技能目录下**所有**文件（SKILL.md + scripts/ +
+    templates/ + references/ …）算一个 sha256，并给出文件数与总字节。
+
+    为何不能只算 SKILL.md —— C8 的原话是「只算说明文件会漏脚本变化」：技能的**行为**
+    等价性由整包决定。改一个 `scripts/foo.py` 而不动 SKILL.md 时，只比说明文件会判
+    「没变」，于是「资产变更准入」那道闸门形同虚设。同族教训：**判据量错了对象 ⇒ 门永
+    远不开**（判例 185）。
+
+    确定性口径：按**相对路径排序**后逐行拼 `relpath\\0sha256`，再对整串算一次 sha256
+    ⇒ 与 `os.walk` 的遍历顺序无关（否则同一份包会算出抖动哈希，无法当判据）。
+    **不含** mtime / 权限：改时间不算改能力，改内容才算。
+
+    任何失败都不抛：返回 `digest=""` + `error`。摘要失败不得把 /list 打挂。
+    返回 `{digest, files, bytes, truncated, manifest, error}`；manifest 只给前 200 条。
+    """
+    out: Dict[str, Any] = {"digest": "", "files": 0, "bytes": 0, "truncated": False,
+                           "manifest": [], "error": None}
+    if not os.path.isdir(root):
+        # 显式表态：空摘要 + error，**不**把「目录不在」伪装成「空包」（那是两种事）。
+        out["error"] = "not_a_dir"
+        return out
+    files: List[tuple] = []
+    total = 0
+    hit_cap = False
+    try:
+        for cur, dirs, fnames in os.walk(root, followlinks=True):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIR_NAMES]
+            for fn in sorted(fnames):
+                p = os.path.join(cur, fn)
+                try:
+                    if not os.path.isfile(p):
+                        continue
+                    st = os.stat(p)
+                    h = hashlib.sha256()
+                    with open(p, "rb") as f:
+                        for chunk in iter(lambda: f.read(65536), b""):
+                            h.update(chunk)
+                except OSError:
+                    continue
+                files.append((os.path.relpath(p, root), st.st_size, h.hexdigest()))
+                total += st.st_size
+                if len(files) >= PKG_MAX_FILES or total >= PKG_MAX_BYTES:
+                    hit_cap = True
+                    break
+            if hit_cap:
+                break
+    except OSError as e:  # noqa: BLE001
+        out["error"] = "%s: %s" % (type(e).__name__, tdai_client.scrub(str(e))[:120])
+    files.sort(key=lambda t: t[0])
+    acc = hashlib.sha256()
+    for rel, _sz, hx in files:
+        acc.update(rel.encode("utf-8", "surrogateescape"))
+        acc.update(b"\0")
+        acc.update(hx.encode())
+        acc.update(b"\n")
+    out.update({"digest": acc.hexdigest(), "files": len(files), "bytes": total,
+                "truncated": hit_cap,
+                "manifest": [{"path": r, "bytes": s, "sha256": h} for r, s, h in files[:200]]})
+    return out
+
+
 def skill_state(scan: Dict[str, Any], n_entries: int) -> str:
     """一路的**四态**。ok=有条目 / empty=目录在但 0 条 / missing=目录不在 / error=配错或读不动。
 
@@ -416,6 +484,8 @@ def _scan_one(route: str, root) -> Dict[str, Any]:
                 continue
             fm, _body = parse_frontmatter(text)
             dirname = os.path.basename(cur)
+            # C8：**整包**摘要。只算 SKILL.md 会漏脚本变化 ⇒ 资产变更准入那道闸门虚设。
+            pkg = package_digest(cur)
             items.append({
                 "name": tdai_client.scrub((fm or {}).get("name") or dirname),
                 "description": tdai_client.scrub((fm or {}).get("description") or ""),
@@ -430,6 +500,11 @@ def _scan_one(route: str, root) -> Dict[str, Any]:
                 "bytes": st.st_size,
                 "mtime": round(st.st_mtime, 1),
                 "source": "disk",
+                "pkg_digest": pkg["digest"],
+                "pkg_files": pkg["files"],
+                "pkg_bytes": pkg["bytes"],
+                "pkg_truncated": pkg["truncated"],
+                "pkg_error": pkg["error"],
             })
     except OSError as e:                          # 整个根走不下去（权限/断链）
         return {"ok": False, "items": items, "ms": ms(), "skipped_outside": skipped,

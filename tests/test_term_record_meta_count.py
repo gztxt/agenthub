@@ -34,9 +34,11 @@
 """
 from __future__ import annotations
 
+import atexit
 import os
 import pathlib
 import re
+import shutil
 import sys
 import sqlite3
 import tempfile
@@ -54,7 +56,16 @@ os.environ["TERM_RECORD"] = "1"
 import db            # noqa: E402
 import term_record   # noqa: E402
 
+#: 模块级共享草稿目录（各用例往里写**各自文件名**的库，互不撞名）。
+#: ⚠ **必须注册回收**：此前这里是裸 `mkdtemp` 且从不清理，每次**整个测试进程**
+#: （包括闸门每跑一次都会做的 `pytest --collect-only` —— 它只 import、不跑
+#: `tearDownModule`）就泄漏一个 ~50MB 的 sqlite。实测累计 264 个目录 / 3.2G，
+#: 把 `/` 空闲压到 2.9G（< `memindex.DISK_CRITICAL_GB=3.0`）⇒ 越过索引读闸 ⇒
+#: **让另一个毫不相干的测试转红**（判例 189「闸门也会中毒」）。
+#: 用 `atexit` 而不是 `addModuleCleanup`：后者依赖框架跑到 teardown，
+#: 而 collect-only 不会跑到 —— 泄漏照样发生。
 _TMP = pathlib.Path(tempfile.mkdtemp(prefix="term-meta-"))
+atexit.register(shutil.rmtree, _TMP, ignore_errors=True)
 _SRC_DB = _REPO / "src" / "db.py"
 _SRC_REC = _REPO / "src" / "term_record.py"
 

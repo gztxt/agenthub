@@ -81,13 +81,18 @@ class TestStatusEnum(unittest.TestCase):
     def test_terminal_parked_active_partition(self):
         t = set(tasks.TERMINAL_STATUSES)
         p = set(tasks.PARKED_STATUSES)
+        s = set(tasks.SUBMITTED_STATUSES)          # P1-4 待接受态：第四组
         self.assertEqual(set(), t & p, "终态与等待态不得重叠")
-        for s in ("success", "failed", "blocked", "cancelled"):
-            self.assertIn(s, t)
-        for s in ("waiting_input", "waiting_approval", "paused"):
-            self.assertIn(s, p)
+        self.assertEqual(set(), t & s, "终态与待接受态不得重叠")
+        self.assertEqual(set(), p & s, "等待态与待接受态不得重叠（出口不同：/resume vs /accept）")
+        for x in ("success", "failed", "blocked", "cancelled"):
+            self.assertIn(x, t)
+        for x in ("waiting_input", "waiting_approval", "paused"):
+            self.assertIn(x, p)
+        for x in ("submitted",):
+            self.assertIn(x, s)
         self.assertEqual(set(tasks.TASK_STATUSES),
-                         t | p | {"pending", "running", "verifying"})
+                         t | p | s | {"pending", "running", "verifying"})
 
 
 #: P0-3 之前的 tasks 表形态（无 verify_kind/budget 列）—— 用来验幂等 ALTER 迁移。

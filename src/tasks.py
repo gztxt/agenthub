@@ -38,12 +38,22 @@ LOOP_SLEEP_S = float(os.getenv("TASK_LOOP_SLEEP_S", "1.5"))
 # ── 状态枚举（P0-3）─────────────────────────────────────────────────
 #: 全量状态。`verifying` 是执行者交产物后、验证器判定前的**短暂态**；
 #: `waiting_*` / `paused` 是**等待态**（parked）：既不占执行资源，也不算终态。
-TASK_STATUSES = ("pending", "running", "verifying", "success", "failed", "blocked",
+TASK_STATUSES = ("pending", "running", "verifying", "submitted", "success", "failed", "blocked",
                  "cancelled", "waiting_input", "waiting_approval", "paused")
 #: 终态：run 的收敛条件。
 TERMINAL_STATUSES = ("success", "failed", "blocked", "cancelled")
 #: 等待态：让出执行资源，等外部输入/批准/恢复；run 在此**挂起**而非空转。
 PARKED_STATUSES = ("waiting_input", "waiting_approval", "paused")
+#: **待接受态（P1-4）**：执行者已交产物**且过了 verifier**，但**尚未被接受**。
+#: 手册 B12：把「执行者提交成功」与「审核方接受」分开——提交只是**候选成果**。
+#: 资源语义与等待态同类（都已让出执行槽），但**刻意不进 `PARKED_STATUSES`**：
+#: 等待态的出口是 `/resume`（→pending 重跑），而 submitted 的出口是 `/accept`→success
+#: 或 `/reject`→failed。混进 PARKED_STATUSES 会被 `requeue_waiting` 误置回 pending。
+SUBMITTED_STATUSES = ("submitted",)
+#: 过了 verifier 后是否**自动接受**（= P1-4 之前的行为，默认开）。
+#: 置 0 则任务停在 `submitted` 等外部 `POST /accept`。
+#: 做成**模块级常量**（不是每次读 env）：与 MAX_CONCURRENCY/LOOP_SLEEP_S 同口径，测试可整体替换。
+AUTO_ACCEPT = os.getenv("TASK_AUTO_ACCEPT", "1").strip().lower() not in ("0", "false", "no", "off")
 
 _ctx: Dict[str, Any] = {}
 _runners: Dict[str, asyncio.Task] = {}
@@ -73,6 +83,11 @@ _TASK_COLUMNS = (
     # P0-b：验收裁决。三态照 verifier.STATUS_*；NULL = 未走到验收这一步。
     ("verdict", "TEXT"),
     ("verify_reason", "TEXT"),
+    # P1-4：提交/接受分离。submitted_at = 产物过 verifier 的时刻；
+    # accepted_at/accepted_by = 被接受的时刻与主体（'auto' = 自动接受）。
+    ("submitted_at", "TEXT"),
+    ("accepted_at", "TEXT"),
+    ("accepted_by", "TEXT"),
 )
 
 
@@ -120,6 +135,13 @@ def format_upstream(task_id: str, text: str) -> str:
                body[:UPSTREAM_HEAD], omitted, body[-UPSTREAM_TAIL:]))
 
 
+def can_accept(status: str) -> bool:
+    """纯函数（P1-4）：该状态可否被接受。**只有 `submitted` 可** ——
+    `success` 已经接受过（重复接受应是 no-op，不该被算成一次接受）；
+    其余状态（pending/running/failed/…）根本没有可接受的候选产物。"""
+    return status in SUBMITTED_STATUSES
+
+
 SCHEMA_TASKS = """
 CREATE TABLE IF NOT EXISTS tasks (
     run_id TEXT NOT NULL,
@@ -140,6 +162,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- NULL = 未走到验收（等待/预算/自称失败/超时）—— 与 'fail' 语义不同，不可混同。
     verdict TEXT,
     verify_reason TEXT,
+    -- P1-4：提交≠接受。submitted_at 在过 verifier 时写；accepted_at/by 在被接受时写。
+    submitted_at TEXT,
+    accepted_at TEXT,
+    accepted_by TEXT,
     started_at TEXT,
     finished_at TEXT,
     duration_ms INTEGER,
@@ -172,6 +198,18 @@ class DecomposeIn(BaseModel):
 
 class RetryIn(BaseModel):
     task_id: Optional[str] = None
+
+
+class AcceptIn(BaseModel):
+    """P1-4：接受已提交的产物。`task_id` 缺省 = 接受该 run 下**全部** submitted。"""
+    task_id: Optional[str] = None
+    by: Optional[str] = Field(default=None, max_length=64)
+
+
+class RejectIn(BaseModel):
+    """P1-4：驳回已提交的产物（→ failed，下游按「上游失败」阻塞）。"""
+    task_id: Optional[str] = None
+    reason: Optional[str] = Field(default=None, max_length=300)
 
 
 LEADER_PROMPT = """你是任务编排器。把用户目标拆解为子任务 DAG，只输出 JSON 数组（不要围栏、不要解释）。
@@ -280,11 +318,13 @@ async def list_runs(limit: int = Query(default=20, le=100)):
                SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending,
                SUM(CASE WHEN status IN ('waiting_input','waiting_approval','paused')
                         THEN 1 ELSE 0 END) waiting,
+               SUM(CASE WHEN status='submitted' THEN 1 ELSE 0 END) submitted,
                MIN(created_at) created_at, MAX(finished_at) finished_at
         FROM tasks GROUP BY run_id ORDER BY created_at DESC LIMIT ?""", (limit,))
     for r in rows:
         r["state"] = ("running" if r["running"] else
                       "success" if r["success"] == r["total"] else
+                      "awaiting_accept" if r["submitted"] else
                       "waiting" if r["waiting"] else
                       "failed" if r["failed"] and r["pending"] == r["running"] == 0 else
                       "pending" if r["pending"] == r["total"] else "partial")
@@ -320,6 +360,49 @@ async def retry_run(run_id: str, body: RetryIn):
                    "WHERE run_id=? AND status IN ('failed','blocked')", (_now(), run_id))
     _start_runner(run_id)
     return {"run_id": run_id, "status": "retry-scheduled"}
+
+
+@router.post("/api/tasks/{run_id}/accept")
+async def accept_run(run_id: str, body: AcceptIn = AcceptIn()):
+    """P1-4：接受已提交的产物（`submitted` → `success`）。
+
+    **只有 `submitted` 接受**：重复接受是 no-op（不篡改已 success 的行，
+    也不把 failed/running 洗成成功）。接受后重启 runner，让下游就绪。
+    """
+    now = _now()
+    who = (body.by or "user")[:64]
+    sql = ("UPDATE tasks SET status='success',accepted_at=?,accepted_by=?,"
+           "finished_at=?,updated_at=? WHERE run_id=? AND status='submitted'")
+    args = [now, who, now, now, run_id]
+    if body.task_id:
+        sql += " AND task_id=?"
+        args.append(body.task_id)
+    n = db.execute(sql, tuple(args))
+    if not n:
+        raise HTTPException(404, "no submitted task to accept")
+    _start_runner(run_id)
+    return {"run_id": run_id, "accepted": n, "by": who}
+
+
+@router.post("/api/tasks/{run_id}/reject")
+async def reject_run(run_id: str, body: RejectIn = RejectIn()):
+    """P1-4：驳回已提交的产物（`submitted` → `failed`）。
+
+    驳回后下游按「上游失败」阻塞（`_execute_run` 的既有判据），而不是默默带着
+    不合格产物继续跑。"""
+    now = _now()
+    why = ("驳回: " + (body.reason or "未说明"))[:500]
+    sql = ("UPDATE tasks SET status='failed',error=?,finished_at=?,updated_at=? "
+           "WHERE run_id=? AND status='submitted'")
+    args = [why, now, now, run_id]
+    if body.task_id:
+        sql += " AND task_id=?"
+        args.append(body.task_id)
+    n = db.execute(sql, tuple(args))
+    if not n:
+        raise HTTPException(404, "no submitted task to reject")
+    _start_runner(run_id)
+    return {"run_id": run_id, "rejected": n}
 
 
 def requeue_waiting(run_id: str) -> int:
@@ -464,17 +547,29 @@ async def _run_task(run_id: str, row: dict):
         verdict = verifier.verify(kind, output=result.get("response"),
                                   expect=row.get("verify_expect"))
         if verdict["status"] == verifier.STATUS_PASS:
-            db.execute("UPDATE tasks SET status='success',output=?,duration_ms=?,spent_ms=?,"
-                       "spent_tokens=?,model=?,verdict=?,verify_reason=?,"
-                       "finished_at=?,updated_at=?"
-                       " WHERE run_id=? AND task_id=?",
-                       (str(result.get("response") or "")[:20000], dur, dur, spent_tokens,
-                        used_model, verdict["status"], None,
-                        _now(), _now(), run_id, row["task_id"]))
-            db.log_profile_event("task_exec", row["agent_id"], "success", dur,
+            # P1-4：**产物过 verifier ≠ 被接受**。AUTO_ACCEPT 开（默认）则立刻接受（＝旧行为），
+            # 关则停在 `submitted` 等外部 `POST /accept`。两条路都写 submitted_at，
+            # 于是「提交→接受」的时延在两种模式下都可度量。
+            out = str(result.get("response") or "")[:20000]
+            if AUTO_ACCEPT:
+                db.execute("UPDATE tasks SET status='success',output=?,duration_ms=?,spent_ms=?,"
+                           "spent_tokens=?,model=?,verdict=?,verify_reason=?,"
+                           "submitted_at=?,accepted_at=?,accepted_by=?,finished_at=?,updated_at=?"
+                           " WHERE run_id=? AND task_id=?",
+                           (out, dur, dur, spent_tokens, used_model, verdict["status"], None,
+                            _now(), _now(), "auto", _now(), _now(), run_id, row["task_id"]))
+            else:
+                db.execute("UPDATE tasks SET status='submitted',output=?,duration_ms=?,spent_ms=?,"
+                           "spent_tokens=?,model=?,verdict=?,verify_reason=?,"
+                           "submitted_at=?,updated_at=?"
+                           " WHERE run_id=? AND task_id=?",
+                           (out, dur, dur, spent_tokens, used_model, verdict["status"], None,
+                            _now(), _now(), run_id, row["task_id"]))
+            db.log_profile_event("task_exec", row["agent_id"],
+                                 "success" if AUTO_ACCEPT else "submitted", dur,
                                  trace_id=row["trace_id"],
                                  detail={"task": row["task_id"], "verify": kind,
-                                         "model": used_model})
+                                         "model": used_model, "auto_accept": AUTO_ACCEPT})
         else:
             gaps = "; ".join("%s: %s" % (g["id"], g["detail"]) for g in verdict["gaps"])
             err = ("verifier %s (%s): %s" % (verdict["status"], kind, gaps))[:500]
@@ -536,9 +631,11 @@ async def _execute_run(run_id: str):
                     live[r["task_id"]] = asyncio.create_task(guarded())
             if not live:
                 parked = [t for t, s in status.items() if s in PARKED_STATUSES]
+                awaiting = [t for t, s in status.items() if s in SUBMITTED_STATUSES]
                 pend = [t for t, s in status.items() if s == "pending"]
-                if parked:
-                    # 整条 run 挂起等外部输入/批准/恢复 ⇒ 释放执行资源，不空转、不算死锁。
+                if parked or awaiting:
+                    # 整条 run 挂起：等外部输入/批准/恢复（parked），或等 `/accept`（submitted）
+                    # ⇒ 释放执行资源，不空转、也不算死锁。
                     return
                 if pend:
                     db.execute("UPDATE tasks SET status='failed',error='无法调度(疑似悬挂)',"

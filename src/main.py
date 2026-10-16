@@ -64,7 +64,7 @@ import tdai_client
 import gwprobe                      # 上游网关（CCR）连通性 + 模型注册清单的缓存式体检
 import healthx                      # /health 派生量的纯函数层（L0 不 import src.main，故抽出来）
 import resilience                   # 出站韧性层：退避重试 + 熔断（/health 的 breakers 字段）
-import settings_bundle              # 配置包导出/导入（PT-20260927-15，JSON，不引 YAML）
+import settings_bundle as settings_bundle_mod  # 配置包导出/导入（PT-20260927-15，JSON，不引 YAML）
 import sessions_export as export_mod
 import export_batch                   # 导出取消息的批量 IN（L0 可测的纯函数层，同 staticguard 范式）
 import models_cache                   # 模型清单的成功路径缓存（同上，纯函数层）

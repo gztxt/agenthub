@@ -41,6 +41,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 import tdai_client
 import memfed
+import ctxmanifest
+import db
 import memstats
 import runlog
 
@@ -222,6 +224,7 @@ async def kb_search(request: Request,
     backends: List[Dict[str, Any]] = []
     rankings: List[List[Dict[str, Any]]] = []
     weights: List[float] = []
+    engine_items: List[tuple] = []          # P1-1：逐路实际返回的条目（建 manifest 用）
     # 权重口径与 memory.py 同源：文档语义命中（真内容）满权，便签 0.2。
     # ⚠ workspace/archived 在 kb 语境下是**文档全文路**，不是记忆权威度维度——
     # 实测 09-26：若沿用 memfed 的 0.7/0.4 权重，tdai 满权池会把它们全部挤出融合
@@ -237,11 +240,40 @@ async def kb_search(request: Request,
         if r.get("ok"):
             rankings.append(r.get("items") or [])
             weights.append(W[name])
+            engine_items.append((name, r.get("items") or []))
 
     import memory as _m
     fused = _m._rrf_fuse(rankings, weights=weights, limit=k)
     engines = [b["name"] for b in backends if b["ok"] and b["count"]]
     degraded = [b["name"] for b in backends if not b["ok"]]
+    # ── P1-1：Context Manifest（检索面）──
+    # 条目 = 每一路**实际返回的条目**（不是候选全集）；排除项 = 本次挂掉的几路
+    # （含未启用/无结果返回的联邦源，它们的 error 里已经写清了原因）。
+    kparts: List[Dict[str, Any]] = []
+    for name, items in engine_items:
+        if not items:
+            continue
+        kparts.append(ctxmanifest.entry(
+            name,
+            "\n".join(str(it.get("content") or it.get("text") or "") for it in items),
+            name,
+            ids=[str(it.get("id") or it.get("path") or it.get("doc") or "")
+                 for it in items if (it.get("id") or it.get("path") or it.get("doc"))],
+            as_of=max((str(it.get("as_of") or it.get("updated_at") or "")
+                       for it in items if (it.get("as_of") or it.get("updated_at"))),
+                      default=None)))
+    kexcl = [ctxmanifest.excluded(b["name"], b.get("error") or "该路未成功返回")
+             for b in backends if not b["ok"]]
+    manifest = ctxmanifest.build_manifest(kparts, budget_chars=0, truncated=False,
+                                          excluded_items=kexcl)
+    # 紧凑摘要落 profile_events（P1-1「哈希写进记录」）；**落库失败不得影响检索结果**。
+    try:
+        db.log_profile_event("ctx_manifest", "kb_search",
+                             "degraded" if degraded else "ok",
+                             int((time.monotonic() - t0) * 1000),
+                             detail=ctxmanifest.summarize(manifest))
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "results": fused,
         "count": len(fused),
@@ -252,6 +284,7 @@ async def kb_search(request: Request,
         # 否则这个门面就又造了一次静默不可用。
         "note": ("全部可用路都返回零命中" if not engines and not degraded else
                  None if not degraded else f"{degraded} 本次弃用，结果不完整"),
+        "manifest": manifest,
         "took_ms": round((time.monotonic() - t0) * 1000, 1),
     }
 

@@ -16,11 +16,12 @@ import json
 import os
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+import ctxmanifest
 import db
 import llm
 import memfed
@@ -591,16 +592,27 @@ async def injection_context(request: Request, q: Optional[str] = None,
     if fed_skip_reason:
         fed_meta["reason"] = fed_skip_reason
 
-    parts = []
+    # P1-1：`parts` 是文本（现状不变），`mparts` 是同一批内容的**清单条目**（一一对应）。
+    # 用同一个 `_add` 落两处，避免「清单与文本各自漂移」—— 那正是 manifest 要防的病。
+    parts: List[str] = []
+    mparts: List[Dict[str, Any]] = []
+
+    def _add(label: str, text: str, source: str, **kw: Any) -> None:
+        parts.append(text)
+        mparts.append(ctxmanifest.entry(label, text, source, **kw))
+
     if l3["content"] or l3["manual"]:
-        parts.append(f"## 长期 Profile\n{l3['content']}\n{l3['manual']}")
+        _add("长期 Profile", f"## 长期 Profile\n{l3['content']}\n{l3['manual']}", "l3",
+             as_of=l3.get("updated_at"))
     else:
         pr = results.get("profile") or {}
         if pr.get("ok") and pr.get("content"):
-            parts.append("## 长期 Profile（TDAI 权威源）\n"
-                         + pr["content"][:PROFILE_CHARS])
+            _add("长期 Profile（TDAI 权威源）",
+                 "## 长期 Profile（TDAI 权威源）\n" + pr["content"][:PROFILE_CHARS],
+                 "l3_tdai")
     if l2["content"] or l2["manual"]:
-        parts.append(f"## 近30天工作记忆\n{l2['content']}\n{l2['manual']}")
+        _add("近30天工作记忆", f"## 近30天工作记忆\n{l2['content']}\n{l2['manual']}", "l2",
+             as_of=l2.get("updated_at"))
 
     if q:
         local_rows = _local_l1(q, 10)
@@ -611,15 +623,20 @@ async def injection_context(request: Request, q: Optional[str] = None,
                           weights=[W_LOCAL, W_TDAI_L1], limit=30)
         fused = _rank_cap(fused, FUSE_TOP_FRAC, 10)[0]
         if fused:
-            parts.append("## 相关记忆\n" + "\n".join(
+            _add("相关记忆", "## 相关记忆\n" + "\n".join(
                 f"- [{m.get('category') or m.get('type') or 'l1'}] {m.get('content','')}"
-                for m in fused))
+                for m in fused), "l1_fused",
+                 ids=[str(m.get("id") or m.get("memory_id") or "") for m in fused
+                      if (m.get("id") or m.get("memory_id"))],
+                 as_of=max((str(m.get("created_at")) for m in fused if m.get("created_at")),
+                           default=None))
 
     if scenes:
         ent = (results.get("scenes") or {}).get("entries") or []
         if ent:
-            parts.append("## 场景索引（TDAI L2）\n"
-                         + "\n".join(f"- {e.get('path','')}" for e in ent[:scenes]))
+            _add("场景索引（TDAI L2）", "## 场景索引（TDAI L2）\n"
+                 + "\n".join(f"- {e.get('path','')}" for e in ent[:scenes]), "scenes_tdai",
+                 ids=[str(e.get("path") or "") for e in ent[:scenes] if e.get("path")])
 
     if fed_want:
         fed_lines, done, skipped, failed, fed_used = _fed_section(
@@ -633,7 +650,9 @@ async def injection_context(request: Request, q: Optional[str] = None,
         if fed_skip_reason:
             fed_meta["reason"] = fed_skip_reason
         if fed_lines:
-            parts.append("## 其他 Agent 记忆（联邦）\n" + "\n".join(fed_lines))
+            _add("其他 Agent 记忆（联邦）", "## 其他 Agent 记忆（联邦）\n"
+                 + "\n".join(fed_lines), "federated",
+                 ids=list(fed_meta.get("done") or []))
 
     text = "\n\n".join(parts)
     truncated = len(text) > max_chars
@@ -643,6 +662,29 @@ async def injection_context(request: Request, q: Optional[str] = None,
     # （或压根没执行），回包形状看着成功。这里把它翻成显式 degraded 标记。
     if fed_want and not (fed_meta.get("matched") or fed_meta.get("chars")):
         fed_meta["degraded"] = True
+    took_ms = round((time.monotonic() - t0) * 1000, 1)
+    # ── P1-1：Context Manifest（A7/C9）──
+    # 排除项 = 本次**没进 prompt** 的那几路 + 被预算砍掉的尾部。归因问的是「为什么没有」，
+    # 所以理由必填（`ctxmanifest.excluded()` 把 reason 定为必填参数）。
+    excl: List[Dict[str, Any]] = []
+    for b in backends:
+        if not b["ok"]:
+            excl.append(ctxmanifest.excluded(b["name"], b.get("error") or "该路未成功返回"))
+    for s in (fed_meta.get("skipped_budget") or []):
+        excl.append(ctxmanifest.excluded(s, "联邦预算不足未取"))
+    for s in (fed_meta.get("failed") or []):
+        excl.append(ctxmanifest.excluded(s, "联邦该路失败"))
+    manifest = ctxmanifest.build_manifest(mparts, budget_chars=max_chars,
+                                          truncated=truncated, excluded_items=excl)
+    # 紧凑摘要落 profile_events（完整清单随回包给前端；账本只留可聚合的几个量）。
+    # **落库失败不得影响注入** —— 与 P1-6 的 sink 同口径（可观测不得反噬调用）。
+    try:
+        db.log_profile_event("ctx_manifest", "injection_context",
+                             "degraded" if degraded else "ok", int(took_ms),
+                             detail=ctxmanifest.summarize(manifest))
+    except Exception:  # noqa: BLE001
+        pass
     return {"context": body, "truncated": truncated, "chars": len(body),
             "backends": backends, "degraded": degraded, "fed": fed_meta,
-            "took_ms": round((time.monotonic() - t0) * 1000, 1)}
+            "manifest": manifest,
+            "took_ms": took_ms}

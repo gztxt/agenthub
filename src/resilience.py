@@ -33,6 +33,7 @@ worker 挂一小时，在本机直接表现为「页面卡住」。故解析结�
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -43,7 +44,7 @@ import threading
 import time
 import urllib.error
 import uuid
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 CLOSED = "closed"
 OPEN = "open"
@@ -82,6 +83,13 @@ class BreakerOpen(RuntimeError):
 
 
 def _http_code(exc: BaseException) -> Optional[int]:
+    # 2026-10-16（P1-6 接线）：除 `urllib.error.HTTPError` 外，**也认鸭子类型**的
+    # `status`/`code` 属性 —— `llm.py` 走 aiohttp，原本抛的是纯 `RuntimeError`（状态码被
+    # 掺进字符串）⇒ 429/5xx 根本分类不出来，重试判定只能靠文本猜。现在是结构化携带。
+    for attr in ("status", "code"):
+        v = getattr(exc, attr, None)
+        if isinstance(v, int):
+            return v
     if isinstance(exc, urllib.error.HTTPError):
         try:
             return int(exc.code)
@@ -91,6 +99,12 @@ def _http_code(exc: BaseException) -> Optional[int]:
 
 
 def _headers(exc: BaseException) -> Dict[str, str]:
+    hdrs = getattr(exc, "headers", None)
+    if hdrs is not None and not isinstance(exc, urllib.error.HTTPError):
+        try:
+            return {str(k).lower(): str(v) for k, v in dict(hdrs).items()}
+        except Exception:  # noqa: BLE001
+            return {}
     if isinstance(exc, urllib.error.HTTPError) and exc.headers is not None:
         try:
             return {k.lower(): v for k, v in exc.headers.items()}
@@ -299,6 +313,26 @@ def _emit_attempt(record: Optional[Callable[[Dict[str, Any]], None]], **rec: Any
         pass
 
 
+def _decide(exc: BaseException, attempt: int, attempts: int, spent: float,
+            sleep_budget_s: float, rand: Callable[[], float]) -> Dict[str, Any]:
+    """重试决策（**纯函数**）：同步 `call()` 与异步 `acall()` **共用这一份**。
+
+    抽出来就是为了不漂移：两条入口若各写一遍「何时重试/退避多少/预算不够怎么办」，
+    日后只改一边就会出现「同一错误在同步路径重试、在异步路径不重试」这种最难查的不一致。
+    返回 `{cls, action, delay}`，`action ∈ return|retry|abort|budget_exhausted`。
+    """
+    cls = classify_error(exc)
+    last_attempt = attempt >= attempts - 1
+    action = "abort" if (last_attempt or not cls["retryable"]) else "retry"
+    delay = 0.0
+    if action == "retry":
+        delay = backoff_delay(attempt, cls["retry_after_s"], jitter=rand())
+        if spent + delay > sleep_budget_s:
+            # 预算不够睡这次 —— 如实放弃重试（调用方看到的是最后一次的真异常）
+            action, delay = "budget_exhausted", 0.0
+    return {"cls": cls, "action": action, "delay": delay}
+
+
 class CircuitBreakers:
     """按 key 管理的熔断器集合（进程内，无全局单例污染 —— 实例由`instance()`给出）。
 
@@ -386,17 +420,9 @@ class CircuitBreakers:
                 try:
                     out = fn()
                 except BaseException as exc:  # noqa: BLE001 —— 要原样重抛，仅在此处拦
-                    cls = classify_error(exc)
+                    dec = _decide(exc, attempt, attempts, spent, sleep_budget_s, self._rand)
+                    cls, action, delay = dec["cls"], dec["action"], dec["delay"]
                     self._record(key, exc, limited=(cls["kind"] == "rate_limit"))
-                    last_attempt = attempt >= attempts - 1
-                    action = "abort" if (last_attempt or not cls["retryable"]) else "retry"
-                    delay = 0.0
-                    if action == "retry":
-                        delay = backoff_delay(attempt, cls["retry_after_s"],
-                                              jitter=self._rand())
-                        if spent + delay > sleep_budget_s:
-                            # 预算不够睡这次 —— 如实放弃重试（调用方看到的是最后一次的真异常）
-                            action, delay = "budget_exhausted", 0.0
                     _emit_attempt(record, call_id=call_id, attempt=attempt, kind=cls["kind"],
                                   action=action, retryable=cls["retryable"],
                                   retry_after_s=cls["retry_after_s"],
@@ -407,6 +433,52 @@ class CircuitBreakers:
                         raise
                     spent += delay
                     self._sleep(delay)
+                    continue
+                self._record_ok(key)
+                _emit_attempt(record, call_id=call_id, attempt=attempt, kind="ok",
+                              action="return", retryable=False, retry_after_s=None,
+                              delay_s=0.0, slept_s=0.0,
+                              elapsed_ms=int((self._clock() - t0) * 1000), ok=True)
+                return out
+            raise AssertionError("unreachable")  # pragma: no cover
+        finally:
+            self._leave(key)
+
+    async def acall(self, key: str, fn: Callable[[], Awaitable[Any]], *, attempts: int = 1,
+                    sleep_budget_s: float = 0.0,
+                    record: Optional[Callable[[Dict[str, Any]], None]] = None,
+                    call_id: str = "") -> Any:
+        """`call()` 的**异步孪生**（`fn` 是 coroutine function）。
+
+        与同步版共享 `_enter/_leave`、`_record/_record_ok` 与 `_decide`（分类/退避/预算）
+        ⇒ 两条入口的**决策不会漂移**（半开探针、失败计数、熔断共用同一状态）。
+        唯一差别是 `await fn()` 与 `await asyncio.sleep()`。
+
+        为何必需：`llm.py` 走 aiohttp（异步）——拿同步 `call()` 包会把事件循环
+        **整段阻塞**在退避睡眠里，一次 429 就能让全站卡住。参数语义与 `call()` 逐字相同。
+        """
+        attempts = max(1, int(attempts))
+        self._enter(key)
+        spent = 0.0
+        t0 = self._clock()
+        try:
+            for attempt in range(attempts):
+                try:
+                    out = await fn()
+                except BaseException as exc:  # noqa: BLE001 —— 要原样重抛，仅在此处拦
+                    dec = _decide(exc, attempt, attempts, spent, sleep_budget_s, self._rand)
+                    cls, action, delay = dec["cls"], dec["action"], dec["delay"]
+                    self._record(key, exc, limited=(cls["kind"] == "rate_limit"))
+                    _emit_attempt(record, call_id=call_id, attempt=attempt, kind=cls["kind"],
+                                  action=action, retryable=cls["retryable"],
+                                  retry_after_s=cls["retry_after_s"],
+                                  delay_s=round(delay, 3),
+                                  slept_s=round(delay, 3) if action == "retry" else 0.0,
+                                  elapsed_ms=int((self._clock() - t0) * 1000), ok=False)
+                    if action != "retry":
+                        raise
+                    spent += delay
+                    await asyncio.sleep(delay)
                     continue
                 self._record_ok(key)
                 _emit_attempt(record, call_id=call_id, attempt=attempt, kind="ok",

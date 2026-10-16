@@ -1,3 +1,39 @@
+## v0.13.117 — P1-6 接线两处：LLM 重试/熔断（`acall`）+ MCP 调用的 `call_id`/幂等键
+
+> 台账里挂着「**P1-6 接线剩两处**：`llm.py`（本机无重试路径）与 `mcpgw.mcp_call` 的幂等键落地」。
+
+### 一、`resilience.acall`：`call()` 的异步孪生（**共用同一份决策**）
+
+`llm.py` 走 aiohttp，拿同步 `call()` 包会把事件循环**整段阻塞**在退避睡眠里（一次 429 就能
+让全站卡住）。新增 `acall()`；并把「何时重试 / 退避多少 / 预算不够怎么办」抽成纯函数
+**`_decide()`**，两条入口共用 ⇒ **同一种错误在同步与异步路径得到同一结论**（不漂移）。
+同步 `call()` 同步重构后行为不变（现有 14 例 P1-6 闸门仍全绿）。
+
+### 二、`llm.py`：结构化状态 + 真重试
+
+- `LLMGatewayError(RuntimeError)` 携带 `status`/`headers` —— 旧实现把状态码掺进字符串，
+  `classify_error` **只能猜文本**；现在 429 ⇒ `rate_limit`、`Retry-After` 直接可用。
+- `resilience._http_code/_headers` 改成**鸭子类型优先**（`status`/`code`/`headers`），
+  urllib 旧路径行为逐字不变（闸门钉着）。
+- `_create_message` 走 `acall(attempts=LLM_ATTEMPTS=2, sleep_budget_s=LLM_RETRY_BUDGET_S=2.0)`，
+  attempt 逐次落 `profile_events`（`source=resilience`，`call_id` 跨 attempt **不变**）。
+- `_post_once()` 抽成**测试接缝**：重试编排可用替身验证，不必真连网关。
+
+### 三、`mcpgw.mcp_call`：`call_id` + 幂等键（**刻意不自动重试**）
+
+- `call_id = resilience.new_call_id()`（一次性，跨 attempt 不变）；
+- `idempotency_key("mcp_call", server, tool, json.dumps(args, sort_keys=True))` ——
+  **确定性**（绝不吃时间戳/随机数）⇒ 同一次逻辑请求重发得到同一把键；
+- 两者**进回包**（`out["call_id"]`/`out["idempotency_key"]`）与 `profile_events.detail`；
+- ⚠ **`attempts=1`（不重试）**：MCP 工具的副作用未知（可能是写），盲目重发 = 可能重复执行。
+  本项只把「可幂等」变成**可用信息**；闸门把「不得自动重试」也钉住。
+
+### 四、闸门
+
+`tests/test_llm_resilience_l0.py`(12) + `tests/test_mcp_idempotency_l0.py`(8)。
+
+---
+
 ## v0.13.116 — `170` §7 前两项：执行者不得自证失败 + run 级预算（派发前止损）
 
 > 来源：`agent-knowledge/170` §7「已知保证边界」四项（P0-3 的设计取舍），用户 2026-10-16 授权。

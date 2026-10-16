@@ -94,7 +94,24 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.116"  # 170 §7 两项：执行者不得自证失败 + run 级预算（派发前止损）
+VERSION = "0.13.117"  # P1-6 接线两处：LLM 路径重试/熔断（acall）+ MCP 调用的 call_id/幂等键
+#   v0.13.117：`P1-6` 模块（`src/resilience.py`）建好了但**只接了一处**调用点（ghsettings），
+#   台账记着的「接线剩两处」在本批补齐。
+#   ① **`resilience.acall`**（新）：`call()` 的**异步孪生**。抽了纯函数 `_decide()`
+#      让两条入口**共用**分类/退避/预算决策 ⇒ 不会出现「同一错误在同步路径重试、在异步路径不重试」。
+#      为何必需：`llm.py` 走 aiohttp，拿同步 `call()` 包会把事件循环整段阻塞在退避睡眠里。
+#   ② **`llm.py`**：`LLMGatewayError`（**结构化携带** `status`/`headers`）替代纯 RuntimeError ——
+#      否则 429/5xx 分类不出、重试判定只能猜文本；`_post_once()` 抽成测试接缝；
+#      `_create_message` 走 `acall(attempts=LLM_ATTEMPTS, sleep_budget_s=LLM_RETRY_BUDGET_S)`
+#      + attempt 逐次落 `profile_events`（source=resilience，call_id 跨 attempt 不变）。
+#   ③ **`resilience._http_code/_headers` 认鸭子类型**（`status`/`code`/`headers`）——
+#      urllib 旧路径行为**逐字不变**（有闸门钉着）。
+#   ④ **`mcpgw.mcp_call`**：落 `call_id` + `idempotency_key(server,tool,规范化 args)`（确定性、
+#      绝不吃时间戳/随机数），两者**进回包与 profile_events.detail**；
+#      ⚠ **刻意 attempts=1**（不自动重试）—— MCP 工具副作用未知，盲目重发可能重复执行；
+#      本项只把「可幂等」变成可用信息，要重试必须逐点显式决定（闸门钉着 attempts=1）。
+#   闸门：`tests/test_llm_resilience_l0.py`(12) + `tests/test_mcp_idempotency_l0.py`(8)。
+#   v0.13.116：170 §7 两项
 #   v0.13.116：`agent-knowledge/170` §7 四项里的**前两项**（用户 2026-10-16 授权）。
 #   ① **§7-④ 执行者不得自证 fail**：旧 `_run_task` 遇 `result["success"]=False` 直接置 failed，
 #      **不看产物、不留结论** ⇒「其实产物合格」被静默掩盖、事后不可复核。现：失败方向仍保守

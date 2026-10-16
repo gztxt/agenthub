@@ -12,15 +12,53 @@ FCC→tokenrouter/qwen3.8-flash 的 tool_use 已由 PT-20260905-01 端到端验�
 import json
 import os
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
+
+import resilience
 
 BASE_URL = os.getenv("MANAGER_LLM_BASE_URL", "http://127.0.0.1:8082").rstrip("/")
 API_KEY = os.getenv("MANAGER_LLM_API_KEY", "")
 MODEL = os.getenv("MANAGER_LLM_MODEL", "tokenrouter/qwen3.8-flash")
 TIMEOUT = aiohttp.ClientTimeout(total=240)
 MAX_TOKENS = int(os.getenv("MANAGER_LLM_MAX_TOKENS", "4096"))
+
+# ── P1-6 接线①：LLM 路径的**重试 + 熔断 + attempt 留痕**（2026-10-16）────────────
+# 旧现状：`_create_message` 单发一次，非 200 就抛**纯 RuntimeError**（状态码只存在字符串里）
+# ⇒ 429/5xx 既分类不出、也没有重试，也没有熔断；一次限流就是一次用户可见的失败。
+# 两个上限必须**逐点显式给**（军规口径）：总尝试次数与退避总时长预算 ——
+# 退避不许把一次工具调用拖成用户可见的卡顿。
+LLM_ATTEMPTS = max(1, int(os.getenv("LLM_ATTEMPTS", "2")))
+LLM_RETRY_BUDGET_S = float(os.getenv("LLM_RETRY_BUDGET_S", "2.0"))
+
+
+class LLMGatewayError(RuntimeError):
+    """上游非 200。**结构化携带** `status`/`headers` —— 否则分类器只能去猜字符串。
+
+    为什么不能继续用纯 RuntimeError：`resilience.classify_error` 判「限流/可重试」
+    靠的是状态码与 `Retry-After`；把它们塞进异常文本里，等于把「协议信号」降级成「猜文本」。
+    """
+
+    def __init__(self, status: int, text: str, headers: Optional[Dict[str, str]] = None):
+        super().__init__("LLM 网关 HTTP %s: %s" % (status, (text or "")[:600]))
+        self.status = int(status)
+        self.headers = {str(k).lower(): str(v) for k, v in dict(headers or {}).items()}
+
+
+def _record_attempt(rec: Dict[str, Any]) -> None:
+    """把每次尝试落 `profile_events`（source=resilience）。**记账绝不允许带倒一次真实调用**。"""
+    try:
+        import db
+        db.log_profile_event("resilience", "llm_call",
+                             "ok" if rec.get("ok") else (rec.get("kind") or "fail"),
+                             rec.get("elapsed_ms"), trace_id=rec.get("call_id"), detail=rec)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _llm_breaker_key() -> str:
+    return resilience.breaker_key(BASE_URL, "llm")
 
 
 # v0.5.4 sub-α Fix 1：Nemotron/FCC 走 Anthropic-compatible 协议时，模型把 tool_call
@@ -181,20 +219,30 @@ async def _create_message(system: Optional[str], messages: List[dict],
     if tools:
         body["tools"] = _openai_tools_to_anthropic(tools)
         body["tool_choice"] = {"type": "auto"}
+    data = await resilience.instance.acall(
+        _llm_breaker_key(),
+        lambda: _post_once(body, request_id),
+        attempts=LLM_ATTEMPTS, sleep_budget_s=LLM_RETRY_BUDGET_S,
+        record=_record_attempt, call_id=resilience.new_call_id())
+    if usage_sink is not None:
+        try:
+            usage_sink.append({"model": body["model"], "request_id": request_id,
+                               "usage": data.get("usage") or {}})
+        except Exception:  # noqa: BLE001
+            pass
+    return data
+
+
+async def _post_once(body: Dict[str, Any], request_id: Optional[str]) -> Dict[str, Any]:
+    """单次 POST（**独立成函数作为测试接缝**：重试编排可被替身验证，而不必真连网关）。"""
     async with aiohttp.ClientSession() as s:
         async with s.post(f"{BASE_URL}/v1/messages", headers=_headers(request_id),
                           json=body, timeout=TIMEOUT) as resp:
             if resp.status != 200:
                 text = (await resp.text())[:600]
-                raise RuntimeError(f"LLM 网关 HTTP {resp.status}: {text}")
-            data = await resp.json()
-            if usage_sink is not None:
-                try:
-                    usage_sink.append({"model": body["model"], "request_id": request_id,
-                                       "usage": data.get("usage") or {}})
-                except Exception:  # noqa: BLE001
-                    pass
-            return data
+                raise LLMGatewayError(resp.status, text,
+                                      dict(getattr(resp, "headers", {}) or {}))
+            return await resp.json()
 
 
 async def chat_tools_loop(messages: List[dict], tools: List[dict],

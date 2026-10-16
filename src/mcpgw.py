@@ -23,6 +23,7 @@ from fastapi import APIRouter, HTTPException, Request
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 import outbound    # P2 C5：出站地址准入（与 ghsettings 共用同一份判据）
+import resilience   # P1-6 接线②：逻辑调用的 call_id / 幂等键 + 熔断
 
 #: MCP server 是否允许指向本机/内网。**默认允许** —— MCP server 本来就常在 127.0.0.1
 #: （本机 stdio/http 桥），一刀切会把最正常的用法挡死（把安全做成可用性事故）。
@@ -40,6 +41,16 @@ router = APIRouter()
 
 RATE_PER_MIN = int(os.getenv("MCP_RATE_PER_MIN", "60"))
 CALL_TIMEOUT_S = int(os.getenv("MCP_CALL_TIMEOUT_S", "60"))
+
+
+def _record_attempt(rec: Dict[str, Any]) -> None:
+    """每次尝试落 `profile_events`（source=resilience）。**记账绝不允许带倒一次真实调用**。"""
+    try:
+        db.log_profile_event("resilience", "mcp_call",
+                             "ok" if rec.get("ok") else (rec.get("kind") or "fail"),
+                             rec.get("elapsed_ms"), trace_id=rec.get("call_id"), detail=rec)
+    except Exception:  # noqa: BLE001
+        pass
 LIST_TTL_S = 60
 DOC_CHARS_MAX = 160   # description 展示截断；**必须与 description_truncated 同时出现**
 
@@ -445,28 +456,48 @@ async def mcp_call(body: CallIn):
             raise HTTPException(400, "该 server 地址被出站准入拒绝：%s" % why)
     server = dict(rows[0])
     _acl_check(body.agent_id, server["id"], body.tool)
+    # P1-6 接线②：**逻辑调用**的标识与幂等键（2026-10-16）。
+    #   `call_id`：一次逻辑调用的标识，**跨 attempt 不变**（用于把同一件事的多次尝试归到一起）；
+    #   `idempotency_key`：由 (server, tool, 规范化 args) 确定性导出 —— 与调用方无关、**绝不吃时间戳/随机数**
+    #     ⇒ 同一个逻辑请求重发多次也得到同一把键，下游据此可判「这件事是否已经发生过」。
+    #   ⚠ **刻意不自动重试**（`attempts=1`）：MCP 工具的副作用未知（可能是写），
+    #   盲目重试 = 可能重复执行。本项只把「可幂等」这件事**变成可用信息**；
+    #   要重试必须逐点显式决定（模块口径：接入不是全局默认）。
+    call_id = resilience.new_call_id()
+    idem = resilience.idempotency_key(
+        "mcp_call", server["id"], body.tool,
+        json.dumps(body.args or {}, sort_keys=True, ensure_ascii=False))
     t0 = time.monotonic()
     status = "success"
     try:
         async with AsyncExitStack() as outer:
             stack, session = await _session_for(server)
             outer.push_async_callback(stack.aclose)
-            result = await asyncio.wait_for(
-                session.call_tool(body.tool, body.args), timeout=CALL_TIMEOUT_S)
+
+            async def _once():
+                return await asyncio.wait_for(
+                    session.call_tool(body.tool, body.args), timeout=CALL_TIMEOUT_S)
+            result = await resilience.instance.acall(
+                resilience.breaker_key(f"mcp:{server['id']}", body.tool), _once,
+                attempts=1, sleep_budget_s=0.0,
+                record=_record_attempt, call_id=call_id)
         texts = [c.text for c in (result.content or []) if getattr(c, "type", "") == "text"]
         is_err = bool(getattr(result, "is_error", False))
         out = {"ok": not is_err,
                "content": "\n".join(texts)[:20000],
-               "is_error": is_err}
+               "is_error": is_err,
+               "call_id": call_id, "idempotency_key": idem}
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
         status = "fail"
-        out = {"ok": False, "error": repr(e)[:500]}
+        out = {"ok": False, "error": repr(e)[:500],
+               "call_id": call_id, "idempotency_key": idem}
     finally:
         db.log_profile_event("mcp_call", f"{server['name']}/{body.tool}", status,
                              int((time.monotonic() - t0) * 1000),
-                             detail={"agent_id": body.agent_id})
+                             detail={"agent_id": body.agent_id, "call_id": call_id,
+                                     "idempotency_key": idem})
     if not out.get("ok"):
         raise HTTPException(502, json.dumps(out, ensure_ascii=False))
     return out

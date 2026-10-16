@@ -238,7 +238,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.116"
+    CURRENT_VERSION = "0.13.117"
+
+    #: v0.13.117（P1-6 接线两处）：关键词取自版本注释里**实际写下的字句**。
+    #: 异步孪生 acall + 结构化网关异常 + MCP 幂等键（且刻意不自动重试）。
+    VERSION_ROOT_CAUSES["0.13.117"] = (
+        "acall", "LLMGatewayError", "幂等键", "attempts=1", "_decide",
+    )
 
     #: v0.13.116（170 §7 前两项）：关键词取自版本注释里**实际写下的字句**。
     #: ① 执行者不得自证 fail（复核落 verify_reason + mismatch 事件）；② run 级预算派发前止损。

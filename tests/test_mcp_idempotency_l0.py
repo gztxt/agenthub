@@ -70,7 +70,9 @@ class _Base(unittest.TestCase):
         async def session_for(server):
             return types.SimpleNamespace(aclose=_noop_async), self.sess
         mcpgw._session_for = session_for
-        mcpgw._acl_check = lambda *a, **k: None
+        mcpgw._acl_check = lambda *a, **k: {"allowed": True, "reason": "test",
+                                            "rules": [], "shadow_would_deny": False,
+                                            "shadow_rules": []}
         mcpgw._check_rate = lambda *a, **k: None
         self.addCleanup(self._restore)
 

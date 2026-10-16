@@ -238,7 +238,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.118"
+    CURRENT_VERSION = "0.13.119"
+
+    #: v0.13.119（P2 C2）：关键词取自版本注释里**实际写下的字句**。
+    #: ACL 检测与拦截分开：effect 灰度、shadow 只记 would_deny 不拦。
+    VERSION_ROOT_CAUSES["0.13.119"] = (
+        "effect", "shadow", "would_deny", "mcp_acl_shadow", "ACL_EFFECTS",
+    )
 
     #: v0.13.118（170 §7 后两项）：关键词取自版本注释里**实际写下的字句**。
     #: verifying 可观测且可度量 + waiting 有界自愈。

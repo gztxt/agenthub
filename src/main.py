@@ -94,7 +94,22 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.118"  # 170 §7 后两项：verifying 可观测（可度量）+ waiting 自愈（有界等待）
+VERSION = "0.13.119"  # P2 C2：ACL 检测与拦截分开（effect=enforce|shadow 灰度）
+#   v0.13.119：P2 第 4/9 项（C2「检测与拦截分开建模」）。
+#   病灶：`mcp_acl` 只有「拦/不拦」两种结果 ⇒ **加一条 deny 规则就是当场生效**，
+#   没人能先看它命中过谁、会拒掉什么 ⇒ 规则一上线就可能把正常调用打死。
+#   ① `mcp_acl` 幂等补 `effect` 列（`enforce`|`shadow`）；**缺列/空值/NULL 折算 enforce**
+#      （灰度是**选择进入**的，旧行不得因为新列而变成不拦）。
+#   ② `_acl_check()` 改为**返回决定对象**（不再只抛异常）：实际生死只由 `enforce` 规则算，
+#      shadow 规则对生死**零影响**；再把 `enforce+shadow` 全量算一遍，若全量会拒而实际放行
+#      ⇒ 记一条 `mcp_acl_shadow` 的 `would_deny`（「本应拒绝」可查、可统计）。
+#      shadow **只会多说话，不会少拦**：实际为拒时照旧 403。
+#   ③ 写入口 `/mcp/acl` 接受 `effect`（只认 `enforce|shadow`，别的 400）。
+#   ④ 新 source `mcp_acl_shadow` 落入 `execsem.SOURCES`+`STATUS_MAP`
+#      （`would_deny → degraded`：有异常但未阻断）—— P2 C3 的**覆盖闸门当场把我拦下**，
+#      这正是「写入点各自发明词」那条判例的机械防线。
+#   闸门：`tests/test_mcp_acl_shadow_l0.py`(9)。
+#   v0.13.118：170 §7 后两项
 #   v0.13.118：`agent-knowledge/170` §7 四项的**后两项**（前两项已在 v0.13.116）。⇒ §7 全闭合。
 #   ① **§7-① verifying 不再瞬时**：旧实现置 `verifying` 后**同步**调 verifier 写回 ⇒ 协程从不
 #      yield、DB 上那一瞬没人看得到（前端/监控只能看到 running→success/failed，分不出

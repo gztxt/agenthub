@@ -38,6 +38,7 @@ SOURCES: Tuple[str, ...] = (
     "task_exec",      # tasks：DAG 子任务
     "cron_run",       # cronjobs：定时作业
     "mcp_call",       # mcpgw：MCP 工具调用
+    "mcp_acl_shadow", # P2 C2：影子 ACL 规则「本应拒绝」的记录（不拦，但必须可查）
     "rest",           # runlog：REST 端点留痕
     "ctx_manifest",   # P1-1：上下文清单
     "resilience",     # P1-6：出站重试的逐次尝试
@@ -56,6 +57,8 @@ STATUS_MAP: Dict[str, Dict[str, str]] = {
                   "submitted": "parked"},
     "cron_run": {"success": "ok", "fail": "failed", "skipped": "skipped"},
     "mcp_call": {"success": "ok", "fail": "failed"},
+    # P2 C2：影子规则只观测不拦 ⇒ 命中即「有异常但未阻断」= degraded（不是 failed）。
+    "mcp_acl_shadow": {"would_deny": "degraded"},
     "rest": {"success": "ok", "fail": "failed", "degraded": "degraded"},
     "ctx_manifest": {"ok": "ok", "degraded": "degraded"},
     # resilience：`ok` + `classification` 的八类错误（见 src/resilience.ERROR_KINDS）

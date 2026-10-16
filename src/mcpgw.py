@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS mcp_acl (
     agent_id TEXT NOT NULL,            -- 'manager' / 'jcode' / '*'
     server_id TEXT,                    -- NULL = 任意 server
     tool_pattern TEXT NOT NULL,        -- fnmatch，如 'read_*' 或 '*'
-    allow INTEGER NOT NULL DEFAULT 1
+    allow INTEGER NOT NULL DEFAULT 1,
+    effect TEXT DEFAULT 'enforce'      -- P2 C2：enforce|shadow（shadow 只记「本应拒绝」，不拦）
 );
 """
 
@@ -76,8 +77,16 @@ _tool_cache: Dict[str, Tuple[float, list]] = {}
 _rate: Dict[str, deque] = defaultdict(deque)
 
 
+#: P2 C2：ACL 规则的**作用模式**。`shadow` ＝ 只记「本应拒绝」、**不拦**（灰度）。
+ACL_EFFECTS = ("enforce", "shadow")
+
+
 def ensure_schema():
     db.execute_script(SCHEMA)
+    # P2 C2：存量库幂等补 `effect` 列。**缺失=enforce**（与旧行为逐字一致 —— 灰度是选择进入的）。
+    have = {r["name"] for r in db.query("PRAGMA table_info(mcp_acl)")}
+    if "effect" not in have:
+        db.execute("ALTER TABLE mcp_acl ADD COLUMN effect TEXT DEFAULT 'enforce'")
 
 
 def _now() -> str:
@@ -130,14 +139,45 @@ def _acl_rows(agent_id: str) -> list:
                     (agent_id,))
 
 
-def _acl_check(agent_id: Optional[str], server_id: str, tool: str) -> None:
+def _acl_effect(row: dict) -> str:
+    """规则作用模式。**缺列/空值/null 一律折算 enforce**（旧行不得因为新列而变成不拦）。"""
+    v = (row.get("effect") or "").strip().lower()
+    return "shadow" if v == "shadow" else "enforce"
+
+
+def _acl_check(agent_id: Optional[str], server_id: str, tool: str) -> dict:
+    """ACL 判定（P2 C2 起**返回决定对象**而不是只抛异常）。
+
+    灰度口径（刻意做成两层算）：
+      · **实际决定**只由 `enforce` 规则算出 —— shadow 规则对生死**零影响**；
+      · 另把 `enforce+shadow` 全量算一遍；两者不一致（全量会拒、实际放行）⇒ 记一条
+        `mcp_acl_shadow` 的 `would_deny`，供「新规则先跑一段再上任」。
+    shadow 规则**只会多说话，不会少拦**：实际为拒时照旧 403。
+    """
     aid = (agent_id or "anon").strip() or "anon"   # 缺省身份折算成 anon，受 `*` 规则约束
     # 改前：`if not agent_id: return` —— agent_id 来自请求体自报，留空即跳过整套 ACL；
     # 那 4 条规则（guest 全拒 / * 对 ekko 全拒）看起来"已配置"，实际全是装饰。
     rows = _acl_rows(aid)
-    allowed, reason, by = _resolve_acl(rows, server_id, tool)
+    enforced = [r for r in rows if _acl_effect(r) == "enforce"]
+    allowed, reason, by = _resolve_acl(enforced, server_id, tool)
+    decision = {"allowed": allowed, "reason": reason, "rules": by,
+                "shadow_would_deny": False, "shadow_rules": []}
     if allowed:
-        return
+        shadows = [r for r in rows if _acl_effect(r) == "shadow"]
+        if shadows:
+            s_allowed, s_reason, s_by = _resolve_acl(rows, server_id, tool)
+            if not s_allowed:
+                decision["shadow_would_deny"] = True
+                decision["shadow_rules"] = [int(i) for i in s_by]
+                try:
+                    db.log_profile_event(
+                        "mcp_acl_shadow", f"{server_id}/{tool}", "would_deny", None,
+                        detail={"agent_id": aid, "reason": s_reason,
+                                "rules": decision["shadow_rules"],
+                                "actual": "allow（shadow 不拦）"})
+                except Exception:  # noqa: BLE001  记账不得带倒一次真实调用
+                    pass
+        return decision
     raise HTTPException(403, f"ACL 拒绝 {aid} 调用 {server_id}/{tool}：{reason}"
                         + (f"（规则 {by}）" if by else ""))
 
@@ -256,6 +296,8 @@ class AclIn(BaseModel):
     tool_pattern: str
     server_id: Optional[str] = None
     allow: bool = True
+    # P2 C2：`enforce`（默认）| `shadow`（只记「本应拒绝」不拦——新规则先灰度）
+    effect: str = "enforce"
 
 
 @router.post("/mcp/acl")
@@ -269,11 +311,14 @@ async def add_acl(body: AclIn, request: Request):
         if not rows:
             raise HTTPException(404, f"mcp server 不存在: {body.server_id}")
         aid = rows[0]["id"]
-    db.execute("INSERT INTO mcp_acl(agent_id,server_id,tool_pattern,allow) VALUES(?,?,?,?)",
-               (body.agent_id, aid, body.tool_pattern, 1 if body.allow else 0))
+    if body.effect not in ACL_EFFECTS:
+        raise HTTPException(400, "effect 必须是 %s" % (list(ACL_EFFECTS),))
+    db.execute("INSERT INTO mcp_acl(agent_id,server_id,tool_pattern,allow,effect)"
+               " VALUES(?,?,?,?,?)",
+               (body.agent_id, aid, body.tool_pattern, 1 if body.allow else 0, body.effect))
     db.log_asset_event("mcp_acl", str(aid or "*"), "bind", writeauth.actor_of(request),
                        {"agent_id": body.agent_id, "tool_pattern": body.tool_pattern,
-                        "allow": bool(body.allow)})
+                        "allow": bool(body.allow), "effect": body.effect})
     return {"status": "added"}
 
 
@@ -455,7 +500,7 @@ async def mcp_call(body: CallIn):
         if why:
             raise HTTPException(400, "该 server 地址被出站准入拒绝：%s" % why)
     server = dict(rows[0])
-    _acl_check(body.agent_id, server["id"], body.tool)
+    acl_decision = _acl_check(body.agent_id, server["id"], body.tool)
     # P1-6 接线②：**逻辑调用**的标识与幂等键（2026-10-16）。
     #   `call_id`：一次逻辑调用的标识，**跨 attempt 不变**（用于把同一件事的多次尝试归到一起）；
     #   `idempotency_key`：由 (server, tool, 规范化 args) 确定性导出 —— 与调用方无关、**绝不吃时间戳/随机数**
@@ -497,7 +542,10 @@ async def mcp_call(body: CallIn):
         db.log_profile_event("mcp_call", f"{server['name']}/{body.tool}", status,
                              int((time.monotonic() - t0) * 1000),
                              detail={"agent_id": body.agent_id, "call_id": call_id,
-                                     "idempotency_key": idem})
+                                     "idempotency_key": idem,
+                                     # P2 C2：影子规则「本应拒绝」的可查证据
+                                     "acl_shadow_would_deny": (acl_decision or {}).get("shadow_would_deny"),
+                                     "acl_shadow_rules": (acl_decision or {}).get("shadow_rules")})
     if not out.get("ok"):
         raise HTTPException(502, json.dumps(out, ensure_ascii=False))
     return out

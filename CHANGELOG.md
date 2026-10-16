@@ -1,3 +1,39 @@
+## v0.13.119 — P2 C2：ACL 检测与拦截分开（`effect=enforce|shadow` 灰度）
+
+> 手册 C2：实时阻断必须确定/可解释/**可回放**，且新规则要能**先影子运行**再上任。
+
+### 病灶
+
+`mcp_acl` 只有「拦/不拦」两种结果 ⇒ **加一条 deny 规则就是当场生效**。
+没人能先看「它命中过谁、会拒掉什么」——规则一上线就可能把正常调用打死。
+
+### 改法（灰度是**选择进入**的）
+
+- `mcp_acl` 幂等补 `effect` 列（`enforce`|`shadow`）；
+  **缺列/空值/NULL 一律折算 `enforce`** —— 旧行不得因为新列而变成不拦。
+- `_acl_check()` 改为**返回决定对象**（不再只抛异常）：
+  · 实际生死**只由 `enforce` 规则**算出；
+  · 再把 `enforce+shadow` 全量算一遍；全量会拒而实际放行 ⇒ 记一条
+    `mcp_acl_shadow` 的 `would_deny`（「本应拒绝」可查、可统计、可回放）；
+  · shadow **只会多说话，不会少拦**：实际为拒时照旧 403。
+- 写入口 `/mcp/acl` 接受 `effect`（只认 `enforce|shadow`，别的 400）。
+- 新 source 落 `execsem.SOURCES`+`STATUS_MAP`（`would_deny → degraded`）。
+
+### 闸门
+
+`tests/test_mcp_acl_shadow_l0.py` **9 例**：shadow deny 不拦但留证 / enforce 照拦 /
+shadow allow 不留证 / **enforce deny 不得因 shadow allow 变放行** / 旧 NULL 行仍是 enforce /
+`effect` 非法值 400。
+
+### ⚠ 闸门当场把我拦下（纪录）
+
+新增 `mcp_acl_shadow` 这个 source 后，**P2 C3 的覆盖闸门**
+（`test_execsem_p2_c3_l0.TestCoverageGate.test_every_written_source_is_registered`）
+立刻变红 —— 它的职责就是扫源码里的 source 字面量并要求登记。
+这正是判例 193「写入点各自发明词」的机械防线在生效；按规矩补登记而非绕过。
+
+---
+
 ## v0.13.118 — `170` §7 后两项：`verifying` 可观测（可度量）+ `waiting` 自愈（有界等待）
 
 > 前两项已随 `v0.13.116` 落地 ⇒ **`170` §7 四项全闭合**。

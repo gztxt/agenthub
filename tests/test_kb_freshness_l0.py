@@ -168,7 +168,21 @@ class TestAnnotateFreshness(unittest.TestCase):
 
 
 class TestSearchEndToEnd(unittest.TestCase):
-    """真查一次索引（临时库），证「改了函数没换调用点」不成立。"""
+    """真查一次索引（临时库），证「改了函数没换调用点」不成立。
+
+    ⚠ **hermetic 性（2026-10-16 修）**：`memindex.search()` 会先过一道**宿主磁盘水位**闸
+    （`disk_state(disk_free_bytes(db_path.parent))`）。临时库建在 `TMPDIR` 上 ⇒ 本用例的
+    结论**随宿主磁盘余量变化**：实测 `/` 空闲 2.9G（< `DISK_CRITICAL_GB=3.0`）时返回
+    `ok=False`，而同一天空闲 6.8G 时通过 —— 这违反 L0 契约「干净机器上结论必须一模一样」，
+    并且曾把一次闸门判红（判例 189）。水位是**宿主量**，所以这里显式注入它，
+    本类只留被测的 freshness 语义；水位闸自己的边界由 `TestDiskGatePure`
+    用注入值覆盖（**不是不测，是换个地方测**）。
+    """
+
+    def setUp(self):
+        self._orig_free = memindex.disk_free_bytes
+        memindex.disk_free_bytes = lambda *a, **k: 64 * (1024 ** 3)   # 64G ⇒ 'ok'
+        self.addCleanup(lambda: setattr(memindex, "disk_free_bytes", self._orig_free))
 
     def test_search_returns_freshness(self):
         with tempfile.TemporaryDirectory() as td:
@@ -209,6 +223,29 @@ class TestRgItemFreshness(unittest.TestCase):
 
     def test_unparsable_line_returns_none(self):
         self.assertIsNone(memfed._rg_item("workspace_files", "不是 rg 输出格式"))
+
+
+class TestDiskGatePure(unittest.TestCase):
+    """磁盘水位闸的边界（纯函数 + 注入 free ⇒ 不受宿主影响）。
+
+    为什么单独放这里：`TestSearchEndToEnd` 把水位钉成 'ok' 以保 hermetic，
+    闸门本身的边界就必须另有用例守 —— 否则「把闸门整个删掉」也无人发现。
+    """
+
+    GB = 1024 ** 3
+
+    def test_boundaries(self):
+        self.assertEqual(memindex.disk_state(free=1 * self.GB), "critical")
+        self.assertEqual(memindex.disk_state(free=int(memindex.DISK_CRITICAL_GB * self.GB)),
+                         "low", "恰好等于临界值不算 critical（判据是 < 而非 ≤）")
+        self.assertEqual(memindex.disk_state(free=int(memindex.DISK_LOW_GB * self.GB)), "ok")
+        self.assertEqual(memindex.disk_state(free=0), "critical")
+
+    def test_read_only_blocked_at_critical(self):
+        """读闸只在 critical：low 时读必须放行（否则用户「明明有索引却查不到」）。"""
+        self.assertNotEqual(memindex.disk_state(free=4 * self.GB), "critical")
+        self.assertEqual(memindex.disk_state(free=int(2.9 * self.GB)), "critical",
+                         "2.9G 正是本轮实测越线的水位")
 
 
 class TestRedDirection(unittest.TestCase):

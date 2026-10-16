@@ -94,7 +94,18 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.117"  # P1-6 接线两处：LLM 路径重试/熔断（acall）+ MCP 调用的 call_id/幂等键
+VERSION = "0.13.118"  # 170 §7 后两项：verifying 可观测（可度量）+ waiting 自愈（有界等待）
+#   v0.13.118：`agent-knowledge/170` §7 四项的**后两项**（前两项已在 v0.13.116）。⇒ §7 全闭合。
+#   ① **§7-① verifying 不再瞬时**：旧实现置 `verifying` 后**同步**调 verifier 写回 ⇒ 协程从不
+#      yield、DB 上那一瞬没人看得到（前端/监控只能看到 running→success/failed，分不出
+#      「还没验」与「正在验」）。现：verifier 改走 `asyncio.to_thread`（协程在此 yield，
+#      外部读得到），并新增 `verify_started_at`/`verify_ms` 两列 ⇒ 该阶段**可观测且可度量**。
+#   ② **§7-② waiting 有界且自愈**：回包说 waiting 时写 `wait_until = now + TASK_WAIT_RESUME_S`
+#      （默认 300s）+ `wake_count`；新增 `resume_expired_waits()`：过期的等待态**未到
+#      `TASK_MAX_WAKES`（默认 3）⇒ 自动重新排队并拉起 runner**（不靠人记得调 /resume）；
+#      到顶 ⇒ 如实 `failed 等待超时`。挂进现有 sweeper 心跳（不为等待态另起 loop）。
+#      人工 `/resume` **也计数**且清掉旧期限——否则「有界」可被无限续命名存实亡。
+#   闸门：`tests/test_task_statemachine.py` 新增 `TestVerifyingIsObservable`(2) + `TestWaitingSelfHeal`(5)。
 #   v0.13.117：`P1-6` 模块（`src/resilience.py`）建好了但**只接了一处**调用点（ghsettings），
 #   台账记着的「接线剩两处」在本批补齐。
 #   ① **`resilience.acall`**（新）：`call()` 的**异步孪生**。抽了纯函数 `_decide()`

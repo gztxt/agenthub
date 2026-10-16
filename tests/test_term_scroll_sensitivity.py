@@ -238,7 +238,14 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.117"
+    CURRENT_VERSION = "0.13.118"
+
+    #: v0.13.118（170 §7 后两项）：关键词取自版本注释里**实际写下的字句**。
+    #: verifying 可观测且可度量 + waiting 有界自愈。
+    VERSION_ROOT_CAUSES["0.13.118"] = (
+        "verify_started_at", "verify_ms", "wait_until", "wake_count",
+        "resume_expired_waits", "TASK_MAX_WAKES",
+    )
 
     #: v0.13.117（P1-6 接线两处）：关键词取自版本注释里**实际写下的字句**。
     #: 异步孪生 acall + 结构化网关异常 + MCP 幂等键（且刻意不自动重试）。

@@ -1,3 +1,34 @@
+## v0.13.118 — `170` §7 后两项：`verifying` 可观测（可度量）+ `waiting` 自愈（有界等待）
+
+> 前两项已随 `v0.13.116` 落地 ⇒ **`170` §7 四项全闭合**。
+
+### 一、§7-① `verifying` 不再是瞬时态
+
+旧实现：置 `verifying` 后**同步**调 verifier 写回 ⇒ 协程**从不 yield**，DB 上那一瞬
+没有任何人能读到 ⇒ 前端/监控只能看到 running→success/failed，**分不出「还没验」与「正在验」**。
+
+改法：verifier 走 `asyncio.to_thread`（协程在此 yield，外部读得到）；新增
+`verify_started_at` / `verify_ms` 两列 ⇒ 该阶段**可观测且可度量**。
+
+### 二、§7-② `waiting` 有界且能自愈
+
+旧实现：等待态**不写期限** ⇒ 没人叫醒就**永久悬空**（只能靠人或编排器记得调 `/resume`）。
+
+改法：
+- 回包说 waiting 时写 `wait_until = now + TASK_WAIT_RESUME_S`（默认 300s）+ `wake_count`；
+- 新增 `resume_expired_waits()`：
+  · 未到 `TASK_MAX_WAKES`（默认 3）⇒ **自动重新排队并拉起 runner**（自愈）；
+  · 到顶 ⇒ 如实 `failed（等待超时（已唤醒 N 次仍无输入））`；
+- 挂进**现有** sweeper 心跳（不为等待态另起一个 loop）；
+- 人工 `/resume` **也计数**并清掉旧期限 —— 否则「有界」可被无限人工续命，名存实亡。
+
+### 三、闸门
+
+`tests/test_task_statemachine.py` 新增 `TestVerifyingIsObservable`(2) 与 `TestWaitingSelfHeal`(5)。
+§7-① 的用例用「慢 verifier + 外部轮询」证伪旧实现：**同步调用时永远读不到 `verifying`**。
+
+---
+
 ## v0.13.117 — P1-6 接线两处：LLM 重试/熔断（`acall`）+ MCP 调用的 `call_id`/幂等键
 
 > 台账里挂着「**P1-6 接线剩两处**：`llm.py`（本机无重试路径）与 `mcpgw.mcp_call` 的幂等键落地」。

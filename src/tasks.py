@@ -12,7 +12,7 @@ import json
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -70,6 +70,12 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+#: §7-② 等待自愈：等待态的**默认期限**（秒）与**最大唤醒次数**。
+#: 到期限未等来输入 ⇒ 自动重新排队（自愈）；唤醒次数到顶 ⇒ 如实 failed（不再永久悬空）。
+WAIT_RESUME_S = int(os.getenv("TASK_WAIT_RESUME_S", "300"))
+MAX_WAKES = int(os.getenv("TASK_MAX_WAKES", "3"))
+
+
 #: P0-3 新增列（幂等 ALTER 补建）。
 _TASK_COLUMNS = (
     ("verify_kind", "TEXT NOT NULL DEFAULT 'nonempty'"),  # 产物由哪个验证 kind 判
@@ -83,6 +89,12 @@ _TASK_COLUMNS = (
     # P0-b：验收裁决。三态照 verifier.STATUS_*；NULL = 未走到验收这一步。
     ("verdict", "TEXT"),
     ("verify_reason", "TEXT"),
+    # §7-①：让「正在验」可被外部读到并**可度量**（旧实现是同一协程内的瞬时态）
+    ("verify_started_at", "TEXT"),
+    ("verify_ms", "INTEGER"),
+    # §7-②：等待态的期限与唤醒计数（无此二列则「等多久」不可知、不可自愈）
+    ("wait_until", "TEXT"),
+    ("wake_count", "INTEGER"),
     # P1-4：提交/接受分离。submitted_at = 产物过 verifier 的时刻；
     # accepted_at/accepted_by = 被接受的时刻与主体（'auto' = 自动接受）。
     ("submitted_at", "TEXT"),
@@ -452,13 +464,47 @@ def requeue_waiting(run_id: str) -> int:
 
     等待态让出了执行资源，run 已挂起；恢复必须**显式**把任务重新排队，
     再重启 runner（由调用方 `_start_runner`）。
+    §7-②：人工唤醒**也计数**（`wake_count+1`）并清掉旧期限 —— 否则可被无限人工续命，
+    「有界」就名存实亡。
     """
     now = _now()
     ph = ",".join("?" * len(PARKED_STATUSES))
     return db.execute(
-        "UPDATE tasks SET status='pending',error=NULL,updated_at=? "
+        "UPDATE tasks SET status='pending',error=NULL,wait_until=NULL,"
+        "wake_count=COALESCE(wake_count,0)+1,updated_at=? "
         "WHERE run_id=? AND status IN (%s)" % ph,
         (now, run_id, *PARKED_STATUSES))
+
+
+def resume_expired_waits(now: Optional[str] = None) -> int:
+    """§7-② **自愈**：把过期的等待态推到下一步。返回被处理的行数。
+
+    · 未到唤醒上限 ⇒ 重新排队（pending）+ 拉起 runner（自愈，不靠人记得调 `/resume`）；
+    · 到上限 ⇒ `failed`（`等待超时（已唤醒 N 次仍无输入）`）—— 「等不来」如实失败，
+      而不是无限期地当一个看似正常的中间态。
+    """
+    now = now or _now()
+    ph = ",".join("?" * len(PARKED_STATUSES))
+    rows = db.query("SELECT run_id, task_id, wake_count FROM tasks"
+                    " WHERE status IN (%s) AND wait_until IS NOT NULL AND wait_until <= ?" % ph,
+                    (*PARKED_STATUSES, now))
+    if not rows:
+        return 0
+    resumed_runs = set()
+    for r in rows:
+        if int(r["wake_count"] or 0) >= MAX_WAKES:
+            db.execute("UPDATE tasks SET status='failed',error=?,finished_at=?,updated_at=?"
+                       " WHERE run_id=? AND task_id=?",
+                       ("等待超时（已唤醒 %d 次仍无输入）" % MAX_WAKES, now, now,
+                        r["run_id"], r["task_id"]))
+        else:
+            db.execute("UPDATE tasks SET status='pending',error=NULL,wait_until=NULL,"
+                       "wake_count=COALESCE(wake_count,0)+1,updated_at=?"
+                       " WHERE run_id=? AND task_id=?", (now, r["run_id"], r["task_id"]))
+            resumed_runs.add(r["run_id"])
+    for rid in resumed_runs:
+        _start_runner(rid)
+    return len(rows)
 
 
 @router.post("/api/tasks/{run_id}/resume")
@@ -552,9 +598,14 @@ async def _run_task(run_id: str, row: dict):
         # ① 等待态：执行者说「卡在等人/等批」⇒ 让出执行资源，不占槽、不算终态。
         waiting = result.get("waiting")
         if waiting in PARKED_STATUSES:
-            db.execute("UPDATE tasks SET status=?,spent_ms=?,spent_tokens=?,model=?,updated_at=?"
+            # §7-②：等待**必须有期限**（旧实现不写期限 ⇒ 无人叫醒就永久悬空）
+            deadline = (datetime.now(timezone.utc)
+                        + timedelta(seconds=WAIT_RESUME_S)).isoformat()
+            db.execute("UPDATE tasks SET status=?,spent_ms=?,spent_tokens=?,model=?,wait_until=?,"
+                       "wake_count=COALESCE(wake_count,0),updated_at=?"
                        " WHERE run_id=? AND task_id=?",
-                       (waiting, dur, spent_tokens, used_model, _now(), run_id, row["task_id"]))
+                       (waiting, dur, spent_tokens, used_model, deadline, _now(),
+                        run_id, row["task_id"]))
             db.log_profile_event("task_exec", row["agent_id"], "parked", dur,
                                  trace_id=row["trace_id"],
                                  detail={"task": row["task_id"], "waiting": waiting})
@@ -576,8 +627,15 @@ async def _run_task(run_id: str, row: dict):
         if not result.get("success"):
             err = (result.get("error") or "unknown")[:500]
             kind = row.get("verify_kind") or verifier.DEFAULT_KIND
-            verdict = verifier.verify(kind, output=result.get("response"),
-                                      expect=row.get("verify_expect"))
+            # §7-①：复核走**线程**（`to_thread`）而非就地同步调用 —— 否则协程从不 yield，
+            # 置下的 `verifying` 在 DB 上没人读得到。
+            db.execute("UPDATE tasks SET status='verifying',verify_started_at=?,updated_at=?"
+                       " WHERE run_id=? AND task_id=?", (_now(), _now(), run_id, row["task_id"]))
+            v0 = asyncio.get_event_loop().time()
+            verdict = await asyncio.to_thread(verifier.verify, kind,
+                                              output=result.get("response"),
+                                              expect=row.get("verify_expect"))
+            verify_ms = int((asyncio.get_event_loop().time() - v0) * 1000)
             status_v = verdict["status"]
             if status_v == verifier.STATUS_PASS:
                 reason = ("executor_claimed_failure_but_output_verified: %s" % err)[:500]
@@ -592,9 +650,10 @@ async def _run_task(run_id: str, row: dict):
             #   钉着这一条。所以本条修复**不写 `verdict`**（保持 NULL），复核结论落 `verify_reason`
             #   + `mismatch` 事件 —— 目的（**不再静默**）达到了，且不破别人的契约。
             db.execute("UPDATE tasks SET status='failed',error=?,verify_reason=?,"
+                       "verify_ms=?,"
                        "duration_ms=?,spent_ms=?,spent_tokens=?,model=?,finished_at=?,updated_at=?"
                        " WHERE run_id=? AND task_id=?",
-                       (err, reason, dur, dur, spent_tokens, used_model,
+                       (err, reason, verify_ms, dur, dur, spent_tokens, used_model,
                         _now(), _now(), run_id, row["task_id"]))
             db.log_profile_event("task_exec", row["agent_id"], event, dur,
                                  trace_id=row["trace_id"],
@@ -603,11 +662,15 @@ async def _run_task(run_id: str, row: dict):
             return
         # ④ **执行者不自证**：先 verifying，再由 verifier 独立判产物（P0-3 主判据）。
         kind = row.get("verify_kind") or verifier.DEFAULT_KIND
-        db.execute("UPDATE tasks SET status='verifying',spent_ms=?,spent_tokens=?,updated_at=?"
-                   " WHERE run_id=? AND task_id=?",
-                   (dur, spent_tokens, _now(), run_id, row["task_id"]))
-        verdict = verifier.verify(kind, output=result.get("response"),
-                                  expect=row.get("verify_expect"))
+        db.execute("UPDATE tasks SET status='verifying',spent_ms=?,spent_tokens=?,updated_at=?,"
+                   "verify_started_at=? WHERE run_id=? AND task_id=?",
+                   (dur, spent_tokens, _now(), _now(), run_id, row["task_id"]))
+        v0 = asyncio.get_event_loop().time()
+        # §7-①：走线程 ⇒ 协程在此 yield，外部读得到 `verifying`
+        verdict = await asyncio.to_thread(verifier.verify, kind,
+                                          output=result.get("response"),
+                                          expect=row.get("verify_expect"))
+        verify_ms = int((asyncio.get_event_loop().time() - v0) * 1000)
         if verdict["status"] == verifier.STATUS_PASS:
             # P1-4：**产物过 verifier ≠ 被接受**。AUTO_ACCEPT 开（默认）则立刻接受（＝旧行为），
             # 关则停在 `submitted` 等外部 `POST /accept`。两条路都写 submitted_at，
@@ -615,18 +678,19 @@ async def _run_task(run_id: str, row: dict):
             out = str(result.get("response") or "")[:20000]
             if AUTO_ACCEPT:
                 db.execute("UPDATE tasks SET status='success',output=?,duration_ms=?,spent_ms=?,"
-                           "spent_tokens=?,model=?,verdict=?,verify_reason=?,"
+                           "spent_tokens=?,model=?,verdict=?,verify_reason=?,verify_ms=?,"
                            "submitted_at=?,accepted_at=?,accepted_by=?,finished_at=?,updated_at=?"
                            " WHERE run_id=? AND task_id=?",
                            (out, dur, dur, spent_tokens, used_model, verdict["status"], None,
-                            _now(), _now(), "auto", _now(), _now(), run_id, row["task_id"]))
+                            verify_ms, _now(), _now(), "auto", _now(), _now(), run_id,
+                            row["task_id"]))
             else:
                 db.execute("UPDATE tasks SET status='submitted',output=?,duration_ms=?,spent_ms=?,"
-                           "spent_tokens=?,model=?,verdict=?,verify_reason=?,"
+                           "spent_tokens=?,model=?,verdict=?,verify_reason=?,verify_ms=?,"
                            "submitted_at=?,updated_at=?"
                            " WHERE run_id=? AND task_id=?",
                            (out, dur, dur, spent_tokens, used_model, verdict["status"], None,
-                            _now(), _now(), run_id, row["task_id"]))
+                            verify_ms, _now(), _now(), run_id, row["task_id"]))
             db.log_profile_event("task_exec", row["agent_id"],
                                  "success" if AUTO_ACCEPT else "submitted", dur,
                                  trace_id=row["trace_id"],
@@ -746,5 +810,8 @@ async def sweep_stale_tasks():
                     db.execute("UPDATE tasks SET status='failed',error='超时兜底',finished_at=?,"
                                "updated_at=? WHERE run_id=? AND task_id=?",
                                (_now(), _now(), r["run_id"], r["task_id"]))
+            # §7-②：等待态自愈（过期唤醒 / 到顶失败）——挂在这里是为了共用这个已有的心跳，
+            # 不为等待态另起一个 loop。
+            resume_expired_waits()
         except Exception:  # noqa: BLE001
             pass

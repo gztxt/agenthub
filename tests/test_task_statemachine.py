@@ -276,6 +276,120 @@ class TestExecutorCannotSelfDeny(_Base):
         self.assertEqual("pass", r["verdict"])
 
 
+class TestWaitingSelfHeal(_Base):
+    """§7-②：等待态不能**永久悬空** —— 有界等待 + 过期自动唤醒（或到上限就失败）。"""
+
+    PAST = "2000-01-01T00:00:00+00:00"
+    FUTURE = "2999-01-01T00:00:00+00:00"
+
+    def _row(self, tid):
+        return db.query("SELECT * FROM tasks WHERE task_id=?", (tid,))[0]
+
+    def test_waiting_result_records_deadline(self):
+        self._insert("rw1", "t1")
+        self._set_chat({"do t1": {"waiting": "waiting_input"}})
+        self._run_task_once("t1")
+        r = self._row("t1")
+        self.assertEqual("waiting_input", r["status"])
+        self.assertIsNotNone(r["wait_until"], "等待必须有期限，否则永久悬空")
+
+    def test_expired_wait_is_requeued(self):
+        self._insert("rw2", "t1")
+        db.execute("UPDATE tasks SET status='waiting_input',wait_until=?,wake_count=0"
+                   " WHERE task_id='t1'", (self.PAST,))
+        started = []
+        saved = tasks._start_runner
+        tasks._start_runner = lambda rid: started.append(rid)
+        self.addCleanup(lambda: setattr(tasks, "_start_runner", saved))
+        n = tasks.resume_expired_waits(now="2026-01-01T00:00:00+00:00")
+        self.assertEqual(1, n)
+        r = self._row("t1")
+        self.assertEqual("pending", r["status"])
+        self.assertEqual(1, r["wake_count"])
+        self.assertIn("rw2", started, "唤醒后必须把 runner 重新拉起")
+
+    def test_unexpired_wait_is_untouched(self):
+        self._insert("rw3", "t1")
+        db.execute("UPDATE tasks SET status='waiting_input',wait_until=?,wake_count=0"
+                   " WHERE task_id='t1'", (self.FUTURE,))
+        self.assertEqual(0, tasks.resume_expired_waits(now="2026-01-01T00:00:00+00:00"))
+        self.assertEqual("waiting_input", self._row("t1")["status"])
+
+    def test_exhausted_wakes_become_failed(self):
+        self._insert("rw4", "t1")
+        db.execute("UPDATE tasks SET status='waiting_input',wait_until=?,wake_count=?"
+                   " WHERE task_id='t1'", (self.PAST, tasks.MAX_WAKES))
+        tasks.resume_expired_waits(now="2026-01-01T00:00:00+00:00")
+        r = self._row("t1")
+        self.assertEqual("failed", r["status"], "唤醒次数到顶仍无输入 ⇒ 不再悬空")
+        self.assertIn("等待超时", r["error"])
+
+    def test_manual_resume_also_counts_a_wake(self):
+        self._insert("rw5", "t1")
+        db.execute("UPDATE tasks SET status='waiting_input',wait_until=?,wake_count=0"
+                   " WHERE task_id='t1'", (self.FUTURE,))
+        saved = tasks._start_runner
+        tasks._start_runner = lambda rid: None
+        self.addCleanup(lambda: setattr(tasks, "_start_runner", saved))
+        tasks.requeue_waiting("rw5")
+        r = self._row("t1")
+        self.assertEqual(1, r["wake_count"], "人工唤醒也要计数（否则可无限悬空）")
+        self.assertIsNone(r["wait_until"], "重新排队后旧期限必须清掉")
+
+
+class TestVerifyingIsObservable(_Base):
+    """§7-①：`verifying` 不能是「同一协程内的瞬时态」——外部必须**能读到**它。
+
+    旧实现：置 `verifying` 后**同步**调 verifier 写回 ⇒ 协程从不 yield，DB 上那一瞬
+    没人看得到 ⇒ 前端/监控永远只能看到 running→success/failed，无法区分
+    「还没验」与「正在验」。
+    """
+
+    def test_external_reader_sees_verifying(self):
+        import asyncio
+        import threading
+        import time
+        self._insert("rv", "t1")
+        self._set_chat({"do t1": {"success": True, "response": "ok"}})
+        row = db.query("SELECT * FROM tasks WHERE task_id='t1'")[0]
+
+        started, release = threading.Event(), threading.Event()
+        orig = tasks.verifier.verify
+
+        def slow_verify(kind, *, output=None, expect=None):
+            started.set()
+            release.wait(5)
+            return orig(kind, output=output, expect=expect)
+        tasks.verifier.verify = slow_verify
+        self.addCleanup(lambda: setattr(tasks.verifier, "verify", orig))
+
+        async def scenario():
+            t = asyncio.create_task(tasks._run_task(row["run_id"], row))
+            seen = None
+            for _ in range(300):
+                await asyncio.sleep(0.01)
+                if db.query("SELECT status FROM tasks WHERE task_id='t1'")[0]["status"] == "verifying":
+                    seen = "verifying"
+                    break
+                if t.done():
+                    break
+            release.set()
+            await t
+            return seen
+
+        self.assertEqual("verifying", asyncio.run(scenario()),
+                         "外部读不到 verifying ⇒ 这个态等于不存在")
+
+    def test_verifying_is_timed(self):
+        """验证耗时必须落库（否则「验证阶段有多慢」也无法度量）。"""
+        self._insert("rv2", "t1")
+        self._set_chat({"do t1": {"success": True, "response": "ok"}})
+        self._run_task_once("t1")
+        r = db.query("SELECT * FROM tasks WHERE task_id='t1'")[0]
+        self.assertIsNotNone(r["verify_started_at"])
+        self.assertIsNotNone(r["verify_ms"])
+
+
 class TestRunBudget(_Base):
     """§7-③：预算不能只有任务粒度 —— run 级累计超限必须在**派发前**止损。"""
 

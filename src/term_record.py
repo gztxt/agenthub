@@ -286,14 +286,46 @@ def _query_total_bytes() -> int:
         return 0
 
 
+def frames_page(session_id: str, limit: int = 2000,
+                after_seq: Optional[int] = None) -> Dict[str, Any]:
+    """取一段帧 + **续传点**（B14）。返回
+    `{frames, count, next_after_seq, more, first_seq, last_seq}`。
+
+    为什么必须有续传点：原签名只有 `limit`，`ORDER BY seq ASC LIMIT n` 在「帧多于 n」时
+    **只给最早那 n 条，且不说还有没有剩下的** ⇒ 客户端要么漏掉后来的帧，要么每次重拉全量
+    （重拉在长会话里越来越慢）。两种都不是「续传」。
+
+    `after_seq` 语义：**只取 seq 严格更大**的帧（`>`，不是 `>=`）—— 客户端把
+    `next_after_seq` 原样回传即可续接，不会重复拿到上一条边界帧。
+    `next_after_seq` 仅在**可能还有更多**时给出（`more=True`），否则为 None：
+    给一个永远取不到新帧的游标会让客户端空转轮询。
+    """
+    sql = ("SELECT seq, ts, direction, bytes, data FROM term_recordings "
+           "WHERE session_id=?")
+    args: List[Any] = [session_id]
+    if after_seq is not None:
+        sql += " AND seq>?"
+        args.append(int(after_seq))
+    sql += " ORDER BY seq ASC LIMIT ?"
+    args.append(int(limit))
+    rows = db.query(sql, tuple(args))
+    items = [{"seq": r["seq"], "ts": r["ts"], "dir": r["direction"],
+              "bytes": r["bytes"],
+              "data": base64.b64encode(bytes(r["data"] or b"")).decode("ascii")}
+             for r in rows]
+    # `more` 是**下界判断**：拿满 limit 条就不敢说「没有了」（可能还有）。
+    # 说「没有了」需要额外一次探测；宁可让客户端多拉一次空的，也不静默截断。
+    more = len(items) >= int(limit)
+    return {"frames": items, "count": len(items),
+            "first_seq": items[0]["seq"] if items else None,
+            "last_seq": items[-1]["seq"] if items else None,
+            "next_after_seq": items[-1]["seq"] if (more and items) else None,
+            "more": more}
+
+
 def frames(session_id: str, limit: int = 2000) -> List[Dict[str, Any]]:
-    rows = db.query(
-        "SELECT seq, ts, direction, bytes, data FROM term_recordings "
-        "WHERE session_id=? ORDER BY seq ASC LIMIT ?", (session_id, limit))
-    return [{"seq": r["seq"], "ts": r["ts"], "dir": r["direction"],
-             "bytes": r["bytes"],
-             "data": base64.b64encode(bytes(r["data"] or b"")).decode("ascii")}
-            for r in rows]
+    """兼容旧调用（裸列表）。**新代码用 `frames_page()`** —— 只有它能给出续传点。"""
+    return frames_page(session_id, limit)["frames"]
 
 
 def status(session_id: str) -> Dict[str, Any]:

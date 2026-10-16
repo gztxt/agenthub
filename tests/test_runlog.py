@@ -224,8 +224,11 @@ class TestRunlogQuery(_Base):
         runlog._fire("mem.search", "fail", 5, {"q": "bad", "channel": "mcp"})
 
     def _call(self, token="good", **kw):
+        # ⚠ 直调 FastAPI handler 时，未传的参数会保持 `Query(...)` 对象本身（**真值**）⇒
+        # 新加的 `outcome` 不传就会走进「取值不在词表」分支而 400。故这里必须逐个显式给。
         args = {"request": _Req(token), "source": None, "subject": None,
-                "status": None, "window": 0, "limit": 100, "before_id": None}
+                "status": None, "outcome": None, "window": 0, "limit": 100,
+                "before_id": None}
         args.update(kw)
         return asyncio.run(runlog.runlog_query(**args))
 

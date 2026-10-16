@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+import execsem    # P2 C3：统一执行语义枚举（词表唯一真相源）
 import db
 import tdai_client
 import usage_ledger
@@ -244,6 +245,7 @@ async def runlog_query(request: Request,
                        source: Optional[str] = Query(default=None, max_length=40),
                        subject: Optional[str] = Query(default=None, max_length=40),
                        status: Optional[str] = Query(default=None, max_length=20),
+                       outcome: Optional[str] = Query(default=None, max_length=20),
                        window: int = Query(default=0, ge=0, le=720),
                        limit: int = Query(default=100, ge=1, le=500),
                        before_id: Optional[int] = Query(default=None, ge=1)):
@@ -271,6 +273,20 @@ async def runlog_query(request: Request,
             raise HTTPException(400, "status must be success|fail")
         conds.append("status=?")
         params.append(status)
+    if outcome:
+        # P2 C3：按**跨 source 的语义**筛，而不是让前端记住每家各自的原始词。
+        if outcome not in execsem.OUTCOMES:
+            raise HTTPException(400, "outcome must be one of %s" % list(execsem.OUTCOMES))
+        pairs = [(s, st) for s, m in execsem.STATUS_MAP.items()
+                 for st, o in m.items() if o == outcome]
+        if not pairs:
+            # 该 outcome 当前没有任何映射 ⇒ **空集**，而不是「忽略过滤条件」。
+            # （静默忽略会让调用方把「没这类事件」读成「全量」—— 本仓反复禁的就是这个。）
+            conds.append("0")
+        else:
+            conds.append("(" + " OR ".join("(source=? AND status=?)" for _ in pairs) + ")")
+            for s, st in pairs:
+                params.extend([s, st])
     if window > 0:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=window)).isoformat()
         conds.append("created_at>=?")
@@ -287,10 +303,13 @@ async def runlog_query(request: Request,
     rows = db.query(sql, tuple(params))
     next_before_id = rows[-1]["id"] if len(rows) == limit else None
     return {
-        "events": rows,
+        # C3：补 outcome/mapped（**不改原始 status** —— 那是事实，outcome 是解释）。
+        "events": execsem.decorate(rows),
         "count": len(rows),
         "next_before_id": next_before_id,
-        "sources": ["rest", "hub_chat", "task_exec", "cron_run", "mcp_call"],
+        # ⚠ 以前这里是**手写死的五个**，而代码已在用 `ctx_manifest`/`resilience` ⇒
+        # 回包静默骗人、前端下拉永远筛不到那两类。现在改读词表（唯一真相源）。
+        **execsem.vocab(),
         "subjects": list(SUBJECTS),
     }
 

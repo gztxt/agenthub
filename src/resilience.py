@@ -33,6 +33,8 @@ worker 挂一小时，在本机直接表现为「页面卡住」。故解析结�
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import random
 import re
@@ -40,6 +42,7 @@ import socket
 import threading
 import time
 import urllib.error
+import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 CLOSED = "closed"
@@ -214,6 +217,88 @@ def breaker_key(url: str, purpose: str) -> str:
     return "%s|%s" % (host or "?", purpose or "default")
 
 
+#: 错误类闭集（P1-6 / 手册 B6）。**直接进 detail / 账本**，故必须是枚举而非自由文本：
+#: 自由文本聚合不动（「HTTP Error 429: Too Many Requests」与「rate limited」是同一类，
+#: 按字符串分就是两类）。
+ERROR_KINDS = ("rate_limit", "auth", "not_found", "invalid_request", "server",
+               "timeout", "network", "unknown")
+
+
+def classify_error(exc: BaseException) -> Dict[str, Any]:
+    """把异常归入**稳定闭集**并给出行动（B6：错误分类**先于**重试）。
+
+    返回 `{kind, action, retryable, retry_after_s, code}`：
+      · `kind ∈ ERROR_KINDS`，可直接落库聚合；
+      · `action ∈ {'retry','abort'}`（不含预算判断——那是 `call()` 的事）。
+
+    ⚠ 本函数**不重复判定逻辑**，一律调用既有的 `is_rate_limited` / `is_retryable` /
+    `parse_retry_after` —— 否则分类与真实重试行为会各自漂移（那正是 B6 要防的：
+    「分类说可重试，实现却不重试」）。
+    """
+    code = _http_code(exc)
+    retryable = is_retryable(exc)
+    if is_rate_limited(exc):
+        kind = "rate_limit"
+    elif code in (401, 403):
+        kind = "auth"
+    elif code == 404:
+        kind = "not_found"
+    elif code is not None and 400 <= code < 500:
+        kind = "invalid_request"
+    elif code is not None and 500 <= code < 600:
+        kind = "server"
+    elif isinstance(exc, (socket.timeout, TimeoutError)):
+        kind = "timeout"
+    elif isinstance(exc, urllib.error.URLError):
+        kind = "network"
+    else:
+        kind = "unknown"
+    return {"kind": kind, "action": "retry" if retryable else "abort",
+            "retryable": retryable, "retry_after_s": parse_retry_after(exc), "code": code}
+
+
+def idempotency_key(purpose: str, *parts: Any) -> str:
+    """幂等键（A6/B7）—— 对写操作**确定性构造**，使「上次到底发生没发生」可查。
+
+    口径（本机裁定，写死在这里以免各调用点自由发挥）：
+
+    1. **只吃调用方显式给出的语义字段**（`purpose` + 业务 id 等 parts）。
+       **绝不吃时间戳 / 随机数 / 进程 id** —— 含这些的键每次都不同，等于没有幂等。
+    2. `json.dumps(..., sort_keys=True)`，保证同语义同键（dict 顺序不影响）。
+    3. 取 `sha256` 全 64 位 hex：键要进 DB 索引，截短既省不了什么又抬高撞率。
+
+    用法：副作用行动重试前先 `SELECT ... WHERE idempotency_key=?`，命中就不再发。
+    """
+    payload = json.dumps({"purpose": str(purpose), "parts": [str(p) for p in parts]},
+                         ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def new_call_id() -> str:
+    """一次**逻辑调用**的标识（P1-6）。同一个 `call_id` 跨多次 attempt 不变，
+    从而「第 1 次 429、等 2s、第 2 次 200」能串成一条链 —— 这是 B7 说的
+    「可归因 attempt 记录」的前提（没标识就只能看到孤立的一条条记录）。
+
+    与 `idempotency_key()` 的差别：后者是**确定性**的（同语义同键，用于去重），
+    前者是**一次性**的（用于归因），两者不可混用。
+    """
+    return uuid.uuid4().hex[:12]
+
+
+def _emit_attempt(record: Optional[Callable[[Dict[str, Any]], None]], **rec: Any) -> None:
+    """把一条 attempt 记录交给调用方的 sink（B7）。
+
+    **sink 抛错必须被吞掉**：记录是为了可观测，绝不能因为落库失败把一次
+    本来成功的调用打挂。`record is None` 时零开销。
+    """
+    if record is None:
+        return
+    try:
+        record(rec)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class CircuitBreakers:
     """按 key 管理的熔断器集合（进程内，无全局单例污染 —— 实例由`instance()`给出）。
 
@@ -274,7 +359,9 @@ class CircuitBreakers:
 
     # ── 主入口 ────────────────────────────────────────────────────────
     def call(self, key: str, fn: Callable[[], Any], *, attempts: int = 1,
-             sleep_budget_s: float = 0.0) -> Any:
+             sleep_budget_s: float = 0.0,
+             record: Optional[Callable[[Dict[str, Any]], None]] = None,
+             call_id: str = "") -> Any:
         """在熔断保护下调用 `fn()`，失败按 `is_retryable` 退避重试。
 
         参数
@@ -282,30 +369,50 @@ class CircuitBreakers:
         · `sleep_budget_s`：**本次调用允许的退避总时长上限**。下一次要睡的秒数
           超过剩余预算就放弃重试、原样抛出。**这是「退避不得拖慢探活」那条
           约束的落点**：宁可少试一次，也不在 /health 的路径上睡出用户可见的卡顿。
+        · `record`（P1-6）：可选的**每次尝试**回调，收到
+          `{call_id, attempt, kind, action, retryable, retry_after_s, delay_s, slept_s,
+          elapsed_ms, ok}`。这是 B7「留可归因 attempt 记录」的落点 —— 传
+          `db.log_profile_event` 之类的适配器即可落库；不传则零开销。
+        · `call_id`（P1-6）：一次**逻辑调用**的标识，**跨 attempt 不变**。
+          重试前先按它查「上次到底发生没发生」，是幂等的前提（写路径另用
+          `idempotency_key()` 构键）。
         """
         attempts = max(1, int(attempts))
         self._enter(key)
         spent = 0.0
+        t0 = self._clock()
         try:
             for attempt in range(attempts):
                 try:
                     out = fn()
                 except BaseException as exc:  # noqa: BLE001 —— 要原样重抛，仅在此处拦
-                    limited = is_rate_limited(exc)
-                    retryable = is_retryable(exc)
-                    self._record(key, exc, limited=limited)
+                    cls = classify_error(exc)
+                    self._record(key, exc, limited=(cls["kind"] == "rate_limit"))
                     last_attempt = attempt >= attempts - 1
-                    if last_attempt or not retryable:
-                        raise
-                    delay = backoff_delay(attempt, parse_retry_after(exc),
-                                          jitter=self._rand())
-                    if spent + delay > sleep_budget_s:
-                        # 预算不够睡这次 —— 如实放弃重试（调用方看到的是最后一次的真异常）
+                    action = "abort" if (last_attempt or not cls["retryable"]) else "retry"
+                    delay = 0.0
+                    if action == "retry":
+                        delay = backoff_delay(attempt, cls["retry_after_s"],
+                                              jitter=self._rand())
+                        if spent + delay > sleep_budget_s:
+                            # 预算不够睡这次 —— 如实放弃重试（调用方看到的是最后一次的真异常）
+                            action, delay = "budget_exhausted", 0.0
+                    _emit_attempt(record, call_id=call_id, attempt=attempt, kind=cls["kind"],
+                                  action=action, retryable=cls["retryable"],
+                                  retry_after_s=cls["retry_after_s"],
+                                  delay_s=round(delay, 3),
+                                  slept_s=round(delay, 3) if action == "retry" else 0.0,
+                                  elapsed_ms=int((self._clock() - t0) * 1000), ok=False)
+                    if action != "retry":
                         raise
                     spent += delay
                     self._sleep(delay)
                     continue
                 self._record_ok(key)
+                _emit_attempt(record, call_id=call_id, attempt=attempt, kind="ok",
+                              action="return", retryable=False, retry_after_s=None,
+                              delay_s=0.0, slept_s=0.0,
+                              elapsed_ms=int((self._clock() - t0) * 1000), ok=True)
                 return out
             raise AssertionError("unreachable")  # pragma: no cover
         finally:

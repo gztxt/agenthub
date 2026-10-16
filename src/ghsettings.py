@@ -556,12 +556,23 @@ def _gh_get_raw(url: str, tok: str) -> Tuple[int, Any, Dict[str, str]]:
 def _gh_get(url: str, tok: str) -> Tuple[int, Any, Dict[str, str]]:
     """退避口径同 `githubprojects`：用户在「设置 → GitHub → 试连」里等这个结果，
     且探的是 `/user` + `/rate_limit`——**这一条恰恰是用来判断配额还剩多少的**，
-    撞上 429/5xx 立刻重试是最伤的（把刚恢复的额度又打下去）。3 次 / 4 秒预算封顶。"""
+    撞上 429/5xx 立刻重试是最伤的（把刚恢复的额度又打下去）。3 次 / 4 秒预算封顶。
+
+    P1-6：每次 attempt **落库**（`profile_events`，source=`resilience`）—— 此前只看得到
+    最终异常，看不到「第 1 次 429、等 2s、第 2 次 200」这种过程，归因全靠猜。"""
+    cid = resilience.new_call_id()
+
+    def _rec(rec: Dict[str, Any]) -> None:
+        db.log_profile_event("resilience", "gh_settings",
+                             "ok" if rec.get("ok") else str(rec.get("kind")),
+                             int(rec.get("elapsed_ms") or 0), trace_id=cid, detail=rec)
+
     try:
         return resilience.instance.call(
             resilience.breaker_key(url, "gh_settings"),
             lambda: _gh_get_raw(url, tok),
             attempts=GH_ATTEMPTS, sleep_budget_s=GH_SLEEP_BUDGET_S,
+            record=_rec, call_id=cid,
         )
     except resilience.BreakerOpen:
         return 0, {"error": f"熔断中（{resilience.RECOVERY_TIMEOUT_S:.0f}s 冷却）"

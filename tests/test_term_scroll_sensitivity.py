@@ -243,7 +243,7 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     #: v0.13.119（P2 C2）：关键词取自版本注释里**实际写下的字句**。
     #: ACL 检测与拦截分开：effect 灰度、shadow 只记 would_deny 不拦。
     VERSION_ROOT_CAUSES["0.13.119"] = (
-        "effect", "shadow", "would_deny", "mcp_acl_shadow", "ACL_EFFECTS",
+        "effect", "shadow", "would_deny", "mcp_acl_shadow", "enforce",
     )
 
     #: v0.13.118（170 §7 后两项）：关键词取自版本注释里**实际写下的字句**。

@@ -409,18 +409,28 @@ def _recent_experiences(limit: int, timeout: float) -> Dict:
 
 
 def _rg_item(source_id: str, line: str) -> Optional[dict]:
-    """`path:line:content` → 统一 item。path 用绝对路径（前端直接可溯源），行号做 id。"""
+    """`path:line:content` → 统一 item。path 用绝对路径（前端直接可溯源），行号做 id。
+
+    `updated_at` 取**实时磁盘 mtime**（`_safe_mtime`），口径与 `_recent_rg`
+    原先的 inline 补值完全一致（P1-8 把它收进本函数，两条路径共用一处）。
+    检索页按此项做「最近」排序——不补就会与真带时间戳的源（claude_mem 有
+    created_at）混排时失序。
+    """
     m = re.match(r"^(.*?):(\d+):(.*)$", line, re.S)
     if not m:
         return None
     path, lineno, content = m.group(1), int(m.group(2)), m.group(3)
     name = os.path.basename(path)
+    mt = _safe_mtime(path)
     return {
         "source": source_id, "id": f"{path}:{lineno}",
         "title": _sanitize_content(name)[:120],
         "content": _sanitize_content(content),
         "category": "session" if source_id.endswith("sessions") else "knowledge",
-        "updated_at": None,
+        # 取不到 mtime（文件刚被删）⇒ None，不填 0.0：`0` 会被当成
+        # 「1970 年」参与排序，把失效条目顶到最新。
+        "updated_at": (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mt))
+                       if mt > 0 else None),
     }
 
 
@@ -573,13 +583,10 @@ def _recent_rg(source_id: str, limit: int, timeout: float) -> Dict:
         for p in files:
             ln = _rg_head_content(p, timeout)
             if ln:
+                # `updated_at` 已由 `_rg_item` 从实时 mtime 给出（原为在此 inline
+                # 补值，P1-8 收进 `_rg_item`，两条路径共用一处口径）。
                 it = _rg_item(source_id, ln)
                 if it:
-                    # 补文件 mtime 当 updated_at：`_rg_item` 默认给 None，而注入包
-                    # 的联邦段按此项做「最近」排序——不补就会与真带时间戳的源
-                    # （claude_mem 有 created_at）混排时失序。
-                    it["updated_at"] = time.strftime(
-                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(_safe_mtime(p)))
                     items.append(it)
         return {"ok": True, "count": len(items), "items": items,
                 "ms": round((time.monotonic() - t0) * 1000, 1)}

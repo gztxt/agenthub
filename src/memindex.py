@@ -689,6 +689,73 @@ def _hit_window(text: str, q: str, width: int = CONTENT_SNIPPET) -> str:
     return ("…" if start > 0 else "") + out + ("…" if start + width < len(text) else "")
 
 
+def fmt_ts(epoch: Optional[int]) -> Optional[str]:
+    """epoch 秒 → `2026-10-16T12:00:00Z`。
+
+    **复用 `memfed.py:581` 的既有口径**（`strftime %Y-%m-%dT%H:%M:%SZ` + `gmtime`），
+    不新建第三套时间格式——跨模块的 `updated_at` 必须逐字节同形，否则
+    `_recent_rg` 补的时间戳和本层回的时间戳会在融合后混排失序。
+    """
+    if epoch is None:
+        return None
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(epoch)))
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def _built_epoch(db_path: Optional[Path] = None) -> Optional[float]:
+    """索引文件的 mtime（epoch 秒）——**不解析 meta 里的 `last_build` 字符串**。
+
+    沿用 `kb.py:362` 已定的口径：实测 `last_build` 是 `2026-10-02T18:07:33` 这种
+    **无时区**形态，与 aware datetime 相减直接 TypeError（kb 的闸门第一版就死在这，
+    只捕了 ValueError）。索引文件 mtime 是内核记的 UTC epoch，无时区歧义，
+    且「rebuild 没回写 meta 字符串、mtime 仍会动」⇒ 更接近真相。
+    """
+    try:
+        p = Path(db_path) if db_path else default_db_path()
+        return os.path.getmtime(p)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def annotate_freshness(items: List[Dict], built_at: Optional[str],
+                       built_epoch: Optional[float]) -> List[Dict]:
+    """就地给每条 item 补新鲜度标注（P1-8 / 手册 B4）。
+
+    只补两个字段，**不改排序**：B5「时近性权重」是独立一步（会改召回序，
+    属设计决策），本函数只解决 B4 的「区分『答案过期』与『检索失败』」。
+
+    补什么：
+    - `updated_at`：该 chunk 所属文件在**建索引那一刻**的 mtime（不是当前磁盘 mtime）。
+    - `index_age_days`：索引本身建了多久。**这是本项的承重字段**——只给 `updated_at`
+      会让下游把「快照里的文件时间」误读成「文件现状」：实测 2026-10-16 索引
+      `last_build=2026-10-02`，而 9107 个文件里 **65 个磁盘 mtime 比索引新**（最旧漂 92 天）、
+      182 个已从磁盘消失。不给这个量，下游拿到的仍是「看起来完整的过期答案」。
+
+    `built_at` 为 None（索引刚建/meta 缺失）时 age 给 None 而不是 0：
+    「不知道多旧」与「刚刚建的」必须可区分，填 0 就是在制造新的静默错误。
+    """
+    age = None
+    if built_epoch is not None:
+        try:
+            age = round(max(0.0, (time.time() - float(built_epoch)) / 86400.0), 1)
+        except (TypeError, ValueError):
+            age = None
+    for it in items:
+        # 无条件赋值（而不是「有值才补」）：`updated_at` 这个键必须**总是存在**，
+        # 取不到时是 `None`。不留 `"updated_at": None` 占位再事后覆盖 ——
+        # 那个占位就是「看起来填了、实则没填」的静默形态。
+        if it.get("updated_at") is None:
+            it["updated_at"] = fmt_ts(it.get("_mtime"))
+        it.pop("_mtime", None)
+        if age is not None:
+            it["index_age_days"] = age
+        if built_at is not None:
+            it["index_built_at"] = built_at
+    return items
+
+
 def search(q: str, limit: int = 10, db_path: Optional[Path] = None,
            sanitize: Optional[Callable[[str], str]] = None,
            sources: Optional[Iterable[str]] = None) -> Dict:
@@ -714,7 +781,7 @@ def search(q: str, limit: int = 10, db_path: Optional[Path] = None,
                 "ms": round((time.monotonic() - t0) * 1000, 3)}
 
     want = set(sources) if sources else None
-    sql = ("SELECT f.source, f.path, f.l1, f.l2, f.text FROM fed_proj_fts "
+    sql = ("SELECT f.source, f.path, f.l1, f.l2, f.text, f.mtime FROM fed_proj_fts "
            "JOIN fed_proj f ON f.rowid = fed_proj_fts.rowid "
            "WHERE fed_proj_fts MATCH ? ")
     args: List = [_fts_term(q)]
@@ -738,7 +805,7 @@ def search(q: str, limit: int = 10, db_path: Optional[Path] = None,
                     "error": f"{type(e).__name__}: {e}"[:160],
                     "ms": round((time.monotonic() - t0) * 1000, 3)}
         items = []
-        for source, path, l1, l2, text in rows:
+        for source, path, l1, l2, text, mtime in rows:
             body = _hit_window(text or "", q)
             name = os.path.basename(path)
             items.append({
@@ -746,10 +813,14 @@ def search(q: str, limit: int = 10, db_path: Optional[Path] = None,
                 "title": (sanitize(name) if sanitize else name)[:120],
                 "content": (sanitize(body) if sanitize else body),
                 "category": "session" if str(source).endswith("sessions") else "knowledge",
-                "updated_at": None,
+                # `updated_at` 由 annotate_freshness 从这个 epoch 中间值转出；
+                # 此处**不预置占位**（预置 `None` 会让「已标注」与「待标注」同形）。
+                "_mtime": mtime,
             })
+        built_at = _meta_get(con, "last_build")
     finally:
         con.close()
+    annotate_freshness(items, built_at, _built_epoch(db_path))
     return {"ok": True, "count": len(items), "items": items,
             "ms": round((time.monotonic() - t0) * 1000, 3)}
 

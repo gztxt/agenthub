@@ -1002,18 +1002,23 @@ async def term_recording_status(sid: str, request: Request):
 
 @router.get("/api/term/recording/{sid}/frames")
 async def term_recording_frames(sid: str, request: Request,
-                                limit: int = Query(default=2000, ge=1, le=10000)):
-    """回放：按seq 升序返回已脱敏的帧（data 为 base64）。
+                                limit: int = Query(default=2000, ge=1, le=10000),
+                                after_seq: Optional[int] = Query(default=None, ge=0)):
+    """回放：按 seq 升序返回已脱敏的帧（data 为 base64）。
 
     ⚠️ 这是**用户键入与 agent 输出的全量文本**出口 —— 即便是脱敏后的，也比会话列表
-    敏感得多，所以与kill 同级鉴权（要 TERM_TOKEN），且绝不接受「免 token 读一帧」。
+    敏感得多，所以与 kill 同级鉴权（要 TERM_TOKEN），且绝不接受「免 token 读一帧」。
+
+    B14 续传点：带 `after_seq` 只取**严格更大**的 seq；回包里的 `next_after_seq`
+    仅在 `more=True` 时给出 —— 客户端原样回传即可续接，不会重复边界帧，
+    也不会拿到一个永远取不到新帧的游标而空转轮询。
     """
     _check_term_token(request.headers.get("x-term-token", "")
                       or request.query_params.get("token", ""), "GET /api/term/recording/frames")
     if not term_record.enabled():
         raise HTTPException(404, "recording 未启用")
-    rows = await asyncio.to_thread(term_record.frames, sid, limit)
-    return {"session_id": sid, "frames": rows, "count": len(rows),
+    page = await asyncio.to_thread(term_record.frames_page, sid, limit, after_seq)
+    return {"session_id": sid, **page,
             "limits": {"max_session": term_record.max_session_bytes(),
                        "max_total": term_record.max_total_bytes()}}
 

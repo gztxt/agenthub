@@ -818,6 +818,9 @@ class CreateIn(BaseModel):
     agent_id: str
     session_id: Optional[str] = None    # v0.13.0：续聊某条历史；仅接受形状合法且实盘存在的 id
     cwd: Optional[str] = Field(default=None, max_length=500)   # v0.13.30：本机项目页——pty 起在指定项目目录；只进 os.chdir，绝不进命令拼装
+    # ⚠ P1-7 刻意**不**加 `allow_cwd_fallback` 字段：本端点的既有安全不变量是
+    # 「请求体只许 agent_id / session_id / cwd 三个 id 型字段」（tests/test_term_launch_guard.py），
+    # 加任何新字段都会破它。目录消失时的逃生路是「不带 session_id 的新会话」，本来就有。
 
 
 def _cwd_or_none(raw: Optional[str]) -> Optional[str]:
@@ -868,8 +871,15 @@ async def create_session(body: CreateIn, request: Request):
         cmd = shlex.split(prof["terminal"]["cmd"])
     if body.session_id:
         # 跳目录口径（09-22 裁定）之后，历史条目可能属于别的目录：pty 要起在**会话自己的 cwd**，
-        # 否则等于"在技术文档目录里打开一条 agent-hub 的会话"。session_cwd 已校验目录真实存在。
-        cwd = sessions_store.session_cwd(prof["id"], body.session_id, cwd)
+        # 否则等于"在技术文档目录里打开一条 agent-hub 的会话"。
+        # P1-7：这里**不再静默回退**。记录过 cwd 但目录已消失 ⇒ 显式拒启（409），
+        # 否则用户会在画像目录里拿到一条空的新会话，把「恢复失败」当成「已经续上」。
+        # 记录里本就没 cwd（source='none'，如 cursor 空 cwd 条目）不算异常，照旧回落。
+        cwd_ex = sessions_store.session_cwd_ex(prof["id"], body.session_id, cwd)
+        reason = sessions_store.resume_cwd_guard(cwd_ex)
+        if reason:
+            raise HTTPException(409, reason)
+        cwd = cwd_ex["cwd"]
     resolved = profiles.which(cmd[0])
     if not resolved:
         raise HTTPException(400, f"命令 {cmd[0]} 未在本机找到")

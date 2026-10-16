@@ -744,9 +744,8 @@ def _exists_on_disk(agent_id: str, sid: str, cwd: str = "") -> bool:
     return _store_path(agent_id, sid) is not None
 
 
-def session_cwd(agent_id: str, sid: str, fallback: str = "") -> str:
-    """会话自己的 cwd。跳目录之后必须按这一条来起 pty / 拼 qoder 的 -w，
-       否则会「在技术文档目录里打开一条 agent-hub 的会话」。目录不存在则退回 fallback。"""
+def _session_cwd_recorded(agent_id: str, sid: str) -> str:
+    """会话记录里写的 cwd（**原样**，不判存在性）。取不到 / 解析失败一律回空串。"""
     c = ""
     try:
         f = _store_path(agent_id, sid)
@@ -773,10 +772,52 @@ def session_cwd(agent_id: str, sid: str, fallback: str = "") -> str:
             c = m.get("cwd") or ""      # 实测有 1 条 cwd 为空 ⇒ 走下面的 fallback
     except Exception:  # noqa: BLE001
         c = ""
-    c = (c or "").strip()
-    if c and Path(c).is_dir():
-        return c
-    return fallback
+    return (c or "").strip()
+
+
+def session_cwd_ex(agent_id: str, sid: str, fallback: str = "") -> Dict[str, str]:
+    """P1-7：`session_cwd` 的**带来源**版本，返回 `{cwd, recorded, source}`。
+
+    - `source='recorded'`：记录的目录在盘上且被采用；
+    - `source='fallback'`：**记录过** cwd，但该目录已消失 ⇒ 退回了 fallback；
+    - `source='none'`：记录里本就没有 cwd（合法，例如 cursor 有空 cwd 条目）⇒ 退回 fallback。
+
+    为什么要「来源」：静默退回 fallback 会把**恢复失败伪装成恢复成功** ——
+    用户在 fallback（画像）目录里拿到一条空的新会话，以为续上了那条历史
+    （手册 B1：「不过就保持失败，不得把空/错目录当恢复成功」）。
+    调用方据此决定「拒启」还是「显式告警」；**不得**用 `cwd != fallback` 反推缺口
+    （那会把「记录目录恰好就是 fallback」误判成回退）。
+    """
+    rec = _session_cwd_recorded(agent_id, sid)
+    if rec and Path(rec).is_dir():
+        return {"cwd": rec, "recorded": rec, "source": "recorded"}
+    return {"cwd": fallback, "recorded": rec, "source": "fallback" if rec else "none"}
+
+
+def session_cwd(agent_id: str, sid: str, fallback: str = "") -> str:
+    """会话自己的 cwd。跳目录之后必须按这一条来起 pty / 拼 qoder 的 -w，
+       否则会「在技术文档目录里打开一条 agent-hub 的会话」。目录不存在则退回 fallback。
+
+    ⚠ 本函数**保留静默回退**（兼容既有调用点）；需区分「目录消失」与「本就无记录」
+    的调用方（续聊起点）请用 `session_cwd_ex()` 看 `source`。"""
+    return session_cwd_ex(agent_id, sid, fallback)["cwd"]
+
+
+def resume_cwd_guard(cwd_ex: Dict[str, str]) -> str:
+    """P1-7 纯函数：续聊起点该不该拒启。返回**拒绝原因**（空串 = 放行）。
+
+    只有 `source == 'fallback'`（**记录过** cwd 但目录已消失）才拒；
+    `none`（记录里本就没 cwd，如 cursor 空 cwd 条目）是合法情形，照旧回落。
+
+    ⚠ 刻意**不提供请求级放行开关**：`create_session` 的既有安全不变量是
+    「只许读 agent_id / session_id / cwd」（`tests/test_term_launch_guard.py`），
+    任何新 body 字段都会破它。想在其它目录另起一条，走「不带 session_id 的新会话」那条路。
+    """
+    if cwd_ex.get("source") == "fallback":
+        return ("会话记录的工作目录已不存在: %s —— 拒绝把此当成恢复成功；"
+                "若要另起一条，请改用新建会话（不带 session_id）"
+                % cwd_ex.get("recorded"))
+    return ""
 
 
 def resume_argv(agent_id: str, session_id: str, cwd: str) -> List[str]:

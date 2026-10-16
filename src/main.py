@@ -65,6 +65,7 @@ import gwprobe                      # 上游网关（CCR）连通性 + 模型注
 import healthx                      # /health 派生量的纯函数层（L0 不 import src.main，故抽出来）
 import resilience                   # 出站韧性层：退避重试 + 熔断（/health 的 breakers 字段）
 import settings_bundle as settings_bundle_mod  # 配置包导出/导入（PT-20260927-15，JSON，不引 YAML）
+import approvals as approvals_mod   # P1-2：审批三态（ASK + Preview-Approve-Commit-Verify）
 import sessions_export as export_mod
 import export_batch                   # 导出取消息的批量 IN（L0 可测的纯函数层，同 staticguard 范式）
 import models_cache                   # 模型清单的成功路径缓存（同上，纯函数层）
@@ -856,6 +857,7 @@ app.include_router(prefs_mod.router)
 app.include_router(modelcfg_mod.router)
 app.include_router(ghsettings_mod.router)
 app.include_router(settings_bundle_mod.router)   # PT-20260927-15：/api/settings/export|import
+app.include_router(approvals_mod.router)         # P1-2：/api/approvals（ASK 审批队列与决定端）
 app.include_router(hublog_mod.router)
 
 # D2：Hub MCP Server —— 把本机事实源以 MCP 暴露给 Hermes 等外部 Agent。

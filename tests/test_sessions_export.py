@@ -47,6 +47,20 @@ class TestRedaction(unittest.TestCase):
         self.assertIn("ccr_web_token=", out)
         self.assertEqual(hits, 1)
 
+    def test_bare_token_and_json_quoted_forms_are_masked(self):
+        """2026-10-16 补的两种漏形态（P1-2 审批预览暴露）。
+
+        · `token=<值>` —— **写门自己的 `?token=` 入口就是这个形态**，此前不在关键词表里；
+        · JSON `"api_key":"<值>"` —— 值前多一个引号，而值字符集不含 `"` ⇒ 匹配不到。
+        两者都在「消息里出现的凭据」这条线上，不补则**任何**走 redact_text 的路径（会话
+        导出、录制落盘、审批预览）都漏。
+        """
+        secret = "abcdEFGH1234567890xyz"
+        for text in ("token=" + secret, '{"api_key":"%s"}' % secret):
+            out, hits = ex.redact_text(text)
+            self.assertGreaterEqual(hits, 1, text)
+            self.assertNotIn(secret, out, text)
+
     def test_plain_text_untouched(self):
         out, hits = ex.redact_text(PLAIN)
         self.assertEqual(out, PLAIN)

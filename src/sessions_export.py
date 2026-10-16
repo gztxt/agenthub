@@ -42,8 +42,8 @@ _PATTERNS = [
     # 「有连字符分段」不等于「是密钥」。改用**总长**作闸门：连字符分段形态要求
     # 去掉分隔符后仍有 ≥20 位字母数字（真密钥 ≥32 位），短slug 一律放过。
     re.compile(r"sk-(?=[0-9A-Za-z-]{24,}[0-9A-Za-z]{0,})[0-9A-Za-z]+(?:-[0-9A-Za-z]+)*"),
-    re.compile(r"(?i)\b((?:ccr_web_token|api[_-]?key|access[_-]?token|secret|password|passwd)"
-               r"\s*[:=]\s*)([A-Za-z0-9_./+-]{16,})"),
+    re.compile(r"(?i)\b((?:ccr_web_token|api[_-]?key|access[_-]?token|refresh[_-]?token|token"
+               r"|secret|password|passwd)\s*[\"']?\s*[:=]\s*[\"']?)([A-Za-z0-9_./+-]{16,})"),
     re.compile(r"(?i)\b(bearer\s+)([A-Za-z0-9_.\-]{16,})"),
 ]
 MASK = "<REDACTED-导出脱敏>"

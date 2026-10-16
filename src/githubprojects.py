@@ -60,11 +60,17 @@ from pydantic import BaseModel, Field
 import db
 import ghsettings
 import localprojects
+import resilience
 import tdai_client
 import vitals
 import writeauth
 
 router = APIRouter(tags=["githubprojects"])
+
+#: 仓库列表的退避口径（PT-20260927-12 A 档）。3 次尝试 = 首发 + 2 退；
+#: 4 秒总预算 = 最坏情况 0.5s + 1s 两次退避，超出即放弃并把 429 如实报给用户。
+GH_ATTEMPTS = int(os.getenv("HUB_GH_ATTEMPTS", "3"))
+GH_SLEEP_BUDGET_S = float(os.getenv("HUB_GH_SLEEP_BUDGET_S", "4"))
 
 #: api.github.com 基址（git 直连与 API 直连本机均实测可达）
 API_BASE = "https://api.github.com"
@@ -244,8 +250,27 @@ def _remote_slugs() -> Dict[str, List[str]]:
     return out
 
 
+def _fetch_page(url: str, tok: str) -> List[Dict[str, Any]]:
+    """一页仓库清单（**裸调用，不含退避**）。只做「发出去 + 解析」，不做错误整形——
+    整形留在 `_fetch_all` 的 except 里，这样退避层看到的才是原始异常
+    （它要靠 HTTP 状态码判「该不该重试」）。"""
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"token {tok}",
+        "User-Agent": "agent-hub",
+    })
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 def _fetch_all(tok: str) -> Dict[str, Any]:
-    """拉全部仓库（分页到空页）。失败返回 {ok:False, error}——降级不抛。"""
+    """拉全部仓库（分页到空页）。失败返回 {ok:False, error}——降级不抛。
+
+    退避口径（PT-20260927-12 A 档）：**这里是真该退避的地方** ——
+    用户在等这一页，且GitHub API 限额 5000/h、次级限流是本机 recurring failure
+    （实测 `vitals.RATE_RE` 就在为429 兜底）。给 3 次尝试、总退避上限 4 秒：
+    `Retry-After` 若说等 60 秒，超过预算就**如实放弃**并把 429 报给用户，
+    而不是让页面转圈 60 秒。
+    """
     base = api_base()
     own = owner()
     repos: List[Dict[str, Any]] = []
@@ -256,13 +281,16 @@ def _fetch_all(tok: str) -> Dict[str, Any]:
                if own else
                (f"{base}/user/repos?per_page=100&sort=pushed"
                 f"&affiliation=owner,collaborator,organization_member&page={page}"))
-        req = urllib.request.Request(url, headers={
-            "Authorization": f"token {tok}",
-            "User-Agent": "agent-hub",
-        })
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                batch = json.loads(resp.read().decode("utf-8"))
+            batch = resilience.instance.call(
+                resilience.breaker_key(url, "gh_repos"),
+                lambda u=url: _fetch_page(u, tok),
+                attempts=GH_ATTEMPTS, sleep_budget_s=GH_SLEEP_BUDGET_S,
+            )
+        except resilience.BreakerOpen:
+            return {"ok": False,
+                    "error": f"GitHub API 熔断中（{resilience.RECOVERY_TIMEOUT_S:.0f}s 冷却）"
+                             "——上一轮连续失败，先看网络/凭据再刷新"}
         except urllib.error.HTTPError as e:
             body = ""
             try:

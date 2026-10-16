@@ -238,7 +238,23 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.114"
+    CURRENT_VERSION = "0.13.115"
+
+    #: v0.13.115（PT-20260927-12/13/14/15，外部评估蓝图链四项）：关键词取自版本注释
+    #: 里**实际写下的字句**。挑的是「这四项最容易被后人顺手改坏/删掉」的点：
+    #: ① 韧性层：429 豁免、Retry-After 封顶、半开单探、异常路径必须释放占位、
+    #:    以及 `vitals.http_ok` 刻意零重试（在探活路径上，重试会破坏「最多 2 次」红线）；
+    #: ② 依赖锁：裸包名 vs 锁定；
+    #: ③ token 取用：它是**可用性**改善而非放宽鉴权，别被当成安全缺口「顺手删掉」；
+    #: ④ 知识索引：指针闸门能验指针、**验不了**判据时效，所以那句限定语必须在；
+    #: ⑤ 配置包：不导凭据/地址、幂等 upsert 不清本机条目、未来版本显式拒绝、
+    #:    导出按写方法判鉴权、一律 JSON 不引 YAML。
+    VERSION_ROOT_CAUSES["0.13.115"] = (
+        "429 不计熔断失败", "Retry-After", "半开只放一个探针", "_leave",
+        "http_ok", "裸包名", "pip freeze", "可用性", "journald",
+        "知识索引", "test_knowledge_index_l0", "取证日期",
+        "mcp_servers", "幂等 upsert", "显式拒绝", "按写方法判", "不引 YAML",
+    )
 
     #: v0.13.114（P0-a + P0-b）：关键词取自版本注释里**实际写下的字句**。
     #: 核心是两条不可退让的口径：**取 adapter 回包值而非请求值**（否则归因自欺）、

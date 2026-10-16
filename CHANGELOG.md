@@ -1,3 +1,158 @@
+## v0.13.115 — 出站韧性层 + 依赖锁版本 + token 取用 + 知识索引 + 配置包导入导出
+
+> 接 `v0.13.114`。来源是一份针对本仓的**第三方评估意见**：逐条对代码取证后，
+> 5 条可用项被拆成 PT-20260927-12~16 五条台账，本次闭合前四条（16 早已落地）。
+> 评估原文与驳回理由见 `技术文档/agent-hub_外部评估核实与优化蓝图.md`。
+
+### 一、出站韧性层（`src/resilience.py`，PT-20260927-12 A 档）
+
+**痛不是假想**：`vitals.py` 自己把 `rate_limited` 列为 recurring failure 态
+（`RT_RETRYABLE`）并用 `RATE_RE` 解析 429 —— 但那只是**语义层判因**（决定卡片
+显示哪一档），**调用层既不退避也不熔断**。于是同一个限流窗口里每个调用点
+各自把一次失败吃下去，而 GitHub API 与 CCR 网关恰是最需要退避的两类对端。
+
+语义借鉴 `nathangtg/agent-hub`（MIT）的 `circuit_breaker.py` + `rate_limit_handler.py`，
+**只抄语义不抄实现**：上游是 async + `time.time()` 硬时钟 + 模块级单例，
+本机是同步 `urlopen` + 多线程（FastAPI 线程池 + `gwprobe` 后台探测线程）。
+上游两个坑一并避开 —— `_extract_wait_time` 用裸 `except:` 吞掉一切；
+`CircuitBreaker.call` 的锁只护状态转换不护调用（并发下可同时放行多个半开探针）。
+
+四条不可退让的设计（各有红向自证，见下）：
+
+| 设计 | 为什么 |
+|---|---|
+| **429 不计入熔断失败** | 限流是**对端健康的表现**。算失败会让「对端只是忙」演成「我方熔断」，然后在它最需要被调用时主动切断 |
+| **`Retry-After` 必须封顶**（20s） | 对端可以写 `Retry-After: 3600`。照单全收＝一个线程池 worker 挂一小时，在本机直接表现为「页面卡住」 |
+| **半开只放一个探针** | 冷却结束瞬间并发 N 个全打向刚恢复的对端 —— 对刚从限流里缓过来的对端恰是最坏时刻 |
+| **`_leave` 走 `finally`** | 否则一次网络卡死就把 key 钉在半开且 busy ⇒ **永远不自愈，比一直开闸更糟** |
+
+**接入是逐点显式决定的，不是全局默认**：`attempts` 与 `sleep_budget_s` 两个上限
+由每个调用点自己给 —— 「退避不得拖慢探活」那条约束的落点是**预算制**
+（退避总时长超预算就立刻放弃重试并原样抛出）。接了 4 个**只读幂等**点：
+`gwprobe.fetch` / `githubprojects._gh_get` / `ghsettings._gh_get` / `vitals.http_ok`。
+
+⚠ **`vitals.http_ok` 刻意零重试**（不是漏接）：它在 L4 探活路径上，而 AGENTS.md
+立着「探活最多 2 次即结束」。任何退避都会把「一轮最多 2 次」变成
+「2 次 × N 个退避」。端口探活要的是**当下这一刻**的应答。
+
+`/health` 新增 `breakers`（开闸列表 + 冷却剩余秒 + policy）：熔断一开，那些调用点
+会在**毫秒内**返回，没有这个字段，用户只看到「GitHub 项目页空了」而没有任何原因字段。
+
+#### 施工中踩到的真缺陷（不是测试写错）
+
+1. **`str(HTTPError)` 里没有响应正文** —— urllib 拼的是
+   `'HTTP Error %s: %s' % (code, reason)`，`reason` 取自 status line，正文在 `.fp` 里。
+   第一版想「靠正文里的 rate limit 文案兜底」，那条路在真实调用中**永远不会触发**；
+   更糟的是想去读 `.fp` 又会把调用方要用的错误正文吃掉。改用可靠信号：
+   **状态码 429，或 403/503 + `Retry-After` 头**。
+   已用 `test_http_error_body_is_not_in_str` 钉死这个坑。
+2. **中文 Retry-After 的语序与英文相反** —— 英文是「短语在前、数字在后」
+   （`retry after 7 seconds`），中文是「数字在前、量词在后」（`请在 12 秒后重试`）。
+   只写前者会漏掉后者。
+3. **`app_prefs.value` 存的是 JSON 字符串不是 dict** —— 当 dict 用会把
+   `dict` 的 repr 当字符串导出去。
+
+### 二、依赖锁版本（`requirements.txt`，PT-20260927-13 P4）
+
+外部评估说「有 `uv.lock` 锁定依赖」是**假的**（全仓无 uv/pyproject/uv.lock），
+但它照出的真隐患成立：**9 个裸包名零版本号**，而重建 venv 就靠这一个文件
+⇒ 任一次重建都可能装到 breaking 版本而**无人察觉**（NAS 无 CI 兜底）。
+
+版本号**取自生产 venv `pip freeze` 实测值**（2026-10-16），不凭记忆填。
+`pip install --dry-run -r requirements.txt` 实测与生产 venv 完全一致（无冲突、无重装）。
+**不挂 CI/Codecov 徽章**——本机无 CI，挂徽章＝对外释放未验证的健康信号。
+
+### 三、终端 token 取用（`agent-hubctl.sh token`，PT-20260927-13 P5）
+
+外部评估说「`TERM_TOKEN` 默认无鉴权」也是**假的**（`term.py:36-39` 未配即生成
+32 字节随机 token，四条终端路由全过 `_check_term_token`）。但它照出的真痛点成立：
+**随机 token 只 `print` 前 4 位到 journald**，首次接线（手机 / 另一台机开终端页）
+只能去日志挖全文，而日志会滚走。这是**可用性**问题，不是安全问题。
+
+新子命令**只读**：token 源三处按可靠性依次取（运行中进程 env → `.env` → systemd 单元），
+取完**实弹验证**（打只读端点 `GET /api/term/sessions`）：
+
+```
+$ bash agent-hubctl.sh token
+来源：运行中进程（pid=15178）的环境变量
+HkYBhZepQIsZuP7Er2uHtR0ubQ9RgO_CxXVVe2z66sA
+实弹验证：带此 token GET /api/term/sessions → 200（有效）
+   对照：不带 token 时 GET /api/term/sessions → 401（401=鉴权闸在生效）
+```
+
+双向自证：真 token → 200，错 token → 401。**鉴权语义一字未动**，
+故只打 stdout、不写 journald、不进审计。
+
+### 四、README 瘦身 + 知识索引（PT-20260927-14 P3）
+
+外部评估说「没有 docs 体系」不准确（docs/ 有 superpowers 技能包），
+但它照出的真缺口是：**本仓 228 行 README 里约 160 行是逐版本施工流水**，
+而真沉淀（`技术文档/agent-knowledge/`，155+ 篇）在**仓内零指针**。
+
+- 流水迁 `docs/HISTORY-features.md`（**原文逐字保留**，README 228 → 128 行）；
+- 新增「现在是什么」速查 + 环境要求（Python 3.11+、依赖锁、零新增依赖、systemd 无 Docker）；
+- 新增「知识索引」一节：按 9 个主题列出 43 篇结论型篇目 + 5 份外部融合评估的裁定摘要；
+- 新增 `tests/test_knowledge_index_l0.py`：**钉住索引里每个编号都解析得到真实文件**。
+
+⚠ 这条闸门**能验指针有效，验不了判据是否仍与现状一致** —— 索引会腐化，判据也会过期。
+所以索引节里同时写明「结论绑定取证日期与版本号，以代码与实测为准」。
+这不是客套，它是对该闸门结构上覆盖不到的那一半风险的人工对冲。
+
+红向自证时抓到**闸门自身的洞**：表头跳过条件首版写成 `if "篇目" in ln`，
+结果任何行内出现「篇目」二字的正文行被整行跳过 ⇒ 它列的编号一个都没被校验，
+而测试仍然全绿。改成精确匹配（`startswith("|---")` / 全等表头行）后覆盖率
+从 40 → **43/43**。**这类「悄悄少校验一部分」的洞只有故意破坏才看得见。**
+
+### 五、配置包导出 / 导入（`src/settings_bundle.py`，PT-20260927-15 P2）
+
+画像是「代码定义（`profiles.py`）+ 运行时注册（`POST /api/agents`）」的混合体，
+另有 MCP ACL 与页面偏好 —— 重装 NAS / 迁移全靠手工，而 `profiles.py` 的**覆盖项
+压根没有导出通道**。新增 `GET /api/settings/export` + `POST /api/settings/import`。
+
+| 进包 | **不进包** | 为什么 |
+|---|---|---|
+| `custom_agents`（自定义注册） | `profiles.py` 的**代码本体** | 代码在 git 里跟着机器走；导出它只会制造「改了导出版本、代码没改」的第二真相 |
+| `mcp_acl`（工具授权规则） | **MCP server 的 URL / env**（`mcp_servers` 表） | server 地址与凭据是机器事实不是可迁移配置 |
+| `app_prefs`（页面偏好） | `.env`（含全部凭据） | 同上，且凭据落配置面违反军规 |
+| | 运行时库（`data/*.db` 主体） | 迁移的是配置不是数据；数据另有备份链 |
+
+四条设计：**先全量校验再逐条写**（校验不过则库一个字节都不动）；
+**幂等 upsert 且不清本机独有条目**（「导入一份包」不该顺手删掉目标机上已有的自定义 agent）；
+**未来版本显式拒绝**（尽力解析会把「字段改名」变成静默丢配置）；
+**导出虽是 GET 但按写方法判鉴权**（批量读＝数据外流，与 `audit.py::_require_read` 同口径 ——
+`GET` 不走 `write_gate`，不显式判就是一个无鉴权导出通道）。
+
+**一律 JSON，不引 YAML**：外部评估建议过 YAML 导出，取其诉求、丢其格式 ——
+`requirements.txt` 无 `pyyaml`，「零新增第三方依赖」是本机硬约束。
+导出件走既有脱敏器 `sessions_export.redact_text`，文件名带 `_sensitive`，
+响应头 `Cache-Control: no-store` + `X-Content-Type-Options: nosniff`。
+
+施工中抓到两个真缺陷：`apply_bundle` 的 INSERT **漏了 `updated_at` NOT NULL**
+（导入会 500）；`ON CONFLICT ... DO UPDATE` **漏了 `source`** ⇒ 导入覆盖过的条目
+仍标 `manual`，无法与手工注册区分。两者都被测试抓住，不是靠肉眼 review。
+
+#### 红向自证（守卫有效性）
+
+| 组 | 故意退化成什么 | 结果 |
+|---|---|---|
+| 韧性层 ×6 | 429 也计失败 / `Retry-After` 不封顶 / 半开占位不释放 / 半开放行所有探针 / 4xx 也重试 / 忽略 `sleep_budget` | **六向全部转红** |
+| 索引 ×3 | 塞不存在的编号 / 去锁一个版本 / README 超 200 行 | **全部转红** |
+| 配置包 ×6 | 导出带 `mcp_servers` / upsert 改 INSERT / 校验挪到写之后 / 未来版本不拒 / 鉴权改按 GET / 不脱敏 | **六向全部转红** |
+
+另：`tests/test_settings_bundle_l0.py` 的 5 次红灯里有 3 次是**判据或样本本身不对**，
+不是实现错 —— ① `ghp_` 样本写 16 位而脱敏器要求 36 位（手数错了两次，
+改成程序生成）；② pop 错了 env 变量名（`secrets_from_env()` 读的是 `TERM_TOKEN`/
+`HUB_PASSCODE`，且仓内 `.env` 被 `load_dotenv(override=True)` 灌进 env，pop 挡不住）；
+③ HTTP 头塞中文导致 httpx 编码层抛 `UnicodeEncodeError`，判据根本没跑到。
+⇒ **红灯不等于我的实现错，先查判据读的是哪。**
+
+### 闸门
+
+- L0 **1928/0/0**（零跳过）、L1 **64/0/0**（1 例 host_only 跳过）；收集器对账 **1993 = 1993**
+- 新增测试：`test_resilience_l0.py`(42) + `test_knowledge_index_l0.py`(7)
+  + `test_settings_bundle_l0.py`(31) = **80 例**
+- `bash scripts/run_tests.sh all` 全绿（exit=0）
+
 ## v0.13.114 — P0-a + P0-b：成本归因接线 + 验收裁决落库
 
 > 接 `v0.13.113`。**不引入任何新概念**，只把两处「数据本来就在、却被丢弃」接上。

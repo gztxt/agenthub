@@ -156,9 +156,63 @@ print('  运行时长: %ss   库: %s   活终端会话: %s (最闲 %ss)' % (
       journalctl --user -u "$UNIT" -n "${2:-100}" --no-pager
     fi
     ;;
+  token)
+    # P5（PT-20260927-13）：打印**当前生效**的 TERM_TOKEN。
+    #
+    # 为什么需要这个子命令（外部评估把它误判成「没鉴权」，实际是**可用性**问题）：
+    # term.py:36-39 在未配置时生成 32 字节随机 token，而 journald 只print 了前 4 位
+    # ⇒ 首次接线（手机 / 另一台机器开终端页）只能去日志里挖全文，且日志会滚走。
+    # 本子命令只**读**不写：token 源有三处，按可靠性依次取，并在取证端点实弹验证。
+    #
+    # ⚠️ 它会**把 token 明文打到 stdout/终端** —— 这是「取用方式」的改善，
+    # 不是安全边界的放宽（鉴权语义一字未动，见上term.py 四条路由仍全过闸）。
+    # 因此不写 journald、不进任何审计日志，只在有人显式执行时打一次。
+    _tok=""
+    # ① 运行中进程的真实值（最可靠：反映实际生效，含 .env 未落盘的情形）
+    _pid=$(hub_pid_from_port || true)
+    if [ -n "${2:-}" ]; then _tok="$2"; fi
+    if [ -z "$_tok" ] && [ -n "$_pid" ] && [ -r "/proc/$_pid/environ" ]; then
+      _tok=$(tr '\0' '\n' < "/proc/$_pid/environ" 2>/dev/null \
+             | sed -n 's/^TERM_TOKEN=//p' | head -1)
+      [ -n "$_tok" ] && c_ok "来源：运行中进程（pid=$_pid）的环境变量"
+    fi
+    # ② .env（term.py 兜底也读它）
+    if [ -z "$_tok" ] && [ -f "$APP_DIR/.env" ]; then
+      _tok=$(sed -n 's/^TERM_TOKEN=[[:space:]]*//p' "$APP_DIR/.env" 2>/dev/null | head -1)
+      [ -n "$_tok" ] && c_ok "来源：$APP_DIR/.env"
+    fi
+    # ③ systemd 单元环境
+    if [ -z "$_tok" ]; then
+      _tok=$(systemctl --user show "$UNIT" -p Environment 2>/dev/null \
+             | sed -n 's/.*TERM_TOKEN=\([^ ]*\).*/\1/p' | head -1)
+      [ -n "$_tok" ] && c_ok "来源：systemd 单元 Environment"
+    fi
+    if [ -z "$_tok" ]; then
+      c_bad "取不到 TERM_TOKEN：进程环境/.env/单元三处都没有。"
+      echo "   说明服务是按 term.py:36-39 的兜底路径跑的（随机生成、只 print 了前 4 位、不落盘）。"
+      echo "   那枚随机值只在进程内存里，重启即换 ⇒ 无解。正解是显式配置："
+      echo "     在 $APP_DIR/.env 里加一行 TERM_TOKEN=<32字节随机串>，然后重启服务。"
+      echo "   生成：python3 -c 'import secrets;print(secrets.token_urlsafe(32))'"
+      exit 2
+    fi
+    printf '%s\n' "$_tok"
+    # 实弹验证：拿它打只读终端列表。200 = 有效；401 = 无效（换进程了/改过了）。
+    _code=$(curl -sS -m 4 -o /dev/null -w '%{http_code}' \
+            -H "x-term-token: $_tok" "$BASE/api/term/sessions" 2>/dev/null || echo 000)
+    _nocode=$(curl -sS -m 4 -o /dev/null -w '%{http_code}' \
+              "$BASE/api/term/sessions" 2>/dev/null || echo 000)
+    case "$_code" in
+      200) c_ok "实弹验证：带此 token GET /api/term/sessions → 200（有效）" ;;
+      401|403) c_bad "实弹验证：带此 token → $_code（无效！token 与运行中进程不一致）" ;;
+      000) c_warn "实弹验证：连不上 $BASE（服务未运行？）—— token 已打印，未验证" ;;
+      *) c_warn "实弹验证：意外状态码 $_code（不带 token 时是 $_nocode）" ;;
+    esac
+    echo "   对照：不带 token 时 GET /api/term/sessions → ${_nocode:-000}（401=鉴权闸在生效）"
+    ;;
   *)
-    echo "用法: $0 {start|stop|restart|status|log}   （起停一律委托 systemctl --user）"
+    echo "用法: $0 {start|stop|restart|status|log|token}   （起停一律委托 systemctl --user）"
     echo "      停服确要连带杀终端会话：FORCE=1 $0 stop"
+    echo "      打印当前生效的终端鉴权 token（只读，并实弹验证）：$0 token"
     exit 1
     ;;
 esac

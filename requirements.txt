@@ -1,10 +1,15 @@
 ﻿# Agent Hub 直接依赖（venv 不入 git，此文件为重建依据：pip install -r requirements.txt）
-fastapi
-uvicorn
-aiohttp
-python-dotenv
-jinja2
-pydantic
-croniter
-mcp
-websockets
+#
+# 版本号来源：**生产 venv 的 `pip freeze` 实测值**，取数2026-10-16（PT-20260927-13 / P4）。
+# 为什么必须锁：本仓无 uv / pyproject / uv.lock，重建 venv 就是 `pip install -r` ——
+# 锁之前，任何一次重建都可能装到 breaking 版本而**无人察觉**（NAS 无 CI 兜底）。
+# 升级时改这里的版本号，并按AGENTS.md「升级铁律」先读 changelog、警惕默认值变更。
+fastapi==0.141.1
+uvicorn==0.52.4
+aiohttp==3.14.3
+python-dotenv==1.2.3
+jinja2==3.1.6
+pydantic==2.13.5
+croniter==6.2.4
+mcp==2.1.1
+websockets==17.1

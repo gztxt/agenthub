@@ -179,12 +179,25 @@ def port_open(port: int, host: str = "127.0.0.1") -> bool:
         return False
 
 
+def _http_ok_raw(url: str, timeout: float) -> Optional[int]:
+    """裸 GET（不含退避/熔断）。返回 HTTP 状态码；连不上None。"""
+    req = urllib.request.Request(url, headers={"Accept": "text/html"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.status
+
+
 def http_ok(url: str, timeout: float = 3.0) -> Optional[int]:
-    """返回 HTTP 状态码；连不上返回 None。只 GET，不改状态。"""
+    """返回 HTTP 状态码；连不上返回 None。只 GET，不改状态。
+
+    **刻意零重试、且不走熔断**（PT-20260927-12 A 档的例外，不是漏接）：
+    本函数是L4 探活的组成部分，而 AGENTS.md 立着「探活最多 2 次即结束」的硬线
+    （理由：实测 68 次/天把swap 打到 90%）。任何形式的重试/退避都会在探活路径上
+    引入不可预测的等待，把「一轮最多 2 次」变成「2 次 × N 个退避」。
+    端口探活要的是**当下这一刻**的应答，不是「等一会儿能不能好」——
+    后者是 `vitals` 自己的 RT_TTL保鲜机制该管的事。
+    """
     try:
-        req = urllib.request.Request(url, headers={"Accept": "text/html"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status
+        return _http_ok_raw(url, timeout)
     except urllib.error.HTTPError as e:
         return e.code           # 401/404 也算「端口在应答」
     except Exception:  # noqa: BLE001

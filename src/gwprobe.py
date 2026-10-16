@@ -32,9 +32,17 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+import resilience
+
 TTL_S = float(os.getenv("HUB_GW_TTL_S", "300"))
 TIMEOUT_S = float(os.getenv("HUB_GW_TIMEOUT_S", "5"))
 MAX_IDS = 60            # /health 里最多回这么多 ID（本机实测 14 个，留足余量）
+# 退避重试上限。**刻意给 0 次重试**：本函数已在后台线程跑（`_schedule_probe`），
+# 而它的结果进的是 TTL 缓存——晚 8 秒拿到和 8 秒后自然过期拿到，对用户没有区别，
+# 却会让「网关此刻不通」这件事晚 8 秒才出现在 /health。退避留给「同一次请求内
+# 必须拿到结果」的场景（GitHub API），这里只留熔断：坏网关被快速断开，
+# 省掉的是「明知不通还反复试」的等待。
+GW_ATTEMPTS = 1
 
 _CFG: Dict[str, Any] = {"base": "", "key": "", "watch": []}
 _CACHE: Dict[str, Any] = {"ts": 0.0, "data": None, "count": 0}
@@ -79,8 +87,9 @@ def endpoint_label(base: str = "") -> str:
         return ""
 
 
-def fetch(url: str, key: str, timeout: float = TIMEOUT_S) -> Tuple[int, List[str]]:
-    """真网络调用。**模块级函数**，L0 测试直接替换它 ⇒ 空 HOME 下零网络也能取证。"""
+def _fetch_raw(url: str, key: str, timeout: float) -> Tuple[int, List[str]]:
+    """裸调用，**不含退避**。抽出它是为了让熔断只包住真正发网络的那一步，
+    而 JSON 解析留在外面（解析失败不该计入对端的失败次数）。"""
     headers = {"Authorization": "Bearer " + key} if key else {}
     with urlopen(Request(url, headers=headers), timeout=timeout) as r:  # noqa: S310
         body = r.read()
@@ -89,6 +98,20 @@ def fetch(url: str, key: str, timeout: float = TIMEOUT_S) -> Tuple[int, List[str
     items = data.get("data") if isinstance(data, dict) else None
     ids = [m.get("id") for m in (items or []) if isinstance(m, dict)]
     return code, [i for i in ids if i]
+
+
+def fetch(url: str, key: str, timeout: float = TIMEOUT_S) -> Tuple[int, List[str]]:
+    """真网络调用。**模块级函数**，L0 测试直接替换它 ⇒ 空 HOME 下零网络也能取证。
+
+    熔断键 = `host|gw_models`：与其它用途分开，因为「/v1/models 拿不到」和
+    「GitHub API 拿不到」是两个独立故障域，共用一个额度会互相拖累。
+    """
+    breakers = resilience.instance
+    return breakers.call(
+        resilience.breaker_key(url, "gw_models"),
+        lambda: _fetch_raw(url, key, timeout),
+        attempts=GW_ATTEMPTS,
+    )
 
 
 def is_free(model_id: str) -> bool:

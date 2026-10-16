@@ -46,6 +46,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 import db
+import resilience
 import tdai_client
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -72,6 +73,10 @@ DEFAULT_TOKEN_FILE = Path("/fs/1000/ftp/技术文档/github.txt")
 
 #: hub 自己的 .env（回写地址/落点/归属；属共享配置面 ⇒ 默认不写，要写必备份）
 ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+#: 试连的退避口径（PT-20260927-12 A 档）。理由见 `_gh_get` docstring。
+GH_ATTEMPTS = int(os.getenv("HUB_GH_ATTEMPTS", "3"))
+GH_SLEEP_BUDGET_S = float(os.getenv("HUB_GH_SLEEP_BUDGET_S", "4"))
 
 #: token 形态前缀（只用于掩码与「类型」提示，不做校验——GitHub 前缀会演进）
 _TOKEN_PREFIXES = ("github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_")
@@ -530,21 +535,37 @@ def view() -> Dict[str, Any]:
 
 
 # ── 试连（不落盘）─────────────────────────────────────────────────────────
-def _gh_get(url: str, tok: str) -> Tuple[int, Any, Dict[str, str]]:
+def _gh_get_raw(url: str, tok: str) -> Tuple[int, Any, Dict[str, str]]:
+    """裸 GET（**不含退避、不做错误整形**）。整形留给 `_gh_get` 的 except，
+    这样退避层看到的是原始异常——它要靠状态码判该不该重试。"""
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {tok}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "agent-hub",
     })
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = resp.read().decode("utf-8", "replace")
+        hdrs = {k.lower(): v for k, v in resp.headers.items()}
+        try:
+            return resp.status, json.loads(raw), hdrs
+        except ValueError:
+            return resp.status, {"_raw": raw[:200]}, hdrs
+
+
+def _gh_get(url: str, tok: str) -> Tuple[int, Any, Dict[str, str]]:
+    """退避口径同 `githubprojects`：用户在「设置 → GitHub → 试连」里等这个结果，
+    且探的是 `/user` + `/rate_limit`——**这一条恰恰是用来判断配额还剩多少的**，
+    撞上 429/5xx 立刻重试是最伤的（把刚恢复的额度又打下去）。3 次 / 4 秒预算封顶。"""
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            raw = resp.read().decode("utf-8", "replace")
-            hdrs = {k.lower(): v for k, v in resp.headers.items()}
-            try:
-                return resp.status, json.loads(raw), hdrs
-            except ValueError:
-                return resp.status, {"_raw": raw[:200]}, hdrs
+        return resilience.instance.call(
+            resilience.breaker_key(url, "gh_settings"),
+            lambda: _gh_get_raw(url, tok),
+            attempts=GH_ATTEMPTS, sleep_budget_s=GH_SLEEP_BUDGET_S,
+        )
+    except resilience.BreakerOpen:
+        return 0, {"error": f"熔断中（{resilience.RECOVERY_TIMEOUT_S:.0f}s 冷却）"
+                            "——上一轮试连连续失败，先看网络再试"}, {}
     except urllib.error.HTTPError as e:
         body = ""
         try:

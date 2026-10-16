@@ -63,6 +63,8 @@ import staticguard
 import tdai_client
 import gwprobe                      # 上游网关（CCR）连通性 + 模型注册清单的缓存式体检
 import healthx                      # /health 派生量的纯函数层（L0 不 import src.main，故抽出来）
+import resilience                   # 出站韧性层：退避重试 + 熔断（/health 的 breakers 字段）
+import settings_bundle              # 配置包导出/导入（PT-20260927-15，JSON，不引 YAML）
 import sessions_export as export_mod
 import export_batch                   # 导出取消息的批量 IN（L0 可测的纯函数层，同 staticguard 范式）
 import models_cache                   # 模型清单的成功路径缓存（同上，纯函数层）
@@ -90,8 +92,32 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.114"  # 闭环地基：P0-a/b 接线 + 产物/账本口径 + P0-c 模型边界画像
+VERSION = "0.13.115"  # 出站韧性层 + 依赖锁版本 + token 取用 + 知识索引 + 配置包导入导出（PT-20260927-12/13/14/15）
 #   叙事全文见 CHANGELOG.md 同版本；此处只留「为何这么改」的根因。
+#   ① **出站韧性层**（src/resilience.py）：本机8 处裸 urlopen 零重试。借鉴
+#      nathangtg/agent-hub 的熔断器 + 限流退避，但**只抄语义**（上游是 async + 硬时钟
+#      单例，本机是同步 urlopen + 多线程）。**429 不计熔断失败** —— 限流是对端健康的
+#      表现，算失败会在对端最需要被调用时主动切断。**Retry-After 必须封顶**
+#      （对端可写 3600，照单全收会挂住线程池 worker 一小时）。**半开只放一个探针**；
+#      `_leave` 必须在抛异常那条路也执行，否则半开永不自愈（比一直开闸更糟）。
+#      ⚠ `vitals.http_ok` 刻意**零重试**：它在 L4 探活路径上，AGENTS.md 立着「探活最多 2 次」。
+#      接了 4 个**只读幂等**调用点；写路径不接。`/health.breakers` 让熔断从黑盒变可观测。
+#   ② **依赖锁版本**：9 个裸包名零版本号，又无 pyproject/uv.lock ⇒ 一次 venv 重建就可能
+#      装到 breaking 版本而无人察觉（NAS 无 CI 兜底）。版本取自生产 venv `pip freeze` 实测值。
+#   ③ **token 取用**（`agent-hubctl.sh token`）：随机 token 只 print 前 4 位到 journald
+#      ⇒ 首次接线（手机/另一台机）只能去日志挖全文，而日志会滚走。这是**可用性**改善，
+#      不是放宽鉴权（四条终端路由仍全过 `_check_term_token`），故只打 stdout、不写 journald。
+#      外部评估把它误判成「没鉴权」——真痛点是取用方式。
+#   ④ **README 瘦身 + 知识索引**：228 行里 160 行是逐版本施工流水（迁 `docs/HISTORY-features.md`，
+#      原文逐字保留）；更关键的是仓内对 `agent-knowledge`（155+ 篇）**零指针**。
+#      新增 `tests/test_knowledge_index_l0.py` 钉「索引里的编号必须解析得到真实文件」——
+#      它能验指针有效，**验不了**判据是否仍与现状一致，所以索引节必须同时写明
+#      「结论绑定取证日期，以代码与实测为准」。
+#   ⑤ **配置包导入导出**（src/settings_bundle.py）：画像=代码定义+运行时注册，重装全靠手工。
+#      **不导出 mcp_servers 与 .env**（机器事实+凭据）；自由文本过既有脱敏器；
+#      导入**幂等 upsert**且不清本机独有条目；未来版本**显式拒绝**（尽力解析＝字段改名
+#      静默丢配置）；导出虽是 GET 但**按写方法判鉴权**（批量读＝数据外流，同 audit.py 口径）。
+#      **一律 JSON，不引 YAML**（零新增第三方依赖是硬约束）。
 #   ① **P0-a 成本归因**：`adapter.chat` 本就返回 model+usage，`_run_task` 却只取
 #      total_tokens 就丢、`model` 一次没读过 ⇒ 任务↔模型↔token 无法 JOIN。
 #      取 adapter 回包值而非我方请求值；缺则留 NULL 不兜底；五条落库路径都记 ——
@@ -829,6 +855,7 @@ app.include_router(github_mod.router)
 app.include_router(prefs_mod.router)
 app.include_router(modelcfg_mod.router)
 app.include_router(ghsettings_mod.router)
+app.include_router(settings_bundle_mod.router)   # PT-20260927-15：/api/settings/export|import
 app.include_router(hublog_mod.router)
 
 # D2：Hub MCP Server —— 把本机事实源以 MCP 暴露给 Hermes 等外部 Agent。
@@ -892,6 +919,15 @@ async def health():
     # 纯读缓存（gwprobe 自己 stale-while-revalidate，TTL 300s），**不改 status**：
     # 上游网关不可达不等于 hub 坏了，与 code_stale / memory_backend 同一设计意图。
     out["ccr_gateway"] = gwprobe.status()
+    # 出站熔断器状态（PT-20260927-12 A 档）：只列**开着的**闸 + 冷却剩余秒。
+    # 为什么必须有：熔断一开，那些调用点会在**毫秒内**返回（不发网络）。
+    # 没有这个字段，用户看到的是「GitHub 项目页空了」而没有任何原因字段——
+    # 正是本仓反复治理的「静默不可用」家族，且它比网络故障更难自查。
+    # 纯读、不改 status（熔断 ≠ hub 坏了），异常不得把 /health 打挂。
+    try:
+        out["breakers"] = resilience.instance.snapshot()
+    except Exception as e:  # noqa: BLE001  # 情报字段不得把 /health 打挂
+        out["breakers"] = {"error": "%s: %s" % (type(e).__name__, str(e)[:120])}
     # 画像最近检测时间（同属「health 增强」的另一半：CCR 连通性 + 画像检测时间 + DB 状态）。
     # 只给 last_sweep 会被「新一轮扫了 6 家、漏了第 7 家」骗过 ⇒ 必须给最坏值 oldest_check_age_s
     # 与 unchecked（在册却从没被扫到的家数，正是 09-22「在册却静默不可用 21 天」的形态）。

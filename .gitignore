@@ -1,4 +1,9 @@
 venv/
+# `venv/` 带尾斜杠**只匹配目录**，而 worktree 里为了跑测试常放一个指向生产 venv 的
+# **软链** `venv -> …/agenthub/venv` —— 软链不是目录，于是 `git status` 会把它当
+# 未跟踪文件冒出来（实测 `git check-ignore venv` 退出码 1 = 未被忽略）。
+# 绝不能提交：它是本机路径，会把绝对路径写进仓、并在别人机器上指向不存在的位置。
+venv
 __pycache__/
 data/
 .env

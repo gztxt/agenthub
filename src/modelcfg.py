@@ -346,6 +346,56 @@ def _codex_write(model: str):
     return [(p, text, changes)]
 
 
+def _pi_model_specs(model_id: str, m: dict) -> Dict[str, int]:
+    """新增清单条目时补上 contextWindow / maxTokens。
+
+    缺这两个字段时 pi 会静默落兜底（`provider-composer.js`:
+    `definition.contextWindow ?? 128000` / `maxTokens ?? 16384`）⇒ pi-web 回显 128k、
+    压缩阈值也按 128k 算，上游能吃 1M 也用不满（agent-knowledge/165）。
+
+    只从**本机已有声明**里抄，不联网、不内置常量表：
+      ① 同一份 models.json 里其它 provider 的同 id 条目；
+      ② pi 内置 models-store.json（同 id，或 id 末段唯一匹配）。
+    两处都没有就返回空 dict —— 宁缺不猜，写个假数会被上游按 256k/1M 边界拒。
+    """
+    keys = ("contextWindow", "maxTokens")
+    out: Dict[str, int] = {}
+
+    def _take(entry: dict) -> None:
+        for k in keys:
+            v = entry.get(k)
+            if k not in out and isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                out[k] = v
+
+    for prov in (m.get("providers") or {}).values():
+        if not isinstance(prov, dict):
+            continue
+        for x in (prov.get("models") or []):
+            if isinstance(x, dict) and str(x.get("id") or "") == model_id:
+                _take(x)
+    if len(out) == len(keys):
+        return out
+
+    try:
+        store = json.loads((_home() / ".pi" / "agent" / "models-store.json")
+                           .read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 —— 内置清单缺失/损坏不影响写配置
+        return out
+    tail = model_id.rsplit("/", 1)[-1]
+    for prov in (store or {}).values() if isinstance(store, dict) else []:
+        if not isinstance(prov, dict):
+            continue
+        for x in (prov.get("models") or []):
+            if not isinstance(x, dict):
+                continue
+            mid = str(x.get("id") or "")
+            if mid == model_id or mid.rsplit("/", 1)[-1] == tail:
+                _take(x)
+            if len(out) == len(keys):
+                return out
+    return out
+
+
 def _pi_read() -> dict:
     sp = _home() / ".pi" / "agent" / "settings.json"
     mp = _home() / ".pi" / "agent" / "models.json"
@@ -384,7 +434,10 @@ def _pi_write(model: str):
                         "to": "新建 provider（CCR :3456/v1）", "op": "add-section"})
         ids = [str(x.get("id") or "") for x in (prov.get("models") or [])]
         if model not in ids:
-            prov.setdefault("models", []).append({"id": model, "name": model})
+            entry = {"id": model, "name": model}
+            # 不带 contextWindow 会被 pi 静默兜底成 128000（pi-web 回显 128k）
+            entry.update(_pi_model_specs(model, m))
+            prov.setdefault("models", []).append(entry)
             ch2.append({"where": f"models.json:providers.{PI_CCR_PROVIDER}.models",
                         "from": f"{len(ids)} 条", "to": f"{len(ids) + 1} 条（+ {model}）", "op": "add-key"})
         if ch2:

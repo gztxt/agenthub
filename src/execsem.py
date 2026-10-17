@@ -42,6 +42,7 @@ SOURCES: Tuple[str, ...] = (
     "rest",           # runlog：REST 端点留痕
     "ctx_manifest",   # P1-1：上下文清单
     "resilience",     # P1-6：出站重试的逐次尝试
+    "action",         # P2 A10：统一 Action Plane 的请求/裁决/结论三拍
 )
 
 #: 跨 source 的执行结果语义闭集（**结果怎样**）。
@@ -62,6 +63,14 @@ STATUS_MAP: Dict[str, Dict[str, str]] = {
     "rest": {"success": "ok", "fail": "failed", "degraded": "degraded"},
     "ctx_manifest": {"ok": "ok", "degraded": "degraded"},
     # resilience：`ok` + `classification` 的八类错误（见 src/resilience.ERROR_KINDS）
+    # P2 A10：Action Plane 三拍。`requested` 只是「登记了」，**不是结果** ⇒ skipped
+    # （把登记记成 ok 会让「请求数」冒充「成功数」）；被拒是策略结论 ⇒ blocked；
+    # 结论直接沿用 OUTCOMES 的词。
+    "action": {"requested": "skipped", "decision:allow": "ok",
+               "decision:ask": "parked", "decision:deny": "blocked",
+               "settled:success": "ok", "settled:failed": "failed",
+               "settled:denied": "blocked", "settled:error": "failed",
+               "settled:unknown": "unknown"},
     "resilience": {"ok": "ok", "rate_limit": "degraded", "auth": "failed",
                    "not_found": "failed", "invalid_request": "failed",
                    "server": "failed", "timeout": "failed", "network": "failed",

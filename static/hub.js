@@ -4284,7 +4284,7 @@ async function loadKbStatus() {
     };
     $('kbStatus').innerHTML =
       seg('TDAI L1', d.tdai || {}) +
-      seg('XERJ 全文', d.xerj || {}) +
+      seg('XERJ 全文', d.xerj || { available: false, error: '后端未重载（重启 agenthub 后生效）' }) +
       seg('workspace 全文', d.workspace || {}) +
       seg('archived 会话备份', d.archived || {}) +
       segState('local 便签', d.local_memory || {});

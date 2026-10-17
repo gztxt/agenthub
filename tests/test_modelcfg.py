@@ -262,6 +262,31 @@ class CApplyWritesWithBackup(_HomeFixture):
         self.assertIn("new/model-z", ids, "pi 只认清单内的模型 id，缺了必须补")
         self.assertIn("old/model-b", ids, "原有清单不许被覆盖")
 
+    def test_pi_new_entry_inherits_ctx_window(self):
+        """新增条目必须带上已有声明：缺 contextWindow 会被 pi 兜底成 128000
+        （pi-web 回显 128k，压缩阈值也跟着错，见 agent-knowledge/165）。"""
+        m = json.loads(self._read(".pi/agent/models.json"))
+        m["providers"]["Alibaba"] = {
+            "api": "openai-completions",
+            "baseUrl": "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
+            "models": [{"id": "new/model-z", "contextWindow": 1000000, "maxTokens": 384000}],
+        }
+        self._write(".pi/agent/models.json", json.dumps(m))
+        modelcfg.apply_model("pi", "new/model-z")
+        mm = json.loads(self._read(".pi/agent/models.json"))
+        ent = [x for x in mm["providers"]["ccr-free"]["models"] if x["id"] == "new/model-z"][0]
+        self.assertEqual(ent.get("contextWindow"), 1000000, "新增条目丢了上下文窗口")
+        self.assertEqual(ent.get("maxTokens"), 384000, "新增条目丢了最大输出")
+        # 已有键不许被动过（整文件重写的旧病）
+        self.assertEqual(mm["providers"]["ccr-free"]["apiKey"], "k-fixture")
+
+    def test_pi_append_without_evidence_stays_unset(self):
+        """两处声明都查不到时宁缺不猜 —— 写个假数会被上游边界拒。"""
+        modelcfg.apply_model("pi", "unknown/model-q")
+        mm = json.loads(self._read(".pi/agent/models.json"))
+        ent = [x for x in mm["providers"]["ccr-free"]["models"] if x["id"] == "unknown/model-q"][0]
+        self.assertNotIn("contextWindow", ent)
+
     def test_grok_reuses_existing_ccr_key_not_hardcoded(self):
         modelcfg.apply_model("grok", "new/model-z")
         text = self._read(".grok/config.toml")

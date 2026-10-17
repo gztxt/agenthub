@@ -3474,6 +3474,9 @@ async function loadChatModels(force) {
       return;
     }
   }
+  // 当前 agent 的 value_prefix（与设置页保持一致：opencode 用 ccr/，其它为空）
+  const pa = SET_AGENTS.find(x => x.id === chatPick) || {};
+  const prefix = pa.value_prefix || '';
   // 当前 agent 默认 model（localStorage 记忆）
   const saved = lsGet('hub.model.' + chatPick) || '';
   // 按 vendor 分组
@@ -3485,7 +3488,10 @@ async function loadChatModels(force) {
     for (const mid of groups[gk]) {
       const m = CHAT_MODELS.find(x => x.id === mid);
       const label = m && m.name && m.name !== mid ? (mid + ' — ' + m.name) : mid;
-      html += '<option value="' + escapeHtml(mid) + '"' + (mid === saved ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+      const val = prefix + mid;
+      // 选中态：兼容旧存储（裸 ID）与新存储（带前缀）
+      const isSel = (val === saved) || (mid === saved);
+      html += '<option value="' + escapeHtml(val) + '"' + (isSel ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
     }
     html += '</optgroup>';
   }
@@ -3495,7 +3501,9 @@ async function loadChatModels(force) {
   if (leftovers.length) {
     html += '<optgroup label="其他">';
     for (const m of leftovers) {
-      html += '<option value="' + escapeHtml(m.id) + '"' + (m.id === saved ? ' selected' : '') + '>' + escapeHtml(m.name || m.id) + '</option>';
+      const val = prefix + m.id;
+      const isSel = (val === saved) || (m.id === saved);
+      html += '<option value="' + escapeHtml(val) + '"' + (isSel ? ' selected' : '') + '>' + escapeHtml(m.name || m.id) + '</option>';
     }
     html += '</optgroup>';
   }

@@ -42,3 +42,6 @@ data/memindex.db*
 e2e-probe/node_modules/
 e2e-probe/package-lock.json
 e2e-probe/.e2e/
+
+# codegraph 本地索引（2026-10-18 init 生成，不入库）
+.codegraph/

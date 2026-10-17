@@ -67,6 +67,7 @@ import resilience                   # 出站韧性层：退避重试 + 熔断（
 import settings_bundle as settings_bundle_mod  # 配置包导出/导入（PT-20260927-15，JSON，不引 YAML）
 import approvals as approvals_mod   # P1-2：审批三态（ASK + Preview-Approve-Commit-Verify）
 import skill_assets as skill_assets_mod   # P1-5 其余四件：技能资产（owner/version/scope/状态机）
+import admission as admission_mod         # P2 C7：外部资产准入六阶段
 import sessions_export as export_mod
 import export_batch                   # 导出取消息的批量 IN（L0 可测的纯函数层，同 staticguard 范式）
 import models_cache                   # 模型清单的成功路径缓存（同上，纯函数层）
@@ -94,7 +95,31 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.121"  # P2 A1：Release manifest（发布单元有指纹 / 读不到报 unknown）
+VERSION = "0.13.122"  # P2 C7：外部资产准入六阶段（没跑 ≠ 通过 / 六阶段顺序不可跳）
+#   v0.13.122：P2 第 7/9 项（C7「外部资产准入六阶段」）。
+#   病灶：`skill.package_digest()` 能证明「内容是什么」、`skill_assets` 状态机能声明
+#   「处于哪一态」，但**中间四道检查根本不存在** —— 来源是谁、脚本有没有外连、
+#   隔离环境跑过没有、谁批的。没有这四份记录，`published` 只是一个自称。
+#   ① 新 `admission.py`：六阶段 `source/integrity/static/isolated/review/publish`
+#      （手册 15 章的原文表，逐条对应），一张准入单锁一个候选包 digest。
+#   ② **顺序不可跳**：`can_advance()` 是唯一推进闸门（前置全 pass/waived 才许推进），
+#      所有写入路径都必须过它。重复记 pass 也拒（幂等 ≠ 可重复确认）。
+#   ③ **三种结论不可合并**：`rejected`（跑过且失败）/ `incomplete`（**还有没跑的**）/
+#      `admitted`。`pending` 永远不是 `pass` —— 本仓反复禁的「空即无」。
+#   ④ 失败必须回 `source` 回炉，不许"修一半继续"。
+#   ⑤ `waived` 必须带理由（无理由豁免＝漏检）；`pending` 不许被写成记录
+#      （那会让"没跑"与"跑了没结果"不可分辨）。
+#   ⑥ 静态检查（`static_scan`）：零网络零执行的纯判据，复用 `outbound.check_url`；
+#      `allowed=true` **自述"不是安全结论"**（手册原话：静态检查不能穷尽自然语言指令）。
+#   ⑦ **刻意不合并** `skill_assets` 的四段状态机：那是资产生命周期，本模块是外来包
+#      的准入检查链。前者可从 published 回 draft，后者一次检查**永不回退**。只产出记录。
+#   ⚠ **自抓两处**（红向自证逼出，都是"测试看着绿但其实没测到"）：
+#      · 只断言 `assertRaises(ValueError)` ⇒ 删掉 pending 专属检查后仍被下一行兜底，
+#        全绿。**断言拒绝必须连理由一起断言**。
+#      · 脱敏用例把 token 放在命中处 **后面 30 字**，而 `_snippet` 只取前后各 20 字
+#        ⇒ token 没进样本，删掉脱敏照样全绿。**样本必须让被测机制真的被触发**。
+#   ⚠ 阶段 4（隔离验证）/ 阶段 5（人工评审）目前只有**记录位**，不做执行与人签
+#      —— 真跑沙箱属 L1/主机级，不在本批（如实标注，不假装已落地）。
 #   v0.13.121：P2 第 6/9 项（A1「Agent Release manifest」）。
 #   病灶：手册要求「发布单元 = 模型+参数+预算+Harness+Skill 版本+Tool 权限+评估基线，绑定可追溯」，
 #   而本机这些**分散在六个地方**各读各的 ⇒ 没有「这个 agent 现在是哪个版本」这个概念；
@@ -951,6 +976,7 @@ app.include_router(ghsettings_mod.router)
 app.include_router(settings_bundle_mod.router)   # PT-20260927-15：/api/settings/export|import
 app.include_router(approvals_mod.router)         # P1-2：/api/approvals（ASK 审批队列与决定端）
 app.include_router(skill_assets_mod.router)      # P1-5：/api/skill-assets（资产登记与状态机）
+app.include_router(admission_mod.router)        # P2 C7：/api/admission（外部资产准入六阶段）
 app.include_router(hublog_mod.router)
 
 # D2：Hub MCP Server —— 把本机事实源以 MCP 暴露给 Hermes 等外部 Agent。

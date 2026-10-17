@@ -54,6 +54,34 @@ async def list_agents():
     return {"agents": [a.to_dict() for a in agents], "count": len(agents)}
 
 
+# ⚠ 注册顺序：`/api/agents/releases` 必须在 `{agent_id}` **之前**。
+# 实测（Starlette TestClient）：放在后面时它被 `get_agent("releases")` 吃掉，
+# 新端点**永远打不到**且不报错 —— 属于「加了路由却静默不生效」。
+# ── P2 A1：Agent Release manifest（只读聚合）─────────────────────────────
+# 为什么放在本文件而不是新建 router：`main.py` 的 include_router 列表是多会话
+# 共写热点（C3），能不碰就不碰。`api_agents` 本来就是「Agent 视图」的归属处。
+
+@router.get("/api/agents/releases")
+async def list_releases(agent_id: Optional[str] = None):
+    """列出各 agent 的 release manifest（`agent_id` 给定时只算那一个）。
+
+    **async def 里同步读盘/SQLite**：单 agent 实测 0.3ms、23 个 10ms（热）/ 350ms（冷，
+    几乎全在 `skill_assets.ensure_schema` 与 `config` 读盘），不值得为它绕 to_thread。
+
+    路由此前**实测打不到**：放在 `{agent_id}` 之后时，Starlette 先用
+    `/api/agents/{agent_id}` 匹配，`get_agent("releases")` 接走请求（未初始化时
+    回 503「Discovery not initialized」），新端点静默失效。现已前移。
+    """
+    import release as release_mod
+    try:
+        if agent_id:
+            return release_mod.build_manifest(agent_id)
+        return release_mod.manifests_for()
+    except Exception as e:  # noqa: BLE001 —— 聚合失败必须显式报，不得空回包
+        raise HTTPException(500, {"error": "release manifest 生成失败",
+                                  "reason": "%s: %s" % (type(e).__name__, e)})
+
+
 @router.get("/api/agents/{agent_id}")
 async def get_agent(agent_id: str):
     if appstate.discovery is None:

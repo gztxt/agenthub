@@ -139,8 +139,11 @@ VERSION = "0.13.122"  # P2 C7：外部资产准入六阶段（没跑 ≠ 通过 
 #      · 端点注册在 `{agent_id}` 之后 ⇒ 被 `get_agent("releases")` 接走，**永远打不到**。
 #   ⚠ 顺带实测：为一行 SQL 而 `import mcpgw` 的冷代价 **894ms**（它拉 mcp SDK + resilience
 #      + outbound）；改为直接 `db.query` 后 23 个 agent 冷启动 959ms → 347ms、热 10ms。
-#   ⚠ 已知缺口（不在本批）：`skill_assets` 表**生产为 0 行**，而盘上 `技术文档/skills/` 有 18 个
-#      SKILL.md —— skills 维度因此恒为 0 条（读数如实，但覆盖面为零）。需另行决定是否批量登记。
+#   ✅ 已销（2026-10-17，同一张表的**登记**部分）：`scripts/skill_assets_register.py`
+#      把 `技术文档/skills/` 的 18 个包登进 `skill_assets`，**全部停在 draft**、digest/path 留空。
+#      仍然为 0 条的是 **published** —— 那是刻意的：15/16 包许可证未确认
+#      （`skills/PROVENANCE.md` 第四节：对外分发禁止），推 `published`（唯一可依赖态）
+#      等于替它们盖章「可依赖」。per-包 Test→Review→Publish 逐条走，不批量。
 #   v0.13.120：P2 第 5/9 项（A11「端到端 Trace 因果链」）。
 #   病灶：手册要「模型/状态/Action/Artifact/Verifier/Outcome 同一条 trace 可见」，
 #   而三张表里 `profile_events`/`tasks` 有 `trace_id`、**`asset_audit` 没有**

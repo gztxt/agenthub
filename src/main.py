@@ -94,7 +94,28 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.120"  # P2 A11：Trace 因果链（有列≠能追 / 两种「空」分开）
+VERSION = "0.13.121"  # P2 A1：Release manifest（发布单元有指纹 / 读不到报 unknown）
+#   v0.13.121：P2 第 6/9 项（A1「Agent Release manifest」）。
+#   病灶：手册要求「发布单元 = 模型+参数+预算+Harness+Skill 版本+Tool 权限+评估基线，绑定可追溯」，
+#   而本机这些**分散在六个地方**各读各的 ⇒ 没有「这个 agent 现在是哪个版本」这个概念；
+#   改模型/换 skill/动 ACL 从界面上看**什么都没变**，出问题也说不清回到哪个组合。
+#   ① 新 `release.py`：只读聚合 + `release_id`（sha256 前 16）。**零写入、不缓存**
+#      （缓存会造「改了配置但 manifest 还是旧的」假绿）。
+#   ② 指纹**只吃语义**：模型 current / 画像(kind,cli,port,terminal_cmd,adapter) /
+#      已发布 skill(slug,version,status,digest) / ACL(server,tool,allow,effect) / execsem 词表。
+#      **不吃**：文件路径、时间戳、耗时、描述文案、detect 规则 —— 换目录不是换版本。
+#   ③ 读不到 ⇒ 该维 `unknown` + `degraded=True`，**不留 `{}`**（那会把「不知道」读成「没有」）。
+#   ④ 端点 `/api/agents/releases`（放 api_agents.py，不动 main 的 include 列表）。
+#   ⚠ **自抓三处**（都在红向自证/真数据里现形）：
+#      · `_semantic_view` 原样透传 model 维度 ⇒ `files` 路径进了指纹，与模块 docstring
+#        「换目录不是换版本」**正好相反**（闸门打红）；已 pop 掉。
+#      · ACL 读 `r.get("tool")`，**列名是 `tool_pattern`** ⇒ 每条规则 `{"tool": null}`，
+#        字段在、值是空、不抛错，把「限哪个工具」丢干净。
+#      · 端点注册在 `{agent_id}` 之后 ⇒ 被 `get_agent("releases")` 接走，**永远打不到**。
+#   ⚠ 顺带实测：为一行 SQL 而 `import mcpgw` 的冷代价 **894ms**（它拉 mcp SDK + resilience
+#      + outbound）；改为直接 `db.query` 后 23 个 agent 冷启动 959ms → 347ms、热 10ms。
+#   ⚠ 已知缺口（不在本批）：`skill_assets` 表**生产为 0 行**，而盘上 `技术文档/skills/` 有 18 个
+#      SKILL.md —— skills 维度因此恒为 0 条（读数如实，但覆盖面为零）。需另行决定是否批量登记。
 #   v0.13.120：P2 第 5/9 项（A11「端到端 Trace 因果链」）。
 #   病灶：手册要「模型/状态/Action/Artifact/Verifier/Outcome 同一条 trace 可见」，
 #   而三张表里 `profile_events`/`tasks` 有 `trace_id`、**`asset_audit` 没有**

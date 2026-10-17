@@ -238,7 +238,12 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.120"
+    CURRENT_VERSION = "0.13.121"
+
+    #: v0.13.121（P2 A1）：关键词取自版本注释里**实际写下的字句**（不是想当然的提法）。
+    VERSION_ROOT_CAUSES["0.13.121"] = (
+        "release_id", "semantic", "tool_pattern", "degraded", "换目录不是换版本",
+    )
 
     #: v0.13.120（P2 A11）：关键词取自版本注释里**实际写下的字句**。
     #: Trace 因果链：有列≠能追、旧行不编因果、两种「空」分开、主路径自抓。

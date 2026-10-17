@@ -1,3 +1,69 @@
+## v0.13.121 — P2 A1：Agent Release manifest（发布单元终于有指纹）
+
+> 手册 A1：发布单元 = 模型 + 参数 + 预算 + Harness + Prompt/Skill/Knowledge 版本 +
+> Tool 权限 + 评估基线，**绑定可追溯**。
+
+### 一、病灶（先取证）
+
+这些信息在本机**分散在六个地方**，各读各的：模型取 `modelcfg.agent_state`、画像取
+`profiles.PROFILES`、skill 取 `skill_assets`、ACL 取 `mcp_acl`、执行语义取 `execsem`。
+
+⇒ **没有「这个 agent 现在是哪个版本」这个概念**。改一个模型、换一版 skill、动一条
+ACL，界面上**什么都没变**；出问题回滚时也**说不清回到哪个组合**。
+
+### 二、改法
+
+新增 `src/release.py`（纯聚合，**零写入、零缓存**）+ `GET /api/agents/releases`。
+
+- `release_id` = 语义视图的 sha256 前 16 位。**只吃语义**：
+
+  | 进指纹 | 不进指纹 |
+  |---|---|
+  | 模型 `current` / `provider` | 配置文件**路径**（换目录不是换版本） |
+  | 画像 `kind/cli/port/terminal_cmd/chat_adapter` | `desc` 文案、`detect` 规则 |
+  | 已发布 skill `slug/version/status/digest` | 时间戳、耗时 |
+  | ACL `server/tool_pattern/allow/effect` | 规则 id、行的先后 |
+  | 执行语义 `sources/outcomes` | |
+
+- **读不到 ⇒ `unknown` + `degraded=True`**，绝不写 `{}`（会把「不知道」读成「没有」）。
+- **stale 必须在清单里**：stale 是「在役但已偏离发布态」，过滤掉就等于把偏差藏起来。
+  为此 `current_digest` 走 `skill_assets._current_digest(rec, True)`，
+  **不能传 `None`**（传 `None` 时 `is_stale` 恒 False ⇒ 判据恒假）。
+
+### 三、四处自抓（都是红向自证/真数据逼出来的）
+
+1. **`files` 路径混进指纹**：`_semantic_view` 原样透传 model 维度，而 `_dim_model`
+   返回里带 `files` ⇒ 与模块 docstring「换目录不是换版本」**正好相反**。闸门打红，已 pop。
+2. **ACL 字段名写错**：读 `r.get("tool")`，列名其实是 **`tool_pattern`** ⇒
+   每条规则都是 `{"tool": null}`，不抛错、字段看着在、值全空 —— 「限哪个工具」丢干净。
+3. **自己写的闸门空转**：effect 对照用例把复刻算式**又抄一遍**去跟 `mcpgw` 比，
+   把实现改成恒定 `"shadow"` 它照样绿（红向自证当场抓到）。已改成喂真行、量 `_dim_acl` 的产物。
+4. **端点注册顺序**：`/api/agents/releases` 放在 `{agent_id}` 之后 ⇒ 被
+   `get_agent("releases")` 接走，**永远打不到**且不报错。已前移并留注释。
+
+### 四、顺带实测（不是猜的）
+
+- 为一行 SQL 而 `import mcpgw` 的**冷代价 894ms**（它顶层拉 `mcp` SDK + `resilience`
+  + `outbound`）。改成直接 `db.query` 后：23 个 agent 冷启动 **959ms → 347ms**，
+  热 **10ms**、单 agent **0.3ms**。
+- `db` 全局连接只由 `main.init_db()` 设置；进程外调用（冒烟/测试/将来的 CLI）里是
+  `None` ⇒ 两个维度直接 `AttributeError`。新增 `_ensure_db()` **只在没连接时补一次**，
+  用 `db.is_open()` 早退而**不是**无条件 `init_db()`（后者会把全局连接重指 ⇒
+  09-24 生产库被污染的那条路）。
+
+### 五、已知缺口（不在本批）
+
+- `skill_assets` 表**生产 0 行**，而盘上 `技术文档/skills/` 有 **18 个 SKILL.md**
+  ⇒ skills 维度读数如实但**覆盖面为零**。是否批量登记需另行决定（本批只做聚合，不造数据）。
+- `POST /api/agents/detect` 与 `{agent_id}` 有同型路由顺序隐患（既有问题，未修）。
+
+### 六、证据
+
+- `tests/test_release_p2_a1_l0.py`(22)，**红向自证八向转红**：files 回填指纹 /
+  degraded 恒假 / `current_digest` 退回 None / `_ensure_db` 无条件重指 /
+  `tool` 退回错列名 / effect 恒 shadow / 路由顺序颠倒 / 批量吞异常。
+- L0 hermetic、对账、`prepush.sh` 六闸结果见本次提交前的闸门输出。
+
 ## v0.13.120 — P2 A11：端到端 Trace 因果链（`asset_audit` 补 `trace_id` + `/api/audit/trace`）
 
 > 手册 A11：模型 / 版本 / Manifest / 状态 / Action / Artifact / Verifier / Outcome

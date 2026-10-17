@@ -1,6 +1,7 @@
 [Unit]
 Description=Agent Hub 智管 (FastAPI :3102)
-Documentation=file:///fs/1000/ftp/技术文档/agenthub/README.md
+# Documentation 原值（含中文，file: URL 非法，systemd 会告警）: file:///fs/1000/ftp/技术文档/agenthub/README.md
+# 2026-10-17：生产 unit 已改成 ASCII 注释保留指针（本副本同步镜像）；要恢复可用 Documentation= 需百分号编码。
 After=network-online.target
 Wants=network-online.target
 # 2026-10-11（会话 01a12943 修 trimafs 挂载竞态）：ExecStart 落在 /fs(trimafs) 上，

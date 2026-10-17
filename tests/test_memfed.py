@@ -399,5 +399,22 @@ class TestProbe(_TmpCase):
         self.assertTrue(any(k in memfed._probe_cache for k in memfed.REGISTRY))
 
 
+
+class TestProjStaleFallback(unittest.TestCase):
+    """2026-10-18：投影库过期 ⇒ 回退 rg，不许静默返回旧答案。
+
+    红向：memindex.db 自 2026-10-02 停更 15 天，而检索照常返回「看起来完整」的结果。
+    """
+
+    def test_stale_projection_falls_back_to_rg(self):
+        import time as _t
+        from unittest import mock
+        with mock.patch.object(memindex, "_built_epoch", return_value=_t.time() - 4 * 86400), \
+             mock.patch.object(memfed, "_search_rg_text",
+                               return_value={"ok": True, "count": 0, "items": [], "ms": 1.0}):
+            out = memfed._search_proj("pi_sessions", "x", 5, 1.0)
+        self.assertEqual(out.get("proj_fallback"), "stale")
+        self.assertGreaterEqual(out.get("index_age_days", 0), 4)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -601,10 +601,13 @@ def build(scope: str = "full", db_path: Optional[Path] = None,
             changed = [e for e in rep.entries
                        if known.get(e.realpath) != (e.mtime, e.size)]
             gone = set(known) - {e.realpath for e in rep.entries}
-            for rp in gone:
+            # 2026-10-18 修：变更文件必须**先删旧行再插**。原实现只删 gone，
+            # 变更文件直接 INSERT ⇒ 第二个 chunk 就撞 UNIQUE(realpath, chunk_no)；
+            # 而失败点前的批次已提交 ⇒ 库里留下同文件旧+新两份（静默脏数据）。
+            # 这也解释了 memindex.db 自 2026-10-02 起就再没更新过。
+            for rp in list(gone) + [e.realpath for e in changed]:
                 con.execute("DELETE FROM fed_proj WHERE realpath=?", (rp,))
-            if gone:
-                con.commit()
+            con.commit()
             br.files = len(changed)
             br.notes.append(f"incremental: changed={len(changed)} removed={len(gone)} "
                             f"total_seen={len(rep.entries)}")
@@ -631,8 +634,12 @@ def build(scope: str = "full", db_path: Optional[Path] = None,
         _meta_set(con, "schema_version", SCHEMA_VERSION)
         _meta_set(con, "last_build", f"{time.strftime('%Y-%m-%dT%H:%M:%S')}")
         _meta_set(con, "index_age", "0")
-        _meta_set(con, "files", str(len(rep.entries)))
-        _meta_set(con, "chunks", str(br.chunks))
+        # 2026-10-18 修：incremental 时 rep.entries 只剩 changed，不能拿它当总数写 meta
+        # （否则 probe 报「投影 37 文件」，而库里是 219k 行 —— 旧代码就是这个洞）。
+        total_files = con.execute("SELECT COUNT(DISTINCT realpath) FROM fed_proj").fetchone()[0]
+        total_chunks = con.execute("SELECT COUNT(*) FROM fed_proj").fetchone()[0]
+        _meta_set(con, "files", str(total_files))
+        _meta_set(con, "chunks", str(total_chunks))
         _meta_set(con, "corpus_bytes", str(br.bytes_corpus))
         con.commit()
     finally:

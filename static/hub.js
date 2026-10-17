@@ -3690,12 +3690,12 @@ const SRC_ABBR = {
   grok_memory: 'GK', hermes_memory: 'HM', workbuddy_memory: 'WB',
   workspace_files: 'WS', archived_sessions: 'AR', amr_memory: 'AM',
   experiences: 'EX',
-  turbovec: 'TV', tdai_l1: 'TD', tdai: 'TD', local: 'L1'
+  turbovec: 'TV', xerj: 'XJ', tdai_l1: 'TD', tdai: 'TD', local: 'L1'
 };
 function srcTag(srcName) {
   const key = String(srcName || '');
   const abbr = SRC_ABBR[key] || (key.slice(0, 2).toUpperCase() || '??');
-  const cls = (key === 'turbovec' || key === 'local') ? 'src-index'
+  const cls = (key === 'turbovec' || key === 'xerj' || key === 'local') ? 'src-index'
     : (key.indexOf('session') >= 0 || key === 'claude_mem') ? 'src-session'
     : 'src-doc';
   return '<span class="tag src-' + cls + '" title="' + escapeHtml(key) + '" style="align-self:flex-start">' +
@@ -4284,7 +4284,7 @@ async function loadKbStatus() {
     };
     $('kbStatus').innerHTML =
       seg('TDAI L1', d.tdai || {}) +
-      seg('turbovec 语义', d.turbovec || {}) +
+      seg('XERJ 全文', d.xerj || {}) +
       seg('workspace 全文', d.workspace || {}) +
       seg('archived 会话备份', d.archived || {}) +
       segState('local 便签', d.local_memory || {});

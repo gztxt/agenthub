@@ -468,6 +468,11 @@ def _rg_item(source_id: str, line: str) -> Optional[dict]:
 #: ⚠️ 放量是 A4 之外的独立一步（规格 §八 裁定 1：三路探针各 ≤200ms 且 G13 全绿才提请）。
 _PROJ_TARGETS = ("pi_sessions", "codex_sessions", "archived_sessions")
 
+#: 投影库最大年龄（天）。超过就不再用它，改走 rg —— **静默过期比慢更贵**：
+#: 2026-10-02 之后 incremental 因 UNIQUE 冲突一直失败，索引静默停了 15 天，
+#: 而检索照常返回「看起来完整」的旧答案。此阈值 + 每日增量刷新共同兑付。
+MEMINDEX_MAX_AGE_DAYS = float(os.getenv("MEMINDEX_MAX_AGE_DAYS", "3"))
+
 
 def _search_proj(source_id: str, q: str, limit: int, timeout: float) -> Dict:
     """走 memindex FTS 投影；**任何降级信号一律回退 rg**（fail-closed，绝不静默返空）。
@@ -478,6 +483,14 @@ def _search_proj(source_id: str, q: str, limit: int, timeout: float) -> Dict:
     回退时把原因挂到 `proj_fallback` 出站，不静默：否则用户只会看到「还是那么慢」。
     """
     t0 = time.monotonic()
+    built = memindex._built_epoch()
+    if built is not None:
+        age_days = (time.time() - float(built)) / 86400.0
+        if age_days > MEMINDEX_MAX_AGE_DAYS:
+            out = _search_rg_text(source_id, q, limit, timeout)
+            out["proj_fallback"] = "stale"
+            out["index_age_days"] = round(age_days, 1)
+            return out
     r = memindex.search(q, limit=limit, sanitize=_sanitize_content,
                         sources=(source_id,))
     fb = r.get("fallback")

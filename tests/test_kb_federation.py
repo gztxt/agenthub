@@ -160,3 +160,38 @@ class TestStatus(_KbCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestXerjRoute(_KbCase):
+    """2026-10-18：文档路由 turbovec 换成 XERJ。三条都是红向能确定性造的。"""
+
+    def test_xerj_in_default_routes(self):
+        self.assertIn("xerj", kb.ROUTES)
+        self.assertNotIn("turbovec", kb.ROUTES, "退役路不得留在默认集合里（会白跑子进程）")
+
+    def test_legacy_turbovec_retired_not_400(self):
+        """老调用方传 routes=turbovec：不 400、不起子进程，逐路回退役说明。"""
+        r = self.client.get("/api/kb/search", params={"q": "x", "routes": "turbovec"})
+        self.assertEqual(r.status_code, 200, r.text)
+        b = {x["name"]: x for x in r.json()["backends"]}
+        self.assertIn("turbovec", b)
+        self.assertFalse(b["turbovec"]["ok"])
+        self.assertIn("退役", b["turbovec"]["error"])
+
+    def test_workspace_skipped_when_xerj_hits(self):
+        """XERJ 命中 ⇒ workspace 不参与融合（否则同一批文档两套排序重复计分）。"""
+        async def fake(q, k):
+            return {"ok": True, "ms": 1.0, "error": None, "items": [
+                {"source": "xerj", "id": "wiki/a.md", "path": "wiki/a.md",
+                 "title": "a", "content": "x", "score": 9.0}]}
+        saved = kb._xerj_search
+        kb._xerj_search = fake
+        try:
+            r = self.client.get("/api/kb/search", params={"q": "CCR", "routes": "xerj,workspace"})
+        finally:
+            kb._xerj_search = saved
+        d = r.json()
+        b = {x["name"]: x for x in d["backends"]}
+        self.assertTrue(b["xerj"]["ok"])
+        self.assertIn("skipped", b["workspace"])
+        self.assertNotIn("workspace_files", {it.get("source") for it in d["results"]})

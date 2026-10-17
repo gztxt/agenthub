@@ -164,14 +164,13 @@ def hub_memory_context(sources: str = "") -> str:
 
 @server.tool()
 def hub_kb_search(q: str, k: int = 8, routes: str = ",".join(kb_mod.ROUTES)) -> str:
-    """**联邦检索**：并发调起本机五路检索面（记忆权威库 TDAI、技术文档向量索引
-    turbovec、hub 本地便签、工作区全文、归档会话）后 RRF 融合。找「本机以前是否记过这件事 /
-    有无相关文档」时优先用它，而不是只查记忆。
+    """**联邦检索**：并发调起本机检索面（记忆权威库 TDAI、XERJ 文档全文、工作区全文兜底、
+    归档会话）后 RRF 融合。找「本机以前是否记过这件事 / 有无相关文档」时优先用它。
 
     返回 `results` + 逐路 `backends` + `degraded` + `note`。**看到 count=0 必读 degraded/note**：
     「真没有」与「那路挂了」在这里是可区分的，别把两者当成一件事。
-    routes 可用值：local / tdai / turbovec / workspace / archived（写错直接 400，
-    不给你静默空结果的机会）。"""
+    routes 可用值：tdai / xerj / workspace / archived；旧名 turbovec / local 仍接受但会回
+    退役说明（turbovec 2026-10-18 已删，local 默认不参与）。"""
     if k > 30:
         k = 30
     data = _get("/api/kb/search", q=q, k=k, routes=routes)

@@ -59,7 +59,23 @@ TDAI_TIMEOUT_S = float(os.getenv("KB_TDAI_TIMEOUT", "0.4"))     # 实测 3ms，4
 DEFAULT_K = int(os.getenv("KB_DEFAULT_K", "8"))
 CACHE_TTL_S = float(os.getenv("KB_INFO_TTL", "600"))            # 索引重建是人工触发的，10 分钟够新
 
-ROUTES = ("local", "tdai", "turbovec", "workspace", "archived")
+# ── XERJ（2026-10-18 接替 turbovec）────────────────────────────────
+# 文档路的权威实现是 /fs/1000/ftp/技术文档/scripts/docs-search.sh 的 T16 模板；
+# 这里**逐字复刻同一 query**（title mss=3 boost2 / body mss=100% / 排除 8 个聚合页），
+# 避免「hub 一套排序、recall 另一套」。实测 nDCG@5 0.7907（v6/37 条）。
+XERJ_URL = os.getenv("KB_XERJ_URL", "http://127.0.0.1:9300")
+XERJ_INDEX = os.getenv("KB_XERJ_INDEX", "axv3-*")
+XERJ_TIMEOUT_S = float(os.getenv("KB_XERJ_TIMEOUT", "1.0"))     # 实测 p50 1.3ms，1s 是很宽的天花板
+XERJ_AGG_PAGES = ["wiki/index.md", "wiki/concepts/_index.md", "wiki/entities/_index.md",
+                  "wiki/log.md", "MEMORY.md", ".skills-index.md", "项目详细清单.md",
+                  "PENDING-TASKS.md"]
+
+#: 默认路由：turbovec 已退役（索引/模型 2026-10-18 删除），不再入默认；
+#: local 是 2026-09-06 的 4 条基线便签，默认不参与（需显式点名）。
+ROUTES = ("tdai", "xerj", "workspace", "archived")
+#: 仍接受但明确回 retired，不再起子进程、不再 400（老调用方不被打断）
+LEGACY_ROUTES = {"turbovec": "已退役（2026-10-18 索引/模型删除）；文档路改用 xerj",
+                 "local": "P0 基线便签（2026-09-06），默认不参与；显式点名才查"}
 
 #: workspace / archived 两路的实现＝转调批1 memfed 的 rg 适配器（文件级全文命中）。
 #: 为什么不在 kb.py 重写 rg：memfed 实测时已踩过两个坑（rg 缺 -n 会解析失配；
@@ -142,6 +158,95 @@ async def _turbovec_search(q: str, k: int) -> Dict[str, Any]:
 _INFO_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
 
 
+def _xerj_body(q: str, k: int) -> Dict[str, Any]:
+    """与 scripts/docs-search.sh 的 T16 逐字同源（改一处必须同步另一处）。"""
+    return {
+        "size": k,
+        "query": {"bool": {
+            "should": [
+                {"match": {"title": {"query": q, "boost": 2.0, "minimum_should_match": 3}}},
+                {"match": {"body": {"query": q, "minimum_should_match": "100%"}}},
+            ],
+            "must_not": [{"terms": {"ax_path": XERJ_AGG_PAGES}}],
+        }},
+        "_source": ["ax_path", "title", "ax_dataset"],
+        "highlight": {"fields": {"body": {"fragment_size": 280, "number_of_fragments": 1}}},
+    }
+
+
+async def _xerj_search(q: str, k: int) -> Dict[str, Any]:
+    """正查 XERJ（HTTP，无子进程）。永不抛：一律回 {ok, items, ms, error}。"""
+    t0 = time.perf_counter()
+    try:
+        import aiohttp
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "items": [], "ms": None,
+                "error": f"aiohttp 不可用：{type(e).__name__}"}
+    try:
+        async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=XERJ_TIMEOUT_S)) as s:
+            async with s.post(f"{XERJ_URL}/{XERJ_INDEX}/_search",
+                              json=_xerj_body(q, k)) as r:
+                body = await r.text()
+                if r.status != 200:
+                    return {"ok": False, "items": [],
+                            "ms": round((time.perf_counter() - t0) * 1000, 1),
+                            "error": f"HTTP {r.status}: {tdai_client.scrub(body)[:200]}"}
+                d = json.loads(body)
+    except asyncio.TimeoutError:
+        return {"ok": False, "items": [],
+                "ms": round((time.perf_counter() - t0) * 1000, 1),
+                "error": f"超时 {XERJ_TIMEOUT_S}s（systemctl --user status xerj-docs）"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "items": [],
+                "ms": round((time.perf_counter() - t0) * 1000, 1),
+                "error": tdai_client.scrub(f"{type(e).__name__}: {e}")[:200]}
+
+    items: List[Dict[str, Any]] = []
+    for h in d.get("hits", {}).get("hits", []) or []:
+        src = h.get("_source") or {}
+        hl = ((h.get("highlight") or {}).get("body") or [""])[0]
+        path = src.get("ax_path") or ""
+        items.append({
+            "source": "xerj",
+            "id": path,
+            "path": path,
+            "title": src.get("title") or "",
+            "content": " ".join(hl.split())[:240],
+            "score": h.get("_score") or 0,
+            "dataset": src.get("ax_dataset") or "",
+        })
+    return {"ok": True, "items": items,
+            "ms": round((time.perf_counter() - t0) * 1000, 1), "error": None}
+
+
+async def xerj_info() -> Dict[str, Any]:
+    """索引健康 + 篇数（面板用）。失败不拖垮 /api/kb/status。"""
+    t0 = time.perf_counter()
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=2.0)) as s:
+            async with s.get(f"{XERJ_URL}/_cluster/health") as r:
+                health = await r.json()
+            body = {"size": 0, "aggs": {"ds": {"terms": {"field": "ax_dataset", "size": 20}}}}
+            async with s.post(f"{XERJ_URL}/{XERJ_INDEX}/_search", json=body) as r:
+                d = await r.json()
+        total = d.get("hits", {}).get("total")
+        docs = total.get("value") if isinstance(total, dict) else total
+        datasets = {b["key"]: b["doc_count"]
+                    for b in (d.get("aggregations", {}).get("ds", {}).get("buckets") or [])}
+        return {"available": health.get("status") in ("green", "yellow"),
+                "status": health.get("status"), "count": docs, "datasets": datasets,
+                "url": XERJ_URL, "index": XERJ_INDEX,
+                "ms": round((time.perf_counter() - t0) * 1000, 1), "error": None}
+    except Exception as e:  # noqa: BLE001
+        return {"available": False, "count": None, "url": XERJ_URL,
+                "ms": round((time.perf_counter() - t0) * 1000, 1),
+                "error": tdai_client.scrub(f"{type(e).__name__}: {e}")[:200]}
+
+
+
 async def turbovec_info(force: bool = False) -> Dict[str, Any]:
     """索引元信息（`info` 子命令**本来就是 JSON**）。带 TTL 缓存，给面板与新鲜度判据用。"""
     now = time.monotonic()
@@ -193,9 +298,9 @@ async def kb_search(request: Request,
     """
     t0 = time.monotonic()
     want = {x.strip() for x in (routes or "").split(",") if x.strip()}
-    bad = sorted(want - set(ROUTES))
+    bad = sorted(want - set(ROUTES) - set(LEGACY_ROUTES))
     if bad:
-        raise HTTPException(400, f"未知 routes: {bad}；可用值 {list(ROUTES)}")
+        raise HTTPException(400, f"未知 routes: {bad}；可用值 {list(ROUTES)}（兼容旧值 {list(LEGACY_ROUTES)}）")
     if not want:
         raise HTTPException(400, "routes 不能为空")
 
@@ -207,9 +312,9 @@ async def kb_search(request: Request,
     else:
         tasks = []
         names = []
-    if "turbovec" in want:
-        tasks.append(_turbovec_search(q, doc_k))
-        names.append("turbovec")
+    if "xerj" in want:
+        tasks.append(_xerj_search(q, doc_k))
+        names.append("xerj")
     if "local" in want:
         # 本地那路复用 P0 的口径：只有 4 行陈旧便签，所以低权
         import memory
@@ -230,7 +335,7 @@ async def kb_search(request: Request,
     # 实测 09-26：若沿用 memfed 的 0.7/0.4 权重，tdai 满权池会把它们全部挤出融合
     # 前列（k=20 时融合分布仍是 tdai 100%），两路变成「backends 绿但结果不可见」的
     # 假接入。kb 里它们与 turbovec 同层：满权，靠 RRF_K 摊平名次差。
-    W = {"tdai_l1": 1.0, "turbovec": 1.0, "local": 0.2,
+    W = {"tdai_l1": 1.0, "xerj": 1.0, "turbovec": 1.0, "local": 0.2,
          "workspace": 1.0, "archived": 1.0}
     for name, r in zip(names, res):
         if isinstance(r, Exception):
@@ -242,9 +347,33 @@ async def kb_search(request: Request,
             weights.append(W[name])
             engine_items.append((name, r.get("items") or []))
 
+    # 旧路名：不静默、不 400、不起子进程——逐路表态（与其它路的 ok/error 同格式）
+    for legacy in ("turbovec", "local"):
+        if legacy in want:
+            backends.append({"name": legacy, "ok": False, "count": 0, "ms": 0.0,
+                             "error": LEGACY_ROUTES[legacy]})
+
+    # 文档路优先级：XERJ 命中则 workspace 降为不参与（防止同一批文档被两套排序重复计分）；
+    # XERJ 零命中/不可达时 workspace 作为实时全扫兜底——这正是原来的设计意图。
+    xerj_hit = any(b["name"] == "xerj" and b["ok"] and b["count"] for b in backends)
+    if xerj_hit:
+        keep = [(n, it) for n, it in engine_items if n != "workspace"]
+        if len(keep) != len(engine_items):
+            # 权重与 rankings 同序重建（前面是 zip 顺序，这里不能直接下标删）
+            new_rank: List[List[Dict[str, Any]]] = []
+            new_w: List[float] = []
+            for n, it in keep:
+                new_rank.append(it)
+                new_w.append(W[n])
+            rankings, weights = new_rank, new_w
+            engine_items = keep
+            for b in backends:
+                if b["name"] == "workspace":
+                    b["skipped"] = "xerj 已命中，本路不参与融合（避免同一批文档两套排序重复计分）"
+
     import memory as _m
     fused = _m._rrf_fuse(rankings, weights=weights, limit=k)
-    engines = [b["name"] for b in backends if b["ok"] and b["count"]]
+    engines = [n for n, _ in engine_items]
     degraded = [b["name"] for b in backends if not b["ok"]]
     # ── P1-1：Context Manifest（检索面）──
     # 条目 = 每一路**实际返回的条目**（不是候选全集）；排除项 = 本次挂掉的几路
@@ -366,7 +495,7 @@ async def kb_browse(request: Request, sub: str = Query(default="", max_length=12
 @runlog.track("kb.status")
 async def kb_status(request: Request):
     """资产面板用：各路是否可用、索引多新、库有多大。全实测，不猜。"""
-    info = await turbovec_info()
+    xinfo = await xerj_info()
 
     async def _fed_status(sid: str) -> Dict[str, Any]:
         """workspace/archived 路的健康段：走 list_fed_sources（复用其 TTL 探测缓存，不重扫）。"""
@@ -392,28 +521,14 @@ async def kb_status(request: Request):
     except Exception as e:                            # noqa: BLE001
         mem = {"state": "unavailable", "rows": None,
                "reason": "%s: %s" % (type(e).__name__, str(e)[:160])}
-    # 年龄**不解析** `built_at` 字符串：实测它是 `2026-09-20T02:21:10` 这种**无时区**形态，
-    # 与 aware datetime 相减直接 TypeError（闸门第一版就是在这上头 500 的，只捕了 ValueError）。
-    # 改用索引文件 mtime：内核记的 UTC epoch，无时区歧义，而且万一 rebuild 没回写 meta
-    # 字符串，mtime 仍会动——更接近真相。
-    age = None
-    idx = info.get("index_path") or TURBOVEC_INDEX
-    try:
-        if idx and os.path.exists(idx):
-            age = round(max(0.0, (time.time() - os.path.getmtime(idx)) / 86400.0), 1)
-    except OSError:
-        age = None
+    # 年龄不解析上游字符串：XERJ 用节点健康 + 各语料篇数代替（uilt_at 型无时区坑已在 2026-09-24 踩过）
     return {
-        "turbovec": {"available": bool(info.get("ok")), "chunks": info.get("chunks"),
-                     "dim": info.get("dim"), "model": info.get("model"),
-                     "built_at": info.get("built_at"),
-                     "index_mtime_age_days": age,
-                     "age_source": "index mtime（不解析上游字符串）",
-                     "index_path": idx,
-                     "index_mb": info.get("index_size_mb"), "error": info.get("error"),
-                     "cached": info.get("cached", False)},
+        "xerj": xinfo,
+        "turbovec": {"available": False, "retired": True,
+                     "why": "2026-10-18 索引/模型删除；文档路已由 xerj 接替",
+                     "index_path": TURBOVEC_INDEX},
         "tdai": tdai,
-        "local_memory": mem,
+        "local_memory": {**mem, "role": "P0 基线便签（2026-09-06，4 条）；默认不参与检索，需显式 routes=local"},
         "workspace": await _fed_status("workspace_files"),
         "archived": await _fed_status("archived_sessions"),
         "wigolo": {"available": False,

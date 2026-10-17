@@ -96,7 +96,18 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.123"  # P2 A10：统一 Action Plane（登记 ≠ 放行 / unknown ≠ failed）
+VERSION = "0.13.124"  # P2 C17：工具描述质量（三态完备性 + 按任务裁剪）
+#   v0.13.124：P2 第 9/9 项（C17「工具瓶颈不在数量而在描述质量」）。补建 `src/tooldesc.py`
+#   （前序会话 in-progress 工作因 merge 混乱丢失，从零重建）。
+#   ① `tooldesc.py`（新模块）：parse_sections() 标签归一；completeness() 三态判定
+#      complete/partial/insufficient，缺项显式列出；select() 委派 skill_relevance.rank。
+#   ② `mcpgw.py` 接线：_tool_shape() 每工具加 description_quality；
+#      aggregated_tools() 加 resp["description_quality"] 分布（不写 note ——
+#      A10 闸门钉着「后端全绿 ⇒ note==""」，质量是结构化数据不是运维信号）；
+#      新端点 /mcp/select（任务裁剪 + 可选 ACL 叠筛）。
+#   ③ `skill.py` 接线：_scan_one() 每技能条目加 description_quality。
+#   闸门：tests/test_tooldesc_p2_c17_l0.py(18)。
+#   v0.13.123：P2 A10
 #   v0.13.123：P2 第 7/9 项补位（A10「统一 Action Plane」）。
 #   病灶：「做一件事」在本机有三种互不相通的表达（mcp_call / term 命令 / llm.acall），
 #   各自记日志、各自判成败 ⇒ 「这一轮做了哪些行动、哪步被谁拒了」只能人肉对三份日志。

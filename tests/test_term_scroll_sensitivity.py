@@ -238,7 +238,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.123"
+    CURRENT_VERSION = "0.13.124"
+
+    #: v0.13.124（P2 C17）：关键词取自版本注释里**实际写下的字句**。
+    #: 工具描述质量三态 + 按任务裁剪。
+    VERSION_ROOT_CAUSES["0.13.124"] = (
+        "tooldesc", "description_quality", "completeness", "select", "insufficient",
+    )
 
     #: v0.13.123（P2 A10）：关键词取自版本注释里**实际写下的字句**。
     #: Action Plane：登记≠放行、unknown≠failed、结论不可覆盖、ACL 降为 PDP。

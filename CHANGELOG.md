@@ -1,3 +1,35 @@
+## v0.13.124 — P2 C17：工具描述质量（三态完备性 + 按任务裁剪）
+
+> 手册 C17：**「工具瓶颈不在数量而在描述质量」** —— 统一描述模板 + 完备性校验 + 按任务裁剪。
+
+### 病灶
+
+`mcpgw._tool_shape` 和 `skill.py` 的技能扫描此前**只做截断，不做质量判断**：一句
+「do it」与一段完整四段说明，回给 agent 的**差不多是同一档**。模型靠 name+description
+选工具，描述含混时它只能猜（手册第 17 章表 17.1-1 明确把「工具描述含混」列为工具选错的
+独立根因）。
+
+### 改法（从零重建 · 前序会话 `9eba5749` 的 in-progress 工作因 merge 混乱丢失）
+
+- **`src/tooldesc.py`**（新模块，246 行）：
+  · `parse_sections()` —— 标签归一：认「**标签 + 冒号**」结构（中英文均可），
+    分四段 `purpose/inputs/outputs/limits`；认不出就整段归 purpose（**不编造**没写的段）；
+  · `completeness()` —— 三态判定：`complete`（≥3 段）/ `partial`（1-2 段）/
+    `insufficient`（有效字符 < 10 或连主体都没有），**缺项显式列出**（`missing`）；
+  · `select()` —— 按任务裁剪：委派 `skill_relevance.rank`（**不建第二套 BM25**），
+    如实报 `considered/selected/dropped`，选不出给 `why`。
+- **`mcpgw.py`** 接线：`_tool_shape()` 每工具加 `description_quality`；
+  `aggregated_tools()` 加 `resp["description_quality"]` 分布（完整/部分/不足计数）。
+  ⚠ **不写 `note`**：A10 闸门钉着「后端全绿 ⇒ note==""」，质量是**结构化数据**不是运维信号。
+  新端点 `/mcp/select`（任务裁剪 + 可选 ACL 叠筛）。
+- **`skill.py`** 接线：`_scan_one()` 每技能条目加 `description_quality`。
+
+### 闸门
+
+`tests/test_tooldesc_p2_c17_l0.py` **18 例**。
+
+---
+
 ## v0.13.123 — P2 A10：统一 Action Plane（登记 ≠ 放行 / unknown ≠ failed）
 
 > 手册：行动归一为 **Action Request / Result + 生命周期**；ACL 降为 **policy decision point**。

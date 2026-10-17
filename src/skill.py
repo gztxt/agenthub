@@ -54,6 +54,7 @@ import db
 import runlog
 import skill_usage
 import tdai_client
+import tooldesc       # P2 C17：描述质量（模板归一 + 完备性三态）
 import writeauth
 
 log = logging.getLogger("hub.skill")
@@ -486,9 +487,12 @@ def _scan_one(route: str, root) -> Dict[str, Any]:
             dirname = os.path.basename(cur)
             # C8：**整包**摘要。只算 SKILL.md 会漏脚本变化 ⇒ 资产变更准入那道闸门虚设。
             pkg = package_digest(cur)
+            _desc = tdai_client.scrub((fm or {}).get("description") or "")
             items.append({
                 "name": tdai_client.scrub((fm or {}).get("name") or dirname),
-                "description": tdai_client.scrub((fm or {}).get("description") or ""),
+                "description": _desc,
+                # C17：描述质量三态（判据量的是描述文本本身，不是本条有多少键）。
+                "description_quality": tooldesc.quality(_desc),
                 "route": route,
                 "path": p,
                 "realpath": rp,

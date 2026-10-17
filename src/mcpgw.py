@@ -24,6 +24,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 import outbound    # P2 C5：出站地址准入（与 ghsettings 共用同一份判据）
 import resilience   # P1-6 接线②：逻辑调用的 call_id / 幂等键 + 熔断
+import tooldesc     # P2 C17：工具描述质量（模板归一 + 完备性三态 + 按任务裁剪）
 
 #: MCP server 是否允许指向本机/内网。**默认允许** —— MCP server 本来就常在 127.0.0.1
 #: （本机 stdio/http 桥），一刀切会把最正常的用法挡死（把安全做成可用性事故）。
@@ -350,6 +351,8 @@ def _tool_shape(t) -> Dict[str, Any]:
     if len(desc) > DOC_CHARS_MAX:
         d["description_truncated"] = True
         d["description_chars"] = len(desc)
+    # P2 C17：描述质量（模板归一 + 完备性三态）。**对原始 desc 判定**，不吃上面的截断。
+    d["description_quality"] = tooldesc.quality(desc)
     schema = None
     got = None
     try:  # 优先走 pydantic 别名（不同 mcp 版本属性名是 input_schema / inputSchema）
@@ -413,7 +416,54 @@ async def aggregated_tools():
     if any(x.get("schema_missing") for x in out):
         notes.append("部分工具未给出 inputSchema（上游没返回，参数名需自查）")
     resp["note"] = "；".join(notes)
+    # P2 C17：质量分布（门面的一等输出，供面板显示「本机工具描述完备率」）。
+    _by_v = {"complete": 0, "partial": 0, "insufficient": 0}
+    for x in out:
+        v = (x.get("description_quality") or {}).get("verdict")
+        if v in _by_v:
+            _by_v[v] += 1
+    resp["description_quality"] = dict(_by_v, total=len(out))
     return resp
+
+
+@router.get("/mcp/select")
+async def select_tools(task: str = "", n: int = 8, agent: str = ""):
+    """按任务描述裁剪工具子集（P2 C17；手册：「按任务裁剪工具集」）。
+
+    手册第 15 章：面对开放任务的 Agent 应「根据任务描述寻找候选，只把相关 Tool 说明放入
+    Context，避免预先加载所有服务的完整 Schema」。本端点即那条通道的**只读门面**：
+
+    - 先取聚合清单（复用 `/mcp/tools` 的 `_tool_shape`，**同源**，不另写一份扫描）；
+    - 用 `tooldesc.select` 打分裁剪（复用 `skill_relevance` 的 BM25F，不建第二套口径）；
+    - 若给了 `agent`，**顺带叠 ACL**：`allowed=false` 的工具从裁剪结果里剔除
+      （否则会把「相关但你无权调」的工具塞进上下文，再在调用时 403 —— 那是让 agent 白试）。
+
+    **如实报被裁掉多少**（`considered/selected/dropped`）——裁剪本身必须可解释，
+    不能让调用方以为「工具就这么几个」。选不出时给 `why`，不返回看着像「没有相关工具」的空表。
+    """
+    t0 = time.monotonic()
+    agg = await aggregated_tools()
+    tools = agg.get("tools") or []
+    cleaned = [{"name": x.get("name"), "description": x.get("description") or "",
+                "server": x.get("server"), "server_name": x.get("server_name"),
+                "description_quality": x.get("description_quality")}
+               for x in tools]
+    sel = tooldesc.select(task, cleaned, n=n)
+    dropped_acl = 0
+    if agent.strip():
+        rows = _acl_rows(agent.strip())
+        kept = []
+        for it in sel.get("items") or []:
+            allowed, _reason, _by = _resolve_acl(rows, it.get("server"), it.get("name"))
+            if allowed:
+                kept.append(it)
+            else:
+                dropped_acl += 1
+        sel["items"] = kept
+        sel["selected"] = len(kept)
+        sel["dropped_acl"] = dropped_acl
+    sel["took_ms"] = int((time.monotonic() - t0) * 1000)
+    return sel
 
 
 class RegistryIn(BaseModel):

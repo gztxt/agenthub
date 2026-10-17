@@ -1,3 +1,58 @@
+## v0.13.123 — P2 A10：统一 Action Plane（登记 ≠ 放行 / unknown ≠ failed）
+
+> 手册：行动归一为 **Action Request / Result + 生命周期**；ACL 降为 **policy decision point**。
+
+### 一、病灶
+
+「做一件事」在本机有三种互不相通的表达：`mcpgw.mcp_call`（工具调用）、终端命令、
+`llm.acall`（模型请求）。三者各自记日志、各自判成败、各自命名 ⇒
+「agent 这一轮做了哪些行动、哪一步被谁拒了」只能人肉对三份日志。
+A11 已经接上了**读侧**的因果链（`traceview`），写入侧缺一个所有行动必经的统一形状。
+
+### 二、改法
+
+新增 `src/actionplane.py` + `/api/actions*`，三张表 `action_requests` / `action_decisions` /
+`action_results`，显式状态机：
+
+```
+pending ──decide(allow)──▶ approved ──settle──▶ done(success|failed|error)
+   │                          └────settle(unknown)──▶ unknown
+   ├──decide(deny)──▶ denied（终态）
+   └──decide(ask)──▶ waiting_approval（可再 decide）
+```
+
+**ACL 不搬进来**：`decide()` 只**接收**裁决并落账（`allowed/reason/rules/effect/shadow_*`），
+自己不查 ACL 表。两份真相必然漂移 —— `mcpgw._acl_check` 的 docstring 已写明这一点。
+
+### 三、四条口径
+
+| 口径 | 为什么 |
+|---|---|
+| **pending ≠ approved** | 「已登记」不是「已准许执行」；合并两态＝「写入成功即完成」 |
+| **unknown ≠ failed** | 执行抛异常且拿不到结果 ⇒ 不知做没做成。记 failed 会诱导重试，而重试有副作用的行动最危险 |
+| **结论不可覆盖** | 一个 action 只能 settle 一次（results 主键）；改判走 `unknown→done` 复查。拒绝**不写 results**（那是 PDP 结论，不是执行结果） |
+| **参数只落形状** | `params` 存 `{键: 类型}`，不吃值 —— 否则凭据被复制进事件表 |
+
+`run()` 的便捷通道在没有策略层时写 `reason="no-pdp：调用方未提供策略裁决"`，
+否则事后分不清「策略放行」与「根本没有策略」。
+
+### 四、闸门
+
+`tests/test_actionplane_p2_a10_l0.py`（17 例）+ 八路红向自证全见红：
+submit 直接置 approved / deny 不要理由 / 异常记 failed / 允许覆盖结论 / params 落原值 /
+被拒仍执行 / 无策略层不写 no-pdp / **偷偷 import mcpgw**（AST 钉住写者面隔离）。
+
+C3 覆盖闸门当场抓出：新模块写 `source='action'` 却未登记 ⇒ 已在 `execsem` 补
+`SOURCES` 与三拍映射（`requested`→`skipped`，不冒充成功数）。
+
+### 五、如实标注的缺口
+
+`mcpgw.mcp_call` / `term` / `llm.acall` 三处真实调用点**尚未**改走本模块
+（`mcpgw.py` 当日被并发会话占着写）。今天生产里 `action_requests` 只有 API 显式登记的行；
+**「三种表达归一」这一步没有发生**，本版只铺地基。
+
+---
+
 ## v0.13.122 — P2 C7：外部资产准入六阶段（没跑 ≠ 通过）
 
 > 手册 15 章：外部 Skill 会把外部维护者、代码依赖和内容来源带进运行环境；

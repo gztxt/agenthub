@@ -67,6 +67,7 @@ import resilience                   # 出站韧性层：退避重试 + 熔断（
 import settings_bundle as settings_bundle_mod  # 配置包导出/导入（PT-20260927-15，JSON，不引 YAML）
 import approvals as approvals_mod   # P1-2：审批三态（ASK + Preview-Approve-Commit-Verify）
 import skill_assets as skill_assets_mod   # P1-5 其余四件：技能资产（owner/version/scope/状态机）
+import actionplane as actionplane_mod     # P2 A10：统一 Action Plane（请求/裁决/结果 + 生命周期）
 import admission as admission_mod         # P2 C7：外部资产准入六阶段
 import sessions_export as export_mod
 import export_batch                   # 导出取消息的批量 IN（L0 可测的纯函数层，同 staticguard 范式）
@@ -95,7 +96,28 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.122"  # P2 C7：外部资产准入六阶段（没跑 ≠ 通过 / 六阶段顺序不可跳）
+VERSION = "0.13.123"  # P2 A10：统一 Action Plane（登记 ≠ 放行 / unknown ≠ failed）
+#   v0.13.123：P2 第 7/9 项补位（A10「统一 Action Plane」）。
+#   病灶：「做一件事」在本机有三种互不相通的表达（mcp_call / term 命令 / llm.acall），
+#   各自记日志、各自判成败 ⇒ 「这一轮做了哪些行动、哪步被谁拒了」只能人肉对三份日志。
+#   ① 新 `actionplane.py`：ActionRequest / ActionDecision / ActionResult + 显式状态机
+#      （pending → approved|denied|waiting_approval → done|unknown）。
+#   ② **ACL 降为 policy decision point**：`decide()` 只**接收**裁决并落账，不自己算 ACL
+#      —— 两份真相必然漂移（mcpgw 的 docstring 已写明）。故本模块**零 import mcpgw**，
+#      闸门 `TestNoImportMcpgw` 用 AST 钉住（写者面隔离，本项才能在 mcpgw.py 被并发
+#      改写时独立交付）。
+#   ③ **pending ≠ approved**：「已登记」不是「已准许执行」；合并两态就是「写入成功即完成」。
+#   ④ **unknown ≠ failed**：执行抛异常且拿不到结果 ⇒ 不知做没做成。记 failed 会诱导
+#      调用方重试，而重试有副作用的行动是最危险的动作，故 unknown 是一等结论。
+#   ⑤ **结论不可覆盖**：一个 action 只能 settle 一次（results 表主键）；改判走 unknown→done 复查。
+#      拒绝**不写 results** —— 那是 PDP 的终局结论，不是执行结果。
+#   ⑥ **参数只落形状**：`{键: 类型}`，不吃值（凭据不得被复制进事件表）。
+#   ⑦ `execsem` 登记 source=`action` 与三拍映射（`requested`→skipped，不冒充成功数）；
+#      这条是 C3 覆盖闸门当场抓出来的 —— 写了 source 却没登记，闸门变红。
+#   ⚠ **未接线（如实标注）**：`mcpgw.mcp_call` / `term` / `llm.acall` 三处真实调用点**尚未**
+#      改走本模块（同样因为 mcpgw.py 的写者面）。所以今天生产里 `action_requests` 只有
+#      API 显式登记的行；「三种表达归一」这一步**没有发生**，本节只是把那层地基铺好。
+#   v0.13.122：P2 第 7/9 项（C7「外部资产准入六阶段」）。
 #   v0.13.122：P2 第 7/9 项（C7「外部资产准入六阶段」）。
 #   病灶：`skill.package_digest()` 能证明「内容是什么」、`skill_assets` 状态机能声明
 #   「处于哪一态」，但**中间四道检查根本不存在** —— 来源是谁、脚本有没有外连、
@@ -979,6 +1001,7 @@ app.include_router(ghsettings_mod.router)
 app.include_router(settings_bundle_mod.router)   # PT-20260927-15：/api/settings/export|import
 app.include_router(approvals_mod.router)         # P1-2：/api/approvals（ASK 审批队列与决定端）
 app.include_router(skill_assets_mod.router)      # P1-5：/api/skill-assets（资产登记与状态机）
+app.include_router(actionplane_mod.router)       # P2 A10：/api/actions（行动台账，只读为主）
 app.include_router(admission_mod.router)        # P2 C7：/api/admission（外部资产准入六阶段）
 app.include_router(hublog_mod.router)
 
@@ -1313,6 +1336,8 @@ async def startup():
     dataset_mod.ensure_schema()
     # P1-5：技能资产表（幂等建表；与 skill.py 的整包摘要一起构成 A9 的资产准入）
     skill_assets_mod.ensure_schema()
+    # P2 A10：行动三表（requests/decisions/results），幂等建表
+    actionplane_mod.ensure_schema()
     tasks_mod.set_context(
         chat_fn=lambda a, m, s=None, mo=None, tr=None: _chat_dispatch(a, m, s, mo, tr),
         agent_ids_fn=lambda: [c["id"] for c in appstate.discovery.all_configs()])

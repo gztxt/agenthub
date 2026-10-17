@@ -32,6 +32,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 import db
 import evidence
+import traceview
 import writeauth
 
 router = APIRouter()
@@ -173,4 +174,42 @@ async def audit_verdicts(request: Request,
                     "source": _VERDICT_FACT_SOURCE},
         "judgments": layered["judgments"][:max(0, int(sample or 0))],
         "window": window,
+    }
+
+
+# ── P2 A11：端到端 Trace 因果链 ───────────────────────────────────────────
+
+#: trace 链里可能出现的表 —— 与 `traceview._SOURCES` 一一对应（查询侧要能枚举）。
+TRACE_TABLES = ("profile_events", "tasks", "asset_audit")
+
+
+@router.get("/api/audit/trace")
+async def audit_trace(request: Request,
+                      trace_id: str = Query(..., min_length=1, max_length=120),
+                      limit: int = Query(default=500, ge=1, le=2000)):
+    """按 `trace_id` 把三张表的节点收成一条链（P2 A11，**只读**）。
+
+    放在本模块（而不是新开一个 router）的理由：`asset_audit` 是链上的三段之一，
+    而本模块已是审计的只读门面 —— 新开模块还要改 `main.py` 的 include_router，
+    在**多会话并发写 main.py** 的当下（AGENTS.md 文件级单写者）那是不必要的冲突面。
+
+    ⚠ 回包里 **`complete` 不等于成功**：它只说「这条 trace 的节点里没有断链的」。
+    一个只含 `fail` 事件的 trace 同样 `complete=true` —— 完整 ≠ 成功。
+    ⚠ `audit_trace_available=false` 表示**存量库的 `asset_audit` 还没补 `trace_id` 列**
+    （迁移发生在下次 `init_db`）⇒ 审计段**不参与**本链；**不是**「这个 trace 没改过资产」。
+    这两种「空」必须分开看，否则会把「能力没上线」读成「事实为空」（判例 193 同族）。
+    """
+    _require_read(request)
+    result = traceview.collect(trace_id, limit=limit)
+    # 只回该 trace 的链 + 断链诊断；不返回别的 trace 的行（最小暴露面，与 /list 同口径）。
+    return {
+        "trace_id": result["trace_id"],
+        "chain": result["chain"],
+        "count": len(result["chain"]),
+        "tables": list(TRACE_TABLES),
+        "audit_trace_available": result["audit_trace_available"],
+        "complete": result["complete"],
+        # `orphans` 按表分桶：喂进来的节点若缺 trace 会在此显形（本端点的入参是**已知** trace，
+        # 故正常情况下恒为空集；非空即说明 collect() 的取数口径漏了过滤，是自检信号）。
+        "orphans": result["orphans"],
     }

@@ -60,7 +60,13 @@ class TestSchema(_DbCase):
                                 # P0-4（v0.13.105）：研判三列。钉死列集是为了让「有人
                                 # 悄悄加列」得先到这里来解释 **为什么** —— 而本批的理由是
                                 # 「光有 PASS/FAIL 两态没法表达『判不了』」。
-                                "verdict", "severity", "confidence"])
+                                "verdict", "severity", "confidence",
+                                # P2 A11（v0.13.120）：trace_id。本批加列的理由是
+                                # 「审计事件在 trace 视图里是断的」——`profile_events`/`tasks`
+                                # 都有 trace_id，只有审计没有 ⇒ 无法沿同一条 trace 追
+                                # 「谁在什么时候改了资产」（手册 A11 因果链）。
+                                # 存量旧行保持 NULL（不替历史编因果），traceview 计 orphans。
+                                "trace_id"])
 
 
 class TestWritePath(_DbCase):

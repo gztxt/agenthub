@@ -122,10 +122,20 @@ CREATE TABLE IF NOT EXISTS asset_audit (
     -- 但两者都让 decisive=False。
     verdict TEXT,               -- confirmed|dismissed|insufficient，NULL=未研判
     severity TEXT,              -- info|warn|high，NULL=未定级
-    confidence REAL             -- 0..1；不可判定时**不给假刻度**，留 NULL
+    confidence REAL,            -- 0..1；不可判定时**不给假刻度**，留 NULL
+    -- ── P2 A11（v0.13.120）Trace 因果链 ────────────────────────────────
+    -- 让审计事件能沿**同一个 trace_id** 与 `profile_events`/`tasks` 排进一条链
+    -- （手册 A11：模型/状态/Action/Artifact/Verifier/Outcome 同一条 trace）。
+    -- **NULL 是诚实值**：调用点没带 trace 时留空 ⇒ `traceview` 计入 `orphans` 如实报断链，
+    -- **绝不**按时间就近归并（那是凭空造因果）。
+    trace_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_audit_asset ON asset_audit(asset_type, asset_slug);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON asset_audit(created_at);
+-- ⚠ v0.13.120 P2 A11：`trace_id` 的索引**不写在这里** —— 它在 SCHEMA 之后由
+-- `_add_column_if_missing` 补列，而 `executescript(SCHEMA)` 在存量库上先跑：
+-- 若在此处 `CREATE INDEX ... (trace_id)`，**列还不存在**⇒ 整段迁移抛
+-- `OperationalError: no such column`，服务启动即挂。索引一律建在 ALTER 之后（见 init_db）。
 -- v0.13.36 应用级偏好 KV：两项目页收藏/隐藏状态落服务端（此前只在浏览器
 -- localStorage，换浏览器/端侧即失效）。键白名单在 prefs.py，不是自由 KV。
 CREATE TABLE IF NOT EXISTS app_prefs (
@@ -233,6 +243,11 @@ def init_db(path: Path) -> None:
         _add_column_if_missing(_conn, "asset_audit", "verdict", "TEXT")
         _add_column_if_missing(_conn, "asset_audit", "severity", "TEXT")
         _add_column_if_missing(_conn, "asset_audit", "confidence", "REAL")
+        # P2 A11（v0.13.120）：asset_audit 补 trace_id。存量库交给 ALTER 幂等补，
+        # **旧行的 trace_id 保持 NULL** —— 那是「这条旧审计发生过，但当时没记 trace」的
+        # 诚实表达；回填成某个值＝替历史编因果。traceview 把 NULL 计 orphans。
+        _add_column_if_missing(_conn, "asset_audit", "trace_id", "TEXT")
+        _conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_trace ON asset_audit(trace_id)")
         _conn.commit()
 
 
@@ -336,7 +351,8 @@ AUDIT_ACTIONS = ("create", "update", "delete", "bind", "unbind", "rebuild")
 def log_asset_event(asset_type: str, asset_slug: str, action: str, actor: str,
                     detail: Optional[dict] = None, verdict: Optional[str] = None,
                     severity: Optional[str] = None,
-                    confidence: Optional[float] = None) -> None:
+                    confidence: Optional[float] = None,
+                    trace_id: Optional[str] = None) -> None:
     """资产变更审计（**append-only**）。与 log_profile_event 同族但口径不同：
     profile_events 记「调用成不成、多快」，asset_audit 记「哪个资产被谁改了」。
 
@@ -356,6 +372,12 @@ def log_asset_event(asset_type: str, asset_slug: str, action: str, actor: str,
     做不到核实的调用点请**显式传** `insufficient`；**不许**用默认值把「不知道」说成「已确认」。
     `verdict` 不在枚举里 ⇒ 原样落库 + detail 打 `verdict_invalid`（与 action 同纪律：
     不静默丢弃、不改写，丢/改比记错更贵）。
+
+    ── P2 A11（v0.13.120）第五参：`trace_id` ──
+    带上它，这条审计就能与 `profile_events`/`tasks` 排进**同一条 trace**
+    （`traceview.collect()`）。默认 `None` ⇒ 落 NULL ⇒ 计入 `orphans`（**断链如实报**）。
+    调用点**能拿得到就传**（`request.headers['x-trace-id']` 或当前任务的 trace），
+    拿不到就留空 —— 留空是诚实，编号是造假。
     """
     d = dict(detail or {})
     if action not in AUDIT_ACTIONS:
@@ -375,9 +397,10 @@ def log_asset_event(asset_type: str, asset_slug: str, action: str, actor: str,
     _conf = None if confidence is None else float(confidence)
     execute(
         "INSERT INTO asset_audit(asset_type,asset_slug,action,actor,detail,created_at,"
-        "verdict,severity,confidence) VALUES(?,?,?,?,?,?,?,?,?)",
+        "verdict,severity,confidence,trace_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (asset_type, str(asset_slug), action, actor, body, _now(),
-         verdict if verdict is not None else "confirmed", severity, _conf))
+         verdict if verdict is not None else "confirmed", severity, _conf,
+         (str(trace_id) if trace_id not in (None, "") else None)))
 
 
 def add_memory(content: str, category: str = "fact", source: str = "manual",

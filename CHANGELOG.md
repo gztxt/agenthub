@@ -1,3 +1,50 @@
+## v0.13.120 — P2 A11：端到端 Trace 因果链（`asset_audit` 补 `trace_id` + `/api/audit/trace`）
+
+> 手册 A11：模型 / 版本 / Manifest / 状态 / Action / Artifact / Verifier / Outcome
+> 应能在**同一条 trace** 上被一起看到。
+
+### 一、病灶（先取证）
+
+三张表里只有两张能沿 trace 追（实测生产 `agents.db`，2026-10-17）：
+
+| 表 | `trace_id` | 带值 |
+|---|---|---|
+| `profile_events` | ✅ | 3180 行中 **441** |
+| `tasks` | ✅ | 3 行全带 |
+| `asset_audit` | 🔴 **无此列** | — |
+
+⇒ 「谁在什么时候改了资产」**无法与任何一次执行关联**。
+
+### 二、改法
+
+- `asset_audit` 幂等补 `trace_id` 列；**旧行保持 NULL**（回填＝替历史编因果）。
+  ⚠ **索引不放 `SCHEMA`**：`executescript(SCHEMA)` 早于 `_add_column_if_missing`，
+  存量库上该列还不存在 ⇒ `no such column` **服务启动即挂**。索引建在 ALTER 之后。
+- `log_asset_event(..., trace_id=)`：拿得到就传，**拿不到留空**（留空是诚实，编号是造假）。
+- 新增 `src/traceview.py`：`build_chains()` 按 trace 聚链，**无 trace 的行按表分桶进
+  `orphans`，绝不按时间就近归并**（那是凭空造因果）。链内排序键 `(at, table, seq)` ⇒ 可复现。
+  两种「空」分开：`audit_trace_available=false`（能力没上线）≠ `chain=[]`（事实为空）。
+- 端点 `GET /api/audit/trace?trace_id=` 落 `audit.py`（不新开 router —— `main.py` 今天多会话在写）。
+
+### 三、闸门
+
+`tests/test_traceview_p2_a11_l0.py`(15)。**红向三向**：无 trace 行归入假链 → 3 例；
+去掉排序 → 3 例；`init_db` 不补列 → 1 例。真数据复验：生产 trace `cqq0qno16rf` 收出 **31 节点**链。
+
+⚠ **自抓（本版最重要）**：首版 `collect()` 构造的节点**没带 `trace_id`** ⇒ `build_chains`
+把它们全判 orphan ⇒ **端点恒回空链**（`chain=[]` 而 `nodes=31`）。单测没抓到是因为只覆盖了
+「空库 / 缺列」两条**降级路径**，没测「查到行」这条**主路径**。已补
+`TestCollectReturnsRealChain`(2) 钉住。判例 `197`。
+
+### 四、未做（如实标注）
+
+- **写入端调用点未逐个接 trace**（改它们会碰 `mcpgw.py`/`memory.py` 等今日被他会话占用的文件，
+  按单写者协议不动）⇒ 审计仍进 `orphans`：链不完整，但**不骗人**。
+- 列迁移由 `init_db` 在服务启动时执行；本版合并时生产运行的是 v0.13.117，
+  故 `audit_trace_available` 目前仍为 `false` —— 这正是该字段要表达的能力边界。
+
+---
+
 ## v0.13.119 — P2 C2：ACL 检测与拦截分开（`effect=enforce|shadow` 灰度）
 
 > 手册 C2：实时阻断必须确定/可解释/**可回放**，且新规则要能**先影子运行**再上任。

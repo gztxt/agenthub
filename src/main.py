@@ -94,7 +94,21 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.119"  # P2 C2：ACL 检测与拦截分开（effect=enforce|shadow 灰度）
+VERSION = "0.13.120"  # P2 A11：Trace 因果链（有列≠能追 / 两种「空」分开）
+#   v0.13.120：P2 第 5/9 项（A11「端到端 Trace 因果链」）。
+#   病灶：手册要「模型/状态/Action/Artifact/Verifier/Outcome 同一条 trace 可见」，
+#   而三张表里 `profile_events`/`tasks` 有 `trace_id`、**`asset_audit` 没有**
+#   （实测生产 441 行带 trace，审计 74 行零 trace）⇒ 审计事件在 trace 视图里是**断的**。
+#   ① `asset_audit` 幂等补 `trace_id` 列；**旧行保持 NULL**（回填＝替历史编因果）；
+#      索引**不放 SCHEMA** —— executescript 早于 ALTER，会死在缺列上（服务启动即挂）。
+#   ② `log_asset_event(..., trace_id=)`：拿得到就传，拿不到留空 —— 留空是诚实，编号是造假。
+#   ③ 新 `traceview`：`build_chains()` 按 trace 聚链，**无 trace 的行按表分桶进 `orphans`**，
+#      绝不按时间就近归并（那是凭空造因果）。链内排序键 `(at, table, seq)` 保证可复现。
+#   ④ 端点 `/api/audit/trace` 放 audit.py（不新开 router —— main.py 今天多会话在写）。
+#   ⚠ 缺口：写入端调用点未逐个接 trace（碰他会话在制品，按单写者不动）⇒ 审计仍进 orphans。
+#   ⚠ **自抓**：首版 `collect()` 节点没带 `trace_id` ⇒ 端点恒回空链；单测只覆盖降级路径
+#      （空库/缺列）没测主路径 ⇒ 全绿。已补 `TestCollectReturnsRealChain`(2) 钉住。
+#   两种「空」分开：`audit_trace_available=false`（能力没上线）≠ `chain=[]`（事实为空）。
 #   v0.13.119：P2 第 4/9 项（C2「检测与拦截分开建模」）。
 #   病灶：`mcp_acl` 只有「拦/不拦」两种结果 ⇒ **加一条 deny 规则就是当场生效**，
 #   没人能先看它命中过谁、会拒掉什么 ⇒ 规则一上线就可能把正常调用打死。

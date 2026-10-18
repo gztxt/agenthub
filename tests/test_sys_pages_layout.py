@@ -180,9 +180,10 @@ class TestSysPagesLayout(unittest.TestCase):
     def test_selects_remain_the_single_source_of_truth(self):
         """三处多选的 option 清单与读法都不许被芯片壳替换。"""
         # memFedSrcs 11→12（v0.13.103 P2 加 amr_memory）→ 13（v0.13.112 D18 加 experiences）
+        # → 14（2026-10-18 codebuddy_sessions 入联邦，用户裁定）
         # —— 该数字是**前后端同源契约**的计数，加源时必须同步
         #（这正是本断言的用意：安静加一个源 = 前端收不到它）。
-        for sel, n in (("memFedSrcs", 13), ("kbRoutes", 5)):
+        for sel, n in (("memFedSrcs", 14), ("kbRoutes", 5)):
             m = re.search(r'<select id="%s"[^>]*>(.*?)</select>' % sel, self.html, re.S)
             self.assertTrue(m, "#%s 原生 select 没了 ⇒ 数据源被换成自造状态" % sel)
             self.assertEqual(len(re.findall(r"<option", m.group(1))), n,

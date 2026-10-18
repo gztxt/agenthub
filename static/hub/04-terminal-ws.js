@@ -352,6 +352,7 @@ async function cloudcliStart(path) {
  *   静默灰底的根因修复）。kb 路名短别名也入表（tdai/workspace/archived）。 */
 const SRC_ABBR = {
   claude_mem: 'CM', claude_projects: 'CP', pi_sessions: 'PI', codex_sessions: 'CX',
+  codebuddy_sessions: 'CB',
   grok_memory: 'GK', hermes_memory: 'HM', workbuddy_memory: 'WB',
   workspace_files: 'WS', archived_sessions: 'AR', amr_memory: 'AM',
   experiences: 'EX',

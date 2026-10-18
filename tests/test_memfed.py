@@ -54,9 +54,26 @@ class TestRegistry(_TmpCase):
     def test_enabled_sources_present(self):
         ids = memfed.enabled_ids()
         for expect in ("claude_mem", "claude_projects", "pi_sessions", "codex_sessions",
+                       "codebuddy_sessions",
                        "grok_memory", "hermes_memory", "workbuddy_memory",
                        "workspace_files", "archived_sessions"):
             self.assertIn(expect, ids)
+
+    def test_codebuddy_sessions_registered_with_rg_target(self):
+        """2026-10-18 用户裁定：codebuddy 会话必须进联邦源。
+
+        红向：只加 REGISTRY 不加 _RG_TARGETS ⇒ search_fed 走到 rg 分支抛 KeyError，
+        整源 ok=False；只加 _RG_TARGETS 不加 REGISTRY ⇒ 源不可见、永远搜不到。
+        两者必须同时钉住。
+        """
+        src = memfed.REGISTRY["codebuddy_sessions"]
+        self.assertTrue(src.enabled)
+        self.assertEqual(src.kind, "rg_text")
+        self.assertEqual(src.weight, 0.5)          # 会话原始档，与 pi/codex 同级
+        roots, glob = memfed._RG_TARGETS["codebuddy_sessions"]
+        self.assertTrue(any(r.endswith("/.codebuddy/projects") for r in roots), roots)
+        self.assertTrue(any(r.endswith("/.codebuddy/history.jsonl") for r in roots), roots)
+        self.assertEqual(glob, "*.jsonl")
 
     def test_opencode_registered_but_disabled(self):
         """登记但不启用：judged 不合格的源要「可见可裁」，不是悄悄消失。"""

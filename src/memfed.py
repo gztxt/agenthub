@@ -95,6 +95,14 @@ REGISTRY: Dict[str, FedSource] = {
     "codex_sessions": FedSource(
         id="codex_sessions", label="codex 会话记录", kind="rg_text", weight=0.5,
         desc="~/.codex/sessions/**/*.jsonl（文件级命中）"),
+    # 2026-10-18 用户裁定（codebuddy 会话检索盲区）：此前 10 路联邦源与 L2 归档
+    # 均不含 codebuddy ⇒ 当天那条「本地模型增强检索/文本分析」的主会话只能靠手工
+    # 读 ~/.codebuddy/projects 才找得到，recall.sh 与 memfed 都 0 命中。
+    # 会话原始档权重取 0.5，与 pi/codex 会话同级（不是成文事实）。
+    "codebuddy_sessions": FedSource(
+        id="codebuddy_sessions", label="codebuddy 会话记录", kind="rg_text", weight=0.5,
+        desc="~/.codebuddy/projects/**/*.jsonl + ~/.codebuddy/history.jsonl（文件级命中）",
+        timeout_s=2.0),
     "grok_memory": FedSource(
         id="grok_memory", label="grok 记忆与会话", kind="rg_text", weight=0.6,
         desc="~/.grok/memory/*.md + ~/.grok/sessions/**/prompt_history.jsonl",
@@ -127,7 +135,7 @@ REGISTRY: Dict[str, FedSource] = {
         timeout_s=1.0),
     "archived_sessions": FedSource(
         id="archived_sessions", label="归档会话备份", kind="rg_text", weight=0.4,
-        desc=f"{WORKSPACE}/会话备份/**（含 claude/pi/codex/grok/hermes 归档）",
+        desc=f"{WORKSPACE}/会话备份/**（含 claude/pi/codex/codebuddy/grok/hermes 归档）",
         timeout_s=2.5),
     "opencode_sessions": FedSource(
         id="opencode_sessions", label="opencode 会话库", kind="disabled", weight=0.0,
@@ -144,6 +152,11 @@ REGISTRY: Dict[str, FedSource] = {
 _RG_TARGETS: Dict[str, tuple] = {
     "pi_sessions": ([str(HOME / ".pi" / "agent" / "sessions")], "*.jsonl"),
     "codex_sessions": ([str(HOME / ".codex" / "sessions")], "*.jsonl"),
+    # codebuddy：projects/<cwd 编码>/<session>.jsonl 为主，history.jsonl 是 prompt 台账
+    # （后者只有 display 文本，仍值得检索：它是「问了什么」的最短索引）。
+    # 走 rg 慢路径而非 FTS 投影：投影库 1.7GB，加源须全量重建，当前不为此动大索引。
+    "codebuddy_sessions": ([str(HOME / ".codebuddy" / "projects"),
+                            str(HOME / ".codebuddy" / "history.jsonl")], "*.jsonl"),
     "claude_projects": ([str(HOME / ".claude" / "projects")], "**/memory/*.md"),
     "grok_memory": ([str(HOME / ".grok" / "memory"), str(HOME / ".grok" / "sessions")],
                     "{*.md,prompt_history.jsonl}"),

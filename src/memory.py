@@ -25,6 +25,7 @@ import ctxmanifest
 import db
 import llm
 import memfed
+import memvitals
 import runlog
 import tdai_client
 import writeauth
@@ -688,3 +689,35 @@ async def injection_context(request: Request, q: Optional[str] = None,
             "backends": backends, "degraded": degraded, "fed": fed_meta,
             "manifest": manifest,
             "took_ms": took_ms}
+
+
+# ── 健康探针投影（PT-20261018-08 P0）──────────────────────────────────
+
+@router.get("/api/memory/vitals")
+async def memory_vitals():
+    """记忆中心健康探针的**只读投影**。
+
+    数据由 `memvitals` oneshot（`agenthub-memvitals.timer`，10 分钟）采集落盘。
+    本端点**不探测、不打源**：进页 0 等待，且 `as_of` 明确说明这是什么时候的数据 ——
+    改前页面在进页时现场探测 1.9s，且整个会话只加载一次，绿点会静默变旧。
+
+    返回 `verdict=unknown` 的两种情形必须区分：
+      · 文件不存在  ⇒ timer 从没跑过（`reason` 写明）；
+      · 文件太旧    ⇒ `stale=true`，前端不得把它渲染成现在。
+    """
+    try:
+        data = json.loads(memvitals.OUT.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"schema": memvitals.SCHEMA, "verdict": "unknown", "as_of": None,
+                "stale": True, "reason": "尚无探测结果：memvitals 还没跑过（检查 agenthub-memvitals.timer）",
+                "anomalies": [], "notes": [], "checks": [], "sources": [], "probes": []}
+    except Exception as e:  # noqa: BLE001
+        return {"schema": memvitals.SCHEMA, "verdict": "unknown", "as_of": None,
+                "stale": True, "reason": f"探测结果不可解析：{type(e).__name__}: {e}",
+                "anomalies": [], "notes": [], "checks": [], "sources": [], "probes": []}
+
+    age = memvitals._age_hours(data.get("as_of"))
+    data["age_h"] = age
+    # 超过 2 个周期（20 分钟）没更新 ⇒ 标记 stale，但不改 verdict（改判定会掩盖真状态）
+    data["stale"] = bool(age is None or age > (20.0 / 60.0))
+    return data

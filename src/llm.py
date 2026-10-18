@@ -8,6 +8,12 @@ FCC→tokenrouter/qwen3.8-flash 的 tool_use 已由 PT-20260905-01 端到端验�
   MANAGER_LLM_BASE_URL   默认 http://127.0.0.1:8082
   MANAGER_LLM_API_KEY    FCC PROXY_AUTH token（Bearer）
   MANAGER_LLM_MODEL      默认 tokenrouter/qwen3.8-flash
+  MEMORY_LLM_MODEL       非会话/后台工具调用的模型（默认 openrouter/openrouter/free）
+
+⚠️ 两个模型 ID 不可互串（军规：取值一律实测，凭据/ID 不凭记忆）：
+  · 经 **CCR**（:3456）要写 provider 前缀 ⇒ `openrouter/openrouter/free`;
+  · 直连 **OpenRouter**（distill-knowledge.py 那类）才写 `openrouter/free`。
+  · 🚨 任何位置禁 `openrouter/auto` —— 它会自动选最便宜的可用模型，最便宜可能是付费档。
 """
 import json
 import os
@@ -21,6 +27,78 @@ import resilience
 BASE_URL = os.getenv("MANAGER_LLM_BASE_URL", "http://127.0.0.1:8082").rstrip("/")
 API_KEY = os.getenv("MANAGER_LLM_API_KEY", "")
 MODEL = os.getenv("MANAGER_LLM_MODEL", "tokenrouter/qwen3.8-flash")
+
+
+def memory_model() -> str:
+    """非会话 / 后台工具调用使用的模型（2026-10-18 用户裁定）。
+
+    为什么要跟 `MODEL` 分开：`MANAGER_LLM_MODEL` 还服务**交互式**的
+    `/api/tasks/decompose`（人点一下才发），而 L2 记忆压缩、后台提炼是**非会话**
+    工具调用 —— 军规要求后者默认走免费档（`openrouter/free`），但免费池中文质量
+    不稳，不该把交互式入口一起降级。两者共用同一个 `.env` 网关地址，只差模型 ID。
+
+    读成函数而不是模块常量：`.env` 由 config 在导入后覆盖，常量会把旧值钉死；
+    函数每次读当前 env，也让 L0 测试能直接改环境而不必 reload 模块。
+
+    失败语义：免费档不可用时由 `complete_free()` 换兜底并把「不可用」显式返回，
+    **不静默切回付费模型**（坏兜底比显式失败更贵）。
+    """
+    return os.getenv("MEMORY_LLM_MODEL", "openrouter/openrouter/free")
+
+
+def free_fallback_model() -> str:
+    """免费档的兜底位：必须是**具体** `:free`，不能再用路由器。
+
+    2026-10-18 单次实测：`openrouter/openrouter/free` 被上游路由到
+    `nvidia/nemotron-3.5-content-safety:free`，**HTTP 200 但正文为空** ——
+    免费路由器的成员里混有审核/分类模型，返回标签而非正文。
+    兜底位用实测三次均正常的具体免费档（经 CCR 同样要 provider 前缀）。
+    """
+    return os.getenv("MEMORY_LLM_FALLBACK_MODEL",
+                     "openrouter/nvidia/nemotron-3-super-120b-a12b:free")
+
+
+#: 免费档输出「可用」的最小长度。低于此值按失败处理（宁可降级为机械拼接，
+#: 也不把空串/标签写进 L2 权威文档）。
+_FREE_MIN_CHARS = 20
+_FREE_LABEL_PREFIXES = ("user safety", "content safety", "safe", "moderation")
+
+
+def _usable_llm_text(text: str) -> bool:
+    """免费池的「200 但没货」判定：空串 / 审核标签 / 过短都不算成功。"""
+    t = (text or "").strip()
+    if len(t) < _FREE_MIN_CHARS:
+        return False
+    low = t.lower()
+    return not any(low.startswith(p) for p in _FREE_LABEL_PREFIXES)
+
+
+async def complete_free(system: str, user: str,
+                        call: Optional[Callable] = None) -> Tuple[str, str]:
+    """非会话工具调用的统一入口：免费档优先，坏输出换兜底，全失败则显式返空。
+
+    返回 `(text, model_used)`；两者都不可用时返回 `("", "")`，由调用方降级
+    （L2 压缩的降级是「机械拼接」，不是抛错）。
+
+    为什么要这一层：免费路由器会返回 200 + 空正文（实测 2026-10-18），
+    只判断「有没有抛异常」会把空串当成成功写进 L2，**权威文档被静默清空**。
+    """
+    caller = call or chat_tools_loop
+    models = [memory_model()]
+    fb = free_fallback_model()
+    if fb and fb not in models:
+        models.append(fb)
+    for m in models:
+        try:
+            out, _steps = await caller(
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": user}],
+                tools=[], max_rounds=1, model=m)
+        except Exception:  # noqa: BLE001 —— 免费档失败不可抛给用户
+            continue
+        if _usable_llm_text(out):
+            return out.strip(), m
+    return "", ""
 TIMEOUT = aiohttp.ClientTimeout(total=240)
 MAX_TOKENS = int(os.getenv("MANAGER_LLM_MAX_TOKENS", "4096"))
 

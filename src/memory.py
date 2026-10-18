@@ -429,22 +429,22 @@ async def rebuild_l2(request: Request):
         raise HTTPException(400, "近30天无 L1 记忆可压缩")
     raw = "\n".join(f"- [{r['category']}] {r['content']} ({r['created_at'][:10]})" for r in rows)
     llm_used = False
+    model_used = ""
+    content = ""
     if llm.configured():
-        try:
-            content, _ = await llm.chat_tools_loop(
-                [{"role": "system", "content":
-                  "你是记忆整理器。把下面的记忆条目压缩为按主题分组的中文要点文档（Markdown，"
-                  "去重合并，保留精确数值/路径/ID），不要添加条目中没有的内容。直接输出文档正文。"},
-                 {"role": "user", "content": raw}],
-                tools=[], max_rounds=1)
-            llm_used = True
-        except Exception:  # noqa: BLE001
-            content = f"# 近30天工作记忆（机械压缩 {len(rows)} 条）\n\n{raw}"
-    else:
+        # 非会话文本提炼（2026-10-18 裁定）：走免费档 + 具体 :free 兜底，
+        # 空正文/审核标签均视为失败 ⇒ 下面降级为机械拼接，绝不把空串写进 L2。
+        content, model_used = await llm.complete_free(
+            "你是记忆整理器。把下面的记忆条目压缩为按主题分组的中文要点文档（Markdown，"
+            "去重合并，保留数值/路径/ID），不要添加条目中没有的内容。直接输出文档正文。",
+            raw)
+        llm_used = bool(model_used)
+    if not content:
         content = f"# 近30天工作记忆（机械压缩 {len(rows)} 条）\n\n{raw}"
     doc = _put_doc("L2", content, None)  # manual 不动
     db.log_asset_event("memory_doc", "L2", "rebuild", writeauth.actor_of(request),
                        {"items": len(rows), "llm": llm_used,
+                        "llm_model": model_used or None,
                         "manual_untouched": True})   # _put_doc(…, None) ⇒ manual 一字未动，如实记
 
     return {"status": "rebuilt", "items": len(rows), "llm": llm_used,

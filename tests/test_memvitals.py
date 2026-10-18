@@ -273,6 +273,34 @@ class TestReadOnly(unittest.TestCase):
         self.assertIn("mode=ro", text)
 
 
+class TestHistoryTookMs(unittest.TestCase):
+    """L2：took_ms 必须逐轮进 history，否则「稳态 p95<1s」无法事后复核。
+
+    反例（2026-10-18）：只写 summary.took_ms ⇒ 每轮被下一轮覆盖，落盘 history 全 null，
+    判据只剩当场单点，换个负载就说不清是否劣化。
+    """
+
+    def test_summary_and_history_both_carry_took(self):
+        rep = memvitals.build_report([src("pi_sessions")], proj(), good_probes(),
+                                     None, NOW, took_ms=123.4)
+        self.assertEqual(rep["summary"]["took_ms"], 123.4)
+        self.assertEqual(rep["history"][-1]["took_ms"], 123.4, "history 未记录本轮耗时")
+
+    def test_prev_history_kept_and_new_entry_appended(self):
+        old = {"history": [{"as_of": "2026-10-18T20:00:00+08:00", "verdict": "ok",
+                            "anomalies": 0, "took_ms": 300.0, "probes": []}]}
+        rep = memvitals.build_report([src("pi_sessions")], proj(), good_probes(),
+                                     old, NOW, took_ms=280.0)
+        self.assertEqual(len(rep["history"]), 2)
+        self.assertEqual([h["took_ms"] for h in rep["history"]], [300.0, 280.0],
+                         "旧条目被覆盖或新条目没追加")
+
+    def test_missing_took_stays_none_not_zero(self):
+        """拿不到耗时必须留 null，不得回填 0——0 会被算进 p95 拉低基线。"""
+        rep = memvitals.build_report([src("pi_sessions")], proj(), good_probes(), None, NOW)
+        self.assertIsNone(rep["history"][-1]["took_ms"])
+
+
 class TestAtomicWrite(unittest.TestCase):
     def test_write_and_reload(self):
         with tempfile.TemporaryDirectory() as td:

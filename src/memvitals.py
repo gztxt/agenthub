@@ -260,6 +260,10 @@ def collect_projection(prev: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     `OnCalendar=05:10` + `RandomizedDelaySec=10m`，实际 05:10–05:20）⇒ 用 **db mtime 当缓存键**：
     mtime 没动就复用上一轮分组结果。这不是拍脑袋的 TTL —— 数据没变就没有重算的理由，
     也不会像「TTL 等于采集周期」那样每轮都恰好过期。
+
+    判据（L1）：稳态 p95 < 1s；**每日 `memindex incremental` 后首轮**（05:10–05:20）
+    页缓存全失效，实测 ≈19s，**一次性成本，必须从 p95 样本中排除**。
+    彻底消除要给 `fed_proj` 加 `source` 索引——2.4GB 表在线建索引的代价未评估，未做。
     """
     if not PROJ_DB.exists():
         return {"ok": False, "error": "索引不存在（检索会退回 rg）", "by_source": {}}
@@ -404,7 +408,8 @@ def _prev_median_took(prev: Optional[Dict[str, Any]], cid: str) -> Optional[floa
 
 def build_report(sources: List[Dict[str, Any]], proj: Dict[str, Any],
                  probes: List[Dict[str, Any]], prev: Optional[Dict[str, Any]] = None,
-                 now: Optional[datetime] = None) -> Dict[str, Any]:
+                 now: Optional[datetime] = None,
+                 took_ms: Optional[float] = None) -> Dict[str, Any]:
     """把采集结果折叠成一份报告。**纯函数**（无 IO）——测试直接喂构造数据。"""
     now = now or _now()
     checks: List[Dict[str, Any]] = []
@@ -535,7 +540,7 @@ def build_report(sources: List[Dict[str, Any]], proj: Dict[str, Any],
             "probes_ok": sum(1 for p in probes if p.get("status") == "ok"),
             "anomalies": len(bad_hard) + len(bad_soft),
             "notes": len(notes),
-            "took_ms": None,
+            "took_ms": took_ms,
         },
         # evidence 一并带出：前端「看证据」要能自证，不能让用户只看到一句结论
         "anomalies": [{"id": c["id"], "layer": c["layer"], "name": c["name"],
@@ -552,14 +557,13 @@ def build_report(sources: List[Dict[str, Any]], proj: Dict[str, Any],
         "probes": [{"id": p["id"], "name": p["name"], "status": p["status"],
                     "took_ms": (p.get("evidence") or {}).get("took_ms")} for p in probes],
     }
-    if prev:
-        hist = list(prev.get("history") or [])
-        hist.append({"as_of": rep["as_of"], "verdict": verdict,
-                     "anomalies": len(rep["anomalies"]), "probes": rep["probes"]})
-        rep["history"] = hist[-HISTORY_MAX:]
-    else:
-        rep["history"] = [{"as_of": rep["as_of"], "verdict": verdict,
-                           "anomalies": len(rep["anomalies"]), "probes": rep["probes"]}]
+    # L2：took_ms 必须逐轮落进 history —— 只写 summary 时每轮被下一轮覆盖，
+    # 事后无法算 p95（实测落盘 history 的 took_ms 全为 null，判据「稳态 p95<1s」无法自证）。
+    entry = {"as_of": rep["as_of"], "verdict": verdict,
+             "anomalies": len(rep["anomalies"]), "took_ms": took_ms,
+             "probes": rep["probes"]}
+    hist = list(prev.get("history") or []) if prev else []
+    rep["history"] = (hist + [entry])[-HISTORY_MAX:]
     return rep
 
 
@@ -617,9 +621,8 @@ def run() -> Dict[str, Any]:
     sources = collect_sources()
     proj = collect_projection(prev)
     probes = collect_probes()
-    rep = build_report(sources, proj, probes, prev)
-    rep["summary"]["took_ms"] = round((time.monotonic() - t0) * 1000, 1)
-    return rep
+    took = round((time.monotonic() - t0) * 1000, 1)
+    return build_report(sources, proj, probes, prev, took_ms=took)
 
 
 def _main(argv: List[str]) -> int:

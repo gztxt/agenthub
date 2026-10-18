@@ -1101,17 +1101,73 @@
            Hallmark · pre-emit critique: P5 H4 E4 S4 R5 V4
            （E=4 而非 5：语义色只给源健康一处，若把警告色撒到 Block 4 会把
              「旧层档案」误读成「故障」；R=5：四档断点均已覆盖，无横向滚动） */
-        .mx-lead { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--mx-2); }
-        .mx-metric {
-            background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
-            padding: var(--mx-2) var(--mx-3); min-width: 0;
+        /* ⚠ 这一段原来只写在注释里、从未声明 ⇒ 全页 var(--mx-*) 全部无效，
+           gap/padding 静默退化为 0（2026-10-18 真浏览器截图才发现：分源行
+           「4 天前234 条37ms」黏成一串）。声明放在页面作用域，不外溢他页。 */
+        #page-memory {
+            --mx-1: 4px; --mx-2: 8px; --mx-3: 12px;
+            --mx-4: 16px; --mx-5: 24px; --mx-6: 32px;
         }
-        .mx-metric b {
-            display: block; font-family: var(--font-mono); font-size: 19px; font-weight: 600;
-            line-height: 1.25; color: var(--text-1); font-variant-numeric: tabular-nums;
+
+        /* ── 结论条（P1）：一屏先答「能不能用 / 哪里不对 / 哪个源」。
+           语义色只出现在左侧圆点与异常左边框两处，其余一律中性色。 */
+        .mv-strip {
+            display: flex; gap: var(--mx-2); align-items: flex-start;
+            background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+            padding: var(--mx-3) var(--mx-4);
         }
-        .mx-metric span { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
-        .mx-metric.is-stale b { color: var(--warn); }
+        .mv-strip[data-verdict="warn"] { border-color: var(--warn-border); }
+        .mv-dot {
+            flex: none; width: 10px; height: 10px; border-radius: 50%;
+            background: var(--muted); margin-top: 5px;
+        }
+        .mv-strip[data-verdict="ok"] .mv-dot { background: var(--ok); }
+        .mv-strip[data-verdict="warn"] .mv-dot { background: var(--warn); }
+        .mv-strip[data-verdict="error"] .mv-dot { background: var(--danger); }
+        .mv-main { flex: 1; min-width: 0; }
+        .mv-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+        .mv-title b { font-size: var(--fs-md); color: var(--text-1); }
+
+        .mv-anoms { display: grid; gap: var(--mx-2); }
+        .mv-anom {
+            border-left: 3px solid var(--danger); background: var(--surface);
+            border-radius: 0 6px 6px 0; padding: var(--mx-2) var(--mx-3);
+            font-size: 12px; overflow-wrap: anywhere;
+        }
+        .mv-anom[data-level="warn"] { border-left-color: var(--warn); }
+        /* notes：可见但不染黄整页（已知可接受的陈旧，例如 L1 演示便签） */
+        .mv-anom[data-level="note"] { border-left-color: var(--muted); }
+        .mv-anom b { font-weight: 600; color: var(--text-1); }
+        .mv-anom .mv-why { color: var(--text-2); }
+        .mv-anom details { margin-top: 2px; }
+        .mv-anom summary { cursor: pointer; color: var(--muted); }
+        .mv-anom pre {
+            margin: 4px 0 0; padding: var(--mx-2); max-height: 160px; overflow: auto;
+            background: var(--bg); border-radius: 4px; font-size: 11px; color: var(--text-2);
+        }
+
+        /* 折叠区：summary 即可点区域，不另设按钮（首屏 0 个 <button> 的落地方式） */
+        .mv-det > .mv-sum {
+            display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+            padding: var(--mx-3) var(--mx-4); cursor: pointer; list-style: none;
+            min-height: 44px;
+        }
+        .mv-det > .mv-sum::-webkit-details-marker { display: none; }
+        .mv-det > .mv-sum::before { content: "▸"; color: var(--muted); font-size: 11px; }
+        .mv-det[open] > .mv-sum::before { content: "▾"; }
+        .mv-det > .mv-sum > span:first-of-type { font-weight: 600; color: var(--text-1); }
+        .mv-det[open] > .mv-sum { border-bottom: 1px solid var(--divider); }
+
+        .mv-checks { display: grid; gap: 0; }
+        .mv-chk {
+            display: grid; grid-template-columns: 8px 52px minmax(0, 1fr) auto;
+            gap: var(--mx-2); align-items: center; padding: 5px 0;
+            border-bottom: 1px solid var(--divider);
+        }
+        .mv-chk:last-child { border-bottom: 0; }
+        .mv-chk-l { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+        .mv-chk-n { font-size: 12px; color: var(--text-2); min-width: 0; overflow-wrap: anywhere; }
+        .mv-chk-r { font-family: var(--font-mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
 
         .mx-srcs { display: grid; grid-template-columns: 1fr; gap: 0; }
         .mx-src {
@@ -1130,14 +1186,9 @@
             font-variant-numeric: tabular-nums; white-space: nowrap;
         }
         .mx-src.off .mx-src-n { color: var(--muted); text-decoration: line-through; }
-
-        .mx-hits { display: grid; grid-template-columns: 1fr; gap: 0; }
-        .mx-hit {
-            padding: var(--mx-2) 0; border-bottom: 1px solid var(--divider); min-width: 0;
-        }
-        .mx-hit:last-child { border-bottom: 0; }
-        .mx-hit p { margin: 0 0 2px; font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
-        .mx-hit .hint { display: block; }
+        /* 列头：让「4 天前 / 234 条 / 37ms」各自可读，否则三个数字连成一串 */
+        .mx-src.mx-hd { padding-top: 0; color: var(--muted); font-size: 11px; }
+        .mx-src.mx-hd .mx-src-n { color: var(--muted); font-size: 11px; }
 
         .mx-ctx { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
         .mx-stale {
@@ -1150,14 +1201,20 @@
         /* 断点值必须与 static/hub/01-core-boot.js 的 matchMedia('(max-width:767px)')
            保持同一取值（分档偏好不变量③）；只允许此一个取值，不得另写 innerWidth<768 */
         @media (max-width: 767px) {
-            .mx-lead { grid-template-columns: repeat(2, 1fr); }
+            /* 窄屏两行：① 名称 + 耗时 ② 最新 + 条数。
+               列头在窄屏无意义（排布与桌面不同），隐藏；单位（前/条/ms）自带解释。 */
             .mx-src { grid-template-columns: 8px minmax(0, 1fr) auto; row-gap: 2px; }
-            .mx-src-k { display: none; }
-            .mx-src-c, .mx-src-t { grid-row: 2; }
-            .mx-src-c { grid-column: 2; }
-            .mx-src-t { grid-column: 3; }
-            .mx-metric b { font-size: 17px; }
-            .mx-card .btn.sm { min-height: 44px; min-width: 44px; }
+            .mx-src.mx-hd { display: none; }
+            .mx-src-n { grid-row: 1; grid-column: 2; }
+            .mx-src-t { grid-row: 1; grid-column: 3; }
+            .mx-src-k { display: block; grid-row: 2; grid-column: 2; }
+            .mx-src-c { grid-row: 2; grid-column: 3; }
+            /* 探针行在窄屏把「层」与「理由」并到第二行，避免 4 列挤成不可读 */
+            .mv-chk { grid-template-columns: 8px minmax(0, 1fr) auto; row-gap: 2px; }
+            .mv-chk-l { grid-row: 2; grid-column: 2; }
+            .mv-chk-n { grid-row: 1; grid-column: 2; }
+            .mv-chk-r { grid-row: 1; grid-column: 3; }
+            .mv-det .btn.sm { min-height: 44px; min-width: 44px; }
         }
     </style>
 </head>
@@ -1524,73 +1581,63 @@
              .sp-bd.box，不再有 420px 魔法数散在 CSS 里。 -->
         <section class="page sys" id="page-memory">
             <div class="sp">
-                <!-- ═══ Block 0 状态带 + Block 1 源健康 + Block 2 注入包（A/B/D/E）═══
-                     A：首屏改为真实联邦记忆总览（此前首屏只有 4 条 2026-09-06 的本地便签）。
-                     B：接 /api/memory/fedsources 逐源健康。
-                     D：注入包默认可见 —— 这是 Agent 每次开局真正收到的内容。
-                     E：进页预检（go() 调 memOverview），不再要求用户先搜一次。
-                     四个数字全部来自实测响应，无任何估算或占位。 -->
-                <div class="sp-card mx-card">
-                    <div class="sp-hd">
-                        <h3>统一记忆总览</h3>
-                        <div class="sp-r">
-                            <span class="hint" id="mxLeadHint">进页自动预检</span>
-                            <button class="btn ghost sm" onclick="memOverview()">重新预检</button>
+                <!-- ═══ P1 首屏（PT-20261018-08）：只读结论，日常 0 按钮 ═══════════════
+                     判据：① 进页 1 个请求（/api/memory/vitals）；② 首屏 0 个 <button>；
+                     ③ 计数与 fed_proj 分组逐源一致。
+                     **不做现场探测**：数据由 agenthub-memvitals.timer 10 分钟采集落盘，
+                     页面只读，`as_of` 明说这是哪一刻的状态——旧版进页现场探测 1.9s 且
+                     整个会话只加载一次，绿点会静默变旧。 -->
+                <div class="mv-strip" id="mvStrip" data-verdict="unknown">
+                    <span class="mv-dot" aria-hidden="true"></span>
+                    <div class="mv-main">
+                        <div class="mv-title">
+                            <b id="mvVerdict">读取中…</b>
+                            <span class="hint" id="mvFacts"></span>
                         </div>
-                    </div>
-                    <div class="sp-bd">
-                        <div class="mx-lead">
-                            <div class="mx-metric"><b id="mxMSrc">—</b><span>可用源 / 启用源</span></div>
-                            <div class="mx-metric"><b id="mxMItems">—</b><span>各源条目合计</span></div>
-                            <div class="mx-metric"><b id="mxMSlow">—</b><span>最慢源探测耗时</span></div>
-                            <div class="mx-metric"><b id="mxMSearch">—</b><span>预检检索耗时</span></div>
-                        </div>
-                        <div class="hint" id="mxLeadNote" style="margin-top:var(--mx-2)"></div>
+                        <div class="hint" id="mvAsOf">探测结果读取中…</div>
                     </div>
                 </div>
 
-                <div class="sp-card mx-card">
-                    <div class="sp-hd">
-                        <h3>源健康</h3>
-                        <div class="sp-r"><span class="hint" id="mxSrcHint">/api/memory/fedsources</span></div>
-                    </div>
-                    <div class="sp-bd box"><div id="mxSrcList" class="mx-srcs"><div class="hint" style="padding:var(--mx-2) 0">预检中…</div></div></div>
-                </div>
+                <!-- 异常清单：0 条时只占一行。每条的理由必须可读（后端保证 reason 非空）。 -->
+                <div class="mv-anoms" id="mvAnoms"><div class="hint">读取中…</div></div>
 
-                <div class="sp-card mx-card">
-                    <div class="sp-hd">
-                        <h3>预检命中</h3>
-                        <div class="sp-r"><span class="hint">固定探针词「记忆」· 按时间倒序 · 非「近期新增」语义</span></div>
-                    </div>
-                    <div class="sp-bd box"><div id="mxHits" class="mx-hits"><div class="hint" style="padding:var(--mx-2) 0">预检中…</div></div></div>
-                </div>
-
-                <div class="sp-card mx-card" id="ctxPanel">
-                    <div class="sp-hd">
-                        <h3>注入上下文包</h3>
-                        <div class="sp-r">
-                            <span class="hint">/api/memory/context · 快路 5 源 · Agent 开局实际收到的内容</span>
-                            <button class="btn ghost sm" onclick="memCtxPreview()">刷新</button>
-                        </div>
-                    </div>
-                    <div class="sp-bd"><pre class="code mx-ctx" id="ctxBody">进页预检中…</pre></div>
-                </div>
-
-                <!-- ═══ Block 3 联邦检索：全页唯一主动作区（原样保留）═══ -->
-                <div class="sp-card mx-card">
-                    <div class="sp-hd">
-                        <h3>联邦检索</h3>                <!-- v0.13.27 E 缺口：联邦检索入口（6 路 RRF）——此前只在资产面板有简陋入口，
-                     记忆中心页只有 L1 LIKE。按需触发（进页不自动跑：防埋点污染+防无谓联邦开销）。
-                     v0.13.28：源 6→10（补 claude_projects/grok/hermes/workbuddy 四家）。 -->
                 <div class="sp-card">
                     <div class="sp-hd">
-                        <h3>联邦检索</h3>
-                        <div class="sp-r">
-                            <span class="hint">本地 L1 + TDAI 权威库 + 8 路外部源 · RRF 融合</span>
-                            <span class="hint" id="memFedHint"></span>
+                        <h3>分源</h3>
+                        <div class="sp-r"><span class="hint" id="mvSrcHint">/api/memory/vitals · 计数来自投影分组</span></div>
+                    </div>
+                    <!-- 不套 .box：14 行本来就该整页滚动，内层再套一个滚动条会出现双滚动条 -->
+                    <div class="sp-bd"><div id="mvSrcs" class="mx-srcs"><div class="hint" style="padding:var(--mx-2) 0">读取中…</div></div></div>
+                </div>
+
+                <!-- 探针默认折叠：绿是常态，展开是取证需要。 -->
+                <details class="sp-card mv-det" id="mvProbeBox">
+                    <summary class="mv-sum">
+                        <span>探针</span>
+                        <span class="hint" id="mvProbeHint">L0 可达 · L1 新鲜 · L2 语义 · L3 一致性</span>
+                    </summary>
+                    <div class="sp-bd"><div id="mvProbes" class="mv-checks"><div class="hint">读取中…</div></div></div>
+                </details>
+
+                <!-- ═══ 工具与维护：日常不需要。展开才拉 L1/L2/L3 与注入包 ⇒ 首屏请求数保持 1。
+                     写动作逐个标成本（P2 判据②）。 ═══ -->
+                <details class="sp-card mv-det" id="mvToolsBox" ontoggle="mvToolsToggle(this)">
+                    <summary class="mv-sum">
+                        <span>工具与维护</span>
+                        <span class="hint">联邦检索 · 注入包 · 手工重读</span>
+                    </summary>
+
+                    <div class="sp-tools">
+                        <div class="toolbar">
+                            <button class="btn ghost sm" onclick="memVitals()">重新读取探针结果</button>
+                            <span class="hint">只重读落盘文件；探针本身由定时器每 10 分钟跑一次</span>
                         </div>
                     </div>
-                    <div class="sp-tools">
+
+                    <!-- 联邦检索：本地 L1 + TDAI 权威库 + 外部源，RRF 融合。按需触发。 -->
+                    <div class="sp-bd" style="border-top:1px solid var(--divider)">
+                        <div class="sp-sub">联邦检索</div>
+                        <div class="hint" id="memFedHint" style="margin-bottom:8px">本地 L1 + TDAI 权威库 + 8 路外部源 · RRF 融合</div>
                         <div class="toolbar">
                             <input id="memFedQ" placeholder="跨全部记忆源检索（如：端口 / 备份 / CCR）…" onkeydown="if(event.key==='Enter')memFedSearch()">
                             <button class="btn sm" onclick="memFedSearch()">检索</button>
@@ -1609,75 +1656,29 @@
                                 <option value="workbuddy_memory" selected>workbuddy 记忆</option>
                                 <option value="workspace_files" selected>工作区文件</option>
                                 <option value="archived_sessions" selected>归档会话</option>
-                                <option value="amr_memory">AMR 记忆仓</option>
+                                <option value="amr_memory" disabled>AMR 记忆仓（已停用）</option>
                                 <option value="experiences" selected>经验库（Dreaming）</option>
                             </select>
                         </div>
                     </div>
                     <div class="sp-bd" style="padding-top:0;padding-bottom:6px">
                         <div id="memFedBadges" class="hint"></div>
-                        <!-- v0.13.28 批3：检索态 header 条——「当前检索 q · N 条 · 清空」，搜完可回退主界面 -->
                         <div id="memFedQueryBar" class="toolbar" style="display:none;margin:2px 0 0"></div>
                     </div>
                     <div class="sp-bd box"><div id="memFedResults" class="sp-list">输入关键词开始联邦检索</div></div>
-                </div>
-                <!-- ═══ Block 4 本机旧层档案（C：L1/L2/L3 降为次要 + 陈旧标识）═══
-                     病根不是数据坏了，是这三层与在役的联邦 10 路是**两套东西**：
-                     L1 是 hub 自有 SQLite 的演示便签，L2 由它压缩而来，L3 从未写入。
-                     所以「用 LLM 重建」只会反复压缩那 4 条旧便签 —— 修不了陈旧显示。
-                     本块保留全部原有写入口（不删功能），但排序降到末位并前置实测口径。 -->
-                <div class="sp-card mx-card">
-                    <div class="sp-hd">
-                        <h3>本机旧层档案</h3>
-                        <div class="sp-r"><span class="hint">L1 便签（可写）· L2 近 30 天压缩 · L3 长期画像（草稿→确认制）</span></div>
-                    </div>
-                    <div class="sp-bd">
-                        <div class="mx-stale" id="mxStale">本机旧层实测口径加载中…</div>
-                        <div class="sp-grid">
-                        <div class="sp-r"><span class="hint">L1 便签（可写）· L2 近 30 天压缩 · L3 长期画像（草稿→确认制）</span></div>
-                    </div>
-                    <div class="sp-bd">
-                        <div class="sp-grid">
-                            <div class="sp-cell">
-                                <div class="sp-sub">L1 · 本地便签</div>
-                                <div class="hint" style="margin-bottom:8px">hub 自有 SQLite 的演示/手写便签（当前为陈旧样例），
-                                <b>主记忆检索走上方「联邦检索」</b>。</div>
-                                <div class="toolbar">
-                                    <input id="memQ" placeholder="搜索…" onkeydown="if(event.key==='Enter')loadMemories()">
-                                    <select id="memCat" onchange="loadMemories()" style="max-width:130px">
-                                        <option value="">全部分类</option><option>fact</option><option>decision</option><option>constraint</option><option>preference</option>
-                                    </select>
-                                </div>
-                                <div class="sp-bd box flush tscroll" style="border-top:1px solid var(--divider)"><div class="sp-list" id="memList"></div></div>
-                                <div class="toolbar" style="margin-top:10px">
-                                    <input id="memNew" placeholder="新增一条记忆…">
-                                    <button class="btn sm" onclick="addMemory()">添加</button>
-                                </div>
-                                <div class="hint">L2 由 L1 经 LLM 压缩生成；manual 手写区自动流程永不触碰（与上游语义一致）。</div>
-                            </div>
-                            <div class="sp-cell">
-                                <div class="sp-sub">L2 · 近 30 天工作记忆</div>
-                                <textarea class="doc" id="l2content" readonly placeholder="（尚无生成内容）"></textarea>
-                                <div class="hint" style="margin:6px 0">手写补充 manual：</div>
-                                <textarea class="doc" id="l2manual" style="min-height:80px"></textarea>
-                                <div class="toolbar" style="margin-top:8px;margin-bottom:0">
-                                    <button class="btn sm" onclick="saveDoc('l2')">保存</button>
-                                    <button class="btn ghost sm" onclick="rebuildL2()"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>用 LLM 重建</button>
-                                </div>
-                            </div>
-                            <div class="sp-cell">
-                                <div class="sp-sub">L3 · 长期 Profile</div>
-                                <textarea class="doc" id="l3content" placeholder="人工确认后写入的稳定长期偏好（草稿→确认制）"></textarea>
-                                <div class="hint" style="margin:6px 0">手写补充 manual：</div>
-                                <textarea class="doc" id="l3manual" style="min-height:80px"></textarea>
-                                <div class="toolbar" style="margin-top:8px;margin-bottom:0">
-                                    <button class="btn sm" onclick="saveDoc('l3')">保存</button>
-                                    <button class="btn ghost sm" onclick="previewCtx()">注入预览</button>
-                                </div>
-                            </div>
+
+                    <!-- 注入上下文包：Agent 每次开局真正收到的内容，排障时看这个。 -->
+                    <div class="sp-bd" style="border-top:1px solid var(--divider)">
+                        <div class="sp-sub">注入上下文包</div>
+                        <div class="hint" style="margin-bottom:8px">/api/memory/context · 快路 5 源 · 无 query 时注入最近记忆</div>
+                        <div class="toolbar" style="margin-bottom:8px">
+                            <button class="btn ghost sm" onclick="memCtxPreview()">刷新</button>
                         </div>
+                        <pre class="code mx-ctx" id="ctxBody">展开本区后自动加载…</pre>
                     </div>
-                </div>
+
+
+                </details>
             </div>
         </section>
 
@@ -2251,6 +2252,62 @@
              profile_events 全量 source（既有的「运行日志」页只看 rest，这里互补）。
              形态纪律同另三个设置页：正文出页（无浮层）、按钮一律 data-settings-act 走委托、
              筛选是页内 select + 关键字框（关键字在服务端 Python 里过滤，绝不进命令行）。 -->
+        <!-- 记忆存储（设置）：本机旧层 L1/L2/L3 的写入口。
+             2026-10-18 按 PT-20261018-08 裁定①从「记忆中心」移出——4 条 2026-09 便签
+             不是「查看」需求，但写入口必须留；日常看记忆只去「记忆中心」。 -->
+        <section class="page sys" id="page-settings-memory">
+            <div class="sp">
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>记忆存储（本机旧层）</h3>
+                        <div class="sp-r"><span class="hint">L1 便签（可写）· L2 近 30 天压缩 · L3 长期画像（草稿→确认制）</span></div>
+                    </div>
+                    <div class="sp-bd">
+                        <div class="mx-stale" id="mxStale">本机旧层实测口径加载中…</div>
+                        <div class="sp-grid">
+                            <div class="sp-cell">
+                                <div class="sp-sub">L1 · 本地便签</div>
+                                <div class="hint" style="margin-bottom:8px">hub 自有 SQLite 的演示/手写便签（当前为陈旧样例），
+                                <b>主记忆检索请去「记忆中心」</b>。</div>
+                                <div class="toolbar">
+                                    <input id="memQ" placeholder="搜索…" onkeydown="if(event.key==='Enter')loadMemories()">
+                                    <select id="memCat" onchange="loadMemories()" style="max-width:130px">
+                                        <option value="">全部分类</option><option>fact</option><option>decision</option><option>constraint</option><option>preference</option>
+                                    </select>
+                                </div>
+                                <div class="sp-bd box flush tscroll" style="border-top:1px solid var(--divider)"><div class="sp-list" id="memList"></div></div>
+                                <div class="toolbar" style="margin-top:10px">
+                                    <input id="memNew" placeholder="新增一条记忆…">
+                                    <button class="btn sm" onclick="addMemory()" title="写入本机 SQLite">添加</button>
+                                </div>
+                                <div class="hint">L2 由 L1 经 LLM 压缩生成；manual 手写区自动流程永不触碰（与上游语义一致）。</div>
+                            </div>
+                            <div class="sp-cell">
+                                <div class="sp-sub">L2 · 近 30 天工作记忆</div>
+                                <textarea class="doc" id="l2content" readonly placeholder="（尚无生成内容）"></textarea>
+                                <div class="hint" style="margin:6px 0">手写补充 manual：</div>
+                                <textarea class="doc" id="l2manual" style="min-height:80px"></textarea>
+                                <div class="toolbar" style="margin-top:8px;margin-bottom:0">
+                                    <button class="btn sm" onclick="saveDoc('l2')">保存</button>
+                                    <button class="btn ghost sm" onclick="rebuildL2()" title="调云端 LLM 压缩近 30 天 L1，约 10–60s">用 LLM 重建（约 10–60s）</button>
+                                </div>
+                            </div>
+                            <div class="sp-cell">
+                                <div class="sp-sub">L3 · 长期 Profile</div>
+                                <textarea class="doc" id="l3content" placeholder="人工确认后写入的稳定长期偏好（草稿→确认制）"></textarea>
+                                <div class="hint" style="margin:6px 0">手写补充 manual：</div>
+                                <textarea class="doc" id="l3manual" style="min-height:80px"></textarea>
+                                <div class="toolbar" style="margin-top:8px;margin-bottom:0">
+                                    <button class="btn sm" onclick="saveDoc('l3')">保存</button>
+                                    <button class="btn ghost sm" onclick="previewCtx()">注入预览</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <section class="page sys" id="page-settings-logs">
             <div class="sp">
                 <div class="sp-card">
@@ -2484,6 +2541,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=8c134e91"></script>
+    <script src="/static/hub.js?v=bb941265"></script>
 </body>
 </html>

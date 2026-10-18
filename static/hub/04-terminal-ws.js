@@ -480,59 +480,156 @@ async function loadDoc(lv) {
   } catch (e) { /* 首次为空 */ }
 }
 
-/* ═══ 记忆中心 A~E（2026-10-03）· 全部读实测响应，无估算、无占位数字 ═══ */
-const MX_PROBE_Q = '记忆';
+/* ═══ 记忆中心 P1（PT-20261018-08）：只读 /api/memory/vitals ═══════════════
+ * 判据（方案 §4）：进页 1 个请求、首屏 0 个 <button>、计数与投影分组逐源一致。
+ * 页面**不做现场探测**：探测由 agenthub-memvitals.timer 每 10 分钟跑一次并落盘，
+ * 这里只读文件。旧版进页现场探测 1.9s，且 `memLoaded` 闸让整个会话只加载一次，
+ * 绿点会静默变旧 —— 现在每次进页都重读（4ms），`as_of` 明说是哪一刻的状态。
+ *
+ * ⚠ verdict=unknown 有两种含义，必须分开渲染：
+ *   · 文件不存在 ⇒ timer 从没跑过（不是「一切正常」）；
+ *   · 文件太旧   ⇒ stale=true，前端不得把它画成现在。
+ */
 const MX_FAST_SOURCES = 'local,tdai,claude_mem,workbuddy_memory,claude_projects';
-
 function mxSet(id, v) { const e = $(id); if (e) e.textContent = v; }
 function mxMs(v) { return (v === null || v === undefined) ? '—' : (Math.round(v * 10) / 10) + ' ms'; }
+const MV_VERDICT = { ok: '可用', warn: '降级', error: '异常', unknown: '未知' };
 
-async function memOverview() {
-  // ── B 源健康 ──
+function mvAgo(iso) {
+  if (!iso) return '—';
+  const t = Date.parse(iso);
+  if (isNaN(t)) return '—';
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 90) return Math.round(s) + ' 秒前';
+  if (s < 5400) return Math.round(s / 60) + ' 分钟前';
+  if (s < 172800) return Math.round(s / 3600) + ' 小时前';
+  return Math.round(s / 86400) + ' 天前';
+}
+function mvHHMM(dt) {
+  return String(dt.getHours()).padStart(2, '0') + ':' + String(dt.getMinutes()).padStart(2, '0');
+}
+function mvDur(ms) {
+  if (ms === null || ms === undefined) return '—';
+  return ms < 1000 ? Math.round(ms) + 'ms' : (Math.round(ms / 100) / 10) + 's';
+}
+
+async function memVitals() {
   try {
-    const d = await api('/api/memory/fedsources');
-    const srcs = d.sources || [];
-    const enabled = (typeof d.enabled === 'number') ? d.enabled : srcs.filter(s => s.enabled).length;
-    const okN = srcs.filter(s => s.probe && s.probe.ok).length;
-    const items = srcs.reduce((n, s) => n + ((s.probe && typeof s.probe.count === 'number') ? s.probe.count : 0), 0);
-    const times = srcs.filter(s => s.probe && s.probe.ok && typeof s.probe.ms === 'number').map(s => s.probe.ms);
-    mxSet('mxMSrc', okN + '/' + enabled);
-    mxSet('mxMItems', items.toLocaleString('zh-CN'));
-    mxSet('mxMSlow', times.length ? mxMs(Math.max.apply(null, times)) : '—');
-    mxSet('mxSrcHint', '注册 ' + srcs.length + ' 路 · 可用 ' + okN + ' 路 · 停用 ' + srcs.filter(s => !s.enabled).length + ' 路');
-    mxSet('mxLeadHint', '预检于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }));
-    $('mxSrcList').innerHTML = srcs.map(s => {
-      const p = s.probe || {};
-      const cls = !s.enabled ? 'off' : (p.ok ? 'ok' : 'bad');
-      return '<div class="mx-src ' + (s.enabled ? '' : 'off') + '">' +
-        '<span class="mx-dot ' + cls + '" title="' + (s.enabled ? (p.ok ? '可用' : '不可用') : '已停用') + '"></span>' +
-        '<span class="mx-src-n">' + escapeHtml(s.label || s.id) + '</span>' +
-        '<span class="mx-src-k">' + escapeHtml(s.kind || '') + '</span>' +
-        '<span class="mx-src-c">' + (typeof p.count === 'number' ? p.count.toLocaleString('zh-CN') + ' 条' : '—') + '</span>' +
-        '<span class="mx-src-t">' + (typeof p.ms === 'number' ? mxMs(p.ms) : (p.note ? escapeHtml(String(p.note)) : '—')) + '</span>' +
+    const d = await api('/api/memory/vitals');
+    mvRender(d);
+    CENTER_HEALTH.memory = d.verdict === 'error' ? 'err' : (d.verdict === 'ok' ? 'ok' : 'warn');
+  } catch (e) {
+    const strip = $('mvStrip'); if (strip) strip.dataset.verdict = 'error';
+    mxSet('mvVerdict', '读取失败');
+    mxSet('mvFacts', '');
+    const asof = $('mvAsOf'); if (asof) asof.textContent = e.message;
+    CENTER_HEALTH.memory = 'err';
+  }
+}
+
+function mvRender(d) {
+  const strip = $('mvStrip'); if (!strip) return;
+  strip.dataset.verdict = d.verdict || 'unknown';
+  const s = d.summary || {};
+  mxSet('mvVerdict', MV_VERDICT[d.verdict] || d.verdict || '未知');
+  mxSet('mvFacts', d.verdict === 'unknown' ? '' :
+    '源 ' + (s.sources_ok || 0) + '/' + (s.sources_total || 0) +
+    (s.sources_off ? '（停用 ' + s.sources_off + '）' : '') +
+    ' · 探针 ' + (s.probes_ok || 0) + '/' + (s.probes_total || 0));
+
+  // as_of：不给「刚刚」这种模糊话——本次数据是几点采的、下次几点采，都写出来
+  const asof = $('mvAsOf');
+  if (asof) {
+    if (!d.as_of) {
+      asof.textContent = d.reason || '尚无探测结果（检查 agenthub-memvitals.timer）';
+    } else {
+      const now = new Date();
+      const next = new Date(now.getTime());
+      next.setSeconds(0, 0); next.setMinutes(Math.floor(now.getMinutes() / 10) * 10 + 10);
+      asof.textContent = '探测于 ' + mvHHMM(new Date(d.as_of)) + '（' + mvAgo(d.as_of) + '）' +
+        (d.stale ? ' · 数据已过期，定时器可能没在跑' : ' · 下次 ' + mvHHMM(next));
+    }
+  }
+
+  // 异常清单：0 条只占一行
+  const box = $('mvAnoms');
+  if (box) {
+    const anoms = d.anomalies || [];
+    const notes = d.notes || [];
+    box.innerHTML = anoms.map(a => {
+      const lvl = a.status === 'warn' ? 'warn' : 'error';
+      return '<div class="mv-anom" data-level="' + lvl + '">' +
+        '<b>' + escapeHtml(a.name || a.id || '') + '</b> ' +
+        '<span class="mv-why">' + escapeHtml(a.reason || '') + '</span>' +
+        (a.evidence ? '<details><summary>证据</summary><pre>' +
+          escapeHtml(JSON.stringify(a.evidence, null, 1)) + '</pre></details>' : '') +
         '</div>';
-    }).join('') || '<div class="hint">注册表为空</div>';
-  } catch (e) {
-    $('mxSrcList').innerHTML = '<div class="hint">源健康预检失败：' + escapeHtml(e.message) + '</div>';
-    mxSet('mxLeadNote', '源健康预检失败，其余指标照常');
+    }).join('') || '<div class="hint">无异常。</div>';
+    // notes：可见但不染色 ⇒ 用 muted 左边框，不参与 verdict
+    if (notes.length) {
+      box.innerHTML += notes.map(n => '<div class="mv-anom" data-level="note">' +
+        '<b>说明</b> <span class="mv-why">' + escapeHtml(n.name || '') + '：' +
+        escapeHtml(n.reason || '') + '</span></div>').join('');
+    }
   }
-  // ── E 预检命中 ──
-  try {
-    const r = await api('/api/memory/search?q=' + encodeURIComponent(MX_PROBE_Q) + '&limit=6');
-    mxSet('mxMSearch', (typeof r.took_ms === 'number' ? mxMs(r.took_ms) : '—'));
-    const ms = (r.memories || []).slice().sort((a, b) =>
-      String(b.created_at || '').localeCompare(String(a.created_at || '')));
-    const eng = (r.engine || '').split('|')[0];
-    mxSet('mxLeadNote', '预检命中 ' + ms.length + ' 条 · 引擎 ' + escapeHtml(eng || '—') +
-      ' · 后端 ' + ((r.backends || []).length) + ' 路' + ((r.degraded || []).length ? ' · 降级 ' + escapeHtml((r.degraded || []).join(',')) : ''));
-    $('mxHits').innerHTML = ms.map(m =>
-      '<div class="mx-hit"><p>' + escapeHtml((m.content || '').slice(0, 220)) + '</p>' +
-      '<span class="hint">' + escapeHtml(m.source || '') + ' · ' + escapeHtml(String(m.created_at || '').slice(0, 10)) +
-      ' · ' + escapeHtml(m.type || '') + '</span></div>').join('') ||
-      '<div class="hint">探针词无命中（这本身是有效信息：说明该词在当前源里没有内容）</div>';
-  } catch (e) {
-    $('mxHits').innerHTML = '<div class="hint">预检检索失败：' + escapeHtml(e.message) + '</div>';
+
+  // 分源表：条数来自 fed_proj 分组（P0 已修「三行同数」），off 源划掉但仍列出
+  const srcs = d.sources || [];
+  const okN = srcs.filter(x => x.enabled && x.ok).length;
+  const enN = srcs.filter(x => x.enabled).length;
+  mxSet('mvSrcHint', '启用 ' + enN + ' 路 · 可用 ' + okN + ' 路 · 停用 ' +
+    srcs.filter(x => !x.enabled).length + ' 路');
+  const list = $('mvSrcs');
+  if (list) {
+    const head = '<div class="mx-src mx-hd">' +
+      '<span></span><span class="mx-src-n">源</span>' +
+      '<span class="mx-src-k">最新</span><span class="mx-src-c">条数</span>' +
+      '<span class="mx-src-t">耗时</span></div>';
+    list.innerHTML = head + (srcs.map(x => {
+      const cls = !x.enabled ? 'off' : (x.ok ? 'ok' : 'bad');
+      const cnt = (!x.enabled) ? '—'
+        : ((typeof x.count === 'number') ? x.count.toLocaleString('zh-CN') + ' 条' : '—');
+      const fresh = x.fresh_at ? mvAgo(x.fresh_at) : '—';
+      let tail;
+      if (!x.enabled) tail = '停用';
+      else if (!x.ok) tail = '不可达';
+      else if (typeof x.ms === 'number') tail = Math.round(x.ms) + 'ms';
+      else tail = 'ok';
+      const title = [x.reason, x.note].filter(Boolean).join(' · ');
+      return '<div class="mx-src' + (x.enabled ? '' : ' off') + '" title="' + escapeHtml(title) + '">' +
+        '<span class="mx-dot ' + cls + '"></span>' +
+        '<span class="mx-src-n">' + escapeHtml(x.label || x.id || '') + '</span>' +
+        '<span class="mx-src-k">' + escapeHtml(fresh) + '</span>' +
+        '<span class="mx-src-c">' + cnt + '</span>' +
+        '<span class="mx-src-t">' + escapeHtml(tail) + '</span>' +
+        '</div>';
+    }).join('') || '<div class="hint">无源</div>');
   }
+
+  // 探针明细（折叠区的载荷）
+  const hint = $('mvProbeHint');
+  if (hint) hint.textContent = (s.probes_ok || 0) + '/' + (s.probes_total || 0) +
+    ' ok · 采集 ' + mvDur(s.took_ms) + ' · L0 可达 · L1 新鲜 · L2 语义 · L3 一致性';
+  const pbox = $('mvProbes');
+  if (pbox) {
+    pbox.innerHTML = (d.checks || []).map(c => {
+      const cls = c.status === 'ok' ? 'ok' : (c.status === 'info' ? '' : 'bad');
+      const why = c.reason ? ' · ' + c.reason : '';
+      return '<div class="mv-chk">' +
+        '<span class="mx-dot ' + cls + '"></span>' +
+        '<span class="mv-chk-l">' + escapeHtml(c.layer || '') + '</span>' +
+        '<span class="mv-chk-n">' + escapeHtml(c.name || c.id || '') + escapeHtml(why) + '</span>' +
+        '<span class="mv-chk-r">' + escapeHtml(c.status || '') + '</span>' +
+        '</div>';
+    }).join('') || '<div class="hint">无检查项</div>';
+  }
+}
+
+/* 工具区展开才拉注入包 ⇒ 首屏请求数保持 1（判据①）。
+   L1/L2/L3 已按裁定①移到「设置 · 记忆存储」，此页不再碰旧层数据。 */
+function mvToolsToggle(el) {
+  if (!el.open || el.dataset.loaded) return;
+  el.dataset.loaded = '1';
   memCtxPreview();
 }
 

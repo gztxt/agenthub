@@ -213,7 +213,7 @@ function cssNum(name, fallback) {
   return Number.isFinite(v) ? v : fallback;
 }
 
-let AGENTS = [], PORTS = [], portsLoaded = false, memLoaded = false, skillsLoaded = false, kbLoaded = false;
+let AGENTS = [], PORTS = [], portsLoaded = false, skillsLoaded = false, kbLoaded = false;
 /* v0.13.30 本机项目页懒加载标志：声明在 01（拼接序最先）而赋值/读取在 09 分片。
    ⚠ 声明只允许存在于 01 这一处。历史错误（v0.13.32~v0.13.103）：09/10 分片顶层又各
    写了一份 `var lpLoaded = false`，并在注释里断言「同名 var 是刻意冗余、赋值不
@@ -231,6 +231,7 @@ var ghLoaded = false;
 var setModelPageLoaded = false;
 var setGithubPageLoaded = false;
 var setLogsPageLoaded = false;   // v0.13.46：日志页（进页才拉，日志量级大不能每次导航都拉）
+var setMemPageLoaded = false;    // v0.13.126：设置·记忆存储（L1/L2/L3 已移出记忆中心）
 var resLoaded = false;           // v0.13.52：资源监控页懒加载标志（同 lpLoaded/ghLoaded 纪律）
 /* v0.13.32 TDZ 补丁（真事故驱动的修复）：06 顶层 go(lsGet('hub.page')) 在
    09/10 分片顶层初始化**之前**就能调到 loadLocalProjects()/loadGithubRepos()
@@ -482,7 +483,10 @@ function go(page) {
   lsSet('hub.page', page);  // T9：记忆上次所在页，刷新后回落
   renderNav();            // v0.7：同步左侧手风琴（实体/系统项的选中态）
   renderPageCrumb(page);  // v0.7：系统页面包屑（实体页由 renderModeBar 接管）
-  if (page === 'memory' && !memLoaded) { memLoaded = true; memOverview(); loadMemories(); loadDoc('l2'); loadDoc('l3'); }
+  // P1（PT-20261018-08）：每次进页重读一次 vitals 投影（<5ms，带 as_of）。
+  // 不再用 memLoaded 闸：整会话只加载一次会让绿点静默变旧，而这份数据本来就是
+  // 「哪一刻采的」而不是「现在怎样」——重读成本远低于误导成本。
+  if (page === 'memory') memVitals();
   if (page === 'skills' && !skillsLoaded) { skillsLoaded = true; loadSkills(); loadSkillBudget(); }
   if (page === 'kb' && !kbLoaded) { kbLoaded = true; loadKbStatus(); kbBrowse(); }
   if (page === 'localprojects' && !lpLoaded) { lpLoaded = true; loadLocalProjects(); }   // v0.13.30 本机项目页（09 分片）
@@ -491,6 +495,7 @@ function go(page) {
   if (page === 'settings-model' && !setModelPageLoaded) { setModelPageLoaded = true; settingsModelsLoad(); }
   if (page === 'settings-github' && !setGithubPageLoaded) { setGithubPageLoaded = true; settingsGithubLoad(); }
   if (page === 'settings-logs' && !setLogsPageLoaded) { setLogsPageLoaded = true; settingsLogsLoad(); }
+  if (page === 'settings-memory' && !setMemPageLoaded) { setMemPageLoaded = true; loadMemories(); loadDoc('l2'); loadDoc('l3'); }
   if (page === 'ports' && !portsLoaded) { portsLoaded = true; loadPorts(); }
   if (page === 'telemetry') loadTelemetry();
   if (page === 'resources' && !resLoaded) { resLoaded = true; loadResources(); }
@@ -868,9 +873,9 @@ const SET_WRITE_MODE = {
   argv: { label: '仅终端注入', hint: '此 agent 无默认模型配置文件，只有 hub 拉起的终端会带 --model。' },
   none: { label: '不支持设置', hint: '该 agent 不在模型设置范围内。' },
 };
-/* 三个设置页的 id —— 委托与 go() 懒加载共用这一份清单，别再各处写字面量 */
+/* 设置页 id —— 委托与 go() 懒加载共用这一份清单，别再各处写字面量 */
 const SET_PAGE_IDS = ['page-settings-model', 'page-settings-github', 'page-settings-token',
-                      'page-settings-logs'];
+                      'page-settings-memory', 'page-settings-logs'];
 
 async function settingsModelsLoad(force) {
   const box = $('setAgentList');

@@ -131,6 +131,34 @@ def _check(cid: str, layer: str, name: str, status: str, reason: str = "",
 
 # ── L0 可达 ──────────────────────────────────────────────────────────
 
+def _fresh_claude_mem() -> Optional[str]:
+    """claude-mem 最后一条写入时间。
+
+    这张表没有 `created_at` 文本列，只有 `created_at_epoch`（整数秒）。
+    取它是为了能看出「capture 静默停更」——正是本探针存在的理由之一。
+    """
+    p = Path(os.path.expanduser("~/.claude-mem/claude-mem.db"))
+    if not p.is_file():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=1.0)
+        try:
+            v = con.execute(
+                "SELECT MAX(t) FROM (SELECT created_at_epoch AS t FROM observations "
+                "UNION ALL SELECT created_at_epoch AS t FROM session_summaries)"
+            ).fetchone()[0]
+        finally:
+            con.close()
+        if not v:
+            return None
+        ts = float(v)
+        if ts > 1e11:      # 实测是毫秒（1792254671154）；秒级时保持原样
+            ts /= 1000.0
+        return _iso(datetime.fromtimestamp(ts).astimezone())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def collect_sources() -> List[Dict[str, Any]]:
     """源清单 + 可达性。
 
@@ -160,17 +188,23 @@ def collect_sources() -> List[Dict[str, Any]]:
         out.append({"id": s.get("id"), "label": s.get("label") or s.get("id"),
                     "enabled": enabled, "ok": bool(p.get("ok")), "status": status,
                     "reason": reason, "count": cnt, "fresh_at": None,
+                    "ms": p.get("ms") if isinstance(p.get("ms"), (int, float)) else None,
                     "note": str(p.get("note") or "")[:120]})
 
     # local / tdai 不在 fedsources 注册表里，但它们是默认检索的两路 ⇒ 必须单列
     out.append(_probe_local())
     out.append(_probe_tdai())
+    # claude-mem 的 fedsources probe 不带时间；单查一次（329 行，毫秒级）
+    for s in out:
+        if s.get("id") == "claude_mem":
+            s["fresh_at"] = _fresh_claude_mem()
     return out
 
 
 def _probe_local() -> Dict[str, Any]:
     base = {"id": "local", "label": "本地 L1 便签（hub 自有库）", "enabled": True,
-            "count": None, "fresh_at": None, "note": "memories 表 status=active"}
+            "count": None, "fresh_at": None, "ms": None, "note": "memories 表 status=active"}
+    t0 = time.monotonic()
     try:
         d = _http_json(f"{HUB}/api/memory/l1?limit=200")
     except ProbeError as e:
@@ -178,18 +212,22 @@ def _probe_local() -> Dict[str, Any]:
     rows = d.get("memories") or []
     newest = max((str(r.get("created_at") or "") for r in rows), default="")
     base.update({"ok": True, "status": "ok", "reason": "",
-                 "count": len(rows), "fresh_at": newest[:10] or None})
+                 "count": len(rows), "fresh_at": newest[:10] or None,
+                 "ms": round((time.monotonic() - t0) * 1000, 1)})
     return base
 
 
 def _probe_tdai() -> Dict[str, Any]:
     base = {"id": "tdai", "label": "TDAI 权威库（:8420）", "enabled": True,
-            "count": None, "fresh_at": None, "note": "L1/L0 总量取自 hub /health 的缓存"}
+            "count": None, "fresh_at": None, "ms": None,
+            "note": "L1/L0 总量取自 hub /health 的缓存"}
+    t0 = time.monotonic()
     try:
         h = _http_json(f"{TDAI}/health", timeout=5.0)
     except ProbeError as e:
         return {**base, "ok": False, "status": "error",
                 "reason": f"权威库不可达：{e}"}
+    base["ms"] = round((time.monotonic() - t0) * 1000, 1)
     stores = h.get("stores") or {}
     bad = [k for k in ("vectorStore", "embeddingService") if not stores.get(k)]
     try:
@@ -483,8 +521,10 @@ def build_report(sources: List[Dict[str, Any]], proj: Dict[str, Any],
             "notes": len(notes),
             "took_ms": None,
         },
+        # evidence 一并带出：前端「看证据」要能自证，不能让用户只看到一句结论
         "anomalies": [{"id": c["id"], "layer": c["layer"], "name": c["name"],
-                       "status": c["status"], "reason": c["reason"]}
+                       "status": c["status"], "reason": c["reason"],
+                       "evidence": c.get("evidence")}
                       for c in (bad_hard + bad_soft)],
         "notes": [{"id": c["id"], "layer": c["layer"], "name": c["name"],
                    "reason": c["reason"]} for c in notes],

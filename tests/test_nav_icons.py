@@ -98,7 +98,8 @@ class NavIconCollisionTest(unittest.TestCase):
         """备案：全表撞车列出来（不判红，但必须被记录下来，不能悄悄存在）。
 
         当前已知且**有意保留**的：遥测/日志 同为 activity（不同组，不相邻）；
-        GitHub 项目/设置-GitHub 同为 globe（同理）。
+        GitHub 项目/设置-GitHub 同为 globe（同理）；记忆中心/设置-记忆存储 同为
+        database（同一领域的主页与其设置页，不同组、不同屏，不构成并排误读）。
         这条测试的价值是：将来新增项若撞车，会在这里显形，由 owner 决定要不要处理。
         """
         from collections import Counter
@@ -106,7 +107,7 @@ class NavIconCollisionTest(unittest.TestCase):
         dup = {k: v for k, v in c.items() if v > 1}
         self.assertNotIn("cpu", dup, "cpu 撞车未清干净：%d 处" % dup.get("cpu", 0))
         # 已知保留项白名单：新增撞车不在此列表时会在注释里显形
-        self.assertLessEqual(set(dup) - {"activity", "globe"}, set(),
+        self.assertLessEqual(set(dup) - {"activity", "globe", "database"}, set(),
                              "出现未登记的新撞车：%s" % dup)
 
 

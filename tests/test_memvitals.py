@@ -12,7 +12,9 @@ TDAI 单源吃满 200/200、memindex note 截断吃掉 last_build）。探针自
 就等于把事故常态化。
 """
 import json
+import os
 import pathlib
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -205,6 +207,59 @@ class TestInfoIsNotWarn(unittest.TestCase):
         rep = memvitals.build_report([src("pi_sessions")], proj(), p, None, NOW)
         self.assertEqual(rep["verdict"], "ok")
         self.assertTrue(any(n["id"] == "note:semantic_floor" for n in rep["notes"]))
+
+
+class TestProjectionCache(unittest.TestCase):
+    """分组计数按 db mtime 缓存：数据没变不得重扫 2.4GB。
+
+    判据要求**双向**：mtime 不变 ⇒ 必须复用；mtime 变了 ⇒ 必须重算。
+    只测前者会造出「永远缓存」的恒真判据。
+    """
+
+    def _make_db(self, td):
+        p = pathlib.Path(td) / "memindex.db"
+        con = sqlite3.connect(p)
+        con.executescript("""
+            CREATE TABLE fed_proj(source TEXT, path TEXT, realpath TEXT, l1 INT, l2 INT,
+                                  mtime INT, size INT, chunk_no INT, text TEXT);
+            CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);
+        """)
+        con.executemany("INSERT INTO meta VALUES(?,?)",
+                        [("files", "2"), ("chunks", "3"), ("last_build", "2026-10-18T10:31:16")])
+        con.executemany(
+            "INSERT INTO fed_proj VALUES(?,?,?,0,0,?,0,0,'t')",
+            [("pi_sessions", "a.md", "a.md", 100), ("pi_sessions", "b.md", "b.md", 200),
+             ("codex_sessions", "c.md", "c.md", 300)])
+        con.commit()
+        con.close()
+        return p
+
+    def _with_db(self, p):
+        old = memvitals.PROJ_DB
+        memvitals.PROJ_DB = p
+        self.addCleanup(lambda: setattr(memvitals, "PROJ_DB", old))
+
+    def test_reuse_when_db_unchanged(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._make_db(td)
+            self._with_db(p)
+            first = memvitals.collect_projection()
+            self.assertFalse(first["cached"])
+            self.assertEqual(first["by_source"]["pi_sessions"]["chunks"], 2)
+            again = memvitals.collect_projection({"projection": first})
+            self.assertTrue(again["cached"], "mtime 未变却重扫全表")
+            self.assertEqual(again["by_source"], first["by_source"])
+            self.assertEqual(again["db_mtime"], first["db_mtime"])
+
+    def test_recompute_when_db_changes(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._make_db(td)
+            self._with_db(p)
+            first = memvitals.collect_projection()
+            os.utime(p, (first["db_mtime"] + 5, first["db_mtime"] + 5))
+            again = memvitals.collect_projection({"projection": first})
+            self.assertFalse(again["cached"], "mtime 变了仍用旧分组数")
+            self.assertNotEqual(again["db_mtime"], first["db_mtime"])
 
 
 class TestReadOnly(unittest.TestCase):

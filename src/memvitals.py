@@ -248,14 +248,27 @@ def _probe_tdai() -> Dict[str, Any]:
 
 # ── L1 新鲜 / L3 一致性（投影库） ─────────────────────────────────────
 
-def collect_projection() -> Dict[str, Any]:
+def collect_projection(prev: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """读 memindex 元数据 + **按 source 分组**的真数。
 
     全表 GROUP BY 在本机冷启约 5s、热 0.4s —— 后台 oneshot 付得起，
     页面付不起（这正是把它移出查询路径的理由）。
+
+    ⚠ 2026-10-18 复测纠正：上面那句「热 0.4s」在**内存吃紧时**不成立。本机可用内存
+    仅几百 MB，2.4GB 表的页缓存放不下 ⇒ 连跑两次都是 **12s**（不是冷启一次）。
+    该表只在每日 `memindex incremental`（04:4x）时变化 ⇒ 用 **db mtime 当缓存键**：
+    mtime 没动就复用上一轮分组结果。这不是拍脑袋的 TTL —— 数据没变就没有重算的理由，
+    也不会像「TTL 等于采集周期」那样每轮都恰好过期。
     """
     if not PROJ_DB.exists():
         return {"ok": False, "error": "索引不存在（检索会退回 rg）", "by_source": {}}
+    try:
+        db_mtime = PROJ_DB.stat().st_mtime
+    except OSError as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "by_source": {}}
+    old = (prev or {}).get("projection") or {}
+    if old.get("ok") and old.get("db_mtime") == db_mtime and old.get("by_source"):
+        return {**old, "ms": 0.0, "cached": True}
     t0 = time.monotonic()
     try:
         con = sqlite3.connect(f"file:{PROJ_DB}?mode=ro", uri=True, timeout=10)
@@ -276,6 +289,8 @@ def collect_projection() -> Dict[str, Any]:
             "chunks": int(meta.get("chunks") or 0),
             "last_build": meta.get("last_build"),
             "by_source": by_source,
+            "db_mtime": db_mtime,
+            "cached": False,
             "ms": round((time.monotonic() - t0) * 1000, 1)}
 
 
@@ -528,6 +543,9 @@ def build_report(sources: List[Dict[str, Any]], proj: Dict[str, Any],
                       for c in (bad_hard + bad_soft)],
         "notes": [{"id": c["id"], "layer": c["layer"], "name": c["name"],
                    "reason": c["reason"]} for c in notes],
+        # 投影快照要进报告：它是下一轮的分组缓存键（db_mtime）。
+        # 不落盘 ⇒ 每轮都重扫 2.4GB 表，缓存形同不存在（实测每轮 9–36s）。
+        "projection": proj,
         "checks": checks,
         "sources": sources,
         "probes": [{"id": p["id"], "name": p["name"], "status": p["status"],
@@ -596,7 +614,7 @@ def run() -> Dict[str, Any]:
     t0 = time.monotonic()
     prev = load_prev()
     sources = collect_sources()
-    proj = collect_projection()
+    proj = collect_projection(prev)
     probes = collect_probes()
     rep = build_report(sources, proj, probes, prev)
     rep["summary"]["took_ms"] = round((time.monotonic() - t0) * 1000, 1)

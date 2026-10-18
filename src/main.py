@@ -96,7 +96,19 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.124"  # P2 C17：工具描述质量（三态完备性 + 按任务裁剪）
+VERSION = "0.13.125"  # 终端 token 尾随空白：两端待遇不一致 ⇒ 会话建好但终端永久空白
+#   v0.13.125：前端静态修复（`static/hub.js` 三处 trim）。
+#   病灶（2026-10-18 实弹取证，非推断）：同一份带尾随空白的 token 在两条鉴权路径上
+#   待遇不同 —— HTTP 头里的空白被解析器按 OWS 裁掉（`X-TERM-TOKEN: <43字符> ` → 200），
+#   WS query 里的 `%20` 不会（`/ws/term/<sid>?token=<43字符>%20` → 403）。
+#   于是 `POST /api/term/sessions` 200（pty 起得来）而 `WebSocket /ws/term/<sid>` 403，
+#   xterm 零字节 ⇒ **终端永久空白**（全 agent 同形，用户以 codebuddy 报障；
+#   journald 实测干净 token 26 次 / 带 %20 10 次）。
+#   修法：`termToken()` 读存量 + prompt 返回值、`settingsApplyToken()` 写入口、
+#   `wsUrl()` 读侧一律 trim（存量脏值因此**自愈**，用户无需清 localStorage）。
+#   **服务端一字未动**：`term.py` 精确比对是对的，放宽成 strip 等于在鉴权闸上开口子。
+#   闸门：tests/test_term_token_trim.py(6，含 node 行为层 + 旧文件红基线)。
+#   注：纯静态前端改动，**不重启生产**；`/health` 的 code_stale 变 true 是设计意图。
 #   v0.13.124：P2 第 9/9 项（C17「工具瓶颈不在数量而在描述质量」）。补建 `src/tooldesc.py`
 #   （前序会话 in-progress 工作因 merge 混乱丢失，从零重建）。
 #   ① `tooldesc.py`（新模块）：parse_sections() 标签归一；completeness() 三态判定

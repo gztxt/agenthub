@@ -829,7 +829,8 @@ function settingsCopyToken() {
 }
 
 function settingsApplyToken() {
-  const t = $('settingsTokenVal').dataset.token || '';
+  /* 尾随空白会把「REST 通、WS 挂」的坑写进 localStorage（见 wsUrl 注释），写入口也 trim。 */
+  const t = ($('settingsTokenVal').dataset.token || '').trim();
   if (!t) return toast('无 token 可应用', 'err');
   lsSet('hub.term.token', t);
   toast('已应用到终端（本浏览器后续自动携带）', 'ok');

@@ -1,3 +1,40 @@
+## v0.13.125 — 终端 token 尾随空白：REST 全绿而 WS 403，终端永久空白
+
+> 用户报障形如「codebuddy 嵌入式终端无法正常启动」——**根因不在 codebuddy**，在鉴权路径。
+
+### 病灶（2026-10-18 journald + 实弹复现）
+
+`codebuddy --version` = 2.137.1、`POST /api/term/sessions` = 200、pty 内 `alive:true`，
+WS 握手却 **403**，xterm 零字节。journald 里同一 token 两种形态：
+
+```
+26  <43字符>       ← 正常
+10  <43字符>%20    ← 尾随空格
+```
+
+**两端待遇不一致才是要害**：`X-TERM-TOKEN: <43字符> ` 实测 **200**（HTTP 解析器按 OWS
+裁掉尾随空白），而 `/ws/term/<sid>?token=<43字符>%20` **403**（`hmac.compare_digest` 精确比对）。
+所以一份带空白的 token（`prompt()` 粘贴带入）会让 REST 全绿、WS 全挂：
+会话建了、进程活着、界面永久空白——本机反复出现的「静默不可用」形态，**全 agent 同形**。
+
+### 改法（只改前端，服务端一字未动）
+
+- `static/hub.js`：`termToken()` 读存量 + `prompt()` 返回值 trim；`settingsApplyToken()`
+  写入口 trim；`wsUrl()` 读侧 trim ⇒ **存量脏值自愈**（用户不必清 localStorage）。
+- **不修服务端**：`term.py` 精确比对是对的，放宽成 `strip()` 等于允许「token + 任意尾随空白」
+  通过，是往鉴权闸上开口子。
+
+### 闸门
+
+`tests/test_term_token_trim.py` **6 例**：静态三处 trim + node 行为层（存量自愈 / prompt 写入 /
+干净值语义不变）。抽取真代码而非手抄（`_hub_extract.extract_function`）；旧文件跑同一组用例
+实测出 `token=TOK%20` —— 红基线成立，不是自证式绿。
+
+> 纯静态前端提交：**不重启生产**，`/health` 的 `code_stale` 变 true 是设计意图；
+> 端侧硬刷新后生效（`?v=` 破不了端侧缓存，判据看 `document.lastModified` 或 ETag）。
+
+---
+
 ## v0.13.124 — P2 C17：工具描述质量（三态完备性 + 按任务裁剪）
 
 > 手册 C17：**「工具瓶颈不在数量而在描述质量」** —— 统一描述模板 + 完备性校验 + 按任务裁剪。

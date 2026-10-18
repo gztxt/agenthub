@@ -238,7 +238,14 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.124"
+    CURRENT_VERSION = "0.13.125"
+
+    #: v0.13.125：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「同一份 token 在两条鉴权路径上待遇不同」——OWS 裁掉、`%20` 不裁 ⇒
+    #: REST 全绿而 WS 403、终端永久空白；服务端精确比对**不许放宽**，脏值只在读侧自愈。
+    VERSION_ROOT_CAUSES["0.13.125"] = (
+        "尾随空白", "OWS", "%20", "精确比对", "存量脏值", "不重启生产",
+    )
 
     #: v0.13.124（P2 C17）：关键词取自版本注释里**实际写下的字句**。
     #: 工具描述质量三态 + 按任务裁剪。

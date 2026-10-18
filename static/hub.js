@@ -829,7 +829,8 @@ function settingsCopyToken() {
 }
 
 function settingsApplyToken() {
-  const t = $('settingsTokenVal').dataset.token || '';
+  /* 尾随空白会把「REST 通、WS 挂」的坑写进 localStorage（见 wsUrl 注释），写入口也 trim。 */
+  const t = ($('settingsTokenVal').dataset.token || '').trim();
   if (!t) return toast('无 token 可应用', 'err');
   lsSet('hub.term.token', t);
   toast('已应用到终端（本浏览器后续自动携带）', 'ok');
@@ -3149,8 +3150,9 @@ function termDetach() {
 /* TERM_TOKEN 鉴权（后端强制校验）：首次用终端时 prompt 一次存 localStorage，之后 header+query 双带 */
 function termToken() {
   let t = lsGet('hub.term.token');
+  if (t) t = String(t).trim();          // 存量脏值自愈：带空白的 token 不再往下传
   if (!t) {
-    t = prompt('请输入终端鉴权 TERM_TOKEN（也可在右上角「设置」查看后一键应用）') || '';
+    t = (prompt('请输入终端鉴权 TERM_TOKEN（也可在右上角「设置」查看后一键应用）') || '').trim();
     if (t) lsSet('hub.term.token', t);
   }
   return t;
@@ -3160,7 +3162,12 @@ function termHeaders(extra) {
 }
 
 function wsUrl(path) {
-  const t = lsGet('hub.term.token');
+  /* ★ 必须 trim（2026-10-18 实弹取证）：同一个 token 在两条路径上待遇不同 —— HTTP 头里的
+     尾随空白会被 HTTP 解析器按 OWS 裁掉，`?token=%20` 不会。于是存量带空白的 token 表现为
+     「POST /api/term/sessions 200 + WS 握手 403」：会话建好、pty 活着，xterm 一个字节也收不到，
+     终端永久空白（不是 codebuddy 特有，全 agent 同形）。浏览器 localStorage 里的存量脏值
+     无法由服务端修（term.py 精确比对是对的，不许放宽），故在读侧自愈。 */
+  const t = String(lsGet('hub.term.token') || '').trim();
   const sep = path.includes('?') ? '&' : '?';
   return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + path + (t ? sep + 'token=' + encodeURIComponent(t) : '');
 }

@@ -112,7 +112,11 @@ REGISTRY: Dict[str, FedSource] = {
         desc=f"{WORKSPACE}/MEMORY.md + memory/ + agent-knowledge/ + digest/"),
     "amr_memory": FedSource(
         id="amr_memory", label="AMR 格式记忆仓", kind="rg_text", weight=0.7,
-        desc=f"{AMR_ROOT}/（Agent Memory Repo 形态：MEMORY.md 入口 + [source:] 溯源 + [[path]] 交叉链接）"),
+        desc=f"{AMR_ROOT}/（Agent Memory Repo 形态：MEMORY.md 入口 + [source:] 溯源 + [[path]] 交叉链接）",
+        # 2026-10-18 用户裁定（PT-20261018-08 ①）：`技术文档/memory-repo` 实测不存在，
+        # 该源长期以「路径不存在」每天报红，属配置问题不是故障。登记保留、**停用**，
+        # 与 opencode_sessions 同处置；重新启用前先确认目录存在，禁顺手打开。
+        enabled=False),
     # P0-1 D18（2026-10-15）：**经验库**接入联邦。它是 hub 自己**蒸馏**出来的可复用单元
     # （情况→处理 + 适用条件 + 回源 trace），不是权威库的第二份副本 —— 权重取在
     # 「成文事实(0.7~0.8)」与「原始会话(0.5)」之间，且**只召回活跃条**（退役条不回来）。

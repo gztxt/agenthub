@@ -1,0 +1,26 @@
+[Unit]
+Description=agenthub 记忆中心健康探针（四层判据 → data/memvitals.json）
+Documentation=https://github.com/gztxt/agenthub
+RequiresMountsFor=/fs/1000/ftp/技术文档/agenthub
+# 探针要打本机 :3102 / :8420，服务没起来时跑也只会记一条「不可达」——那是有效信息，
+# 所以用 After 而不是 Requires：**依赖它活着才能测，就永远测不出它死了**。
+After=agenthub.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/fs/1000/ftp/技术文档/agenthub
+Environment=PYTHONPATH=src
+ExecStart=/fs/1000/ftp/技术文档/agenthub/venv/bin/python -m memvitals
+# 退出码语义（与 src/memvitals.py:_main 对齐）：
+#   0 = 全绿；2 = 被测对象有异常（已写进 json）；其它 = 探针自身故障。
+# 把 2 视为成功，是为了让 `systemctl is-failed` 只表示「探针自己坏了」，
+# 不把「记忆有异常」伪装成服务故障（否则红点会失去分辨率）。
+SuccessExitStatus=2
+TimeoutStartSec=180
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=append:/home/gztxt/.local/state/agenthub-memvitals.log
+StandardError=append:/home/gztxt/.local/state/agenthub-memvitals.log
+
+[Install]
+WantedBy=default.target

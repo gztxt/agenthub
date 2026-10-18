@@ -1,0 +1,14 @@
+[Unit]
+Description=每 10 分钟采集一次记忆中心健康判据（PT-20261018-08 P0）
+
+[Timer]
+# 开机 2 分钟后先跑一次，之后每 10 分钟。
+# Persistent=false：探针结果 10 分钟就过期，补跑补不出有意义的历史；
+# 而 OnUnitActiveSec 从"上次启动"起算，不会因为关机堆积。
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Unit=agenthub-memvitals.service
+
+[Install]
+WantedBy=timers.target

@@ -56,11 +56,21 @@ class TestAmrSource(unittest.TestCase):
                 memfed._RG_TARGETS["amr_memory"] = saved
 
     def test_registered_and_weighted(self):
-        """AMR 源必须在注册表里、enabled、带权重——否则融合层不会带上它。"""
+        """AMR 源必须**仍在注册表里、仍带权重**，且「停用」是显式的。
+
+        2026-10-18 用户裁定（PT-20261018-08 ①）：`技术文档/memory-repo` 实测不存在，
+        该源长期以「路径不存在」每天报红，属配置问题不是故障 ⇒ 停用（与 opencode_sessions 同处置）。
+        本闸门因此改判两条不变式：
+          · **不许删**：注册表条目与权重保留，重新启用只需改一个布尔；
+          · **不许悄悄启用**：`enabled is False` 且不在 `enabled_ids()` 里。
+        改回 True 前必须先证明目录存在（否则就是把假红放回页面）。
+        """
         self.assertIn("amr_memory", memfed.REGISTRY)
-        self.assertTrue(memfed.REGISTRY["amr_memory"].enabled)
-        self.assertGreater(memfed.fed_weight("amr_memory"), 0.0)
-        self.assertIn("amr_memory", memfed.enabled_ids())
+        self.assertFalse(memfed.REGISTRY["amr_memory"].enabled,
+                         "amr 已于 2026-10-18 停用；启用前先确认 memory-repo 存在")
+        self.assertGreater(memfed.fed_weight("amr_memory"), 0.0,
+                           "权重必须保留：停用不是删除")
+        self.assertNotIn("amr_memory", memfed.enabled_ids())
 
     def test_consumes_amr_fixture(self):
         """真仓存在时能召回，且召回内容里带 AMR 的 `[source:]` 溯源串。

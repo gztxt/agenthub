@@ -38,7 +38,10 @@ from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 HOME = Path.home()
 WORKSPACE = Path("/fs/1000/ftp/技术文档")
 
-#: 单一版本源：/api/memory/health、探针 note 与构建产物元数据都取这里。
+#: 索引 schema 版本，构建时写入 `memindex.db` 的 `meta.schema_version`。
+#: ⚠ 旧注释称它是「/api/memory/health 的版本源」——该端点**不存在（404）**，
+#: 现行观测入口是 `/api/memory/vitals` 的 L1 投影判据（它读 `meta.last_build`，
+#: 不消费本常量）。见 `memvitals.py` 头部与 2026-10-18 方案 §1。
 SCHEMA_VERSION = 1
 
 #: 索引落位。**派生数据**——不是第二权威副本，各源仍各自权威，删了可重建。

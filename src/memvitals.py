@@ -256,7 +256,8 @@ def collect_projection(prev: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
     ⚠ 2026-10-18 复测纠正：上面那句「热 0.4s」在**内存吃紧时**不成立。本机可用内存
     仅几百 MB，2.4GB 表的页缓存放不下 ⇒ 连跑两次都是 **12s**（不是冷启一次）。
-    该表只在每日 `memindex incremental`（04:4x）时变化 ⇒ 用 **db mtime 当缓存键**：
+    该表只在每日 `memindex incremental` 时变化（`agenthub-memindex.timer`：
+    `OnCalendar=05:10` + `RandomizedDelaySec=10m`，实际 05:10–05:20）⇒ 用 **db mtime 当缓存键**：
     mtime 没动就复用上一轮分组结果。这不是拍脑袋的 TTL —— 数据没变就没有重算的理由，
     也不会像「TTL 等于采集周期」那样每轮都恰好过期。
     """

@@ -2,11 +2,12 @@
 Description=每 10 分钟采集一次记忆中心健康判据（PT-20261018-08 P0）
 
 [Timer]
-# 开机 2 分钟后先跑一次，之后每 10 分钟。
-# Persistent=false：探针结果 10 分钟就过期，补跑补不出有意义的历史；
-# 而 OnUnitActiveSec 从"上次启动"起算，不会因为关机堆积。
+# 开机 2 分钟后先跑一次，之后按整十分钟点跑（:00 :10 :20 …）。
+# 为什么用 OnCalendar 而不是 OnUnitActiveSec：实测后者在「先手动 start 过 service、
+# 再 enable timer」的顺序下 NEXT 直接显示 "-"（永不触发）——定时器看起来是 active，
+# 实际停了，属于「指标绿功能死」。绝对日历点没有这个依赖顺序。
 OnBootSec=2min
-OnUnitActiveSec=10min
+OnCalendar=*:0/10
 AccuracySec=30s
 Unit=agenthub-memvitals.service
 

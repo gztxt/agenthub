@@ -238,7 +238,15 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.125"
+    CURRENT_VERSION = "0.13.126"
+
+    #: v0.13.126：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「Mac/局域网 http ⇒ 只剩 execCommand，而 WebKit 的用户手势不跨微任务」，
+    #: 以及「有选区 Cmd+C 不该自己 preventDefault，把 xterm 的原生 copy 链废掉」。
+    VERSION_ROOT_CAUSES["0.13.126"] = (
+        "Mac", "isSecureContext", "navigator.clipboard", "execCommand",
+        "用户手势", "微任务", "原生 copy", "preventDefault", "SIGINT", "不重启生产",
+    )
 
     #: v0.13.125：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「同一份 token 在两条鉴权路径上待遇不同」——OWS 裁掉、`%20` 不裁 ⇒

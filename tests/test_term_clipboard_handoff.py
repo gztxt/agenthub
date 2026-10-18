@@ -16,6 +16,13 @@
     pty 实收 ESC[200~PASTED_TEXT ESC[201~。
 
 本测试锁的是**契约**（静态），行为由 tests/verify_term_clipboard.py 真渲染锁。
+
+v0.13.126（2026-10-18，Mac 端侧报障）改判的契约：
+  · 有选区 Ctrl/Cmd+C **不再** preventDefault + JS 写剪贴板，改为只 return false，
+    把复制交给浏览器原生 copy 链（xterm 自己在 .xterm 上挂了 copyHandler，本文件
+    #termEl 还有一条容器级兜底）。理由：WebKit/Safari 的用户手势不跨 Promise 微任务，
+    而局域网 http（无 navigator.clipboard）只剩 execCommand 一条路 ⇒ 改前必然静默失败。
+  · 非安全上下文的 termCopyFallback 必须**同步**调 execCommand（右键菜单/OSC 52 仍用它）。
 """
 import re
 import unittest
@@ -81,14 +88,50 @@ class TestPasteGoesThroughBrowserNative(unittest.TestCase):
                          "没有 paste 监听 ⇒ 放给浏览器的原生粘贴没人接")
         self.assertIn("termPasteText(", self.s, "paste 安全包装丢了（bracketed paste 注入面）")
 
-    def test_ctrl_c_with_selection_still_copies(self):
-        """不能为了修粘贴把复制改坏：有选区 Ctrl+C 仍走 JS 复制。"""
+    def test_ctrl_c_with_selection_defers_to_native_copy(self):
+        """v0.13.126：有选区 Ctrl+C 必须**不** preventDefault，交给浏览器原生 copy 链。
+
+        改前（v0.13.90–125）是 preventDefault + termCopySelection()。那条路在
+        Mac/Safari + 局域网 http 下会因「用户手势不跨微任务」静默失败（端侧实测）。
+        当前形状必须能区分于旧形状，否则后人「顺手加回 preventDefault」不会被发现。
+        """
         seg = self.s.split("attachCustomKeyEventHandler", 1)[1].split("term.dataset_copyBound", 1)[0]
         m = re.search(r"if \(k === 'c' && term\.hasSelection\(\)\) \{([\s\S]*?)\n        \}", seg)
         self.assertIsNotNone(m, "有选区 Ctrl+C 分支不见了")
-        self.assertIn("preventDefault", m.group(1), "有选区 Ctrl+C 必须 preventDefault（否则 ^C 会进 pty 当 SIGINT）")
-        self.assertIn("termCopySelection", m.group(1))
-        self.assertIn("return false", m.group(1))
+        body = m.group(1)
+        self.assertNotIn("preventDefault", body,
+                         "有选区 Ctrl+C 不许 preventDefault：它会掐断浏览器原生 copy 事件，"
+                         "而 JS 写剪贴板这条路在 Mac/Safari 的 http 源上会丢手势")
+        self.assertNotIn("stopPropagation", body, "keydown 上 stopPropagation 会把原生链一起挡掉")
+        self.assertNotIn("termCopySelection", body,
+                         "键盘复制不该再走 JS 写剪贴板（原生 copy 链才是跨平台的）")
+        self.assertRegex(body, r"return false",
+                         "就要返回 false：让 xterm 别把 ^C 当字节送进 pty")
+
+    def test_native_copy_chain_has_a_receiver(self):
+        """交给原生链的前提：copy 事件必须有人接（容器级兜底在 ⇒ 选区真进 clipboardData）。"""
+        self.assertIn("function termCopyBind(", self.s)
+        self.assertRegex(self.s, r"el\.addEventListener\('copy'",
+                         "#termEl 的容器级 copy 兜底丢了 ⇒ 原生 Cmd+C 没有落地接收方")
+        self.assertIn("term.hasSelection()", self.s)
+
+    def test_non_secure_copy_runs_synchronously(self):
+        """非安全上下文必须同步 execCommand：不能排在 Promise 微任务里（Safari 会丢手势）。"""
+        seg = self.s.split("function termCopyFallback(", 1)[1].split("\nfunction ", 1)[0]
+        self.assertIn("execCommand('copy')", seg, "同步兜底不在 termCopyFallback 里")
+        # 同步分支的形状：Promise.resolve(viaExec()) —— 同步算完再包成 Promise
+        self.assertRegex(seg, r"return Promise\.resolve\(viaExec\(\)\)",
+                         "非安全上下文必须是同步 execCommand（改回 p.then(...) 就会在 Safari 丢手势）")
+        self.assertRegex(seg, r"window\.isSecureContext",
+                         "安全上下文分支要看 isSecureContext，不能只看 navigator.clipboard 有没有")
+        # 旧形状（先发 clipboard 写、再在 then 里兜底）出现即红
+        self.assertNotRegex(seg, r"return p\.then\(",
+                            "旧形状「先 navigator.clipboard 再 p.then 里 execCommand」已否决")
+
+    def test_paste_hint_is_platform_aware(self):
+        """右键菜单的「请按 Ctrl+V」在 Mac 上是教错键 —— 提示必须分平台。"""
+        self.assertRegex(self.s, r"⌘V|Apple|Mac",
+                         "粘贴提示要按平台给 ⌘V/Ctrl+V，不能对 Mac 用户写 Ctrl+V")
 
     def test_no_selection_ctrl_c_still_signals(self):
         """无选区 Ctrl+C 必须放行 ⇒ 仍是 SIGINT（bash 语义不能被这次修复破坏）。"""

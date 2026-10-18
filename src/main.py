@@ -96,7 +96,21 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.125"  # 终端 token 尾随空白：两端待遇不一致 ⇒ 会话建好但终端永久空白
+VERSION = "0.13.126"
+#   v0.13.126：嵌入式终端「Mac 下复制/粘贴快捷键失效」（纯静态前端，服务端一字未动）。
+#   端侧取证：Mac（192.168.5.101）走 `http://192.168.5.102:3102`，即 isSecureContext=false、
+#   navigator.clipboard 不存在 ⇒ 复制只剩 execCommand 一条路。两条独立根因：
+#   ① v0.13.90–125 把它排在 `Promise.then` 里，而 WebKit/Safari 的**用户手势**不跨
+#      **微任务** ⇒ execCommand 被拒、剪贴板没内容 ⇒ 后续 Cmd+V「粘不出东西」。
+#   ② 有选区 Cmd+C 自己 `preventDefault` 并用 JS 写剪贴板，把 xterm 6.0 在 `.xterm` 上
+#      自带的那条**原生 copy** 链（copyHandler 写 clipboardData）整条废掉。
+#   修法：有选区 Cmd/Ctrl+C 只 return false（不 preventDefault）⇒ 交给浏览器原生 copy 链；
+#   termCopyFallback（右键/OSC 52）非安全上下文改为**同步** execCommand。
+#   保留 `SIGINT`（无选区 Ctrl+C 仍进 pty）、Cmd+V 仍不 preventDefault。
+#   闸门：tests/test_term_clipboard_handoff.py（契约改判）+ tests/verify_term_clipboard.py（L2，
+#   量 copy 事件与 clipboardData）；真 chromium 对生产 hub.js 实测
+#   `work/probe_copy_native_path.py --real` 6/6。
+#   注：纯静态前端改动，**不重启生产**；code_stale=true 是设计意图，端侧硬刷新生效。
 #   v0.13.125：前端静态修复（`static/hub.js` 三处 trim）。
 #   病灶（2026-10-18 实弹取证，非推断）：同一份带尾随空白的 token 在两条鉴权路径上
 #   待遇不同 —— HTTP 头里的空白被解析器按 OWS 裁掉（`X-TERM-TOKEN: <43字符> ` → 200），

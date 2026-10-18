@@ -1,3 +1,64 @@
+## v0.13.126 — Mac 下终端复制/粘贴快捷键失效（有选区 Cmd+C 改走原生 copy 链）
+
+> 用户报障（2026-10-18，Mac）：「agenthub 嵌入式终端在 Mac 系统下 复制 粘贴 键盘快捷键失效」。
+
+### 端侧取证（本机对 Mac 零探针能力，按 4.3 口径先量环境再判）
+
+- 访问源固定：`ss -tn sport = :3102` 与 journald 同时显示 Mac 侧 **192.168.5.101** →
+  `http://192.168.5.102:3102`（生产 `/health` 200，v0.13.125，`is-active`）。
+- 含义：该源 **`isSecureContext=false`、`navigator.clipboard===undefined`** ⇒ 复制只剩
+  `document.execCommand('copy')` 一条路（粘贴不受影响，它走浏览器原生 paste）。
+
+### 病灶（两条独立根因，都指向「不要自己写剪贴板」）
+
+1. **异步链路丢用户手势**：v0.13.90–125 里 `termCopyFallback` 的非安全上下文分支是
+   `Promise.resolve().then(() => { … execCommand('copy') … })`。WebKit/Safari 的用户手势
+   只在**当前任务**有效，排进微任务后手势过期 ⇒ `execCommand` 返回 false、剪贴板没内容
+   ⇒ 紧接着的 Cmd+V「粘不出东西」，看起来就是复制粘贴整块坏掉。
+   Chromium 的瞬态激活能跨微任务（Linux 端到端闸门一直绿）⇒ **缺陷只在 Mac/Safari 侧显形**。
+2. **我们自己 preventDefault 掐断了 xterm 的复制**：xterm 6.0 在 `.xterm` 上自带 copy handler
+   （`copyHandler: clipboardData.setData('text/plain', selectionText); e.preventDefault()`）。
+   v0.13.90 在 keydown 里对有选区 Cmd+C 先 `preventDefault()` 再自己写剪贴板，等于把这条
+   最跨平台的原生链整条废掉，只留那条 Mac 上会失败的路。
+
+### 改法（只动前端一个分片，服务端一字未动）
+
+- `static/hub/03-agents-cards.js`：
+  - **有选区 Cmd/Ctrl+C**：只 `return false`（xterm 不把 ^C 送进 pty），**不** preventDefault
+    ⇒ 浏览器原生 copy 事件照常派发 → xterm 的 copyHandler 把选区写进 clipboardData →
+    本文件 `#termEl` 的容器级 copy 兜底再叠一层。不建临时 textarea ⇒ 也不再抢焦点。
+  - **`termCopyFallback`（右键菜单「复制」/ OSC 52 仍用它）**：非安全上下文**同步**调
+    `execCommand`（手势必然有效）；安全上下文仍走 `navigator.clipboard`，失败才退同步兜底。
+  - 右键菜单「请按 Ctrl+V」改为按平台给 **⌘V / Ctrl+V**（Mac 上写 Ctrl+V 等于教错键）。
+- 保留：无选区 Ctrl+C 仍 `return true` → ^C 进 pty（SIGINT）；Cmd+V 仍 `return false` 且
+  不 preventDefault；bracketed-paste 安全包装不变。
+
+### 取证（真 chromium + CDP，对**生产已部署的 hub.js** 量，`tests/probe/probe_copy_native_path.py --real`）
+
+| 判据 | 结果 |
+|---|---|
+| 点终端取焦 → `term.select(0,0,16)` → Ctrl+C：原生 copy 事件派发 | copyEvt=1 |
+| copy 事件末端 `clipboardData.getData('text/plain')` | `MAC_COPY_SEL_202` == 终端选区 |
+| xterm 已 preventDefault（默认动作不覆盖写入值） | true |
+| 有选区 Ctrl+C 是否把 ^C 灌进 pty | 零收到 |
+| 随后 **Cmd+V（meta 修饰符）** | pasteEvt=1、`termPasteText` 收到同一串 ⇒ 复制→粘回环成立 |
+| 无选区 Ctrl+C（SIGINT 语义） | pty 收到 `\x03` |
+
+### 闸门
+
+- `tests/test_term_clipboard_handoff.py`：原「有选区 Ctrl+C 必须 preventDefault + JS 复制」
+  契约**改判**为新契约（不许 preventDefault / 不许 termCopySelection / 必须 return false），
+  并新增同步兜底形状、原生链接收方、平台化提示三条。
+- `tests/verify_term_clipboard.py`（L2）：A/B 改为量「原生 copy 事件 + clipboardData + 焦点不动」，
+  另加 A2/B3 覆盖菜单/OSC 52 那条同步兜底；C/D/E 不变。
+- `python3 -m pytest tests/test_term_clipboard_handoff.py tests/test_term_select_persist.py \
+  tests/test_hubjs_split.py` → **19 passed**。
+
+> 纯静态前端提交：**不重启生产**（`code_stale=true` 是设计意图），端侧硬刷新后生效。
+> **未闭合**：Mac 真机点一次「选字→Cmd+C→Cmd+V」的端侧确认（本机无法代替）——见 PENDING-TASKS。
+
+---
+
 ## v0.13.125 — 终端 token 尾随空白：REST 全绿而 WS 403，终端永久空白
 
 > 用户报障形如「codebuddy 嵌入式终端无法正常启动」——**根因不在 codebuddy**，在鉴权路径。

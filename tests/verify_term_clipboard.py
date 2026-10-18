@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""L2 live 真渲染闸门：终端剪贴板「焦点归还 + 原生粘贴通道」(v0.13.90)。
+"""L2 live 真渲染闸门：终端剪贴板「原生 copy 链 + 原生粘贴通道」。
+
+v0.13.126 起键盘复制改判：有选区 Cmd/Ctrl+C 只 `return false`（不 preventDefault），
+复制由浏览器原生 `copy` 事件 + xterm 自带的 copyHandler 完成 ⇒ 本闸门不能再拿
+`termCopyFallback` 当复制判据，改为**直接量 copy 事件与事件末端的 clipboardData**。
+（v0.13.90 那套「JS 写剪贴板 + 焦点归还」仍被覆盖：菜单/OSC 52 走那条路，见 A3/B3。）
 
 跑法（生产或影子实例，真 chromium + CDP）：
     HUB_PROBE_TERM_TOKEN=<token> python tests/verify_term_clipboard.py http://192.168.5.102:3102
@@ -11,12 +16,13 @@
     以及 navigator.clipboard 在非安全上下文是否 undefined —— 都只在运行时成立。
 
 判据（全部可断言量，不以截图交差）：
-  A 复制兜底归还焦点：复制前 focus=termTA ⇒ 复制后 focus 仍=termTA（改前 =BODY，红向自证）
-  B 复制内容真的进了剪贴板：execCommand('copy') 被调用且承载的是选区文本
+  A 键盘复制不动焦点：Ctrl/Cmd+C 前后 focus 仍=termTA（原生链不建临时 textarea）
+  B 原生 copy 事件真的派发（xterm 的 copyHandler 是落地接收方）
+  B2 事件末端 clipboardData == 终端选区文本
+  A3/B3 菜单/OSC 52 的同步兜底仍能写剪贴板 + 归还焦点
   C 原生粘贴通道可用：真 Ctrl+V ⇒ paste 事件计数增加 + termPasteText 被调用
-    （改前 pasteEvt 恒 0，红向自证）
-  D 无选区 Ctrl+V 也走通（改前只在 hasSelection 时才进那段代码）
-  E 有选区 Ctrl+C 仍复制、无选区 Ctrl+C 仍放行给 pty（不破坏 SIGINT 语义）
+  D 有选区 Ctrl+V 也走通
+  E 无选区 Ctrl+C 仍放行给 pty（不破坏 SIGINT 语义）
   F 全程零 JS 异常
 """
 import json
@@ -57,6 +63,14 @@ def key(cdp, k, code, vk, mods, text=None, commands=None):
 INSTRUMENT = r"""(function(){
   window.__r = {copyFallbackResolved: [], pasteEvt: 0, pasteTextCalls: [],
                 execCopyPayloads: null, errs: []};
+  __r.copyEvt = 0; __r.copyClip = null;
+  /* v0.13.126：键盘复制改走浏览器原生 copy 链 ⇒ 闸门必须能看见 copy 事件
+     与**事件末端**的 clipboardData（xterm 的 copyHandler 与容器兜底都在中间写入；
+     只在 document 冒泡末端才能读到最终值）。 */
+  document.addEventListener('copy', function(e){
+    __r.copyEvt++;
+    try { __r.copyClip = e.clipboardData ? e.clipboardData.getData('text/plain') : null; } catch (x) {}
+  });
   /* 判据要能区分「走了哪条路」：安全上下文（loopback/https）走 navigator.clipboard，
      非安全上下文（局域网 http，用户实际访问方式）只能走 execCommand 兜底 ——
      本次缺陷正在兜底那条路上，所以两条都要能被看见。 */
@@ -141,23 +155,27 @@ def main():
     cdp.eval("term.select(0,%d,25)" % max(0, ln)); time.sleep(0.4)
     chk("V3 选区建立", cdp.eval("term.hasSelection()") is True)
 
-    # A/B 复制
+    # A/B 复制（v0.13.126：键盘复制走浏览器原生 copy 链，不再由 JS 写剪贴板）
     f0 = focus_name(cdp)
-    key(cdp, "c", "KeyC", 67, 2); time.sleep(1.0)
+    cdp.eval("window.__r.copyEvt=0; window.__r.copyClip=null; true")
+    key(cdp, "c", "KeyC", 67, 2, commands=["copy"]); time.sleep(1.0)
     f1 = focus_name(cdp)
-    chk("A 复制兜底归还焦点（改前此处变 BODY ⇒ 之后所有按键都不进终端）", f1 == "termTA",
+    chk("A 复制不动焦点（原生链不建临时 textarea ⇒ 不会把后续按键弄哑）", f1 == "termTA",
         "复制前=%s 复制后=%s" % (f0, f1))
+    evt = cdp.eval("window.__r.copyEvt")
+    chk("B 原生 copy 事件真派发（xterm 自带的 copyHandler 是落地接收方）", evt > 0,
+        "copyEvt=%s（0 ⇒ 浏览器没把 Cmd/Ctrl+C 当复制命令）" % evt)
+    clip = cdp.eval("window.__r.copyClip")
+    chk("B2 clipboardData 是终端选区文本（事件末端读值）",
+        bool(clip) and "CLIPVERIFY" in clip, "clip=%r" % (clip if clip is None else clip[:40]))
+
+    # A2/B3：右键菜单「复制」/OSC 52 走的那条 JS 路仍要能写剪贴板并归还焦点
+    cdp.eval("window.__r.copyFallbackResolved=[]; window.__r.fallbackPathUsed=false;"
+             " window.__r.copyEvt=0; window.__r.copyClip=null; void termCopySelection(); true")
+    time.sleep(0.8)
     res = cdp.eval("window.__r.copyFallbackResolved")
-    chk("B 复制真的落盘（execCommand 返回 true）", res == [True], "resolved=%s" % res)
-    pays = cdp.eval("window.__r.execCopyPayloads")
-    used_fallback = cdp.eval("window.__r.fallbackPathUsed")
-    if used_fallback:
-        chk("B2 复制载荷是选区文本（走 execCommand 兜底这条 = 用户实际路径）",
-            bool(pays) and "CLIPVERIFY" in pays[-1],
-            "payload=%s" % (pays[-1:] if pays else []))
-    else:
-        chk("B2 安全上下文走 navigator.clipboard（本档不涉及兜底改动）", True,
-            "securePathUsed=True ⇒ 本次修复的兜底路径未被走到，请在局域网 http 上再跑一次")
+    chk("B3 菜单/OSC 52 的同步兜底仍能写剪贴板", res == [True], "resolved=%s" % res)
+    chk("A3 兜底归还焦点", focus_name(cdp) == "termTA", "focus=%s" % focus_name(cdp))
 
     # C/D 粘贴（真 Ctrl+V）
     cdp.eval("term.clearSelection()"); time.sleep(0.3)

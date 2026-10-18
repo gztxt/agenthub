@@ -2843,8 +2843,10 @@ function termPasteBind() {
    病灶：agent-hub 只有粘贴通道（termPasteBind），没有复制通道——xterm 选中文本后
    Ctrl+C 被 term.onData(termSend) 原样灌进 pty（= bash SIGINT），没有任何路径把选区
    写进系统剪贴板，体感就是"终端里选不中/复制不动"。四处改动（按授权 P1–P4）：
-   P1 attachCustomKeyEventHandler：仅 hasSelection() 时拦 C（复制选区）/V（粘贴），
+   P1 attachCustomKeyEventHandler：仅 hasSelection() 时拦 C（内置复制选区）/V（粘贴），
       否则一律 return true 放行（无选区 Ctrl+C 照旧进 pty，不误伤 SIGINT 语义）；
+      ⚠️ v0.13.126 起 C 只 return false、**不** preventDefault（交给浏览器原生 copy 链，
+      见 termCopyBind 分支内的端侧取证）；
    P2 #termEl 容器 copy 事件兜底：有选区时 clipboardData.setData 覆盖右键/Cmd+Shift+C
       等原生路径（很多嵌入式/非 HTTPS 环境 navigator.clipboard 不可用）；
    P3 termCopySelection：navigator.clipboard.writeText → 失败退回隐藏 textarea
@@ -2853,14 +2855,23 @@ function termPasteBind() {
       写剪贴板在非 HTTPS 下也能成（默认 provider 只认 navigator.clipboard）。 */
 function termCopyFallback(text) {
   /* P3 核心：两级兜底写剪贴板（navigator.clipboard → 隐藏 textarea execCommand）。
-     局域网 http（非安全上下文）navigator.clipboard 常缺失/被拒，必须有第二路。 */
+     局域网 http（非安全上下文）navigator.clipboard 常缺失/被拒，必须有第二路。
+
+     ★ v0.13.126（2026-10-18 用户报障「Mac 下复制/粘贴键盘快捷键失效」）：
+     非安全上下文那条路必须**同步**执行，不能排进 Promise 微任务。
+     端侧取证：Mac 主机 192.168.5.101 走 `http://192.168.5.102:3102`（生产照常 200），
+     即 isSecureContext=false、navigator.clipboard===undefined ⇒ 复制只剩 execCommand
+     这一条路；而 WebKit/Safari 的用户手势只在**当前任务**有效，改前把它放在
+     `p.then(...)` 里跑，手势已过期 ⇒ execCommand('copy') 返回 false、剪贴板没内容
+     ⇒ 紧接着的 Cmd+V 自然「粘不出东西」，看起来就是复制粘贴整块坏掉。
+     Chromium 的瞬态激活能跨微任务（Linux 端到端闸门一直绿），所以这个缺陷只在
+     Mac/Safari 侧显形 —— 这正是本仓「端侧不可观测」的典型形态。
+     修法：安全上下文仍走异步 clipboard API（无手势依赖）；非安全上下文直接同步调
+     execCommand，手势必然有效。同步化不改变焦点归还义务（见下面 finally）。 */
   if (!text) return Promise.resolve(false);
-  let done = false;
-  const p = (navigator.clipboard && navigator.clipboard.writeText)
-    ? navigator.clipboard.writeText(text).then(() => { done = true; }).catch(() => {})
-    : Promise.resolve();
-  return p.then(() => {
-    if (done) return true;
+  /* 同步写剪贴板：临时 textarea + execCommand。返回 boolean（不返回 Promise），
+     便于非安全上下文在**同一个任务**里完成复制。 */
+  const viaExec = () => {
     /* ★ 焦点归还（2026-10-07 用户报障「复制粘贴/键盘快捷键全都用不了」的根因）。
        execCommand('copy') 这条路**必须**先把临时 textarea 选中 ⇒ 它会把焦点从
        xterm 的 helper textarea 抢到 body。改前复制完就不还了，而 xterm 的
@@ -2890,7 +2901,13 @@ function termCopyFallback(text) {
         else if (term && term.textarea) term.textarea.focus();
       } catch (e) {}
     }
-  });
+  };
+  /* 安全上下文（https / loopback）优先用标准 API；它失败才退同步 execCommand。
+     非安全上下文没有标准 API 可用，**同步**走 execCommand（见上面的端侧取证）。 */
+  if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).then(() => true).catch(() => viaExec());
+  }
+  return Promise.resolve(viaExec());
 }
 function termCopySelection() {
   if (!term) return Promise.resolve(false);
@@ -2920,7 +2937,13 @@ function termCopyBind() {
      xterm 处理（但**不**等于阻止浏览器默认行为 —— 那要靠 preventDefault）。
      三档口径（v0.13.90 订正，改前写的是「V 走安全粘贴链」）：
        · 无选区 Ctrl+C → return true：照旧进 pty = SIGINT，bash 语义不能破坏；
-       · 有选区 Ctrl+C → preventDefault + JS 复制 + return false；
+       · 有选区 Ctrl/Cmd+C → **只 return false，不 preventDefault**：
+         xterm 自己不处理该键（不会把 ^C 送进 pty），浏览器的原生复制链照常跑
+         —— `copy` 事件会冒泡到 `.xterm`，xterm 6.0 自带的 copy handler
+         （vendor 实证：`copyHandler(e,t){e.clipboardData.setData('text/plain',
+         t.selectionText), e.preventDefault()}`）把终端选区写进 clipboardData，
+         本文件 #termEl 上那条容器级 copy 兼底再叠一层。v0.13.126 改到这里，
+         依据见下面 `if (k === 'c' …)` 分支内的实测。
        · Ctrl/Cmd+V → **一律 return false 且不 preventDefault**：
          让浏览器的原生粘贴落到 xterm 的 helper textarea，由 termPasteBind 接住。
          （改前是「有选区才拦、且 preventDefault + readText」—— 非安全上下文
@@ -2930,8 +2953,21 @@ function termCopyBind() {
       if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && !e.altKey) {
         const k = String(e.key || '').toLowerCase();
         if (k === 'c' && term.hasSelection()) {
-          e.preventDefault(); e.stopPropagation();
-          void termCopySelection();
+          /* ★ v0.13.126（2026-10-18 用户报障「Mac 下复制/粘贴键盘快捷键失效」）：
+             这里**不再** preventDefault + 自己调 termCopySelection()，改为放给浏览器
+             的原生复制链。理由：JS 写剪贴板那条路在端侧只有 `execCommand` 可走
+             （局域网 http 无 navigator.clipboard），而 WebKit/Safari 的用户手势
+             不跨微任务 —— 一旦排进 Promise 就是“静默失败、剪贴板没内容”，
+             紧接着的 Cmd+V 也就“粘不出东西”。原生链不需要任何剪贴板 API，
+             也不碰焦点（不建临时 textarea），三平台同一条路。
+             实测（真 chromium + CDP，2026-10-18，`work/probe_copy_native_path.py`）：
+               点终端取焦 → term.select(0,0,16) → Ctrl+C：
+                 `copy` 事件派发到 #termEl（copyEvt=1），事件末端 clipboardData
+                 读到 `MAC_COPY_SEL_202`（=终端选区），xterm 已 preventDefault
+                 （默认动作不会覆盖写入的数据），pty 零收到 ^C；
+                 随后 Cmd+V（meta 修饰符）→ pasteEvt=1、termPasteText 收到同一串
+                 ⇒ 复制→粘回去回环成立。
+             保留 SIGINT 语义：无选区时仍是 return true，^C 照旧进 pty。 */
           return false;
         }
         /* ★ 粘贴：**不拦**，交给浏览器原生路径（2026-10-07 根治）。
@@ -3004,7 +3040,8 @@ function termCtxOpen(x, y) {
   /* 只允许一个浮层接收点击（AGENTS 4.2 ①）：右键菜单开时收掉终端内查找条。 */
   if (typeof termFindClose === 'function') termFindClose();
   /* 非安全上下文（局域网 http，用户实际访问方式）没有 navigator.clipboard.readText
-     ⇒ 菜单粘贴给不出内容。这时**不隐藏**：点了转「请按 Ctrl+V」的显式提示，
+     ⇒ 菜单粘贴给不出内容。这时**不隐藏**：点了转「请按 ⌘V / Ctrl+V」的显式提示
+     （按平台给对键名 —— Mac 上写 Ctrl+V 等于教错键），
      比留一个静默无效的按钮好（与 v0.13.90 的「显式失败」同一口径）。 */
   if (ps) ps.disabled = false;
   if (sa) sa.disabled = !term;
@@ -3023,7 +3060,7 @@ function termCtxPasteManual() {
   if (term && typeof termFocusWanted === 'function') {
     try { if (termFocusWanted({ user: true })) term.focus(); } catch (e) {}
   }
-  if (typeof toast === 'function') toast('此环境不支持读取剪贴板，请按 Ctrl+V 粘贴', 'err');
+  if (typeof toast === 'function') toast('此环境不支持读取剪贴板，请按 ' + (/(^|\W)Mac/i.test(String(navigator.userAgent)) ? '⌘V' : 'Ctrl+V') + ' 粘贴', 'err');
 }
 function termCtxBind() {
   const el = $('termEl');

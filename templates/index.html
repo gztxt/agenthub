@@ -696,17 +696,38 @@
            ② 不新增色 token：只引用 :root 既有变量；
            ③ tab 是**视图开关**不是设备分档 ⇒ 状态只存 JS 变量、首屏不写盘
               （分档偏好五条之②：加载不写盘）。 */
+        /* 2026-10-19：tab 与「技能中心」标题同一行（用户明确要求不另起一行）。
+           nowrap 保证标题+两个 tab 永远是一组；超窄屏也只会整组换行，不会把 tab 单独挤下去。 */
+        .sk-titlebar { display: flex; align-items: baseline; gap: 10px; flex-wrap: nowrap; min-width: 0; }
+        .sk-titlebar > h3 { flex: none; }
         .sk-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
         .sk-tab { border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2);
                   border-radius: 99px; padding: 5px 14px; font-size: var(--fs-sm); line-height: 1.5;
                   cursor: pointer; }
         .sk-tab:hover { border-color: var(--accent-2); color: var(--text-1); }
         .sk-tab.on { background: var(--sel-bg); border-color: var(--sel-border); color: var(--text-1); font-weight: 600; }
+        .sk-tab:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+        .sk-tab .badge { margin-left: 5px; }
+        .sk-tab .badge[hidden] { display: none; }
+        /* 目录行整行可点：查看详情不必精准命中右侧小按钮；右侧按钮仍是独立可聚焦控件。 */
+        .sp-list > .mem-item.sk-row { cursor: pointer; }
+        .sp-list > .mem-item.sk-row:hover, .sp-list > .mem-item.sk-row:focus-within { background: var(--surface-2); }
+        /* 过滤结果计数：等宽数字，避免数字变化时行宽跳动；不折行 */
+        .sk-cnt { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); }
+        /* 搜索清除钮：只在有输入时出现（hidden 由 JS 切换） */
+        .sk-clear[hidden] { display: none; }
+        /* 空状态：说清「为什么是 0」与下一步，不再只写一句「没有记录」 */
+        .sk-empty { padding: 14px; font-size: var(--fs-sm); color: var(--text-2); line-height: var(--lh-base); }
+        .sk-empty b { color: var(--text-1); }
+        .sk-empty .btn { margin-top: 8px; }
         /* 统计条：数字全部由 JS 从后端字段算出（页面上不许有第二个真相） */
         .sk-stats { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 10px 14px;
                     border-bottom: 1px solid var(--divider); font-size: var(--fs-sm); color: var(--text-2); }
+        .sk-stats > span { white-space: nowrap; }
         .sk-stats b { color: var(--text-1); font-weight: 600; }
         .sk-stats .sk-stat-warn { color: var(--warn); }
+        /* 筛选芯片在工具条里按内容收窄（.chip 默认 flex:1 1 260px 会把 1440 空出一大条） */
+        #skillZombieOnly { flex: 0 0 auto; cursor: pointer; }
         /* 调用次数徽标：行内小圆点徽标（复用 .badge 形状，不另立类） */
         .sk-inv { font-variant-numeric: tabular-nums; }
         /* digest 指纹：等宽 + 截断，hover 看全（title 属性给全文） */
@@ -1958,54 +1979,57 @@
                 <!-- v0.13.127 P1：两视图 tab（Grill 裁定 5）。技能目录＝操作/查看逻辑，
                      调用记录＝审计逻辑。tab 是视图开关不是设备分档：状态只存 JS 变量，
                      首屏不写盘；懒加载——调用记录第一次切到才拉。 -->
+                <!-- 2026-10-19 用户裁定：两个视图 tab **跟在「技能中心」文字后面**，不另起一行。
+                     实现上 h3 与 tablist 同属 .sk-titlebar（nowrap），右侧 hint/刷新仍可整组换行。
+                     单卡承载两个 tabpanel：去掉原来重复的「技能目录」「调用记录」内层卡头。 -->
                 <div class="sp-card">
                     <div class="sp-hd">
-                        <h3>技能中心</h3>
+                        <div class="sk-titlebar">
+                            <h3>技能中心</h3>
+                            <div class="sk-tabs" id="skillTabs" role="tablist" aria-label="技能中心视图">
+                                <button class="sk-tab on" id="skillTabCatalog" role="tab" aria-selected="true"
+                                        aria-controls="skillViewCatalog" tabindex="0"
+                                        data-skill-view="catalog">技能目录</button>
+                                <button class="sk-tab" id="skillTabInvocations" role="tab" aria-selected="false"
+                                        aria-controls="skillViewInvocations" tabindex="-1"
+                                        data-skill-view="invocations">调用记录<span class="badge sk-inv" id="skillInvTabBadge" hidden></span></button>
+                            </div>
+                        </div>
                         <div class="sp-r">
                             <span class="hint" id="skillHint"></span>
-                            <button class="btn ghost sm" onclick="loadSkills()"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
+                            <button class="btn ghost sm" id="skillRefresh" onclick="refreshSkillView()"
+                                    title="刷新当前视图（目录 / 调用记录）"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
                         </div>
                     </div>
-                    <div class="sp-tools">
-                        <div class="sk-tabs" role="tablist" aria-label="技能中心视图">
-                            <button class="sk-tab on" id="skillTabCatalog" role="tab" aria-selected="true"
-                                    data-skill-view="catalog" onclick="switchSkillView('catalog')">技能目录</button>
-                            <button class="sk-tab" id="skillTabInvocations" role="tab" aria-selected="false"
-                                    data-skill-view="invocations" onclick="switchSkillView('invocations')">调用记录</button>
-                        </div>
-                    </div>
-                </div>
 
-                <!-- ── 视图一：技能目录 ── -->
-                <div id="skillViewCatalog">
-                    <div class="sp-card">
-                        <div class="sp-hd">
-                            <h3>技能目录</h3>
-                            <div class="sp-r"><span class="hint" id="skillRouteHint">只读门面：点「查看」读正文（脱敏）</span></div>
-                        </div>
+                    <!-- ── 视图一：技能目录 ── -->
+                    <div id="skillViewCatalog" role="tabpanel" aria-labelledby="skillTabCatalog">
                         <!-- 统计条：每个数字都来自后端字段（list/zombies/invocations），
                              页面不存第二个真相（test_skill_center_ui 钉着） -->
                         <div class="sk-stats" id="skillStats">加载中…</div>
                         <div class="sp-tools">
                             <div class="toolbar">
                                 <input id="skillQ" placeholder="按名称 / 描述过滤…" oninput="renderSkillList()" style="max-width:260px">
+                                <button class="btn ghost sm sk-clear" id="skillQClear" hidden
+                                        onclick="clearSkillFilter()" aria-label="清空搜索">清除</button>
                                 <select id="skillRoute" onchange="renderSkillList()" style="max-width:190px"><option value="">全部发现点</option></select>
+                                <select id="skillSort" onchange="renderSkillList()" style="max-width:130px" title="排序方式">
+                                    <option value="">默认排序</option>
+                                    <option value="calls">调用最多</option>
+                                    <option value="idle">闲置最久</option>
+                                </select>
                                 <span class="chip pick" id="skillZombieOnly" role="button" tabindex="0"
                                       onclick="toggleSkillZombieOnly()"
                                       title="只看近 7 天零调用的技能（数据源 /api/skill/zombies）">只看零调用</span>
+                                <span class="hint sk-cnt" id="skillCount"></span>
+                                <span class="hint" id="skillRouteHint">只读门面：点行或「查看」读正文（脱敏）</span>
                             </div>
                         </div>
                         <div class="sp-bd box"><div id="skillList" class="sp-list">加载中…</div></div>
                     </div>
-                </div>
 
-                <!-- ── 视图二：调用记录（/api/skill/invocations 只读投影，零新表）── -->
-                <div id="skillViewInvocations" style="display:none">
-                    <div class="sp-card">
-                        <div class="sp-hd">
-                            <h3>调用记录</h3>
-                            <div class="sp-r"><span class="hint">hub 通道遥测（profile_events · skill.invoke）——各家 agent 直读磁盘的旁路未接入，置信度封顶</span></div>
-                        </div>
+                    <!-- ── 视图二：调用记录（/api/skill/invocations 只读投影，零新表）── -->
+                    <div id="skillViewInvocations" role="tabpanel" aria-labelledby="skillTabInvocations" style="display:none">
                         <div class="sp-tools">
                             <div class="toolbar">
                                 <input id="invName" placeholder="按技能名过滤…" style="max-width:200px" oninput="renderSkillInvocations()">
@@ -2015,8 +2039,10 @@
                                     <option value="30">近 30 天</option>
                                     <option value="90">近 90 天</option>
                                 </select>
-                                <button class="btn ghost sm" onclick="loadSkillInvocations()"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
+                                <button class="btn ghost sm" onclick="clearInvFilters()" title="清空名称 / 调用方过滤">清空过滤</button>
+                                <span class="hint sk-cnt" id="invCount"></span>
                             </div>
+                            <div class="hint" style="margin:-6px 0 12px">hub 通道遥测（profile_events · skill.invoke）——各家 agent 直读磁盘的旁路未接入，置信度封顶</div>
                         </div>
                         <div class="sk-inv-sum" id="skillInvSummary">加载中…</div>
                         <div class="sp-bd box"><div id="skillInvocations" class="sp-list">加载中…</div></div>
@@ -2494,6 +2520,8 @@
                 <button class="btn sm" onclick="skillInvokeCur()" title="POST /api/skill/invoke：回指令正文并记一条调用流水（caller=web 自报）">试调用（记账）</button>
                 <button class="btn sm ghost" onclick="skillCopySnippet()" title="复制 REST / MCP 两种接入片段到剪贴板">复制接入片段</button>
             </div>
+            <div class="hint" style="margin-top:6px">「试调用」记一条 hub 调用流水（caller=web，可在「调用记录」看到）；「查看正文」不记账。
+                若提示 401，是浏览器保存的 TERM_TOKEN 与服务端不一致——旧值会被清空，重试时按弹窗输入当前 token。</div>
             <div class="toolbar" style="margin-top:8px">
                 <select id="skInstTo" style="min-width:150px" title="安装目标发现点（软链，不动本体；local 路只读不接受）"></select>
                 <button class="btn sm ghost" onclick="skillInstallFromDrawer()">安装到所选目标</button>
@@ -2658,6 +2686,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=7c12aacc"></script>
+    <script src="/static/hub.js?v=74d9392e"></script>
 </body>
 </html>

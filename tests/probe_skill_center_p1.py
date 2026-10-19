@@ -138,6 +138,16 @@ def main():
         ok("digest 指纹渲染 %d 处" % fp)
     else:
         bad("digest 指纹未渲染：%r" % fp)
+    # 2026-10-19 用户裁定：两个 tab 必须跟在「技能中心」文字后面（同一行），
+    # 不许再被 .sp-tools 挤到下一行。量几何：tab 左边在标题右边之后、两者 top 差 ≤12px。
+    geom = evaluate(cdp, "(()=>{const h=document.querySelector('#page-skills .sp-hd h3').getBoundingClientRect();"
+                         "const t=document.getElementById('skillTabCatalog').getBoundingClientRect();"
+                         "return {ht:Math.round(h.top),tt:Math.round(t.top),hr:Math.round(h.right),tl:Math.round(t.left)};})()")
+    if geom and geom["tl"] >= geom["hr"] - 2 and abs(geom["tt"] - geom["ht"]) <= 12:
+        ok("tab 与标题同一行（h3.right=%d, tab.left=%d, top 差=%d）" %
+           (geom["hr"], geom["tl"], abs(geom["tt"] - geom["ht"])))
+    else:
+        bad("tab 未与标题同行：%r" % geom)
 
     print("== B 切「调用记录」：视图切换 + 汇总")
     evaluate(cdp, "document.getElementById('skillTabInvocations').click()")
@@ -154,17 +164,35 @@ def main():
         ok("汇总 scope 声明在（不是全历史）")
     else:
         bad("汇总缺 scope 声明（会被读成全历史）")
+    # 0 条时必须解释「为什么是 0」——用户 2026-10-19 报障「调用记录一直显示 0」。
+    if sum_txt and "窗口内 0 条" in sum_txt:
+        empty_txt = evaluate(cdp, "document.getElementById('skillInvocations').textContent")
+        if empty_txt and "agent 直接读磁盘" in empty_txt and "试调用" in empty_txt:
+            ok("0 条空状态解释了直读旁路 + 试调用出口")
+        else:
+            bad("0 条空状态缺少解释：%r" % (empty_txt or "")[:120])
+    # WAI-ARIA Tabs 键盘：焦点在「技能目录」时按 → 应切到「调用记录」。
+    evaluate(cdp, "document.getElementById('skillTabCatalog').click()")
+    evaluate(cdp, "document.getElementById('skillTabCatalog').focus()")
+    evaluate(cdp, "document.getElementById('skillTabCatalog').dispatchEvent("
+                  "new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}))")
+    kb = wait_until(cdp, "document.getElementById('skillViewInvocations').style.display!=='none'", 3)
+    if kb:
+        ok("ArrowRight 从目录切到调用记录")
+    else:
+        bad("tab 键盘 ArrowRight 未切换")
     evaluate(cdp, "document.getElementById('skillTabCatalog').click()")
 
     print("== C 行「查看」→ 详情抽屉五区")
     opened = wait_until(cdp, "document.querySelectorAll('#skillList .mem-item .btn').length")
     if isinstance(opened, int) and opened > 0:
-        evaluate(cdp, "document.querySelector('#skillList .mem-item .btn').click()")
+        # 2026-10-19：点行的主文本（不是右侧小按钮）验证整行可点
+        evaluate(cdp, "document.querySelector('#skillList .mem-item .tag').click()")
     drawer = wait_until(cdp, "document.getElementById('skillDocDrawer').classList.contains('on')")
     if not drawer:
         bad("抽屉未打开")
     else:
-        ok("抽屉经 openOverlay 打开")
+        ok("整行点击经委托打开抽屉")
         meta = wait_until(cdp, "(()=>{const e=document.getElementById('skillDocMeta');"
                                "return e && e.textContent.indexOf('读取中')<0 && e.textContent.indexOf('整包')>=0 "
                                "? e.textContent : false;})()")
@@ -243,6 +271,14 @@ def main():
             ok("%s %d 无横向溢出（scrollWidth=%d）" % (name, w, ov["sw"]))
         else:
             bad("%s %d 横向溢出：%r" % (name, w, ov))
+        # 同档再量一次「tab 是否仍与标题同行」——1440 绿不代表 390 不换行。
+        g2 = evaluate(cdp, "(()=>{const h=document.querySelector('#page-skills .sp-hd h3').getBoundingClientRect();"
+                           "const t=document.getElementById('skillTabCatalog').getBoundingClientRect();"
+                           "return {ht:Math.round(h.top),tt:Math.round(t.top),hr:Math.round(h.right),tl:Math.round(t.left)};})()")
+        if g2 and g2["tl"] >= g2["hr"] - 2 and abs(g2["tt"] - g2["ht"]) <= 14:
+            ok("%s %d tab 仍与标题同行" % (name, w))
+        else:
+            bad("%s %d tab 被挤到下一行：%r" % (name, w, g2))
     # 抽屉窄屏宽度 ≤ 92vw（§4.2 ③触屏逃生的前提：点得到遮罩）
     cdp.send("Emulation.setDeviceMetricsOverride", width=390, height=844,
              deviceScaleFactor=1, mobile=True)

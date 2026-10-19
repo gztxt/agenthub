@@ -133,10 +133,20 @@ class TestSysPagesLayout(unittest.TestCase):
 
     def test_no_legacy_panel_left_in_system_pages(self):
         """迁移完整性闸：系统页里不许再出现 .panel 自搭（那种页面间距/卡头/滚动
-        归属都跟别人不一样 —— 就是本次报障「乱七八糟」的原始形态）。"""
+        归属都跟别人不一样 —— 就是本次报障「乱七八糟」的原始形态）。
+
+        ⚠ 判据必须是 **class 属性里的 panel**，不能是全文字面量：
+        2026-10-19 技能中心按 WAI-ARIA Tabs 给两个视图加了 `role="tabpanel"`，
+        旧写法 `assertNotIn("panel", …)` 把 ARIA 角色当成遗留类误报。
+        闸门量错对象就会逼人改对代码——这里改闸门，不改 ARIA。
+        """
+        pat = re.compile(r"""class\s*=\s*['"][^'"]*\bpanel\b""")
+        # 反向自证：真的 .panel 自搭必须被抓到；role=tabpanel 不算。
+        self.assertRegex('<div class="panel foo">', pat)
+        self.assertNotRegex('<div role="tabpanel" class="sk-panelish">', pat)
         for p in SYS_PAGES:
-            self.assertNotIn("panel", self.sections[p],
-                             "#page-%s 还在用 .panel 自搭，没走统一骨架" % p)
+            self.assertNotRegex(self.sections[p], pat,
+                                "#page-%s 还在用 .panel 自搭，没走统一骨架" % p)
 
     def test_table_pages_use_bounded_scroll_box(self):
         """单表页的表格进限高盒：盒是 sticky 表头的滚动容器，卡片留在视口里。"""

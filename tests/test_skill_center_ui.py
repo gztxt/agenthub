@@ -300,6 +300,64 @@ class TestStatsBarAndBadges(unittest.TestCase):
         self.assertIn("available", m.group(0))
 
 
+class TestInlineTabsAndInteraction(unittest.TestCase):
+    """2026-10-19 用户裁定：tab 跟在「技能中心」文字后面（不另起一行）+ 操作逻辑优化。
+
+    钉住四类回归：
+      ① tablist 必须在 .sk-titlebar 内、紧跟 h3（有人再包一层 .sp-tools 就红）；
+      ② ARIA tabs 契约（aria-controls / aria-labelledby / roving tabindex / 方向键）；
+      ③ 目录行整行可点、搜索清除、排序下拉、结果计数都在；
+      ④ 调用记录空状态必须解释「为什么是 0」与 401 的下一步，不许只写一行空文案。
+    """
+
+    def test_tabs_are_inline_with_title(self):
+        self.assertRegex(
+            HTML,
+            r'<div class="sp-hd">\s*<div class="sk-titlebar">\s*<h3>技能中心</h3>\s*'
+            r'<div class="sk-tabs" id="skillTabs"',
+            "tab 必须与「技能中心」同处 .sk-titlebar（用户要求：不另起一行）")
+        # 两个 tab 都不许再挂 inline onclick（§4.2 委托口径；也避免 jsStr 旧坑）
+        self.assertNotIn('onclick="switchSkillView', HTML)
+
+    def test_aria_tabs_contract(self):
+        self.assertIn('role="tablist"', HTML)
+        self.assertIn('aria-controls="skillViewCatalog"', HTML)
+        self.assertIn('aria-controls="skillViewInvocations"', HTML)
+        self.assertIn('role="tabpanel" aria-labelledby="skillTabCatalog"', HTML)
+        self.assertIn('role="tabpanel" aria-labelledby="skillTabInvocations"', HTML)
+        self.assertIn("tab.tabIndex = on ? 0 : -1", JS, "缺 roving tabindex")
+        for key in ("ArrowRight", "ArrowLeft", "Home", "End"):
+            self.assertIn(key, JS, "tab 键盘导航缺 %s" % key)
+
+    def test_row_click_opens_detail(self):
+        """目录行整行可点（右侧「查看」仍是独立按钮）。"""
+        self.assertIn('data-sk-row="1"', JS, "目录行未挂整行点击标记")
+        self.assertIn("closest('[data-sk-row]')", JS, "委托未处理整行点击")
+        self.assertIn("'skillList', 'skillInvocations', 'skillDocDrawer'", JS,
+                      "调用记录行未接入查看委托")
+
+    def test_search_clear_sort_and_count(self):
+        for dom_id in ("skillQClear", "skillSort", "skillCount", "invCount"):
+            self.assertIn('id="%s"' % dom_id, HTML, "#%s 缺失" % dom_id)
+        self.assertIn("function clearSkillFilter()", JS)
+        self.assertIn("function clearInvFilters()", JS)
+        m = re.search(r"function renderSkillList\(.*?\n\}", JS, re.S)
+        self.assertTrue(m)
+        self.assertIn("skillSort", m.group(0), "排序下拉未接进目录渲染")
+
+    def test_refresh_is_contextual(self):
+        """一个刷新入口按当前视图刷新，避免两个视图各一个按钮点错。"""
+        self.assertIn("function refreshSkillView()", JS)
+        self.assertIn('id="skillRefresh"', HTML)
+        self.assertNotIn('onclick="loadSkills()"><svg', HTML)
+
+    def test_invocations_empty_state_explains_zero_and_401(self):
+        """调用记录 0 条时必须解释口径与下一步（2026-10-19 用户报障）。"""
+        self.assertIn("agent 直接读磁盘", JS, "空状态未解释直读旁路不可见")
+        self.assertIn("TERM_TOKEN", JS, "空状态未说明 401 凭据失效这一常见原因")
+        self.assertIn("skillInvTabBadge", HTML, "调用记录 tab 缺少数量徽标")
+
+
 class TestDiagnosticsFold(unittest.TestCase):
     """自检与实验室下沉诊断折叠区（裁定 5）：details/summary，默认折叠。"""
 

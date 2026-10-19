@@ -704,9 +704,15 @@ let SKILL_TOTAL = 0, SKILL_TRUNCATED = false;
  * SKILL_VIEW      当前视图（'catalog' | 'invocations'）——**只存变量不写盘**：
  *                 分档偏好五条之②「加载不写盘」；视图开关不是设备分档，无需记忆。
  * SKILL_DOC       抽屉里正在看的技能（name/route），试调用/复制片段/安装都取它。
- * SKILL_INV       调用流水原始数据（/api/skill/invocations），汇总与徽标同源；
+ * SKILL_INV       调用流水原始数据（固定近 7 天），只服务目录徽标与统计条；
+ *                 与下方 SKILL_INV_VIEW（当前面板窗口）分开，禁止互相覆盖。
  *                 by_skill 映射给目录行徽标与统计条用（页面不存第二个真相）。 */
 let SKILL_VIEW = 'catalog', SKILL_DOC = { name: '', route: '' };
+/* 调用记录视图的数据与「近 7 天徽标」的数据分开存：
+ * 用户把窗口切到 30/90 天时，若复用 SKILL_INV，统计条会在下一次重渲染时
+ * 把 30 天数字冒充「近 7 天」（页面上第二个真相）。SKILL_INV 只服务徽标/统计条，
+ * SKILL_INV_VIEW 只服务当前调用记录面板。 */
+let SKILL_INV_VIEW = null;
 let SKILL_INV = null, SKILL_INV_BY_SKILL = {}, SKILL_INV_LOADED = false;
 
 /* v0.13.69 D7 技能门面：一份数据源、一个扫描口径。
@@ -716,6 +722,7 @@ let SKILL_INV = null, SKILL_INV_BY_SKILL = {}, SKILL_INV_LOADED = false;
  * 藏起来的 medium 会被读成 high。 */
 
 async function loadSkills() {
+  bindSkillTabs();   // 标题行 tab 的点击/键盘委托（幂等；视图可先于数据切换）
   boxBusy('skillList');
   try {
     // v0.13.128（PT-20261019-03）：显式要上限 1000。旧代码不传 limit ⇒ 后端默认 200，
@@ -738,7 +745,7 @@ async function loadSkills() {
     if (SKILL_TRUNCATED) $('skillHint').textContent += '（本次只显示 ' + SKILLS.length + ' 条，单次有上限）';
     if ((d.degraded || []).length) $('skillHint').textContent += ' · 降级路：' + d.degraded.join(',');
     // 工具条那句同样不再写死（它与 skillHint 同源，不然后面会再次漂移）
-    $('skillRouteHint').textContent = SKILL_ROUTES.length + ' 路发现点 · 只读门面：点「查看」读正文（脱敏）';
+    $('skillRouteHint').textContent = '点行或「查看」读正文（脱敏）';
   } catch (e) {
     CENTER_HEALTH.skills = 'err';
     boxFail('skillList', e, 'loadSkills');
@@ -784,19 +791,28 @@ function renderSkillStats() {
   const degraded = [];
   const disk = (SKILL_STATUS && SKILL_STATUS.disk) || {};
   Object.keys(disk).forEach(k => { if (disk[k] && disk[k].available === false) degraded.push(k); });
-  let html = '共 <b>' + nSkill + '</b> 个技能 · <b>' + nRoute + '</b> 路发现点' +
-    ' · 近 7 天调用 <b>' + invTotal + '</b> 次（<b>' + nInvoked + '</b> 个技能被调用过）' +
-    ' · 零调用 <b>' + zCount + '</b> 个';
+  let html = '<span>共 <b>' + nSkill + '</b> 个技能 ·</span>' +
+    '<span><b>' + nRoute + '</b> 路发现点 ·</span>' +
+    '<span>近 7 天调用 <b>' + invTotal + '</b> 次 ·</span>' +
+    '<span>（<b>' + nInvoked + '</b> 个技能被调用过）·</span>' +
+    '<span>零调用 <b>' + zCount + '</b> 个</span>';
   if (SKILL_TRUNCATED) {
     // 「共 N 个」与「列表里有几条」必须分开说：把截断后的条数写成总数 = 这个 bug 的原始形态
-    html += ' · <span class="sk-stat-warn">本次只显示 ' + SKILLS.length +
+    html += '<span class="sk-stat-warn">本次只显示 ' + SKILLS.length +
       ' 条（单次上限），用搜索缩小范围</span>';
   }
   if (degraded.length) {
-    html += ' · <span class="sk-stat-warn">降级路：' + escapeHtml(degraded.join(', ')) + '</span>';
+    html += '<span class="sk-stat-warn">降级路：' + escapeHtml(degraded.join(', ')) + '</span>';
   }
   if (SKILL_INV && SKILL_INV.bad_detail) {
-    html += ' · <span class="sk-stat-warn">' + SKILL_INV.bad_detail + ' 条坏账已跳过</span>';
+    html += '<span class="sk-stat-warn">' + SKILL_INV.bad_detail + ' 条坏账已跳过</span>';
+  }
+  // tab 上的调用数徽标：数据未到不显示；到 0 也显示 0（用户能一眼看出「记录确实为空」，
+  // 而不是怀疑 tab 没加载）。
+  const tabBadge = $('skillInvTabBadge');
+  if (tabBadge) {
+    tabBadge.textContent = SKILL_INV ? String(invTotal) : '';
+    tabBadge.hidden = !SKILL_INV;
   }
   el.innerHTML = html;
 }
@@ -809,7 +825,14 @@ function switchSkillView(v) {
   ['catalog', 'invocations'].forEach(k => {
     const tab = $('skillTab' + k[0].toUpperCase() + k.slice(1));
     const view = $('skillView' + k[0].toUpperCase() + k.slice(1));
-    if (tab) { tab.classList.toggle('on', k === v); tab.setAttribute('aria-selected', k === v ? 'true' : 'false'); }
+    if (tab) {
+      const on = k === v;
+      tab.classList.toggle('on', on);
+      tab.setAttribute('aria-selected', on ? 'true' : 'false');
+      // roving tabindex（WAI-ARIA APG Tabs）：只有当前 tab 在 Tab 序列里，
+      // 左右箭头在 tablist 内移动——避免键盘用户被迫逐个 Tab 穿过两个控件。
+      tab.tabIndex = on ? 0 : -1;
+    }
     if (view) view.style.display = (k === v) ? '' : 'none';
   });
   if (v === 'invocations' && !SKILL_INV_LOADED) {
@@ -817,6 +840,54 @@ function switchSkillView(v) {
     loadSkillInvocations();
   }
   if (v === 'invocations') renderSkillInvocations();
+}
+
+/* 顶部「刷新」按当前视图刷新：目录页刷新技能清单与徽标，调用记录页刷新流水。
+ * 只留一个刷新入口——原来两个视图各有一个按钮，切视图后按错是常态。 */
+function refreshSkillView() {
+  if (SKILL_VIEW === 'invocations') loadSkillInvocations();
+  else loadSkills();
+}
+
+/* 标题行 tab 的点击 + 键盘（WAI-ARIA APG Tabs pattern）。
+ * 自动激活：箭头落到哪个 tab 就切到哪个视图（两个面板都在本地，切换无网络代价）。
+ * 交互一律 data-* 委托，不用 inline onclick（§4.2 同族口径）。 */
+function bindSkillTabs() {
+  const bar = $('skillTabs');
+  if (!bar || bar.__skTabs) return;
+  bar.__skTabs = true;
+  const tabs = () => Array.from(bar.querySelectorAll('[role="tab"]'));
+  bar.addEventListener('click', e => {
+    const t = e.target.closest('[data-skill-view]');
+    if (t && bar.contains(t)) switchSkillView(t.dataset.skillView);
+  });
+  bar.addEventListener('keydown', e => {
+    const ts = tabs();
+    const i = ts.indexOf(document.activeElement);
+    if (i < 0) return;
+    let next = null;
+    if (e.key === 'ArrowRight') next = (i + 1) % ts.length;
+    else if (e.key === 'ArrowLeft') next = (i - 1 + ts.length) % ts.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = ts.length - 1;
+    else return;
+    e.preventDefault();          // 横向 tablist 不劫持上下键，页面仍可正常滚动
+    ts[next].focus();
+    switchSkillView(ts[next].dataset.skillView);
+  });
+}
+
+function clearSkillFilter() {
+  const q = $('skillQ');
+  if (!q) return;
+  q.value = '';
+  renderSkillList();
+  q.focus();
+}
+
+function clearInvFilters() {
+  ['invName', 'invCaller'].forEach(id => { const el = $(id); if (el) el.value = ''; });
+  renderSkillInvocations();
 }
 
 /* 技能中心的匹配字段表：**必须与 `src/skill.py` 的 `_Q_FIELDS` 同表同权重**。
@@ -834,9 +905,26 @@ function toggleSkillZombieOnly() {
   renderSkillList();
 }
 
+/* 排序用的两个派生值：都取页面已有的后端数据，不另发请求、不存第二个真相。 */
+function skillInvCount(s) { return (SKILL_INV_BY_SKILL && SKILL_INV_BY_SKILL[s.name]) || 0; }
+function skillIdleDays(s) {
+  const z = SKILL_ZOMBIES[s.name];
+  return z ? (Number(z.days_idle) || 0) : -1;   // 不在僵尸榜 = 有调用痕迹，排最后
+}
+
+/* 清除目录视图的全部筛选（搜索词/发现点/排序/只看零调用）——空状态里的出口。 */
+function resetSkillFilters() {
+  ['skillQ', 'skillRoute', 'skillSort'].forEach(id => { const el = $(id); if (el) el.value = ''; });
+  SKILL_ZOMBYE_ONLY = false;
+  const chip = $('skillZombieOnly');
+  if (chip) chip.classList.remove('on');
+  renderSkillList();
+}
+
 function renderSkillList() {
   const q = ($('skillQ').value || '').toLowerCase();
   const route = $('skillRoute').value;
+  const sort = ($('skillSort') && $('skillSort').value) || '';
   // 模糊打分 + 排序：精确命中（1000 分）在前，近似命中在后且按接近度排。
   const scored = SKILLS
     .filter(s => (!route || (s.routes || []).includes(route) || s.route === route))
@@ -848,13 +936,31 @@ function renderSkillList() {
   // 「只看零调用」是**后端给的名单**，不是前端自己数出来的：零调用要看的是
   // 注入/读取两个通道的记账，而不是「页面上没点过查看」。
   const zrows = SKILL_ZOMBYE_ONLY ? rows.filter(s => SKILL_ZOMBIES[s.name]) : rows;
+  // 排序（默认保持上面的相关性/名称顺序；只在筛选后才需要另一种视角）
+  if (sort === 'calls') {
+    zrows.sort((a, b) => (skillInvCount(b) - skillInvCount(a)) ||
+      String(a.name || '').localeCompare(String(b.name || '')));
+  } else if (sort === 'idle') {
+    zrows.sort((a, b) => (skillIdleDays(b) - skillIdleDays(a)) ||
+      String(a.name || '').localeCompare(String(b.name || '')));
+  }
   const el = $('skillList');
+  if (!el) return;
+  // 结果计数 + 搜索清除钮：输入框有自己的「清除」出口，不用整页重置。
+  const total = SKILL_TOTAL || SKILLS.length;
+  const cnt = $('skillCount');
+  if (cnt) cnt.textContent = (SKILL_ZOMBYE_ONLY ? '零调用 ' : (q ? '命中 ' : '显示 ')) +
+    zrows.length + ' / ' + total + ' 条';
+  const clearBtn = $('skillQClear');
+  if (clearBtn) clearBtn.hidden = !q;
   if (SKILL_ZOMBYE_ONLY && !Object.keys(SKILL_ZOMBIES).length) {
-    el.innerHTML = '<div class="hint">零调用榜为空（可能记账尚未建立）——先用相关性实验室跑一次检索。</div>';
+    el.innerHTML = '<div class="sk-empty"><b>零调用榜为空</b>（可能记账尚未建立）。' +
+      '这不是「所有技能都没人用」——先跑一次相关性实验室建立记账，或' +
+      '<button class="btn ghost sm" onclick="resetSkillFilters()">查看全部技能</button></div>';
     return;
   }
   const nearHint = (q && nearCount)
-    ? '<div class="hint">其中 <b>' + nearCount + '</b> 条为<b>近似匹配</b>（容忍手误，标 ≈近似）——无精确命中项。</div>'
+    ? '<div class="hint" style="padding:8px 10px 0">其中 <b>' + nearCount + '</b> 条为<b>近似匹配</b>（容忍手误，标 ≈近似）——无精确命中项。</div>'
     : '';
   el.innerHTML = nearHint + zrows.map(s => {
     const rt = (s.routes && s.routes.length) ? s.routes[0] : s.route;   // 首路作为查看默认 route
@@ -882,7 +988,11 @@ function renderSkillList() {
     const invLine = nInv
       ? '近 7 天调用 <b>' + nInv + '</b> 次'
       : (z ? '末次调用：无（从未调用）' : '近 7 天无 hub 通道调用记录');
-    return '<div class="mem-item"><span class="tag agent" style="align-self:flex-start">' + escapeHtml(s.name) + '</span>' +
+    // 整行可点（data-sk-row）：查看详情不必精准命中右侧小按钮；
+    // 右侧「查看」仍是独立按钮，供键盘/读屏直接聚焦。
+    return '<div class="mem-item sk-row" data-sk-row="1" data-name="' + escapeHtml(s.name) +
+      '" data-route="' + escapeHtml(rt == null ? '' : rt) + '" title="点击查看详情">' +
+    '<span class="tag agent" style="align-self:flex-start">' + escapeHtml(s.name) + '</span>' +
     // 描述走 mdInline（行内白名单 + 先转义），不再 escapeHtml —— 见 01-core-boot 的口径注释
     '<p>' + mdInline(String(s.description || '').slice(0, 160)) +
     '<br><span class="hint">' + escapeHtml((s.routes || [s.route]).join(', ')) +
@@ -894,9 +1004,10 @@ function renderSkillList() {
     // bindSkillViewDelegation 注释）。属性值走 escapeHtml（含 " 转义），dataset 读回原值。
     '<button class="btn sm" data-sk-view="1" data-name="' + escapeHtml(s.name) +
     '" data-route="' + escapeHtml(rt == null ? '' : rt) + '" title="读全文（脱敏）">查看</button></span></div>';
-  }).join('') ||
-    '<div class="hint">没有匹配的技能（' + zrows.length + ' / ' + (SKILL_TOTAL || SKILLS.length) + ' 总数' +
-    (q ? '；已启用模糊匹配仍无结果 ⇒ 换关键词或查发现点自检' : '') + '）</div>';
+  }).join('') || ('<div class="sk-empty"><b>没有匹配的技能</b>（当前 ' + zrows.length + ' / ' +
+    total + ' 条）。' + (q ? '已启用模糊匹配仍无结果 ⇒ 换关键词，或到「诊断 → 发现点自检」查该目录是否被扫到。' :
+      '当前筛选条件下没有条目。') +
+    '<br><button class="btn ghost sm" onclick="resetSkillFilters()">清除全部筛选</button></div>');
 }
 
 /* 零调用榜：/api/skill/zombies。**confidence 封顶 medium**——只接了 hub 通道
@@ -1017,15 +1128,24 @@ async function skillLabSearch() {
  * data-* + escapeHtml 进属性（" 被转成 &quot;，任何名字都不断属性），dataset 读回原值。
  * 绑定幂等（loadSkills 每次刷新都调；marker 防重复挂——重复挂会一点开两个抽屉调用）。 */
 function bindSkillViewDelegation() {
-  ['skillList', 'skillDocDrawer'].forEach(id => {
+  ['skillList', 'skillInvocations', 'skillDocDrawer'].forEach(id => {
     const el = $(id);
     if (!el || el.__skDeleg) return;
     el.__skDeleg = true;
     el.addEventListener('click', e => {
       const b = e.target.closest('[data-sk-view]');
-      if (!b || !el.contains(b)) return;
-      e.stopPropagation();
-      skillRead(b.dataset.name || '', b.dataset.route || '');
+      if (b && el.contains(b)) {
+        e.stopPropagation();
+        skillRead(b.dataset.name || '', b.dataset.route || '');
+        return;
+      }
+      // 目录行整行可点（2026-10-19）：右侧「查看」仍是独立按钮；
+      // 点在行内其它位置同样打开详情，减少「必须精准点小按钮」的操作成本。
+      const row = e.target.closest('[data-sk-row]');
+      if (row && el.contains(row)) {
+        e.stopPropagation();
+        skillRead(row.dataset.name || '', row.dataset.route || '');
+      }
     });
   });
 }
@@ -1157,10 +1277,21 @@ async function skillInvokeCur() {
           escapeHtml(SKILL_DOC.name) + '" data-route="' + escapeHtml(String(c.route || '')) + '">' +
           '<b>' + escapeHtml(String(c.route || '')) + '</b> <span class="hint">' +
           escapeHtml(String(c.path || '')) + (c.via_symlink ? '（软链）' : '') + '</span></div>').join('');
+      toast('同名技能有多路，先在正文区选一路', 'err');
+    } else if (e.http === 401 && body) {
+      // 2026-10-19 实测：用户点「试调用」后调用记录仍为 0，生产日志是
+      // `[writegate] 401 ... 凭据不匹配`。旧 token 被 api() 清空但用户不知道，
+      // 必须把「为什么没记账 + 下一步」讲清楚，否则只会读成「功能坏了」。
+      body.textContent = '调用失败（401 未授权）：浏览器保存的 TERM_TOKEN 与服务端不一致。\n' +
+        '旧凭据已被自动清空。请再点一次「试调用」，在弹窗里输入当前 TERM_TOKEN。\n\n服务端返回：' +
+        (e.message || e);
+      toast('调用未记账：TERM_TOKEN 已失效，已清空旧凭据；请重试并输入当前 token', 'err');
     } else if (body) {
       body.textContent = '调用失败：' + (e.message || e);
+      toast('调用失败：' + (e.message || e), 'err');
+    } else {
+      toast('调用失败：' + (e.message || e), 'err');
     }
-    toast('调用失败：' + (e.message || e), 'err');
   }
 }
 
@@ -1223,7 +1354,7 @@ async function loadSkillInvocations() {
   const days = ($('invDays') && $('invDays').value) || '7';
   try {
     const d = await api('/api/skill/invocations?days=' + encodeURIComponent(days) + '&limit=100');
-    SKILL_INV = d;
+    SKILL_INV_VIEW = d;
     SKILL_INV_LOADED = true;
     renderSkillInvocations();
   } catch (e) {
@@ -1237,35 +1368,58 @@ async function loadSkillInvocations() {
 function renderSkillInvocations() {
   const sumEl = $('skillInvSummary'), el = $('skillInvocations');
   if (!el) return;
-  if (!SKILL_INV) { el.innerHTML = '<div class="hint">加载中…</div>'; return; }
+  if (!SKILL_INV_VIEW) { el.innerHTML = '<div class="hint">加载中…</div>'; return; }
   const wantName = (($('invName') || {}).value || '').trim();
   const wantCaller = (($('invCaller') || {}).value || '').trim();
-  const items = (SKILL_INV.items || []).filter(x =>
+  const all = SKILL_INV_VIEW.items || [];
+  const items = all.filter(x =>
     (!wantName || fuzzyMatch([[x.name, 3]], wantName) > 0) &&
     (!wantCaller || fuzzyMatch([[x.caller, 3]], wantCaller) > 0));
+  const cnt = $('invCount');
+  if (cnt) cnt.textContent = '显示 ' + items.length + ' / ' + all.length + ' 条';
   if (sumEl) {
-    const byCaller = (SKILL_INV.summary && SKILL_INV.summary.by_caller) || {};
-    const bySkill = (SKILL_INV.summary && SKILL_INV.summary.by_skill) || {};
+    const byCaller = (SKILL_INV_VIEW.summary && SKILL_INV_VIEW.summary.by_caller) || {};
+    const bySkill = (SKILL_INV_VIEW.summary && SKILL_INV_VIEW.summary.by_skill) || {};
     const callerTxt = Object.keys(byCaller).map(c => escapeHtml(c) + ' × ' + byCaller[c]).join('，') || '无';
     const hot = Object.keys(bySkill).slice(0, 3).map(k => escapeHtml(k) + ' × ' + bySkill[k]).join('，') || '无';
-    sumEl.innerHTML = '窗口内 <b>' + (SKILL_INV.matched_total != null ? SKILL_INV.matched_total : 0) +
+    sumEl.innerHTML = '窗口内 <b>' + (SKILL_INV_VIEW.matched_total != null ? SKILL_INV_VIEW.matched_total : 0) +
       '</b> 条 · 按调用方：' + callerTxt + ' · 最热：' + hot +
-      '<br><span class="hint">汇总口径＝本次抓取窗口（' + (SKILL_INV.window_fetched || 0) + ' 条，上限 ' +
-      (SKILL_INV.fetch_cap || 0) + '），不是全历史' +
-      (SKILL_INV.bad_detail ? '；' + SKILL_INV.bad_detail + ' 条坏账已跳过' : '') + '</span>';
+      '<br><span class="hint">汇总口径＝本次抓取窗口（' + (SKILL_INV_VIEW.window_fetched || 0) + ' 条，上限 ' +
+      (SKILL_INV_VIEW.fetch_cap || 0) + '），不是全历史' +
+      (SKILL_INV_VIEW.bad_detail ? '；' + SKILL_INV_VIEW.bad_detail + ' 条坏账已跳过' : '') + '</span>';
   }
   el.innerHTML = items.map(x => {
     const st = x.status === 'ok' ? '' : '<span class="badge" style="color:var(--warn)">' + escapeHtml(String(x.status || '?')) + '</span>';
+    const who = String(x.name || '');
+    // 行内「查看」复用目录页同一条 read 链路（不记账）；从流水直接跳到技能详情，
+    // 不用切回目录再搜一次。
+    const viewBtn = who
+      ? '<button class="btn sm" data-sk-view="1" data-name="' + escapeHtml(who) +
+        '" data-route="" title="查看该技能详情（read 不记账）">查看</button>'
+      : '';
     return '<div class="mem-item"><span class="tag agent" style="align-self:flex-start">' +
-      escapeHtml(String(x.name || '（无名次）')) + '</span>' +
+      escapeHtml(who || '（无名次）') + '</span>' +
       '<p>caller <b>' + escapeHtml(String(x.caller || 'anonymous')) + '</b>' +
       (x.caller_reported ? ' <span class="hint">（自报）</span>' : '') + st +
       (x.task ? '<br>' + mdInline(String(x.task).slice(0, 120)) : '') +
       '<br><span class="hint">' + escapeHtml(String(x.created_at || '')) +
-      ' · ' + (x.duration_ms != null ? x.duration_ms + 'ms' : '') + '</span></p></div>';
-  }).join('') || '<div class="hint">窗口内没有调用记录' +
-    (wantName || wantCaller ? '（已被过滤掉；清空过滤框再看）' : '——还没有任何 agent/用户通过 hub 调用过技能') + '</div>';
+      ' · ' + (x.duration_ms != null ? x.duration_ms + 'ms' : '') + '</span></p>' +
+      '<span style="align-self:flex-start;display:flex;gap:4px">' + viewBtn + '</span></div>';
+  }).join('') || ('<div class="sk-empty"><b>这个窗口内没有调用记录</b>（近 ' +
+    (SKILL_INV_VIEW.days || 7) + ' 天）。<br>' +
+    '这里只统计 <b>hub 通道</b>的显式调用（POST /api/skill/invoke 或 MCP hub_skill_invoke）；' +
+    'agent 直接读磁盘的 SKILL.md 不经过 hub，因此不会出现在这里。' +
+    (wantName || wantCaller ? '<br>当前有过滤条件，也可能是被过滤掉了。' : '') +
+    '<br>想验证记账正常：到「技能目录」点任一技能，在抽屉里点「试调用（记账）」。' +
+    '<br><span class="hint">若刚点过试调用仍为 0，多半是浏览器 TERM_TOKEN 与服务端不一致（401）——' +
+    '旧凭据会被自动清空，重试时按提示输入当前 token 即可。</span>' +
+    '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">' +
+    (wantName || wantCaller ? '<button class="btn ghost sm" onclick="clearInvFilters()">清空过滤</button>' : '') +
+    '<button class="btn ghost sm" onclick="switchToCatalog()">去技能目录</button></div></div>');
 }
+
+/* 空状态的出口：切回目录视图（不需要加载新数据）。 */
+function switchToCatalog() { switchSkillView('catalog'); }
 
 function closeSkillDoc() { closeOverlay('skillDocDrawer'); }
 

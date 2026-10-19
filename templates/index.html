@@ -793,6 +793,16 @@
                          color: var(--muted); overflow-wrap: anywhere; }
         .sk-store-act { display: flex; align-items: center; }
         .sk-store-act .btn { flex: none; }
+        /* 自动兜底 / 账号：两行判据。左列标签定宽、右列可收缩（与调用记录同一套对齐口径）。 */
+        .sk-store-meta { display: grid; gap: 6px; margin: 0 0 12px; padding: 10px 12px;
+                         border: 1px solid var(--line); border-radius: 8px;
+                         background: var(--surface-2); font-size: var(--fs-sm); }
+        .sk-store-meta-line { display: grid; grid-template-columns: max-content minmax(0, 1fr);
+                              align-items: center; gap: 4px 10px; color: var(--text-2); }
+        .sk-store-meta-line b { color: var(--text-1); font-weight: 600; }
+        .sk-store-meta-line .sk-store-token { display: inline-flex; align-items: center;
+                                              gap: 6px; flex-wrap: wrap; }
+        .sk-store-token input { max-width: 220px; }
         /* 抽屉分区：元信息 / 分布路由 / 调用统计 / 操作 / 正文 */
         .sk-sec { margin-top: 14px; }
         .sk-sec > .sp-sub { margin-bottom: 6px; }
@@ -2123,6 +2133,12 @@
                                 来源 SkillHub（skillhub.cn）· 安装＝把技能文件落到所选发现点 ·
                                 调用走本仓 /api/skill/invoke，正文不出机器
                             </div>
+                            <!-- 自动兜底 + 账号：两行都**只读后端字段**（/store/status 的
+                                 auto / auth），开关与额度不在前端另存一份真相。 -->
+                            <div class="sk-store-meta">
+                                <div class="sk-store-meta-line" id="storeAutoLine">自动兜底：查询中…</div>
+                                <div class="sk-store-meta-line" id="storeAuthLine">账号：查询中…</div>
+                            </div>
                         </div>
                         <div class="sp-bd box"><div id="storeList" class="sp-list">输入关键词后按回车或点「搜索」。</div></div>
                     </div>
@@ -2765,6 +2781,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=bfb2c4b2"></script>
+    <script src="/static/hub.js?v=fafda524"></script>
 </body>
 </html>

@@ -1,3 +1,80 @@
+## v0.13.135 — 技能商店自动兜底（找不到就搜、够像才装、装完即回正文）+ 账号入口
+
+> 来源：用户「技能商店的作用就是 agent 在技能中心没有对应技能时要自动搜索技能商店并下载调用；
+> 验证是否需要 key 或登录，如果需要就添加对应入口模块」。
+
+### 一、先答「要不要登录/Key」（实测，不是读文档）
+
+| 动作 | 匿名可用 | 证据 |
+|---|---|---|
+| `search` | ✅ | 无 token 搜 `pdf`，rc=0，12 条结果 |
+| `install` | ✅ | 无 token 装 `@clawhub_kirkraman/martin-pdf` 到 `/tmp`，rc=0，SKILL.md 落地 |
+| `publish` / `comment` / `run` / `whoami` | ❌ | `auth whoami` 无 token → rc=1「未登录。请先执行 skillhub login --key skh_xxx」 |
+
+⇒ **自动补货链路（搜索+安装+本地读正文）不需要 Key**。Key 只对发布/评论/在线 run 有意义，
+而 `run` 会把正文发到第三方执行，本仓不接。仍按要求补了入口：商店页「账号」行 +
+`GET /store/auth`、`POST /store/login`、`POST /store/logout`；token 交给官方 CLI 落
+`~/.skillhub/credentials.json`，hub 不落库、不回显、审计只记「有一次登录动作」。
+
+### 二、自动兜底（`POST /api/skill/store/acquire`）
+
+```
+query → ① 本地 BM25（归一化 ≥0.40）⇒ source=local，不联网不装盘
+      → ② 商店搜索（ASCII 关键词 + 原句两路合并）
+          候选门槛：关键词名称命中 ≥0.5 或 查询覆盖 ≥0.5
+      → ③ 装到自动目标（默认 techdocs，可 SKILL_STORE_AUTO_ROUTE 改）
+      → ④ 立刻扫回 SKILL.md，顶层回 name/route/content（与 /invoke 同形）
+```
+
+**为什么本地判据用归一化分数**：绝对 BM25 随语料规模/查询长度漂移——同一强命中在
+375 条语料上是 17.9，在 2 条测试语料上不到 1。分母取「查询词 IDF 之和（绝对值）」，
+实测 8 条查询：真命中 0.41~1.51、弱命中/无关 0.10~0.27 ⇒ 取 0.40，两侧各留约 0.13。
+
+**为什么商店要先抽英文词重搜**：中文长句直接搜会被切成二字组，上游排序靠「哪个描述里
+凑巧有『生成』『图片』」——实测「把 PDF 拆成图片」首条是视频创作技能（覆盖率 0.2 却因
+名称含「图片」被判候选）。改为抽 `pdf` 重搜 + 名称命中优先后，选中名称就叫 `pdf` 的那条。
+
+**为什么门槛必须存在**：商店搜索对任何词都会回 12 条。「搜索命中 ≠ 相似」，
+不设门槛等于「随便装一个第三方技能进 agent 的发现点」。
+
+### 三、`/api/skill/invoke` 的 `allow_store`
+
+- 默认 **false**：web/旧客户端打错一个名字就往发现点写第三方技能，是把手误变成装机。
+- MCP `hub_skill_invoke` 默认 **true**：agent 点名一个本地没有的技能才走补货；
+  响应 `store_fallback` 写明 slug/版本/`trust=community`/安装结果。
+- 新增 MCP 工具 `hub_skill_acquire(query, caller, task, allow_install=True)`：
+  手里只有任务、没有技能名时用这个。
+
+### 四、边界与预算
+
+- 自动安装按小时限次（默认 6，`SKILL_STORE_AUTO_MAX`），计数读 `profile_events` 的
+  `skill.store_auto` 成功行——不另建状态表；超了 429 并说清。DB 不可用时**按已用满处理**
+  （宁可不装）。
+- 已存在同名目录 ⇒ `already_present` 跳过，不覆盖本机改过的技能。
+- 关闭开关：`SKILL_STORE_AUTO=0`。
+- 不接 `skillhub run`（在线执行＝正文离机）；商店技能一律标 `trust=community` 并带警示。
+
+### 五、闸门
+
+```
+tests/test_skill_store.py（22 例）
+  TestAcquire 9 例：本地命中不联网（mock search 断言）、商店安装并回正文、幂等、
+                   不相似候选不落盘、allow_install=false / dry_run、额度 429、
+                   开关关闭、记账、空查询 400
+  TestAuth 3 例：未登录但搜索可用、坏 Token 400、Token 不回显/不入审计 detail
+  TestInvokeFallback 2 例：默认不写盘、allow_store=true 才装并带来源
+```
+
+红臂（改坏必红）：把商店门槛置 -1 ⇒「不相似候选不落盘」红；把 `allow_store` 默认改 true
+⇒「默认不许写盘」红。两处均实测红后还原。
+
+### 六、真机验证
+
+- 真实语料 375 条标定 + `dry_run` 决策复核 8 条：PDF→本地 `pdf`、PPT→商店 `ppt-skill`、
+  浏览器截图/记忆召回/小红书→本地、翻译合同→`none`（商店候选覆盖 0.14 被拒）。
+- 真实安装（临时发现点，非生产）：`@clawhub_cao-yuu/ppt-skill` v1.0.4 装入后扫回
+  22,376B 正文，`took_ms≈2.2s`（含搜索+下载）。
+
 ## v0.13.134 — 调用记录排版重做（对齐 / 层级 / 状态可读）
 
 > 来源：用户报「调用记录页面文字排版要优化，文字要对齐，主题要清晰」。

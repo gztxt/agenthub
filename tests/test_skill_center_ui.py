@@ -347,6 +347,30 @@ class TestStoreView(unittest.TestCase):
         seg = re.search(r"function renderStore\(.*?\n\}", JS, re.S).group(0)
         self.assertNotIn("onclick=", seg)
 
+    def test_auto_policy_is_rendered_from_backend(self):
+        """自动兜底的开关/目标/额度只准来自 `/store/status` 的 `auto` 段。
+
+        前端若能自己写死 6 次/小时、techdocs 路径，界面就会在服务端改配置后
+        继续说旧话（「还能装」→ 实际 429）。
+        """
+        self.assertIn('id="storeAutoLine"', HTML)
+        body = re.search(r"function _renderStoreMeta\(.*?\n\}", JS, re.S).group(0)
+        self.assertIn("auto.enabled", body)
+        self.assertIn("auto.max_per_hour", body)
+        self.assertIn("auto.used_last_hour", body)
+        self.assertNotIn("/home/", body, "额度/目标不许由前端拼路径")
+        self.assertNotIn("AUTO_MAX", body)
+
+    def test_auth_entry_is_password_input_and_delegated(self):
+        """账号入口：Token 输入必须 type=password，且走 data-* 委托（值不进事件属性）。"""
+        body = re.search(r"function _renderStoreMeta\(.*?\n\}", JS, re.S).group(0)
+        self.assertIn('type="password"', body)
+        self.assertIn("data-store-login", body)
+        self.assertNotIn("onclick=", body)
+        login = re.search(r"async function storeLogin\(.*?\n\}", JS, re.S).group(0)
+        self.assertIn("/api/skill/store/login", login)
+        self.assertIn("inp.value = ''", login, "提交后必须清空输入框，不在页面上留副本")
+
 
 class TestInvokeButton(unittest.TestCase):
     """调用（操作）与查看分钮（裁定 3）：invoke 记账、read 不记账，两个入口。"""

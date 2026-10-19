@@ -97,7 +97,25 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.134"
+VERSION = "0.13.135"
+#   v0.13.135：技能商店从「人工货架」变成 **agent 找不到技能时的自动补货通道**。
+#   ① 新端点 POST /api/skill/store/acquire：收一段任务描述，本地 BM25 够像就直接回正文
+#      （不联网、不装盘）；不够像才搜商店，候选覆盖率过门槛才装到自动目标
+#      （默认 techdocs），装完立刻解析 SKILL.md 回正文。返回顶层 name/route/content
+#      与 /invoke 同形，`source=local|store|none` 说明这次是怎么拿到的。
+#   ② 三道闸：本地优先（归一化 BM25 ≥0.40，分母＝查询词 IDF 之和，避免绝对分随语料
+#      规模漂移）/ 商店门槛（ASCII 关键词名称命中 ≥0.5 或查询覆盖 ≥0.5；中文长句先抽
+#      英文词重搜，否则「把 PDF 拆成图片」的首条是视频创作技能）/ 小时额度（默认 6，
+#      计数读 profile_events 的 skill.store_auto，不另建状态表）。超了 429 并说清。
+#   ③ `/api/skill/invoke` 加 `allow_store`（默认关）：MCP `hub_skill_invoke` 默认开，
+#      agent 点名一个本地没有的技能时自动补货；web/旧客户端不受影响（防手误写盘）。
+#      MCP 另加 `hub_skill_acquire`（任务描述入口）。
+#   ④ 账号入口：实测**搜索与安装匿名可用**（2026-10-20 匿名额装了一条验证），
+#      需要 skh_ Token 的只有 publish/comment/run/whoami ⇒ 商店页加「账号」行与
+#      /store/login|/logout|/auth 三个端点；token 交给官方 CLI 落 ~/.skillhub，
+#      hub 不落库、不回显、不写日志。
+#   ⑤ 边界：不接 `skillhub run`（在线执行把正文发到第三方）；商店技能标记
+#      trust=community 并带警示，hub 只当说明书交回，不代跑脚本。
 #   v0.13.134：调用记录排版重做（用户报「文字没对齐、主题不清晰」）。
 #   ① 根因是**容器与换行手段不匹配**：`.sk-inv-sum` 是 flex 而 JS 用 `<br>` 分行，
 #      flex 里的 <br> 只是一个空 flex 项、不换行 ⇒ 三行文案被摊成一串参差项。

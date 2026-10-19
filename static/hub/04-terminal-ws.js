@@ -880,6 +880,7 @@ async function loadStoreStatus() {
     STORE_STATE.available = !!d.available;
     STORE_STATE.error = d.available ? '' : (d.error || 'SkillHub CLI 不可用');
     _fillStoreTargets(STORE_STATE.targets);
+    _renderStoreMeta(d);
     const hint = $('storeHint');
     if (hint) {
       hint.innerHTML = STORE_STATE.available
@@ -890,6 +891,73 @@ async function loadStoreStatus() {
     }
   } catch (e) {
     STORE_STATE.error = e.message || String(e);
+  }
+}
+
+/* 自动兜底与账号：**只渲染后端字段**（/store/status 的 auto / auth）。
+ * 阈值、额度、目标目录都在服务端现算，前端不复制一份——复制就会漂移，
+ * 漂移的形态是「界面说还能装，实际 429」。 */
+function _renderStoreMeta(d) {
+  const auto = (d && d.auto) || {};
+  const a = $('storeAutoLine');
+  if (a) {
+    let text;
+    if (auto.enabled) {
+      text = '开启 · 目标 ' + escapeHtml(String(auto.route || '')) +
+        (auto.route_writable ? '' : '（不可写）') +
+        ' · 本小时 ' + escapeHtml(String(auto.used_last_hour || 0)) + '/' +
+        escapeHtml(String(auto.max_per_hour || 0));
+    } else {
+      text = '关闭（SKILL_STORE_AUTO=0）';
+    }
+    a.innerHTML = '<b>自动兜底</b><span>' + text + '</span>';
+  }
+  const au = (d && d.auth) || {};
+  const b = $('storeAuthLine');
+  if (!b) return;
+  if (au.logged_in) {
+    b.innerHTML = '<b>账号</b><span class="sk-store-token">已登录（' +
+      escapeHtml(String(au.detail || '')) + '）' +
+      '<button class="btn ghost sm" data-store-logout="1">退出</button></span>';
+  } else {
+    b.innerHTML = '<b>账号</b><span class="sk-store-token">未登录 · ' +
+      '搜索/下载免登录；发布、评论、在线运行需 skh_ Token' +
+      '<input id="storeToken" type="password" placeholder="skh_…" autocomplete="off"' +
+      ' aria-label="SkillHub API Token">' +
+      '<button class="btn sm" data-store-login="1">保存 Token</button></span>';
+  }
+}
+
+async function storeLogin() {
+  const inp = $('storeToken');
+  const key = String((inp && inp.value) || '').trim();
+  if (!/^skh_[A-Za-z0-9_-]{8,}$/.test(key)) {
+    toast('Token 形状不对：应以 skh_ 开头', 'err');
+    return;
+  }
+  const btn = document.querySelector('[data-store-login]');
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  try {
+    await api('/api/skill/store/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: key }),
+    });
+    if (inp) inp.value = '';       // 不在页面上留副本
+    toast('Token 已保存到 ~/.skillhub（hub 不落库）', 'ok');
+    await loadStoreStatus();
+  } catch (e) {
+    toast('登录失败：' + (e.message || e), 'err');
+    if (btn) { btn.disabled = false; btn.textContent = '保存 Token'; }
+  }
+}
+
+async function storeLogout() {
+  try {
+    await api('/api/skill/store/logout', { method: 'POST' });
+    toast('已退出 SkillHub 账号', 'ok');
+    await loadStoreStatus();
+  } catch (e) {
+    toast('退出失败：' + (e.message || e), 'err');
   }
 }
 
@@ -989,6 +1057,15 @@ function bindStoreActions() {
     const b = e.target.closest('[data-store-install]');
     if (b && box.contains(b)) installStore(b.dataset.storeInstall, b.dataset.storeName);
   });
+  // 登录/退出按钮在 `#storeAuthLine`（不在 #storeList 里），故挂在容器外层。
+  const meta = $('storeAuthLine');
+  if (meta && !meta.__skAuth) {
+    meta.__skAuth = true;
+    meta.addEventListener('click', e => {
+      if (e.target.closest('[data-store-login]')) storeLogin();
+      else if (e.target.closest('[data-store-logout]')) storeLogout();
+    });
+  }
 }
 
 /* 顶部「刷新」按当前视图刷新：目录页刷新技能清单与徽标，调用记录页刷新流水**和徽标**。

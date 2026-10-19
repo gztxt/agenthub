@@ -12,6 +12,9 @@
           / hub_skill_invoke / hub_skill_catalog（后两个 v0.13.127 PT-20261019-01：
           统一调用入口。invoke 是 POST 但**不算写工具**——只写 hub 自己的遥测账本，
           不过 ALLOW_WRITE 门，理由见 `_post` 注释）
+          / hub_skill_acquire（v0.13.135：任务描述 → 本地优先 + 商店自动补货。
+          会经 `/api/skill/store/acquire` 往 techdocs 发现点写技能文件，故
+          **只在调用方显式传 allow_install=true 时**才可能落盘；默认值见工具说明）
 """
 import json
 import os
@@ -317,7 +320,8 @@ def hub_skill_status() -> str:
 
 
 @server.tool()
-def hub_skill_invoke(name: str, route: str = "", caller: str = "", task: str = "") -> str:
+def hub_skill_invoke(name: str, route: str = "", caller: str = "", task: str = "",
+                     allow_store: bool = True) -> str:
     """**统一调用一个技能**（v0.13.127 PT-20261019-01）：回传它的 SKILL.md 指令正文，
     并在 hub 记一条调用流水（`skill.invoke`）。
 
@@ -328,10 +332,40 @@ def hub_skill_invoke(name: str, route: str = "", caller: str = "", task: str = "
     完整指令。`caller` 建议传你的客户端名（如 "codex"），调用记录面板按它分组；
     不传则记 "mcp"（自报身份，不是协议取证）。`task` 一句话说明你要用它干什么。
 
-    失败态与 /read 同族：同名多路 409 带 candidates（带 route 再调）；未知名 404；
+    **v0.13.135 自动补货**：`allow_store=true`（默认）时，本地找不到该名字会去 SkillHub
+    商店搜同名技能，按相似度门槛装到 `techdocs` 发现点再返回正文（响应里
+    `store_fallback` 写明装了哪个 slug、版本、来源；`trust=community` 表示第三方文本，
+    用前建议人工过一遍）。不想让它写盘就传 `allow_store=false`。
+    若你手里只有任务描述、没有具体技能名，用 `hub_skill_acquire` 更合适。
+
+    失败态与 /read 同族：同名多路 409 带 candidates（带 route 再调）；未知名 404
+    （`allow_store=true` 且商店也没装到时，detail 里带 `store_fallback` 的失败原因）；
     正文超上限 `truncated=true` 并给 `bytes_total`（不静默截断）。"""
-    body = {"name": name, "route": route, "caller": caller, "task": task}
+    body = {"name": name, "route": route, "caller": caller, "task": task,
+            "allow_store": bool(allow_store)}
     return json.dumps(_post("/api/skill/invoke", body), ensure_ascii=False)
+
+
+@server.tool()
+def hub_skill_acquire(query: str, caller: str = "", task: str = "",
+                      allow_install: bool = True) -> str:
+    """**按任务描述自动取技能**（v0.13.135）：本地优先，没有就搜 SkillHub 商店并按门槛装好。
+
+    这是「我需要在做 X，但技能中心没有对应技能」时的入口——传一句任务/需求
+    （中文英文都可以），不用先知道技能叫什么：
+      ① 本地 BM25 命中够强 ⇒ `source=local`，直接回正文，**不联网、不装东西**；
+      ② 本地不够像 ⇒ 搜商店，候选与查询的覆盖率过门槛才装（默认装到 `techdocs`），
+         装完**立刻**回该技能的指令正文（`source=store`，带 `trust=community` 警告）；
+      ③ 都没有 ⇒ `ok=false` + `reason`，并回 `local.candidates` / `store.candidates`
+         供你自己判断下一步，**不会随便装一个不相干的东西**。
+
+    `allow_install=false` 只检索、报告「将会装什么」（配合 `dry_run` 预览）。
+    自动安装有小时额度（默认 6 次/小时），超了会明确说「额度已满」。
+    返回正文同样只是**说明书**：执行仍在你自己的工具环境里完成，hub 不代跑脚本。
+    """
+    body = {"query": query, "caller": caller or "mcp", "task": task,
+            "allow_install": bool(allow_install)}
+    return json.dumps(_post("/api/skill/store/acquire", body), ensure_ascii=False)
 
 
 @server.tool()

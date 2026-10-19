@@ -238,7 +238,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.134"
+    CURRENT_VERSION = "0.13.135"
+
+    #: v0.13.135：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「找不到才补货」「归一化 BM25 判本地」「store_auto 记账当额度」「第三方要标明来源」。
+    VERSION_ROOT_CAUSES["0.13.135"] = (
+        "自动补货", "归一化 BM25", "skill.store_auto", "trust=community",
+    )
 
     #: v0.13.133：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「曝光只作分母」与「逐名 route 缺失会让 auto 配不到使用上」。

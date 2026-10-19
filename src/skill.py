@@ -1120,6 +1120,10 @@ class InvokeRequest(BaseModel):
     caller: str = ""            # 自报身份：MCP 工具传 agent 名（如 "codex"），web 传 "web"
     task: str = ""              # 调用方想用它干什么（截断后落 detail，供调用记录面板）
     with_body: bool = True      # false＝只激活记账不回正文（注入链只想留痕时用）
+    #: v0.13.135：本地找不到时是否允许「搜商店 → 装 → 再解析」。
+    #: **默认关**（web/旧客户端不该因为打错一个名字就往磁盘装东西）；
+    #: MCP 的 `hub_skill_invoke` 默认开——agent 场景才是「没有就自动补货」的语义。
+    allow_store: bool = False
 
 
 @router.post("/invoke")
@@ -1144,9 +1148,41 @@ async def skill_invoke(req: InvokeRequest, request: Request):
     route = (req.route or "").strip() or None
     if route is not None and route not in SKILL_DIRS and route != _LOCAL_ROUTE:
         raise HTTPException(400, f"未知 route: {route!r}；可用值 {sorted(all_routes())}")
-    out = await _resolve_skill(req.name.strip(), route, req.with_body)
-    out["caller"] = (req.caller.strip() or request.headers.get("x-hub-channel")
-                     or "anonymous")[:64]
+    caller = (req.caller.strip() or request.headers.get("x-hub-channel")
+              or "anonymous")[:64]
+    try:
+        out = await _resolve_skill(req.name.strip(), route, req.with_body)
+    except HTTPException as e:
+        # v0.13.135：本地没有 → 自动从商店补货（**只在调用方显式允许时**）。
+        # 失败仍然是失败：补货没找到就原文抛出 404 的 detail，不把「没装到」说成「调用成功」。
+        if e.status_code != 404 or not req.allow_store:
+            raise
+        import skill_store          # 延迟导入：skill_store 依赖本模块（顶层导入会成环）
+        try:
+            fb = await skill_store.acquire(req.name.strip(), caller=caller,
+                                           task=req.task.strip(), allow_install=True)
+        except skill_store.StoreError as se:
+            raise HTTPException(404, {
+                "error": f"未找到技能 {req.name!r}（route={route or '全部'}），"
+                         f"商店兜底也失败：{se}",
+                "store_fallback": {"ok": False, "reason": str(se)},
+            })
+        if not fb.get("ok") or not fb.get("content") and req.with_body:
+            raise HTTPException(404, {
+                "error": f"未找到技能 {req.name!r}（route={route or '全部'}），商店兜底未命中",
+                "store_fallback": {"ok": False,
+                                   "reason": (fb.get("store") or {}).get("reason") or "无匹配",
+                                   "local": fb.get("local")},
+            })
+        out = {k: v for k, v in fb.items()
+               if k in ("name", "route", "path", "realpath", "content", "encoding",
+                        "truncated", "bytes_total", "bytes", "via_symlink", "note")}
+        out["store_fallback"] = {
+            "used": True, "source": fb.get("source"), "slug": fb.get("slug"),
+            "version": fb.get("version"), "trust": fb.get("trust"),
+            "warning": fb.get("warning"), "install": (fb.get("store") or {}).get("install"),
+        }
+    out["caller"] = caller
     out["task"] = tdai_client.scrub(req.task.strip())[:500]
     out["caller_reported"] = True           # 自报，不是协议取证（见 docstring）
     out["recorded_subject"] = "skill.invoke"

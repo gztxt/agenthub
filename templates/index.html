@@ -690,6 +690,44 @@
         .sp-list > .mem-item > p { min-width: 0; }
         .sp-list > .mem-item > .btn { flex: none; }
 
+        /* ── v0.13.127 P1：技能中心两视图（Grill 裁定 5）────────────────────
+           三条硬约束（与 .sp 骨架同族）：
+           ① 不新增 @media：窄屏靠 flex-wrap 自己换行，断点仍只有 1100px 那一处；
+           ② 不新增色 token：只引用 :root 既有变量；
+           ③ tab 是**视图开关**不是设备分档 ⇒ 状态只存 JS 变量、首屏不写盘
+              （分档偏好五条之②：加载不写盘）。 */
+        .sk-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+        .sk-tab { border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2);
+                  border-radius: 99px; padding: 5px 14px; font-size: var(--fs-sm); line-height: 1.5;
+                  cursor: pointer; }
+        .sk-tab:hover { border-color: var(--accent-2); color: var(--text-1); }
+        .sk-tab.on { background: var(--sel-bg); border-color: var(--sel-border); color: var(--text-1); font-weight: 600; }
+        /* 统计条：数字全部由 JS 从后端字段算出（页面上不许有第二个真相） */
+        .sk-stats { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 10px 14px;
+                    border-bottom: 1px solid var(--divider); font-size: var(--fs-sm); color: var(--text-2); }
+        .sk-stats b { color: var(--text-1); font-weight: 600; }
+        .sk-stats .sk-stat-warn { color: var(--warn); }
+        /* 调用次数徽标：行内小圆点徽标（复用 .badge 形状，不另立类） */
+        .sk-inv { font-variant-numeric: tabular-nums; }
+        /* digest 指纹：等宽 + 截断，hover 看全（title 属性给全文） */
+        .sk-fp { font-family: var(--mono, ui-monospace, monospace); font-size: var(--fs-sm);
+                 color: var(--muted); }
+        /* 调用记录面板：汇总区 + 流水行 */
+        .sk-inv-sum { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px 14px;
+                      border-bottom: 1px solid var(--divider); font-size: var(--fs-sm); color: var(--text-2); }
+        .sk-inv-sum b { color: var(--text-1); }
+        /* 抽屉分区：元信息 / 分布路由 / 调用统计 / 操作 / 正文 */
+        .sk-sec { margin-top: 14px; }
+        .sk-sec > .sp-sub { margin-bottom: 6px; }
+        .sk-meta { display: grid; gap: 4px 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                   font-size: var(--fs-sm); color: var(--text-2); }
+        .sk-meta b { color: var(--text-1); font-weight: 600; }
+        .sk-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+        .sk-acts .btn { flex: none; }
+        /* 抽屉里的接入片段：等宽预格式 + 盒内滚（窄屏 92vw 不溢出） */
+        .sk-snip { white-space: pre-wrap; word-break: break-all; font-size: var(--fs-sm);
+                   font-family: var(--mono, ui-monospace, monospace); color: var(--text-2); }
+
         .modal-mask { position: fixed; inset: 0; background: var(--mask); display: none; align-items: center; justify-content: center; z-index: 50; }
         .modal-mask.on { display: flex; }
         .modal { width: min(560px, 92vw); background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 20px; max-height: 86vh; overflow-y: auto; }
@@ -1917,26 +1955,74 @@
              的 4 项 <select multiple size=4> 换成 .picks 芯片。 -->
         <section class="page sys" id="page-skills">
             <div class="sp">
+                <!-- v0.13.127 P1：两视图 tab（Grill 裁定 5）。技能目录＝操作/查看逻辑，
+                     调用记录＝审计逻辑。tab 是视图开关不是设备分档：状态只存 JS 变量，
+                     首屏不写盘；懒加载——调用记录第一次切到才拉。 -->
                 <div class="sp-card">
                     <div class="sp-hd">
-                        <h3>技能发现</h3>
+                        <h3>技能中心</h3>
                         <div class="sp-r">
                             <span class="hint" id="skillHint"></span>
                             <button class="btn ghost sm" onclick="loadSkills()"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
                         </div>
                     </div>
                     <div class="sp-tools">
-                        <div class="toolbar">
-                            <input id="skillQ" placeholder="按名称 / 描述过滤…" oninput="renderSkillList()" style="max-width:260px">
-                            <select id="skillRoute" onchange="renderSkillList()" style="max-width:190px"><option value="">全部发现点</option></select>
-                            <span class="hint" id="skillRouteHint">只读门面：点「查看」读正文（脱敏）</span>
-                            <span class="chip pick" id="skillZombieOnly" role="button" tabindex="0"
-                                  onclick="toggleSkillZombieOnly()"
-                                  title="只看近 7 天零调用的技能（数据源 /api/skill/zombies）">只看零调用</span>
+                        <div class="sk-tabs" role="tablist" aria-label="技能中心视图">
+                            <button class="sk-tab on" id="skillTabCatalog" role="tab" aria-selected="true"
+                                    data-skill-view="catalog" onclick="switchSkillView('catalog')">技能目录</button>
+                            <button class="sk-tab" id="skillTabInvocations" role="tab" aria-selected="false"
+                                    data-skill-view="invocations" onclick="switchSkillView('invocations')">调用记录</button>
                         </div>
                     </div>
-                    <div class="sp-bd box"><div id="skillList" class="sp-list">加载中…</div></div>
                 </div>
+
+                <!-- ── 视图一：技能目录 ── -->
+                <div id="skillViewCatalog">
+                    <div class="sp-card">
+                        <div class="sp-hd">
+                            <h3>技能目录</h3>
+                            <div class="sp-r"><span class="hint" id="skillRouteHint">只读门面：点「查看」读正文（脱敏）</span></div>
+                        </div>
+                        <!-- 统计条：每个数字都来自后端字段（list/zombies/invocations），
+                             页面不存第二个真相（test_skill_center_ui 钉着） -->
+                        <div class="sk-stats" id="skillStats">加载中…</div>
+                        <div class="sp-tools">
+                            <div class="toolbar">
+                                <input id="skillQ" placeholder="按名称 / 描述过滤…" oninput="renderSkillList()" style="max-width:260px">
+                                <select id="skillRoute" onchange="renderSkillList()" style="max-width:190px"><option value="">全部发现点</option></select>
+                                <span class="chip pick" id="skillZombieOnly" role="button" tabindex="0"
+                                      onclick="toggleSkillZombieOnly()"
+                                      title="只看近 7 天零调用的技能（数据源 /api/skill/zombies）">只看零调用</span>
+                            </div>
+                        </div>
+                        <div class="sp-bd box"><div id="skillList" class="sp-list">加载中…</div></div>
+                    </div>
+                </div>
+
+                <!-- ── 视图二：调用记录（/api/skill/invocations 只读投影，零新表）── -->
+                <div id="skillViewInvocations" style="display:none">
+                    <div class="sp-card">
+                        <div class="sp-hd">
+                            <h3>调用记录</h3>
+                            <div class="sp-r"><span class="hint">hub 通道遥测（profile_events · skill.invoke）——各家 agent 直读磁盘的旁路未接入，置信度封顶</span></div>
+                        </div>
+                        <div class="sp-tools">
+                            <div class="toolbar">
+                                <input id="invName" placeholder="按技能名过滤…" style="max-width:200px" oninput="renderSkillInvocations()">
+                                <input id="invCaller" placeholder="按调用方过滤…" style="max-width:160px" oninput="renderSkillInvocations()">
+                                <select id="invDays" onchange="loadSkillInvocations()" style="max-width:130px" title="统计窗口">
+                                    <option value="7">近 7 天</option>
+                                    <option value="30">近 30 天</option>
+                                    <option value="90">近 90 天</option>
+                                </select>
+                                <button class="btn ghost sm" onclick="loadSkillInvocations()"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
+                            </div>
+                        </div>
+                        <div class="sk-inv-sum" id="skillInvSummary">加载中…</div>
+                        <div class="sp-bd box"><div id="skillInvocations" class="sp-list">加载中…</div></div>
+                    </div>
+                </div>
+
                 <div class="sp-card">
                     <div class="sp-hd">
                         <h3>安装与注入预算</h3>
@@ -1972,21 +2058,17 @@
                         </div>
                     </div>
                 </div>
-                <!-- v0.13.69 D7：三张诊断卡。数字全部来自后端字段（/api/skill/status、
-                     /api/skill/relevant、/api/skill/zombies），页面里不存第二份真相。 -->
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>发现点自检</h3>
-                        <div class="sp-r"><span class="hint">每路四态：正常 / 目录空 / 未安装 / 读失败 —— 不混成一句「不可用」</span></div>
-                    </div>
+                <!-- v0.13.127 P1：自检与实验室下沉诊断折叠区（Grill 裁定 5）。
+                     默认折叠——绿是常态，展开是取证需要；details/summary 无 JS、
+                     不写盘（与记忆页探针折叠同一形态）。 -->
+                <details class="sp-card mv-det" id="skillDiagBox">
+                    <summary class="mv-sum">
+                        <span>诊断</span>
+                        <span class="hint">发现点自检 · 相关性实验室</span>
+                    </summary>
                     <div class="sp-bd box flush tscroll"><div id="skillSelfCheck" class="sp-list">加载中…</div></div>
-                </div>
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>相关性实验室</h3>
-                        <div class="sp-r"><span class="hint">说一段任务 → 看 hub 会把哪几条技能注入给 agent</span></div>
-                    </div>
-                    <div class="sp-bd">
+                    <div class="sp-bd" style="border-top:1px solid var(--divider)">
+                        <div class="sp-sub">相关性实验室</div>
                         <div class="toolbar">
                             <input id="skillLabQ" placeholder="用一句话描述这个任务…" style="max-width:340px"
                                    onkeydown="if(event.key==='Enter')skillLabSearch()" value="">
@@ -1999,7 +2081,7 @@
                             <div id="skillLab" class="sp-list">输入一句话，看 BM25 真实排序、命中词与耗时。</div>
                         </div>
                     </div>
-                </div>
+                </details>
             </div>
         </section>
 
@@ -2382,12 +2464,43 @@
     </div>
 
     <!-- 技能正文抽屉（v0.13.27：技能中心「查看」→ /api/skill/read 全文，409 多路选路） -->
-    <aside id="skillDocDrawer" role="dialog" aria-modal="false" aria-label="技能正文" tabindex="-1">
+    <!-- v0.13.127 P1：技能详情抽屉（Grill 裁定 5）。五区：元信息 / 分布路由 /
+         调用统计 / 操作 / SKILL.md 正文。查看（/read，不记账）与调用
+         （/invoke，记账 caller=web）是**两个按钮**——分钮是裁定 3 的落点。 -->
+    <aside id="skillDocDrawer" role="dialog" aria-modal="false" aria-label="技能详情" tabindex="-1">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
             <b id="skillDocTitle" style="font-size:var(--fs-lg)"></b>
-            <button class="btn ghost sm" aria-label="关闭技能正文" onclick="closeSkillDoc()"><svg class="i xs" aria-hidden="true"><use href="#i-x"/></svg></button>
+            <button class="btn ghost sm" aria-label="关闭技能详情" onclick="closeSkillDoc()"><svg class="i xs" aria-hidden="true"><use href="#i-x"/></svg></button>
         </div>
-        <pre class="code" id="skillDocBody" style="white-space:pre-wrap;word-break:break-word">未加载</pre>
+        <div class="sk-sec" style="margin-top:0">
+            <div class="sp-sub">元信息</div>
+            <div class="sk-meta" id="skillDocMeta">读取中…</div>
+        </div>
+        <div class="sk-sec">
+            <div class="sp-sub">分布路由</div>
+            <div class="sk-meta" id="skillDocRoutes">读取中…</div>
+        </div>
+        <div class="sk-sec">
+            <div class="sp-sub">调用统计</div>
+            <div class="hint" id="skillDocUsage">读取中…</div>
+        </div>
+        <div class="sk-sec">
+            <div class="sp-sub">操作</div>
+            <div class="sk-acts">
+                <button class="btn sm" onclick="skillReadDoc()" title="重新读取 SKILL.md 全文（脱敏）；查看不记账">查看正文</button>
+                <button class="btn sm" onclick="skillInvokeCur()" title="POST /api/skill/invoke：回指令正文并记一条调用流水（caller=web 自报）">试调用（记账）</button>
+                <button class="btn sm ghost" onclick="skillCopySnippet()" title="复制 REST / MCP 两种接入片段到剪贴板">复制接入片段</button>
+            </div>
+            <div class="toolbar" style="margin-top:8px">
+                <select id="skInstTo" style="min-width:150px" title="安装目标发现点（软链，不动本体；local 路只读不接受）"></select>
+                <button class="btn sm ghost" onclick="skillInstallFromDrawer()">安装到所选目标</button>
+            </div>
+            <div class="hint tscroll" id="skillDocSnippet" style="display:none;margin-top:8px"></div>
+        </div>
+        <div class="sk-sec">
+            <div class="sp-sub">SKILL.md 正文（脱敏）</div>
+            <pre class="code" id="skillDocBody" style="white-space:pre-wrap;word-break:break-word">未加载</pre>
+        </div>
     </aside>
 
     <!-- 实体详情抽屉 -->
@@ -2542,6 +2655,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=b023edf8"></script>
+    <script src="/static/hub.js?v=8b56b04d"></script>
 </body>
 </html>

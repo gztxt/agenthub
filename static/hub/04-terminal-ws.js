@@ -696,6 +696,14 @@ async function previewCtx() {
 /* ── 技能中心（v0.13.26 批4）────────────────────────── */
 
 let SKILLS = [], SKILL_ROUTES = [], SKILL_STATUS = null, SKILL_ZOMBIES = {}, SKILL_ZOMBYE_ONLY = false;
+/* v0.13.127 P1（PT-20261019-01 Grill 裁定 5）三份新状态：
+ * SKILL_VIEW      当前视图（'catalog' | 'invocations'）——**只存变量不写盘**：
+ *                 分档偏好五条之②「加载不写盘」；视图开关不是设备分档，无需记忆。
+ * SKILL_DOC       抽屉里正在看的技能（name/route），试调用/复制片段/安装都取它。
+ * SKILL_INV       调用流水原始数据（/api/skill/invocations），汇总与徽标同源；
+ *                 by_skill 映射给目录行徽标与统计条用（页面不存第二个真相）。 */
+let SKILL_VIEW = 'catalog', SKILL_DOC = { name: '', route: '' };
+let SKILL_INV = null, SKILL_INV_BY_SKILL = {}, SKILL_INV_LOADED = false;
 
 /* v0.13.69 D7 技能门面：一份数据源、一个扫描口径。
  * 主列表 + 三张诊断卡（自检 / 相关性实验室 / 注入预算）都读同一批后端字段，
@@ -728,6 +736,72 @@ async function loadSkills() {
   // 诊断数据与主列表**分开拉**：自检/零调用失败不该把主列表一起拖黑。
   loadSkillStatus();
   loadSkillZombies();
+  // v0.13.127 P1：调用徽标/统计条的数据源（/api/skill/invocations 的 summary.by_skill）。
+  // 同样分开拉：它失败只掉徽标，不掉列表。
+  loadSkillInvBadges();
+  // 「查看」委托绑定（幂等；渲染器每次重建行，绑定只挂一次）
+  bindSkillViewDelegation();
+}
+
+/* v0.13.127 P1：拉一次调用流水汇总，供①目录行调用徽标 ②统计条 用。
+ * 只取汇总不取明细：明细是「调用记录」视图的事（switchSkillView 懒加载）。
+ * 失败静默降级为「徽标不可用」——徽标是增强信息，不该把主列表拖黑。 */
+async function loadSkillInvBadges() {
+  try {
+    const d = await api('/api/skill/invocations?days=7&limit=100');
+    SKILL_INV_BY_SKILL = (d.summary && d.summary.by_skill) || {};
+    SKILL_INV = d;
+  } catch (e) {
+    SKILL_INV_BY_SKILL = {};
+    SKILL_INV = null;
+  }
+  renderSkillStats();
+  renderSkillList();
+}
+
+/* 统计条：每个数字都来自后端字段（list 的 items/backends、invocations 的 summary、
+ * zombies 的 counted）。**不许在页面上写死任何数**——本仓吃过「7 路发现点」的亏。
+ * 降级路从 /status 的 disk[*].available 现算（该端点无顶层 degraded 字段，
+ * 别读一个不存在的键然后当成「没有降级」）。 */
+function renderSkillStats() {
+  const el = $('skillStats');
+  if (!el) return;
+  const nSkill = SKILLS.length;
+  const nRoute = SKILL_ROUTES.length;
+  const invTotal = SKILL_INV ? (SKILL_INV.matched_total != null ? SKILL_INV.matched_total : 0) : 0;
+  const nInvoked = Object.keys(SKILL_INV_BY_SKILL || {}).length;
+  const zCount = Object.keys(SKILL_ZOMBIES || {}).length;
+  const degraded = [];
+  const disk = (SKILL_STATUS && SKILL_STATUS.disk) || {};
+  Object.keys(disk).forEach(k => { if (disk[k] && disk[k].available === false) degraded.push(k); });
+  let html = '共 <b>' + nSkill + '</b> 个技能 · <b>' + nRoute + '</b> 路发现点' +
+    ' · 近 7 天调用 <b>' + invTotal + '</b> 次（<b>' + nInvoked + '</b> 个技能被调用过）' +
+    ' · 零调用 <b>' + zCount + '</b> 个';
+  if (degraded.length) {
+    html += ' · <span class="sk-stat-warn">降级路：' + escapeHtml(degraded.join(', ')) + '</span>';
+  }
+  if (SKILL_INV && SKILL_INV.bad_detail) {
+    html += ' · <span class="sk-stat-warn">' + SKILL_INV.bad_detail + ' 条坏账已跳过</span>';
+  }
+  el.innerHTML = html;
+}
+
+/* 视图切换（Grill 裁定 5：技能目录 / 调用记录两视图）。
+ * 懒加载：调用记录第一次切到才拉数据——首屏请求数不因它增加。 */
+function switchSkillView(v) {
+  if (v !== 'catalog' && v !== 'invocations') return;
+  SKILL_VIEW = v;
+  ['catalog', 'invocations'].forEach(k => {
+    const tab = $('skillTab' + k[0].toUpperCase() + k.slice(1));
+    const view = $('skillView' + k[0].toUpperCase() + k.slice(1));
+    if (tab) { tab.classList.toggle('on', k === v); tab.setAttribute('aria-selected', k === v ? 'true' : 'false'); }
+    if (view) view.style.display = (k === v) ? '' : 'none';
+  });
+  if (v === 'invocations' && !SKILL_INV_LOADED) {
+    SKILL_INV_LOADED = true;
+    loadSkillInvocations();
+  }
+  if (v === 'invocations') renderSkillInvocations();
 }
 
 /* 技能中心的匹配字段表：**必须与 `src/skill.py` 的 `_Q_FIELDS` 同表同权重**。
@@ -779,13 +853,32 @@ function renderSkillList() {
     const near = (q && sc > 0 && sc < 1000)
       ? '<span class="badge" title="无精确子串命中，这条靠模糊匹配（容忍手误）召回">≈近似</span>'
       : '';
+    // v0.13.127 P1：调用次数徽标（Grill 裁定 5「调用次数徽标」）。数据来自
+    // /api/skill/invocations 的 summary.by_skill —— **hub 通道口径**（各家 agent
+    // 直读磁盘的旁路未接入，title 里写清，别让人读成「总调用次数」）。
+    const nInv = (SKILL_INV_BY_SKILL && SKILL_INV_BY_SKILL[s.name]) || 0;
+    const inv = nInv
+      ? '<span class="badge sk-inv" title="近 7 天被显式调用 ' + nInv + ' 次（/api/skill/invoke，hub 通道口径；agent 直读磁盘的旁路未接入）">调用 ' + nInv + '</span>'
+      : '';
+    // digest 指纹：整包摘要前 8 位（hover 看全文）——「技能是否被改过」的比对依据。
+    const fp = s.pkg_digest
+      ? '<span class="sk-fp" title="整包摘要（SKILL.md + 同目录脚本，' + (s.pkg_files || 0) + ' 个文件 ' + (s.pkg_bytes || 0) + 'B）：' + escapeHtml(String(s.pkg_digest)) + '">指纹 ' + escapeHtml(String(s.pkg_digest).slice(0, 8)) + '</span>'
+      : '';
+    const invLine = nInv
+      ? '近 7 天调用 <b>' + nInv + '</b> 次'
+      : (z ? '末次调用：无（从未调用）' : '近 7 天无 hub 通道调用记录');
     return '<div class="mem-item"><span class="tag agent" style="align-self:flex-start">' + escapeHtml(s.name) + '</span>' +
     // 描述走 mdInline（行内白名单 + 先转义），不再 escapeHtml —— 见 01-core-boot 的口径注释
     '<p>' + mdInline(String(s.description || '').slice(0, 160)) +
     '<br><span class="hint">' + escapeHtml((s.routes || [s.route]).join(', ')) +
-    ' · ' + (z ? '末次调用：无（从未调用）' : '末次调用：记账未覆盖此技能') + '</span></p>' +
-    '<span style="align-self:flex-start;display:flex;gap:4px">' + used + near +
-    '<button class="btn sm" title="读全文（脱敏）" onclick="skillRead(' + jsStr(s.name) + ',' + jsStr(rt) + ')">查看</button></span></div>';
+    ' · ' + invLine + (fp ? ' · ' + fp : '') + '</span></p>' +
+    '<span style="align-self:flex-start;display:flex;gap:4px">' + used + inv + near +
+    // v0.13.127 P1：「查看」走 data-* 委托，**不再 inline onclick + jsStr**——
+    // jsStr 出双引号字面量，嵌在双引号界定的 onclick 属性里会被 HTML 解析器提前截断
+    // （v0.13.59 引入，渲染出的属性值只剩函数名+左括号 ⇒ 点击静默 SyntaxError，见
+    // bindSkillViewDelegation 注释）。属性值走 escapeHtml（含 " 转义），dataset 读回原值。
+    '<button class="btn sm" data-sk-view="1" data-name="' + escapeHtml(s.name) +
+    '" data-route="' + escapeHtml(rt == null ? '' : rt) + '" title="读全文（脱敏）">查看</button></span></div>';
   }).join('') ||
     '<div class="hint">没有匹配的技能（' + zrows.length + ' / ' + SKILLS.length + ' 总数' +
     (q ? '；已启用模糊匹配仍无结果 ⇒ 换关键词或查发现点自检' : '') + '）</div>';
@@ -823,6 +916,7 @@ async function loadSkillZombies() {
     $('skillBudgetHint').innerHTML = '<span class="hint">零调用榜不可用：' + escapeHtml(e.message || e) + '</span>';
   }
   renderSkillList();
+  renderSkillStats();
 }
 
 /* 发现点自检：/api/skill/status。四态 + 排除段 + 白名单外拒读数。
@@ -857,6 +951,7 @@ async function loadSkillStatus() {
   } catch (e) {
     boxFail('skillSelfCheck', e, 'loadSkillStatus');
   }
+  renderSkillStats();
 }
 
 /* 相关性实验室：/api/skill/relevant。
@@ -895,34 +990,268 @@ async function skillLabSearch() {
   }
 }
 
-/* 技能正文查看（C 缺口）：调 /api/skill/read 弹 skillDocDrawer 抽屉。
+/* v0.13.127 P1：「查看」入口的委托绑定（§4.2 口径：交互一律 data-* 走委托）。
+ *
+ * 【为什么必须换掉 inline onclick】v0.13.59 为防双语境注入给三处 inline onclick
+ * 换了 jsStr()，但 jsStr 出的是**双引号** JS 字面量，嵌在双引号界定的属性里会被
+ * HTML 解析器提前截断 ⇒ 属性值只剩「函数名+左括号」⇒ 点击即静默 SyntaxError。
+ * 实测（本批 P1 探针抓到）：技能行「查看」自 2026-09-30 起点了没反应。
+ * 同族还有 4 处（agents 的 verifyAgent / 本地项目的 cloudcliStart / 工具选择的
+ * pickTool / 命令面板的 cmdGo）——不在本 PT 范围，已报请并登记 PT，不顺手修。
+ *
+ * data-* + escapeHtml 进属性（" 被转成 &quot;，任何名字都不断属性），dataset 读回原值。
+ * 绑定幂等（loadSkills 每次刷新都调；marker 防重复挂——重复挂会一点开两个抽屉调用）。 */
+function bindSkillViewDelegation() {
+  ['skillList', 'skillDocDrawer'].forEach(id => {
+    const el = $(id);
+    if (!el || el.__skDeleg) return;
+    el.__skDeleg = true;
+    el.addEventListener('click', e => {
+      const b = e.target.closest('[data-sk-view]');
+      if (!b || !el.contains(b)) return;
+      e.stopPropagation();
+      skillRead(b.dataset.name || '', b.dataset.route || '');
+    });
+  });
+}
+
+/* 技能详情抽屉（v0.13.127 P1，Grill 裁定 5）：行上「查看」入口。
+ * 打开抽屉 → 载入元信息/分布路由/调用统计 → 载入正文（/read，**不记账**）。
  * 409 多路冲突时读 err.payload.detail.candidates 渲染候选按钮（api() 已挂 payload）。
- * 抽屉只经 openOverlay 开（浮层三条红线：禁止裸 classList.add('on')）。 */
+ * 抽屉只经 openOverlay 开（浮层三条红线：禁止裸 classList.add('on')）。
+ *
+ * 与 /invoke 的分钮（裁定 3）：本函数走 /read 不记账；抽屉里「试调用」走
+ * /invoke 记账（caller=web 自报）。两条链路的口径在服务端单一出处
+ * （_resolve_skill），前端只负责把「查看」与「操作」分成两个按钮。 */
 async function skillRead(name, route) {
-  const title = $('skillDocTitle'), body = $('skillDocBody');
+  SKILL_DOC = { name: name, route: route || '' };
+  const title = $('skillDocTitle');
   if (title) title.textContent = name + (route ? ' · ' + route : '');
-  if (body) body.textContent = '读取中…';
+  const meta = $('skillDocMeta'), routesEl = $('skillDocRoutes'), usage = $('skillDocUsage');
+  if (meta) meta.innerHTML = '读取中…';
+  if (routesEl) routesEl.innerHTML = '读取中…';
+  if (usage) usage.innerHTML = '读取中…';
   openOverlay('skillDocDrawer');
+  skillRenderDocMeta();
+  skillLoadDocUsage();
+  await skillReadDoc();
+  skillFillInstTo(route);
+}
+
+/* 抽屉内「查看正文」：只重取正文（脱敏）。查看不记账——与「试调用」分钮。 */
+async function skillReadDoc() {
+  const body = $('skillDocBody');
+  if (!body) return;
+  body.textContent = '读取中…';
   try {
-    const d = await api('/api/skill/read?name=' + encodeURIComponent(name) + (route ? '&route=' + encodeURIComponent(route) : ''));
+    const d = await api('/api/skill/read?name=' + encodeURIComponent(SKILL_DOC.name) +
+      (SKILL_DOC.route ? '&route=' + encodeURIComponent(SKILL_DOC.route) : ''));
     let txt = d.content || '';
     if (d.truncated) {
       txt += '\n\n[正文 ' + (d.bytes_total || '?') + 'B 超过读取上限已截断；需要全文请直接读磁盘路径 ' + (d.realpath || '?') + ']';
     }
-    if (body) body.textContent = txt;
+    body.textContent = txt;
   } catch (e) {
     const cands = (e.payload && e.payload.detail && e.payload.detail.candidates) || [];
-    if (e.http === 409 && cands.length && body) {
+    if (e.http === 409 && cands.length) {
       body.innerHTML = '<div class="hint">同名多路且指向不同文件，请选一路：</div>' +
-        cands.map(c => '<div class="mem-item" style="cursor:pointer" onclick="skillRead(' +
-          jsStr(name) + ',' + jsStr(c.route) + ')">' +
+        cands.map(c => '<div class="mem-item" style="cursor:pointer" data-sk-view="1" data-name="' +
+          escapeHtml(SKILL_DOC.name) + '" data-route="' + escapeHtml(String(c.route || '')) + '">' +
           '<b>' + escapeHtml(String(c.route || '')) + '</b> <span class="hint">' +
           escapeHtml(String(c.path || '')) + (c.via_symlink ? '（软链）' : '') + '</span></div>').join('');
-    } else if (body) {
+    } else {
       body.textContent = '读取失败：' + (e.message || e);
     }
   }
 }
+
+/* 抽屉元信息 + 分布路由：全部取自 /api/skill/list 已拉回的 SKILLS（**不发新请求**，
+ * 页面不存第二个真相）。找不到该项（竞态删了）就如实说，不编。 */
+function skillRenderDocMeta() {
+  const meta = $('skillDocMeta'), routesEl = $('skillDocRoutes');
+  if (!meta || !routesEl) return;
+  const s = (SKILLS || []).find(x => x.name === SKILL_DOC.name);
+  if (!s) {
+    meta.innerHTML = '<span class="hint">列表中已找不到该技能（可能刚被卸载）——正文仍可按名读取。</span>';
+    routesEl.innerHTML = '<span class="hint">—</span>';
+    return;
+  }
+  const fmtB = n => (n == null ? '—' : (n > 1024 ? (n / 1024).toFixed(1) + ' KB' : n + ' B'));
+  meta.innerHTML =
+    kv('整包大小', fmtB(s.pkg_bytes) + '（' + (s.pkg_files || 0) + ' 个文件）') +
+    kv('SKILL.md', fmtB(s.bytes) + (s.fm ? '' : ' · <b>缺 frontmatter</b>')) +
+    kv('指纹', '<span class="sk-fp" title="' + escapeHtml(String(s.pkg_digest || '')) + '">' +
+      escapeHtml(String(s.pkg_digest || '—').slice(0, 12)) + '</span>') +
+    kv('到达方式', s.via_symlink ? '软链' : '实体目录') +
+    kv('编码', escapeHtml(String(s.encoding || '—')));
+  const routes = s.routes || [s.route];
+  routesEl.innerHTML = routes.map(r => {
+    const kind = (r === 'local') ? '项目本地' : '全局';
+    return kv(escapeHtml(String(r)), kind + (s.via_symlink ? ' · 软链到达' : ''));
+  }).join('') || '<span class="hint">—</span>';
+  function kv(k, v) { return '<div>' + k + '：<b>' + v + '</b></div>'; }
+}
+
+/* 抽屉调用统计：/api/skill/invocations?name=…（hub 通道口径，title/文案写清）。
+ * 失败不炸抽屉——统计区单独表态，正文照常可看。 */
+async function skillLoadDocUsage() {
+  const usage = $('skillDocUsage');
+  if (!usage) return;
+  usage.innerHTML = '读取中…';
+  try {
+    const d = await api('/api/skill/invocations?name=' + encodeURIComponent(SKILL_DOC.name) + '&days=30&limit=20');
+    const n = d.matched_total != null ? d.matched_total : 0;
+    const byCaller = (d.summary && d.summary.by_caller) || {};
+    const callers = Object.keys(byCaller).map(c => escapeHtml(c) + ' × ' + byCaller[c]).join('，') || '无';
+    const last = (d.items && d.items.length) ? d.items[0].created_at : null;
+    usage.innerHTML = n
+      ? '近 30 天被显式调用 <b>' + n + '</b> 次 · 调用方：' + callers +
+        (last ? ' · 最近一次 ' + escapeHtml(String(last)) : '') +
+        '<br><span class="hint">口径：hub 通道（/api/skill/invoke）遥测；各家 agent 直读磁盘的旁路未接入 ⇒ 这是**下限**不是总量。</span>'
+      : '<span class="hint">近 30 天无 hub 通道调用记录（=下限为 0，不等于没人用）。</span>';
+  } catch (e) {
+    usage.innerHTML = '<span class="hint">调用统计不可用：' + escapeHtml(e.message || e) + '</span>';
+  }
+}
+
+/* 抽屉「试调用」（v0.13.127 P1，Grill 裁定 1/3）：POST /api/skill/invoke。
+ * caller=web 是**自报**（服务端落 caller_reported=true），task 固定文案说明来源。
+ * 成功：回指令正文直接渲染进正文区（用户要的就是「拿到指令」），并刷新统计与徽标。 */
+async function skillInvokeCur() {
+  if (!SKILL_DOC.name) { toast('先点一条技能', 'err'); return; }
+  const body = $('skillDocBody');
+  if (body) body.textContent = '调用中…';
+  try {
+    const d = await api('/api/skill/invoke', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: SKILL_DOC.name, route: SKILL_DOC.route || '',
+        caller: 'web', task: 'web 面板试调用（用户点击抽屉「试调用」）' }) });
+    let txt = d.content || d.instructions || '';
+    if (d.truncated) {
+      txt += '\n\n[正文 ' + (d.bytes_total || '?') + 'B 超过读取上限已截断；需要全文请直接读磁盘路径 ' + (d.realpath || '?') + ']';
+    }
+    if (body) body.textContent = txt || '（技能无正文）';
+    toast('已激活并记账：' + SKILL_DOC.name + '（caller=web，subject=skill.invoke）', 'ok');
+    skillLoadDocUsage();
+    loadSkillInvBadges();
+    if (SKILL_VIEW === 'invocations') loadSkillInvocations();
+  } catch (e) {
+    const cands = (e.payload && e.payload.detail && e.payload.detail.candidates) || [];
+    if (e.http === 409 && cands.length && body) {
+      body.innerHTML = '<div class="hint">同名多路且指向不同文件，请选一路：</div>' +
+        cands.map(c => '<div class="mem-item" style="cursor:pointer" data-sk-view="1" data-name="' +
+          escapeHtml(SKILL_DOC.name) + '" data-route="' + escapeHtml(String(c.route || '')) + '">' +
+          '<b>' + escapeHtml(String(c.route || '')) + '</b> <span class="hint">' +
+          escapeHtml(String(c.path || '')) + (c.via_symlink ? '（软链）' : '') + '</span></div>').join('');
+    } else if (body) {
+      body.textContent = '调用失败：' + (e.message || e);
+    }
+    toast('调用失败：' + (e.message || e), 'err');
+  }
+}
+
+/* 复制接入片段（裁定 2「统一调用接口」的落地面）：给 REST 与 MCP 两种形态。
+ * 片段同时**显示**在抽屉里（#skillDocSnippet）——复制失败（局域网 http 非安全上下文
+ * 常见）时用户还能手动选学。复制走 settingsLogsCopyText 的两级兜底（clipboard →
+ * execCommand），不新造第三份实现。 */
+async function skillCopySnippet() {
+  if (!SKILL_DOC.name) { toast('先点一条技能', 'err'); return; }
+  const nm = SKILL_DOC.name, rt = SKILL_DOC.route || '';
+  const base = location.origin;
+  const rest = [
+    'curl -s -X POST ' + base + '/api/skill/invoke \\',
+    "  -H 'x-hub-token: <TERM_TOKEN>' \\",
+    "  -H 'Content-Type: application/json' \\",
+    '  -d \'{"name": "' + nm + '", "caller": "my-agent", "task": "<要干什么>"}\'',
+  ].join('\n');
+  const mcp = 'MCP 工具 hub_skill_invoke(name="' + nm + '", caller="my-agent", task="<要干什么>")';
+  const txt = '# REST\n' + rest + '\n\n# MCP（hub MCP server）\n' + mcp +
+    '\n\n# 返回 SKILL.md 指令正文；执行由你（agent 侧）完成，hub 不代跑代码。';
+  const box = $('skillDocSnippet');
+  if (box) {
+    box.style.display = '';
+    box.innerHTML = '<div class="sp-sub">接入片段（REST / MCP）</div>' + escapeHtml(txt);
+  }
+  if (await settingsLogsCopyText(txt)) {
+    toast('接入片段已复制（REST + MCP）', 'ok');
+  } else {
+    toast('复制失败：浏览器不给剪贴板权限（局域网 http 常见）——片段已显示在抽屉里，可手动选择复制', 'err');
+  }
+}
+
+/* 抽屉内安装：目标路下拉（skInstTo）→ POST /api/skill/install（软链，不动本体）。
+ * local 路是只读发现面，install 不接受它——下拉里就不该出现。 */
+function skillFillInstTo(route) {
+  const sel = $('skInstTo');
+  if (!sel) return;
+  const opts = (SKILL_ROUTES || []).filter(r => r !== route && r !== 'local' && r !== 'tdai')
+    .map(r => '<option value="' + escapeHtml(r) + '">' + escapeHtml(r) + '</option>').join('');
+  sel.innerHTML = opts || '<option value="">（无可用目标）</option>';
+}
+async function skillInstallFromDrawer() {
+  const to = $('skInstTo') && $('skInstTo').value;
+  if (!SKILL_DOC.name || !SKILL_DOC.route) { toast('缺少技能或源路', 'err'); return; }
+  if (!to) { toast('没有可选目标发现点', 'err'); return; }
+  try {
+    const d = await api('/api/skill/install', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: SKILL_DOC.name, from_route: SKILL_DOC.route, targets: [to] }) });
+    toast('已软链到 ' + to + '：' + ((d.created || []).join(', ') || '（幂等跳过，已存在）'), 'ok');
+    loadSkills();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ── 调用记录视图（v0.13.127 P1，裁定 3）────────────────────────────────────
+ * 数据源 GET /api/skill/invocations：profile_events 里 subject='skill.invoke' 的
+ * 只读投影（零新表）。坏 detail 行由服务端跳过并计数（bad_detail）——面板照常渲染。
+ * 汇总口径是**抓取窗口**（window_fetched），界面必须照抄这个 scope，不许写成「全部历史」。 */
+async function loadSkillInvocations() {
+  boxBusy('skillInvocations');
+  const days = ($('invDays') && $('invDays').value) || '7';
+  try {
+    const d = await api('/api/skill/invocations?days=' + encodeURIComponent(days) + '&limit=100');
+    SKILL_INV = d;
+    SKILL_INV_LOADED = true;
+    renderSkillInvocations();
+  } catch (e) {
+    boxFail('skillInvocations', e, 'loadSkillInvocations');
+  }
+}
+
+/* 客户端二次过滤（名称/调用方）：与目录视图同一口径——**也必须走 fuzzyMatch**
+ * （v0.13.71 起全仓搜索框统一；test_search_fuzzy 反向扫「小写化 + 子串判断」旧写法）。
+ * 调用流水里按 caller 找人名/按 name 找技能，手误同样要能容忍。 */
+function renderSkillInvocations() {
+  const sumEl = $('skillInvSummary'), el = $('skillInvocations');
+  if (!el) return;
+  if (!SKILL_INV) { el.innerHTML = '<div class="hint">加载中…</div>'; return; }
+  const wantName = (($('invName') || {}).value || '').trim();
+  const wantCaller = (($('invCaller') || {}).value || '').trim();
+  const items = (SKILL_INV.items || []).filter(x =>
+    (!wantName || fuzzyMatch([[x.name, 3]], wantName) > 0) &&
+    (!wantCaller || fuzzyMatch([[x.caller, 3]], wantCaller) > 0));
+  if (sumEl) {
+    const byCaller = (SKILL_INV.summary && SKILL_INV.summary.by_caller) || {};
+    const bySkill = (SKILL_INV.summary && SKILL_INV.summary.by_skill) || {};
+    const callerTxt = Object.keys(byCaller).map(c => escapeHtml(c) + ' × ' + byCaller[c]).join('，') || '无';
+    const hot = Object.keys(bySkill).slice(0, 3).map(k => escapeHtml(k) + ' × ' + bySkill[k]).join('，') || '无';
+    sumEl.innerHTML = '窗口内 <b>' + (SKILL_INV.matched_total != null ? SKILL_INV.matched_total : 0) +
+      '</b> 条 · 按调用方：' + callerTxt + ' · 最热：' + hot +
+      '<br><span class="hint">汇总口径＝本次抓取窗口（' + (SKILL_INV.window_fetched || 0) + ' 条，上限 ' +
+      (SKILL_INV.fetch_cap || 0) + '），不是全历史' +
+      (SKILL_INV.bad_detail ? '；' + SKILL_INV.bad_detail + ' 条坏账已跳过' : '') + '</span>';
+  }
+  el.innerHTML = items.map(x => {
+    const st = x.status === 'ok' ? '' : '<span class="badge" style="color:var(--warn)">' + escapeHtml(String(x.status || '?')) + '</span>';
+    return '<div class="mem-item"><span class="tag agent" style="align-self:flex-start">' +
+      escapeHtml(String(x.name || '（无名次）')) + '</span>' +
+      '<p>caller <b>' + escapeHtml(String(x.caller || 'anonymous')) + '</b>' +
+      (x.caller_reported ? ' <span class="hint">（自报）</span>' : '') + st +
+      (x.task ? '<br>' + mdInline(String(x.task).slice(0, 120)) : '') +
+      '<br><span class="hint">' + escapeHtml(String(x.created_at || '')) +
+      ' · ' + (x.duration_ms != null ? x.duration_ms + 'ms' : '') + '</span></p></div>';
+  }).join('') || '<div class="hint">窗口内没有调用记录' +
+    (wantName || wantCaller ? '（已被过滤掉；清空过滤框再看）' : '——还没有任何 agent/用户通过 hub 调用过技能') + '</div>';
+}
+
 function closeSkillDoc() { closeOverlay('skillDocDrawer'); }
 
 async function skillInstall() {

@@ -1,4 +1,4 @@
-## v0.13.127 — 技能中心统一调用入口：invoke/catalog/invocations + MCP 双工具 + 扫描三补强（PT-20261019-01 P0）
+## v0.13.127 — 技能中心统一调用入口 + 前端两视图重设计（PT-20261019-01 P0+P1）
 
 > 用户 2026-10-19 需求三件（PT-20261019-01）：① 自动扫描本机所有技能 ② 汇总后所有 agent
 > 可统一调用 ③ 前端 UI 重设计（P1 交付）。Grill 六问全部裁定后本批落地 **P0 后端**。
@@ -64,7 +64,38 @@
   有没有先跑（同码两态）。实测受害例：codebuddy 路 crawl4ai 软链在 `all` 模式下
   被假白名单拒读报 0 条、`host` 单独跑报 1 条。修法：先捕获原值再覆写。
 
-### 5. 闸门
+### 5. 前端两视图重设计（P1，Grill 裁定 5；纯静态 + 服务端零改）
+
+- **两视图 tab**：技能目录（统计条：总数/路数/近 7 天调用/零调用/降级路，全部由后端字段现算）
+  ｜调用记录（`/api/skill/invocations` 只读投影 + 按技能名/调用方过滤 + 汇总**窗口口径**
+  明示「不是全历史」+ 坏账计数）。tab 是视图开关不是设备分档：状态只存 JS 变量、
+  **首屏不写盘**、调用记录**懒加载**（切到才拉）。
+- **目录行新增**：调用次数徽标（来自 `summary.by_skill`，title 写明 hub 通道口径）+
+  digest 指纹（整包摘要前 8 位，hover 看全文——「技能是否被改过」的比对依据）。
+- **详情抽屉五区**：元信息（整包大小/SKILL.md/指纹/到达方式/编码）、分布路由（含
+  project-local 标注）、调用统计（近 30 天 + 调用方分布 + 「下限不是总量」口径声明）、
+  操作、SKILL.md 正文。**查看（/read 不记账）与试调用（/invoke 记账 caller=web）分钮**；
+  复制接入片段给 REST curl + MCP `hub_skill_invoke` 两种形态（片段同时显示在抽屉里——
+  局域网 http 非安全上下文复制失败时用户还能手动选学）；抽屉内可安装到所选目标。
+- 自检卡与实验室下沉 `<details>` 诊断折叠区（默认折叠、无 JS、不写盘，与记忆页探针
+  折叠同一形态）。
+- 守 §4 硬判据：浮层只经 `openOverlay`（唯一性/导航即清/遮罩单一出口不变）；tab/统计条/
+  抽屉新区**零新增 @media、零新增色 token**；窄屏 390 与宽屏 1440 真浏览器实测无横向溢出。
+
+### 6. 修掉一个 19 天的静默回归（v0.13.59 引入，P1 探针实测抓到）
+
+`jsStr()` 产出**双引号** JS 字面量，嵌在双引号界定的 `onclick="…"` 属性里被 HTML 解析器
+**提前截断** ⇒ 渲染出的属性值只剩「函数名+左括号」⇒ 点击即静默 SyntaxError（UI 零反馈，
+只在控制台可见）。技能行「查看」自 2026-09-30（`1e3648f`）起点了没反应——**静态闸门
+全绿**：现有 gate 只查 JS 源码字符串，不查渲染出的 HTML 属性是否完整。
+
+- 技能页 3 处（行「查看」+ 抽屉两处 409 候选）改 `data-*` + 事件委托（§4.2 口径，
+  属性值走 escapeHtml，对任意名字字符都稳）；`test_center_ui_l0` 的查看入口断言
+  随之改判（机制从 inline 变委托，契约不变），并加反向扫闸门。
+- **同族其余 4 处不在本批范围**（agents 的 verifyAgent / 本地项目 cloudcliStart /
+  工具选择 pickTool / 命令面板 cmdGo）——按白名单军规报请并登记 PT-20261019-02，未顺手修。
+
+### 7. 闸门
 
 - `tests/test_skill_invoke.py`（新增 386 行 / ~25 例，L0 hermetic）：语义边界（无 exec
   字段）、409 candidates、404、截断显式、caller 回落链、查看/操作分账（read 不记账）、
@@ -73,12 +104,22 @@
 - `test_skill_routes.py`：20→21 路逐个点名、FLOORS 加 `codebuddy:0`、opencode 实测 3 条
   证伪注记、`test_local_route_absent_when_no_local_roots`；`test_skill_facade.py`：
   路由名单同步；`test_skill_usage.py`：`_SUBJECTS` 钉四元组 + invokes 桶。
-- **L0 hermetic 2353 例 0 跳过 0 失败**；L1 host 65 例（1 个既有 work/ 目录 skip）；
-  收集器对账 2419=2419；隔离 smoke 11/11（`env -i` + 独立 .env + /vol1 DATA_DIR，
+- **L0 hermetic 2373 例 0 跳过 0 失败**；L1 host 65 例（1 个既有 work/ 目录 skip）；
+  收集器对账 2439=2439；隔离 smoke 11/11（`env -i` + 独立 .env + /vol1 DATA_DIR，
   影子实例不碰生产：影子库 3 条 invoke 事件、生产库 0 条未写；含 MCP tools/call
   真调用回指令正文）。
+- **P1 静态闸门**：`test_skill_center_ui.py` +19 例（两视图/懒加载/不写盘/调用记录三态/
+  坏账计数/汇总 scope/invoke caller=web/查看调用分钮/徽标取后端 summary/digest 指纹/
+  降级路现算/诊断折叠默认收起），全部带红向自证；`test_center_ui_l0` 查看入口改判 +
+  新增 inline onclick+jsStr 反向扫；`test_search_fuzzy` 接线表补 `renderSkillInvocations`。
+- **真浏览器实测**（`tests/probe_skill_center_p1.py` + `work/p1-browser-verify.sh`，
+  隔离影子 3199 + CDP）**20/20 ALL-PASS**：统计条出数（200 技能 / 21 路）、两视图切换、
+  抽屉五区渲染、窄屏导航清浮层、试调用回指令正文且**影子库 caller=web 0→1**、
+  接入片段含 REST+MCP、390/1440 无横向溢出、抽屉 ≤92vw、零对话框。
 
-> **P1 前端 / P2 agent 侧接线未在本批**（见 PT-20261019-01 分期）。
+> **P2 agent 侧接线未在本批**（opencode/jcode/grok/workbuddy/codebuddy 补 hub MCP，
+> 跨工具链改动，动手前按军规第 5 条单独声明报请）——见 PT-20261019-01 分期。
+> **已知待修**：v0.13.59 同族 inline onclick 回归还有 4 处（PT-20261019-02）。
 
 ---
 

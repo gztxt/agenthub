@@ -70,19 +70,45 @@ class TestCenterUi(unittest.TestCase):
                       "skillDocDrawer 需复用抽屉滑出 CSS")
 
     def test_render_skill_list_has_view_button(self):
+        """技能行必须有「查看」入口。
+
+        v0.13.127 P1 改判：inline onclick + jsStr 是**静默 SyntaxError**形态——
+        jsStr 出双引号字面量，嵌在双引号界定的 onclick 属性里被 HTML 解析器提前
+        截断（渲染出 onclick="skillRead( ⇒ 点击即抛，探针实测抓到，
+        自 v0.13.59 起坏了 19 天）。改走 data-* 委托（§4.2 口径），
+        断言跟着改机制：行内 data-sk-view 按钮 + 委托绑定函数存在。
+        """
         m = re.search(r"function renderSkillList\(.*?\n\}", self.w04, re.S)
         self.assertTrue(m)
-        self.assertIn("skillRead(", m.group(0), "技能行必须有「查看」入口")
+        self.assertIn('data-sk-view="1"', m.group(0), "技能行必须有查看入口（data-sk-view 委托）")
+        self.assertIn("data-name=", m.group(0), "查看入口必须带技能名（dataset 读回）")
+        self.assertIn("function bindSkillViewDelegation(", self.w04,
+                      "查看入口必须真的绑上委托（写了 data-* 没人绑 = 死按钮）")
+
+    def test_no_inline_onclick_with_jsstr_in_skill_shard(self):
+        """反向扫：04 分片不许再出现 inline onclick 里嵌 jsStr 的形态
+        （那正是 v0.13.59 静默回归的成因）。抽屉候选按钮同样只许 data-*。"""
+        bad = [l.strip()[:90] for l in self.w04.split("\n")
+               if 'onclick="skillRead(' in l]
+        self.assertEqual(bad, [], "04 分片仍有 inline onclick+jsStr 的查看入口：%r" % bad)
 
     def test_skill_read_handles_409_candidates(self):
+        """查看链（v0.13.127 P1 起拆成 skillRead 开门 + skillReadDoc 取文两步）：
+        skillRead 只许经 openOverlay 开抽屉并委托给 skillReadDoc；skillReadDoc 必须
+        调 /api/skill/read、处理 409 candidates（err.payload.detail.candidates）、
+        截断显式提示。拆步不拆契约——两边都钉。"""
         m = re.search(r"async function skillRead\(.*?\n\}", self.w04, re.S)
         self.assertTrue(m, "skillRead 缺失")
         body = m.group(0)
-        self.assertIn("/api/skill/read", body)
-        self.assertIn("candidates", body, "409 多路冲突必须读 err.payload.detail.candidates")
         self.assertIn("openOverlay('skillDocDrawer')", body,
                       "抽屉只许经 openOverlay 开（浮层红线②）")
-        self.assertIn("truncated", body, "截断必须显式提示（不许静默少内容）")
+        self.assertIn("skillReadDoc(", body, "skillRead 必须委托 skillReadDoc 取正文")
+        d = re.search(r"async function skillReadDoc\(.*?\n\}", self.w04, re.S)
+        self.assertTrue(d, "skillReadDoc 缺失")
+        dbody = d.group(0)
+        self.assertIn("/api/skill/read", dbody)
+        self.assertIn("candidates", dbody, "409 多路冲突必须读 err.payload.detail.candidates")
+        self.assertIn("truncated", dbody, "截断必须显式提示（不许静默少内容）")
 
     def test_close_skill_doc_exists(self):
         self.assertIn("function closeSkillDoc()", self.w04)

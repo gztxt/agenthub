@@ -185,5 +185,135 @@ class TestNarrowBreakpointSingleSource(unittest.TestCase):
         self.assertNotIn("max-width: 767px", skill_ui)
 
 
+class TestTwoViewTabs(unittest.TestCase):
+    """v0.13.127 P1（Grill 裁定 5）：技能目录 / 调用记录两视图。
+
+    钉三条：① tab 与两个视图容器都在；② 调用记录**懒加载**（切到才拉，
+    首屏请求数不因它增加）；③ 视图状态**不写盘**（分档偏好五条之②：
+    加载不写盘——tab 是视图开关不是设备分档，无需记忆）。
+    """
+
+    def test_tabs_and_view_containers_exist(self):
+        for dom_id in ("skillTabCatalog", "skillTabInvocations",
+                       "skillViewCatalog", "skillViewInvocations"):
+            self.assertIn('id="%s"' % dom_id, HTML, "#%s 缺失 ⇒ 两视图残缺" % dom_id)
+
+    def test_switch_function_wires_both(self):
+        m = re.search(r"function switchSkillView\(.*?\n\}", JS, re.S)
+        self.assertTrue(m, "switchSkillView 缺失")
+        body = m.group(0)
+        self.assertIn("catalog", body)
+        self.assertIn("invocations", body)
+
+    def test_invocations_lazy_loaded_on_first_switch(self):
+        """切到调用记录才拉数据（SKILL_INV_LOADED 守卫），go('skills') 不自动拉。"""
+        m = re.search(r"function switchSkillView\(.*?\n\}", JS, re.S)
+        self.assertIn("SKILL_INV_LOADED", m.group(0), "缺懒加载守卫")
+        self.assertIn("loadSkillInvocations(", m.group(0))
+
+    def test_view_state_not_persisted_to_disk(self):
+        """分档偏好五条之②：加载不写盘。switchSkillView 不许碰 localStorage。"""
+        m = re.search(r"function switchSkillView\(.*?\n\}", JS, re.S)
+        code = strip_js_comments(m.group(0))
+        self.assertNotIn("lsSet", code, "视图状态不许写盘（首屏只读偏好）")
+        self.assertNotIn("localStorage", code, "视图状态不许写 localStorage")
+
+
+class TestInvocationsPanel(unittest.TestCase):
+    """调用记录面板：数据源 /api/skill/invocations（零新表只读投影）。"""
+
+    def test_containers_exist(self):
+        for dom_id in ("skillInvocations", "skillInvSummary", "invName", "invCaller", "invDays"):
+            self.assertIn('id="%s"' % dom_id, HTML, "#%s 缺失 ⇒ 调用记录面板残缺" % dom_id)
+
+    def test_js_calls_invocations_endpoint(self):
+        self.assertIn("/api/skill/invocations", JS)
+
+    def test_loader_uses_three_state(self):
+        m = re.search(r"async function loadSkillInvocations\(.*?\n\}", JS, re.S)
+        self.assertTrue(m)
+        body = strip_js_comments(m.group(0))
+        self.assertIn("boxBusy(", body)
+        self.assertIn("boxFail(", body, "调用流水读不到要上屏表态，不装成空面板")
+
+    def test_bad_detail_counted_not_fatal(self):
+        """坏 detail 行由服务端计数（bad_detail）——前端要显示它，
+        一行脏数据不许打挂整个面板（与服务端 _pick_extra 同一条纪律）。"""
+        self.assertIn("bad_detail", JS)
+
+    def test_summary_scope_is_window_not_history(self):
+        """汇总是抓取窗口口径，界面必须照抄 scope——写成「全部历史」就是第二个真相。"""
+        self.assertIn("window_fetched", JS)
+        self.assertIn("不是全历史", JS)
+
+
+class TestInvokeButton(unittest.TestCase):
+    """调用（操作）与查看分钮（裁定 3）：invoke 记账、read 不记账，两个入口。"""
+
+    def test_js_posts_invoke_with_caller_web(self):
+        m = re.search(r"async function skillInvokeCur\(.*?\n\}", JS, re.S)
+        self.assertTrue(m, "skillInvokeCur 缺失")
+        body = m.group(0)
+        self.assertIn("/api/skill/invoke", body)
+        self.assertIn("caller", body)
+        self.assertIn("web", body, "web 面板调用必须自报 caller=web（自报身份，服务端落 caller_reported）")
+
+    def test_invoke_button_exists_in_drawer(self):
+        self.assertIn("skillInvokeCur()", HTML)
+
+    def test_read_button_exists_in_drawer(self):
+        """查看（/read 不记账）与调用（/invoke 记账）是抽屉里两个分开的按钮。"""
+        self.assertIn("skillReadDoc()", HTML)
+
+    def test_invoke_failure_surfaces_409_candidates(self):
+        """调用失败同样要能选路（与查看链同口径），不静默失败。"""
+        m = re.search(r"async function skillInvokeCur\(.*?\n\}", JS, re.S)
+        self.assertIn("candidates", m.group(0))
+
+
+class TestStatsBarAndBadges(unittest.TestCase):
+    """统计条 + 调用徽标 + digest 指纹：全部来自后端字段，页面不存第二个真相。"""
+
+    def test_stats_container_and_renderer_exist(self):
+        self.assertIn('id="skillStats"', HTML)
+        m = re.search(r"function renderSkillStats\(.*?\n\}", JS, re.S)
+        self.assertTrue(m, "renderSkillStats 缺失")
+
+    def test_invoke_badge_source_is_backend_summary(self):
+        """徽标数来自 /api/skill/invocations 的 summary.by_skill——不是前端自己数的
+        「页面上点过几次」（那统计的是点击不是调用）。"""
+        m = re.search(r"function renderSkillList\(.*?\n\}", JS, re.S)
+        self.assertIn("SKILL_INV_BY_SKILL", m.group(0))
+        self.assertIn("d.summary", JS, "徽标必须读后端 summary（不是前端计数）")
+        self.assertIn("by_skill", JS, "徽标必须取 by_skill 分组")
+
+    def test_digest_fingerprint_rendered(self):
+        """digest 指纹（整包摘要）展示在行上——「技能是否被改过」的比对依据。"""
+        m = re.search(r"function renderSkillList\(.*?\n\}", JS, re.S)
+        self.assertIn("pkg_digest", m.group(0))
+        self.assertIn("sk-fp", HTML, "指纹样式类缺失")
+
+    def test_degraded_routes_computed_from_status(self):
+        """/status 无顶层 degraded 字段——降级路必须从 disk[*].available 现算，
+        读一个不存在的键然后当成「没有降级」就是静默假绿。"""
+        m = re.search(r"function renderSkillStats\(.*?\n\}", JS, re.S)
+        self.assertIn("available", m.group(0))
+
+
+class TestDiagnosticsFold(unittest.TestCase):
+    """自检与实验室下沉诊断折叠区（裁定 5）：details/summary，默认折叠。"""
+
+    def test_diag_details_exists_and_defaults_collapsed(self):
+        m = re.search(r'<details[^>]*id="skillDiagBox"([^>]*)>', HTML)
+        self.assertTrue(m, "skillDiagBox 缺失")
+        self.assertNotIn("open", m.group(1).split('"'), "诊断区默认折叠（绿是常态，展开是取证需要）")
+
+    def test_selfcheck_and_lab_moved_inside(self):
+        diag = HTML[HTML.find('id="skillDiagBox"'):]
+        diag = diag[:diag.find("</details>")]
+        self.assertIn('id="skillSelfCheck"', diag, "自检卡必须收进诊断折叠区")
+        self.assertIn('id="skillLab"', diag, "实验室必须收进诊断折叠区")
+
+
 if __name__ == "__main__":
     unittest.main()

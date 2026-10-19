@@ -175,7 +175,7 @@ class SkillFuzzySearchTest(unittest.TestCase):
         与本仓「文字存在 ≠ 已生效」（TDZ / vitals_loop / 跨档镜像）同族。
         """
         boxes = {
-            "04-terminal-ws.js": ["renderSkillList", "renderPorts"],
+            "04-terminal-ws.js": ["renderSkillList", "renderPorts", "renderSkillInvocations"],
             "05-chat-and-history.js": ["renderCmdList", "navMatch"],
             "09-local-projects.js": ["lpRenderList"],
             "10-github-projects.js": ["ghRenderList"],

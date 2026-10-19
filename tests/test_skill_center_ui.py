@@ -266,6 +266,88 @@ class TestInvocationsPanel(unittest.TestCase):
         self.assertIn("'success'", body)
 
 
+class TestInvocationLayout(unittest.TestCase):
+    """调用记录的文字排版（2026-10-20 用户报「文字没对齐、主题不清晰」）。
+
+    根因不是配色而是**容器与换行手段不匹配**：`.sk-inv-sum` 是 `display:flex`，
+    JS 却用 `<br>` 分行——`<br>` 在 flex 容器里只是一个空 flex 项，不产生换行，
+    三行文案被摊成一串长度不齐的横向项。判据必须钉在「用块级行 + grid 两栏」，
+    否则有人再把 `<br>` 加回来也照样能过（样式在、结构没变）。
+    """
+
+    def test_summary_is_two_column_grid(self):
+        css = re.search(r"\.sk-inv-sum\s*\{[^}]*\}", HTML).group(0)
+        self.assertIn("grid-template-columns: max-content minmax(0, 1fr)", css,
+                      "汇总区必须是「标签列自适应 + 值列拉伸」的网格，值才对齐")
+        body = re.search(r"function renderSkillInvocations\(.*?\n\}", JS, re.S).group(0)
+        seg = body[body.index("if (sumEl)"):body.index("el.innerHTML = items.map")]
+        self.assertNotIn("'<br>", seg,
+                         "汇总区不许用 <br> 分行（flex 容器里它不换行）")
+        self.assertIn("sk-k", seg)
+        self.assertIn("sk-v", seg)
+
+    def test_rows_use_two_column_grid_with_aligned_side(self):
+        css = re.search(r"\.sk-inv-row\s*\{[^}]*\}", HTML).group(0)
+        self.assertIn("grid-template-columns", css, "流水行必须是网格，右列才能逐行对齐")
+        self.assertIn("minmax(0, 1fr)", css, "主列要能收缩，否则长任务文本撑破布局")
+        meta = re.search(r"\.sk-inv-meta\s*\{[^}]*\}", HTML).group(0)
+        self.assertIn("tabular-nums", meta, "时间/耗时必须等宽数字，否则右边缘参差")
+        body = re.search(r"function renderSkillInvocations\(.*?\n\}", JS, re.S).group(0)
+        self.assertIn("sk-inv-row", body)
+        self.assertIn("sk-inv-side", body)
+
+    def test_status_has_explicit_text_not_only_color(self):
+        """成功/失败要有文字（颜色只是辅助）：只靠色相区分在灰度屏与色弱下失效。"""
+        body = re.search(r"function renderSkillInvocations\(.*?\n\}", JS, re.S).group(0)
+        self.assertIn("sk-inv-ok", body)
+        self.assertIn("成功", body)
+
+
+class TestStoreView(unittest.TestCase):
+    """技能商店（PT-20261020-02）：搜索 / 安装 / 装后调用。
+
+    三条判据：
+    ① 商店是**第三个视图**（tab + panel 同 id 族，switchSkillView 认它）；
+    ② 安装的目标只来自后端返回的 targets（前端不拼路径）；
+    ③ 不接在线执行（`skillhub run` 会把正文发到第三方服务）。
+    """
+
+    def test_tab_and_panel_exist(self):
+        self.assertIn('id="skillTabStore"', HTML)
+        self.assertIn('id="skillViewStore"', HTML)
+        self.assertIn('data-skill-view="store"', HTML)
+        body = re.search(r"function switchSkillView\(.*?\n\}", JS, re.S).group(0)
+        self.assertIn("'store'", body, "switchSkillView 不认识第三个视图")
+
+    def test_targets_come_from_backend(self):
+        body = re.search(r"async function installStore\(.*?\n\}", JS, re.S).group(0)
+        self.assertIn("/api/skill/store/install", body)
+        self.assertIn("slug", body)
+        self.assertIn("route", body)
+        # 目标下拉只由后端 targets 填充；禁止前端写死路径（只查商店相关函数，别查整份 JS）
+        seg = re.search(r"function _fillStoreTargets\(.*?(?=/\* 顶部「刷新」)", JS, re.S).group(0)
+        self.assertNotIn("/home/", seg, "商店代码里不许出现绝对路径")
+        self.assertIn("_fillStoreTargets", JS)
+        self.assertIn("/api/skill/store/status", JS)
+
+    def test_no_remote_execution_path(self):
+        """`skillhub run` 是**在线执行**：正文会离开本机，本视图不接。
+
+        只查代码不查注释：模块注释里正好写着「不接 skillhub run」，
+        拿全文查会把「声明不做」当成「做了」——这是本仓遇到过的判据量错对象。
+        """
+        code = strip_js_comments(JS)
+        self.assertNotIn("skillhub run", code)
+        self.assertNotIn("/store/run", code)
+
+    def test_install_buttons_use_delegation(self):
+        """结果来自远端 ⇒ 不许 inline onclick（会把 slug 拼进 HTML 事件属性）。"""
+        self.assertIn("bindStoreActions", JS)
+        self.assertIn("data-store-install", JS)
+        seg = re.search(r"function renderStore\(.*?\n\}", JS, re.S).group(0)
+        self.assertNotIn("onclick=", seg)
+
+
 class TestInvokeButton(unittest.TestCase):
     """调用（操作）与查看分钮（裁定 3）：invoke 记账、read 不记账，两个入口。"""
 

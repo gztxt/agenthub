@@ -1,3 +1,46 @@
+## v0.13.134 — 调用记录排版重做（对齐 / 层级 / 状态可读）
+
+> 来源：用户报「调用记录页面文字排版要优化，文字要对齐，主题要清晰」。
+
+### 根因：容器与换行手段不匹配
+
+`.sk-inv-sum` 是 `display:flex`，JS 却用 `<br>` 分行——**flex 容器里的 `<br>`
+只是一个空 flex 项，不产生换行**，三行文案被摊成一串长度不齐的横向项，
+折行位置随视口漂移。流水行同理：技能名/来源/调用方/caller/时间全在一个自由流里，
+每行起止位置由内容长度决定。
+
+### 做法
+
+| 位置 | 改法 |
+|---|---|
+| 汇总区 | 两列网格 `max-content minmax(0,1fr)`：标签列自适应、值列拉伸 ⇒ 所有值左缘同一 x |
+| 流水行 | 外层 grid 两栏（主列 + 动作列）；主列内 name → route → caller → 状态 → 任务 → 时间·耗时 |
+| 技能名 | 去掉实心黑胶囊（每行一个黑块压过正文），改字重 600 + 正文色 |
+| 来源片 | `inline-flex` 定高 19px：inline 元素的 line-height 不等同盒高，边框会压到文字下缘 |
+| 时间/耗时 | 等宽字体 + `tabular-nums`，逐行右缘对齐；完整时间戳进 `title` |
+| 状态 | 成功显示「成功」、失败显示原因文字：颜色只是辅助，灰度屏与色弱下仍可读 |
+
+约束遵守：不新增 `@media`（窄屏靠 grid 的 `minmax(0,1fr)` 自塌）、不新增色 token、
+不新增浮层。实测 1440 与 500 宽：行高分别 98px / 127px，右缘 x 完全一致，
+`scrollWidth-clientWidth=0`（无横向溢出）。
+
+### 闸门
+
+```
+tests/test_skill_center_ui.py::TestInvocationLayout（3 例）
+  test_summary_is_two_column_grid / test_rows_use_two_column_grid_with_aligned_side
+  test_status_has_explicit_text_not_only_color
+```
+
+判据钉的是**结构**（grid 模板、`tabular-nums`、状态文字），不是像素快照——
+像素快照在不同字体回退下会假红。
+
+### 验收（真机，CDP）
+
+- 1440×857：5 行高度 98px，`.sk-inv-name` 左缘全为 263，`.sk-inv-side` 右缘全为 1402。
+- 500×757：无横向溢出，主列折行后仍左对齐。
+- 截图存 `agenthub/work/ui-inv/invocations-{desk,narrow}.png`。
+
 ## v0.13.133 — 技能权重端点 + auto 口径统一（PT-20261020-01）
 
 > 来源：用户「权重公式按台账 PT-20261020-01 实现」。台账要求：**曝光 ≠ 使用**，

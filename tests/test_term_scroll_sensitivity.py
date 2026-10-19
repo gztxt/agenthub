@@ -238,10 +238,16 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.133"
+    CURRENT_VERSION = "0.13.134"
 
     #: v0.13.133：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「曝光只作分母」与「逐名 route 缺失会让 auto 配不到使用上」。
+    #: v0.13.134：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「flex 容器里的 <br> 不换行」与「两列网格才对齐」。
+    VERSION_ROOT_CAUSES["0.13.134"] = (
+        "flex 里的 <br>", "两列网格", "inline-flex", "成功",
+    )
+
     VERSION_ROOT_CAUSES["0.13.133"] = (
         "PT-20261020-01", "只作分母", "use^2/(use+auto)", "逐条目字段", "legacy",
     )

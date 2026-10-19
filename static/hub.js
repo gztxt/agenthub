@@ -4152,6 +4152,8 @@ let SKILL_VIEW = 'catalog', SKILL_DOC = { name: '', route: '' };
  * SKILL_INV_VIEW 只服务当前调用记录面板。 */
 let SKILL_INV_VIEW = null;
 let SKILL_INV = null, SKILL_INV_BY_SKILL = {}, SKILL_INV_LOADED = false;
+/* 商店视图：targets 来自后端 `_targets()`（只含可写发现点），页面不自己拼路径。 */
+let STORE_STATE = { items: [], q: '', busy: false, targets: null, error: '' };
 
 /* v0.13.69 D7 技能门面：一份数据源、一个扫描口径。
  * 主列表 + 三张诊断卡（自检 / 相关性实验室 / 注入预算）都读同一批后端字段，
@@ -4161,6 +4163,7 @@ let SKILL_INV = null, SKILL_INV_BY_SKILL = {}, SKILL_INV_LOADED = false;
 
 async function loadSkills() {
   bindSkillTabs();   // 标题行 tab 的点击/键盘委托（幂等；视图可先于数据切换）
+  bindStoreActions();   // 商店行的安装按钮走委托（数据来自远端，禁 inline onclick）
   boxBusy('skillList');
   try {
     // v0.13.128（PT-20261019-03）：显式要上限 1000。旧代码不传 limit ⇒ 后端默认 200，
@@ -4260,9 +4263,9 @@ function renderSkillStats() {
 /* 视图切换（Grill 裁定 5：技能目录 / 调用记录两视图）。
  * 懒加载：调用记录第一次切到才拉数据——首屏请求数不因它增加。 */
 function switchSkillView(v) {
-  if (v !== 'catalog' && v !== 'invocations') return;
+  if (v !== 'catalog' && v !== 'invocations' && v !== 'store') return;
   SKILL_VIEW = v;
-  ['catalog', 'invocations'].forEach(k => {
+  ['catalog', 'invocations', 'store'].forEach(k => {
     const tab = $('skillTab' + k[0].toUpperCase() + k.slice(1));
     const view = $('skillView' + k[0].toUpperCase() + k.slice(1));
     if (tab) {
@@ -4285,6 +4288,145 @@ function switchSkillView(v) {
     // 不拿列表结果冒充徽标（2026-10-20：徽标停在首屏那次的 0）。
     loadSkillInvBadges(false);
   }
+  if (v === 'store') {
+    // 首进只查 CLI 状态与目标（不自动搜——搜索是用户的显式动作，别擅自发网络请求）。
+    loadStoreStatus();
+    renderStore();
+  }
+}
+
+/* ── 技能商店（SkillHub 门面）────────────────────────────────────────────
+ * 分工：后端只暴露 search / install / status 三个动作；安装目标是后端
+ * `skill.SKILL_DIRS` 现算的可写发现点，前端**不自己拼路径**（拼路径＝让浏览器决定写哪）。
+ * 「调用」不在本视图里另开一条链路：装完回技能目录，用既有 read/invoke（正文不出机器）。
+ * 不接 `skillhub run`（在线执行会把正文发到第三方服务）。 */
+
+function _fillStoreTargets(targets) {
+  const sel = $('storeRoute');
+  if (!sel || !targets || !targets.length) return;
+  const keep = sel.value;
+  sel.innerHTML = targets.map(t =>
+    '<option value="' + escapeHtml(t.route) + '"' + (t.writable ? '' : ' disabled') + '>' +
+    escapeHtml(t.route) + (t.writable ? '' : '（只读）') + '</option>').join('');
+  if (keep && targets.some(t => t.route === keep && t.writable)) sel.value = keep;
+}
+
+async function loadStoreStatus() {
+  try {
+    const d = await api('/api/skill/store/status');
+    STORE_STATE.targets = d.targets || [];
+    STORE_STATE.available = !!d.available;
+    STORE_STATE.error = d.available ? '' : (d.error || 'SkillHub CLI 不可用');
+    _fillStoreTargets(STORE_STATE.targets);
+    const hint = $('storeHint');
+    if (hint) {
+      hint.innerHTML = STORE_STATE.available
+        ? '来源 SkillHub（' + escapeHtml(String(d.version || '')) +
+          '）· 安装＝把技能文件落到所选发现点 · 调用走本仓 /api/skill/invoke，正文不出机器'
+        : '<span class="sk-inv-bad">SkillHub 不可用：' + escapeHtml(STORE_STATE.error) +
+          '</span> <span class="hint">（CLI 缺失或不可执行，安装见 skillhub.cn/install/skillhub.md）</span>';
+    }
+  } catch (e) {
+    STORE_STATE.error = e.message || String(e);
+  }
+}
+
+async function searchStore(q) {
+  const box = $('storeQ');
+  const query = String(q != null ? q : (box ? box.value : '')).trim();
+  if (!query) { toast('先输入关键词', 'err'); return; }
+  STORE_STATE.q = query;
+  STORE_STATE.busy = true;
+  STORE_STATE.error = '';
+  STORE_STATE.items = [];
+  renderStore();
+  const btn = $('storeSearchBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const d = await api('/api/skill/store/search?q=' + encodeURIComponent(query) + '&limit=12');
+    STORE_STATE.items = d.items || [];
+    if (d.targets) { STORE_STATE.targets = d.targets; _fillStoreTargets(d.targets); }
+  } catch (e) {
+    STORE_STATE.error = e.message || String(e);
+  } finally {
+    STORE_STATE.busy = false;
+    if (btn) btn.disabled = false;
+    renderStore();
+  }
+}
+
+function renderStore() {
+  const el = $('storeList');
+  if (!el) return;
+  const cnt = $('storeCount');
+  if (cnt) cnt.textContent = STORE_STATE.q
+    ? (STORE_STATE.busy ? '搜索中…' : STORE_STATE.items.length + ' 条结果')
+    : '';
+  if (STORE_STATE.busy) { el.innerHTML = '<div class="sk-empty">搜索中…</div>'; return; }
+  if (STORE_STATE.error) {
+    el.innerHTML = '<div class="sk-empty"><b>商店不可用</b><br>' +
+      escapeHtml(STORE_STATE.error) + '</div>';
+    return;
+  }
+  if (!STORE_STATE.items.length) {
+    el.innerHTML = '<div class="sk-empty">' + (STORE_STATE.q
+      ? '<b>没有匹配的技能</b><br>换个关键词（中文/英文都可），或到 skillhub.cn 看分类。'
+      : '输入关键词后按回车或点「搜索」。安装会写到你上方选的发现点目录。') + '</div>';
+    return;
+  }
+  el.innerHTML = STORE_STATE.items.map(it => {
+    const installed = STORE_STATE.installed && STORE_STATE.installed[it.slug];
+    const meta = [it.version ? 'v' + it.version : '', it.namespace || it.source || '']
+      .filter(Boolean).map(escapeHtml).join(' · ');
+    return '<div class="mem-item sk-store-row">' +
+      '<div class="sk-store-main">' +
+        '<div class="sk-inv-head"><span class="sk-inv-name">' + escapeHtml(it.name || it.slug) +
+          '</span>' + (meta ? '<span class="sk-inv-route">' + meta + '</span>' : '') + '</div>' +
+        '<div class="sk-store-desc">' + escapeHtml(it.description || '（无描述）') + '</div>' +
+        '<div class="sk-store-slug">' + escapeHtml(it.slug) + '</div>' +
+      '</div>' +
+      '<div class="sk-store-act">' +
+        (installed
+          ? '<span class="sk-inv-ok">已装到 ' + escapeHtml(installed) + '</span>'
+          : '<button class="btn sm" data-store-install="' + escapeHtml(it.slug) +
+            '" data-store-name="' + escapeHtml(it.name || it.slug) + '">安装</button>') +
+      '</div></div>';
+  }).join('');
+}
+
+async function installStore(slug, name) {
+  const sel = $('storeRoute');
+  const route = sel ? sel.value : '';
+  if (!route) { toast('没有可写的发现点，先确认 SKILL_DIRS 配置', 'err'); return; }
+  const btn = Array.from(document.querySelectorAll('[data-store-install]'))
+    .find(b => b.dataset.storeInstall === slug);
+  if (btn) { btn.disabled = true; btn.textContent = '安装中…'; }
+  try {
+    const d = await api('/api/skill/store/install', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slug: slug, route: route }),
+    });
+    STORE_STATE.installed = STORE_STATE.installed || {};
+    STORE_STATE.installed[slug] = d.route;
+    toast('已安装 ' + (d.name || name || slug) + ' → ' + d.route + '（可在技能目录查看与试调用）', 'ok');
+    // 目录重扫：不刷的话新技能要等 TTL，用户会以为没装上。
+    loadSkills();
+    loadSkillInvBadges(false);
+  } catch (e) {
+    toast('安装失败：' + (e.message || e), 'err');
+    if (btn) { btn.disabled = false; btn.textContent = '安装'; }
+  }
+  renderStore();
+}
+
+function bindStoreActions() {
+  const box = $('storeList');
+  if (!box || box.__skStore) return;
+  box.__skStore = true;
+  box.addEventListener('click', e => {
+    const b = e.target.closest('[data-store-install]');
+    if (b && box.contains(b)) installStore(b.dataset.storeInstall, b.dataset.storeName);
+  });
 }
 
 /* 顶部「刷新」按当前视图刷新：目录页刷新技能清单与徽标，调用记录页刷新流水**和徽标**。
@@ -4295,6 +4437,10 @@ function refreshSkillView() {
   if (SKILL_VIEW === 'invocations') {
     loadSkillInvocations();
     loadSkillInvBadges();
+  } else if (SKILL_VIEW === 'store') {
+    // 商店页的「刷新」＝重查状态 + 重跑当前关键词（没搜过就只查状态，不发网络搜索）。
+    loadStoreStatus();
+    if (STORE_STATE.q) searchStore(STORE_STATE.q);
   } else loadSkills();
 }
 
@@ -4841,10 +4987,15 @@ function renderSkillInvocations() {
     const bySkill = (SKILL_INV_VIEW.summary && SKILL_INV_VIEW.summary.by_skill) || {};
     const fmt = o => Object.keys(o).map(k => escapeHtml(k) + ' × ' + o[k]).join('，') || '无';
     const hot = Object.keys(bySkill).slice(0, 3).map(k => escapeHtml(k) + ' × ' + bySkill[k]).join('，') || '无';
-    sumEl.innerHTML = '窗口内 <b>' + (SKILL_INV_VIEW.matched_total != null ? SKILL_INV_VIEW.matched_total : 0) +
-      '</b> 条 · 按调用方：' + fmt(byCaller) + ' · 按技能来源：' + fmt(byRoute) +
-      ' · 最热：' + hot;
-    // 自动下发单独一行：这是「agent 在任务开始时被推了哪些技能」（subject=skill.relevant），
+    // 两列网格：标签列 max-content ⇒ 每个值的起点同一 x（旧写法是 flex 流式，
+    // 标签与值被拆成并列项，折行位置随内容漂移，用户看到的就是「没对齐」）。
+    const rows = [
+      ['窗口内', '<b>' + (SKILL_INV_VIEW.matched_total != null ? SKILL_INV_VIEW.matched_total : 0) + '</b> 条'],
+      ['按调用方', fmt(byCaller)],
+      ['按技能来源', fmt(byRoute)],
+      ['最热', hot],
+    ];
+    // 自动下发单独一组：这是「agent 在任务开始时被推了哪些技能」（subject=skill.relevant），
     // 与上面的「有人点名调用」是两种证据。混成一桶就是把曝光当使用，权重会失真。
     const auto = SKILL_INV_VIEW.auto;
     if (auto) {
@@ -4852,21 +5003,27 @@ function renderSkillInvocations() {
       // query/legacy 单列：它们是「同端点的另一种用途」，混进自动下发会把
       // 人工检索和旧账算成曝光，权重分母凭空变大（656 那次就是这么来的）。
       const other = [];
-      if (auto.query) other.push('人工检索 ' + auto.query);
-      if (auto.legacy) other.push('旧事件未自报 ' + auto.legacy);
-      sumEl.innerHTML += '<br><span class="hint">自动下发：<b>' + (auto.total || 0) +
-        '</b> 次 · 按调用方：' + fmt(auto.by_caller || {}) + un +
-        (other.length ? '（另有 ' + other.join('、') + ' 条，不计入）' : '') +
-        (auto.error ? ' · 读取失败：' + escapeHtml(String(auto.error)) : '') + '</span>';
+      if (auto.query) other.push('人工检索 ' + auto.query + ' 条');
+      if (auto.legacy) other.push('旧事件未自报 ' + auto.legacy + ' 条');
+      rows.push(['自动下发', '<b>' + (auto.total || 0) + '</b> 次 · 按调用方 ' +
+        fmt(auto.by_caller || {}) + un +
+        (other.length ? '（另有 ' + other.join('、') + '，不计入）' : '') +
+        (auto.error ? ' <span class="sk-inv-bad">读取失败：' + escapeHtml(String(auto.error)) +
+          '</span>' : '')]);
     }
-    sumEl.innerHTML +=
-      '<br><span class="hint">汇总口径＝本次抓取窗口（' + (SKILL_INV_VIEW.window_fetched || 0) + ' 条，上限 ' +
-      (SKILL_INV_VIEW.fetch_cap || 0) + '），不是全历史' +
-      (SKILL_INV_VIEW.bad_detail ? '；' + SKILL_INV_VIEW.bad_detail + ' 条坏账已跳过' : '') + '</span>';
+    sumEl.innerHTML = rows.map(([k, v]) =>
+      '<span class="sk-k">' + k + '</span><span class="sk-v">' + v + '</span>').join('') +
+      '<span class="sk-note hint">汇总口径＝本次抓取窗口（' +
+      (SKILL_INV_VIEW.window_fetched || 0) + ' 条，上限 ' + (SKILL_INV_VIEW.fetch_cap || 0) +
+      '），不是全历史' +
+      (SKILL_INV_VIEW.bad_detail ? '；' + SKILL_INV_VIEW.bad_detail + ' 条坏账已跳过' : '') +
+      '</span>';
   }
   el.innerHTML = items.map(x => {
     // 运行日志的成功状态是 'success'（旧写法 'ok' 也兼容）：别把成功渲染成警告色。
-    const st = (x.status === 'ok' || x.status === 'success') ? '' : '<span class="badge" style="color:var(--warn)">' + escapeHtml(String(x.status || '?')) + '</span>';
+    const ok = (x.status === 'ok' || x.status === 'success');
+    const st = ok ? '<span class="sk-inv-ok">成功</span>'
+      : '<span class="sk-inv-bad">' + escapeHtml(String(x.status || '?')) + '</span>';
     const who = String(x.name || '');
     const route = String(x.route || '');
     // 行内「查看」复用目录页同一条 read 链路（不记账）；从流水直接跳到技能详情，
@@ -4875,15 +5032,26 @@ function renderSkillInvocations() {
       ? '<button class="btn sm" data-sk-view="1" data-name="' + escapeHtml(who) +
         '" data-route="' + escapeHtml(route) + '" title="查看该技能详情（read 不记账）">查看</button>'
       : '';
-    return '<div class="mem-item"><span class="tag agent" style="align-self:flex-start">' +
-      escapeHtml(who || '（无名次）') + '</span>' +
-      (route ? '<span class="tag" style="align-self:flex-start">' + escapeHtml(route) + '</span>' : '') +
-      '<p>caller <b>' + escapeHtml(String(x.caller || 'anonymous')) + '</b>' +
-      (x.caller_reported ? ' <span class="hint">（自报）</span>' : '') + st +
-      (x.task ? '<br>' + mdInline(String(x.task).slice(0, 120)) : '') +
-      '<br><span class="hint">' + escapeHtml(String(x.created_at || '')) +
-      ' · ' + (x.duration_ms != null ? x.duration_ms + 'ms' : '') + '</span></p>' +
-      '<span style="align-self:flex-start;display:flex;gap:4px">' + viewBtn + '</span></div>';
+    // 时间只显示「月-日 时:分:秒」，完整时间戳进 title：右列定宽后逐行对齐，
+    // 不再因为秒的小数位不同而参差。
+    const ts = String(x.created_at || '');
+    const m = ts.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}:\d{2}:\d{2})/);
+    const tsShort = m ? m[2] + '-' + m[3] + ' ' + m[4] : ts;
+    return '<div class="mem-item sk-inv-row">' +
+      '<div class="sk-inv-main">' +
+        '<div class="sk-inv-head">' +
+          '<span class="sk-inv-name">' + escapeHtml(who || '（无名次）') + '</span>' +
+          (route ? '<span class="sk-inv-route">' + escapeHtml(route) + '</span>' : '') +
+          '<span class="sk-inv-caller">由 <b>' + escapeHtml(String(x.caller || 'anonymous')) +
+            '</b> 调用' + (x.caller_reported ? '（自报）' : '') + '</span>' + st +
+        '</div>' +
+        (x.task ? '<div class="sk-inv-task">' + mdInline(String(x.task).slice(0, 120)) + '</div>' : '') +
+        '<div class="sk-inv-meta">' +
+          '<span class="sk-inv-time" title="' + escapeHtml(ts) + '">' + escapeHtml(tsShort) + '</span>' +
+          '<span class="sk-inv-dur">' + (x.duration_ms != null ? x.duration_ms + ' ms' : '—') + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="sk-inv-side">' + viewBtn + '</div></div>';
   }).join('') || ('<div class="sk-empty"><b>这个窗口内没有调用记录</b>（近 ' +
     (SKILL_INV_VIEW.days || 7) + ' 天）。<br>' +
     '这里只统计 <b>hub 通道</b>的显式调用（POST /api/skill/invoke 或 MCP hub_skill_invoke）；' +

@@ -49,6 +49,7 @@ import memory as memory_mod
 import memfed as memfed_mod
 import kb as kb_mod
 import skill as skill_mod
+import skill_store as skill_store_mod
 import dataset as dataset_mod
 import tasks as tasks_mod
 import mcpgw as mcpgw_mod
@@ -96,7 +97,15 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.133"
+VERSION = "0.13.134"
+#   v0.13.134：调用记录排版重做（用户报「文字没对齐、主题不清晰」）。
+#   ① 根因是**容器与换行手段不匹配**：`.sk-inv-sum` 是 flex 而 JS 用 `<br>` 分行，
+#      flex 里的 <br> 只是一个空 flex 项、不换行 ⇒ 三行文案被摊成一串参差项。
+#      改为两列网格（标签 max-content / 值 minmax(0,1fr)），所有值左缘同一 x。
+#   ② 流水行改 grid 两栏：主列（技能名/来源片/调用方/结果/任务/时间·耗时）+
+#      右列动作。技能名从实心黑胶囊改字重区分，来源片 inline-flex 定高（原 inline
+#      的边框会压到文字下缘）。时间与耗时用等宽数字，逐行右缘对齐。
+#   ③ 状态除颜色外必须有文字（「成功」/失败原因），灰度屏与色弱下才可读。
 #   v0.13.133：技能权重端点 `/api/skill/usage`（PT-20261020-01）。
 #   ① 公式 `use = 2*explicit + read; score = use^2/(use+auto)`：曝光（auto_inject）
 #      **只作分母**，从曝光不使用的技能得 0 分；explicit_invoke 与 read 才是正样本。
@@ -1074,6 +1083,7 @@ app.include_router(memory_mod.router)
 app.include_router(memfed_mod.router)
 app.include_router(kb_mod.router)
 app.include_router(skill_mod.router)
+app.include_router(skill_store_mod.router)   # PT-20261020-02：商店搜索/安装（写侧独立模块）
 app.include_router(tasks_mod.router)
 app.include_router(mcpgw_mod.router)
 app.include_router(cronjobs_mod.router)

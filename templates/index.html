@@ -733,10 +733,66 @@
         /* digest 指纹：等宽 + 截断，hover 看全（title 属性给全文） */
         .sk-fp { font-family: var(--mono, ui-monospace, monospace); font-size: var(--fs-sm);
                  color: var(--muted); }
-        /* 调用记录面板：汇总区 + 流水行 */
-        .sk-inv-sum { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px 14px;
-                      border-bottom: 1px solid var(--divider); font-size: var(--fs-sm); color: var(--text-2); }
-        .sk-inv-sum b { color: var(--text-1); }
+        /* 调用记录面板：汇总区 + 流水行
+           v0.13.134：汇总区原为 `display:flex; flex-wrap:wrap` 且 JS 用 <br> 分行——
+           **flex 容器里的 <br> 只是一个空 flex 项，不产生换行**，于是三行文案被摊成
+           一串长度不齐的 flex 项横向排、折行位置随视口漂移（用户报「文字没对齐」）。
+           改法：容器仍 flex，但 direction=column，每行一个块级子元素；行内再用
+           flex + baseline 对齐。不新增 @media、不新增色 token。 */
+        /* 汇总区＝两列网格（标签 / 值）。标签列 max-content ⇒ 所有值的起点同一 x，
+           这是用户要的「对齐」；不用 <br>、不用 flex 流式排。 */
+        .sk-inv-sum { display: grid; grid-template-columns: max-content minmax(0, 1fr);
+                      gap: 4px 14px; padding: 10px 14px;
+                      border-bottom: 1px solid var(--divider); font-size: var(--fs-sm);
+                      color: var(--text-2); line-height: 1.55; }
+        .sk-inv-sum b { color: var(--text-1); font-weight: 600; }
+        .sk-inv-sum .sk-k { color: var(--muted); white-space: nowrap; }
+        .sk-inv-sum .sk-v { min-width: 0; overflow-wrap: anywhere; }
+        /* 口径说明横跨两列，不占标签位（它是对整块的注脚，不是某个字段的值） */
+        .sk-inv-sum .sk-note { grid-column: 1 / -1; }
+        /* 流水行：主列（技能/来源/调用方/任务）+ 右列（时间/耗时/操作）两栏网格。
+           右列定宽 + 等宽数字 ⇒ 同一列的毫秒数与时间戳逐行对齐（原来是自由流，
+           每行时间宽度不同导致右边缘参差）。窄屏由 minmax(0,1fr) 自塌，不写断点。 */
+        .sk-inv-row { display: grid; grid-template-columns: minmax(0, 1fr) auto;
+                      gap: 6px 16px; align-items: start; }
+        .sk-inv-main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+        .sk-inv-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+        /* 技能名不再用实心黑胶囊：每行一个黑块会盖过正文，且名字长短不同让后面的
+           来源/调用方起点参差（用户报的「没对齐」有一半来自这里）。改用字重区分。 */
+        .sk-inv-name { font-weight: 600; color: var(--text-1); font-size: var(--fs-base); }
+        /* 来源路：细描边小片，等宽字体，宽度随名字变但**起点固定**（紧跟在技能名后） */
+        /* inline-flex + 固定行高：inline 元素的 line-height 不等同盒高，边框会压到
+           文字下缘（实测「pi」的框只包住下半截）。 */
+        .sk-inv-route { display: inline-flex; align-items: center; height: 19px;
+                        font-family: var(--font-mono); font-size: var(--fs-xs);
+                        color: var(--text-2); background: var(--surface-2);
+                        border: 1px solid var(--divider); border-radius: 5px;
+                        padding: 0 6px; line-height: 1; }
+        .sk-inv-caller { font-size: var(--fs-sm); color: var(--text-2); }
+        .sk-inv-caller b { color: var(--text-1); font-weight: 600; }
+        .sk-inv-task { color: var(--text-2); font-size: var(--fs-sm); line-height: 1.5;
+                       overflow-wrap: anywhere; }
+        /* 右列只放动作：时间/耗时移到正文块末尾，右边缘不再被三样东西挤成一条窄缝 */
+        .sk-inv-side { display: flex; align-items: center; justify-content: flex-end;
+                       align-self: stretch; }
+        .sk-inv-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px;
+                       font-family: var(--font-mono); font-size: var(--fs-xs);
+                       color: var(--muted); font-variant-numeric: tabular-nums; }
+        .sk-inv-time { color: var(--muted); }
+        .sk-inv-dur { color: var(--text-2); }
+        .sk-inv-ok { font-size: var(--fs-xs); color: var(--ok); }
+        .sk-inv-bad { font-size: var(--fs-xs); color: var(--warn); font-weight: 600; }
+        /* 商店结果行：与调用记录同族的两栏网格（内容可收缩 + 动作定宽） */
+        .sk-store-row { display: grid; grid-template-columns: minmax(0, 1fr) auto;
+                        gap: 6px 16px; align-items: start; }
+        .sk-store-main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+        .sk-store-desc { color: var(--text-2); font-size: var(--fs-sm); line-height: 1.5;
+                         overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2;
+                         -webkit-box-orient: vertical; overflow: hidden; }
+        .sk-store-slug { font-family: var(--font-mono); font-size: var(--fs-xs);
+                         color: var(--muted); overflow-wrap: anywhere; }
+        .sk-store-act { display: flex; align-items: center; }
+        .sk-store-act .btn { flex: none; }
         /* 抽屉分区：元信息 / 分布路由 / 调用统计 / 操作 / 正文 */
         .sk-sec { margin-top: 14px; }
         .sk-sec > .sp-sub { margin-bottom: 6px; }
@@ -1993,6 +2049,9 @@
                                 <button class="sk-tab" id="skillTabInvocations" role="tab" aria-selected="false"
                                         aria-controls="skillViewInvocations" tabindex="-1"
                                         data-skill-view="invocations">调用记录<span class="badge sk-inv" id="skillInvTabBadge" hidden></span></button>
+                                <button class="sk-tab" id="skillTabStore" role="tab" aria-selected="false"
+                                        aria-controls="skillViewStore" tabindex="-1"
+                                        data-skill-view="store">技能商店</button>
                             </div>
                         </div>
                         <div class="sp-r">
@@ -2046,6 +2105,26 @@
                         </div>
                         <div class="sk-inv-sum" id="skillInvSummary">加载中…</div>
                         <div class="sp-bd box"><div id="skillInvocations" class="sp-list">加载中…</div></div>
+                    </div>
+
+                    <!-- ── 视图三：技能商店（SkillHub 门面：搜索 / 安装 / 装后调用）──
+                         安装写的是**所选发现点**的目录；调用复用本仓 /api/skill/invoke，
+                         正文不出机器（不接 skillhub run 的在线执行）。 -->
+                    <div id="skillViewStore" role="tabpanel" aria-labelledby="skillTabStore" style="display:none">
+                        <div class="sp-tools">
+                            <div class="toolbar">
+                                <input id="storeQ" placeholder="搜索技能商店（如 pdf / 翻译 / calendar）…"
+                                       style="max-width:300px" onkeydown="if(event.key==='Enter'){event.preventDefault();searchStore();}">
+                                <select id="storeRoute" style="max-width:190px" title="安装到哪个发现点"></select>
+                                <button class="btn sm" id="storeSearchBtn" onclick="searchStore()">搜索</button>
+                                <span class="hint sk-cnt" id="storeCount"></span>
+                            </div>
+                            <div class="hint" style="margin:-6px 0 12px" id="storeHint">
+                                来源 SkillHub（skillhub.cn）· 安装＝把技能文件落到所选发现点 ·
+                                调用走本仓 /api/skill/invoke，正文不出机器
+                            </div>
+                        </div>
+                        <div class="sp-bd box"><div id="storeList" class="sp-list">输入关键词后按回车或点「搜索」。</div></div>
                     </div>
                 </div>
 
@@ -2686,6 +2765,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=a87ebecc"></script>
+    <script src="/static/hub.js?v=bfb2c4b2"></script>
 </body>
 </html>

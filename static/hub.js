@@ -4699,9 +4699,14 @@ async function loadSkillBudget() {
     const failed = (d.routes_failed || []).length
       ? ' · <b>' + d.routes_failed.length + ' 路扫描失败</b>（' + d.routes_failed.map(f => escapeHtml(f.route)).join(',') + '，total 偏低）'
       : '';
+    // 子章节不是技能：`_is_nested_doc` 已把它们排除在名录外（否则模型可能选中分册、
+    // 绕过父技能的强制规则）。排除必须可见，否则面板会变成「总数对不上却查不出为什么」。
+    const nested = (d.nested_docs || []).length
+      ? ' · ' + d.nested_docs.length + ' 条子文档已排除（' + d.nested_docs.map(n => escapeHtml(n)).join(',') + '，属父技能分册）'
+      : '';
     $('skillBudget').innerHTML =
       '范围 ' + escapeHtml(scope) + ' · 预算 ' + d.budget + ' tok · 实际约 ' + d.used_est + '（' + pct + '%） · 全条目 ' + full.length + ' / 仅名 ' + names.length +
-      (d.truncated ? ' / <b>被裁 ' + d.truncated + '</b>' : '') + '（共 ' + d.total + '）' + unknown + failed + '<br>' +
+      (d.truncated ? ' / <b>被裁 ' + d.truncated + '</b>' : '') + '（共 ' + d.total + '）' + unknown + failed + nested + '<br>' +
       full.concat(names).map(s => '· ' + s).join('<br>') +
       '<br><span class="hint">被裁 = 预算不够时连名字都留不下 ⇒ 注入时 agent <b>看不到</b>它。' +
       '本面板只预览清单；agent 实际注入走 /api/skill/relevant（BM25 top-3），不受此预算约束。</span>';

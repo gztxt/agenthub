@@ -538,6 +538,29 @@ def _scan_many(route: str, roots: List[str]) -> Dict[str, Any]:
             "error": tdai_client.scrub("; ".join(errs))[:400] or None}
 
 
+def _is_nested_doc(cur: str, root) -> bool:
+    """本条 `SKILL.md` 是否只是**父技能的子章节文档**，而非独立技能。
+
+    实测样本（2026-10-19）：`~/.jcode/skills/ima-skills/{notes,knowledge-base}/SKILL.md`
+    —— 父目录 `ima-skills/SKILL.md` 的 frontmatter 是 `name: ima-skill`，正文用
+    `⛔ Before ANY write ... validate ALL string fields` 这类 **MANDATORY RULES** 统管子文档，
+    子目录只是接口分册（`openapi/note/v1`、`openapi/wiki/v1`）。
+
+    为什么必须识别、而不是「补个 frontmatter 让它可选」：补了之后清单里会多出两个
+    名字像技能、正文只有 API 片段的条目，模型完全可能选中 notes 而**跳过父级的
+    写前校验强制规则** —— 那不是修好，是把一条会写坏用户数据（IMA 笔记乱码）的捷径
+    塞进名录。正确做法是让它们不参与「可选技能」这件事，同时在清单里如实标出
+    `nested=true`，不静默消失。
+    """
+    root_rp = os.path.realpath(str(root))
+    p = os.path.dirname(os.path.realpath(cur))
+    while len(p) > len(root_rp) and p != root_rp:
+        if os.path.isfile(os.path.join(p, "SKILL.md")):
+            return True
+        p = os.path.dirname(p)
+    return False
+
+
 def _scan_one(route: str, root) -> Dict[str, Any]:
     """扫一个技能目录（`root` 可为 str 或 list[str] —— glob 路会展开成多根）。同步。任何失败都变成结构化 error，不抛。"""
     if isinstance(root, (list, tuple)):
@@ -600,6 +623,9 @@ def _scan_one(route: str, root) -> Dict[str, Any]:
                 "via_symlink": p != rp,
                 "fm": fm is not None,            # false 也要出现在清单里（事实③）
                 "fm_keys": sorted(fm) if fm else [],
+                # true ⇒ 本条只是父技能的子章节（如 ima-skills/notes），不进可选名录。
+                # 与 `fm=false` 是**两件事**：前者「本来就该归父级管」，后者「元数据缺失、待补」。
+                "nested": _is_nested_doc(cur, root),
                 "encoding": enc,
                 "bytes": st.st_size,
                 "mtime": round(st.st_mtime, 1),
@@ -1588,6 +1614,14 @@ async def skill_budget(
         unique = [it for it in unique
                   if wanted_set & {str(r) for r in (it.get("routes") or [])}]
 
+    # 父技能的子章节（`_is_nested_doc`）不是可选技能：它们没有 description，
+    # 旧口径会把它们降级成 name-only **白占预算**（实测 ima-skills 两条），
+    # 而模型据此选择时还会绕过父级的写前校验强制规则。
+    # 单独归类并如实给出名单 —— 是「不该进名录」，不是「丢了」。
+    nested_docs = sorted(str(it.get("name") or "") for it in unique if it.get("nested"))
+    if nested_docs:
+        unique = [it for it in unique if not it.get("nested")]
+
     def est(s: str) -> int:
         return int(len(s) / _CHARS_PER_TOKEN) + 1
 
@@ -1620,4 +1654,7 @@ async def skill_budget(
             "route_filter": wanted, "routes_available": routes_available,
             "route_unknown": route_unknown,
             # 本次扫描失败的路（total 偏低时据此判断"是少了东西"而非"本来就没有"）
-            "routes_failed": routes_failed}
+            "routes_failed": routes_failed,
+            # 被判定为「父技能子章节」而排除在名录外的条目（见 _is_nested_doc）。
+            # 不静默：面板能说出「这 2 条不是技能，是 ima-skill 的分册」。
+            "nested_docs": nested_docs}

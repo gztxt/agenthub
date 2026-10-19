@@ -1,3 +1,70 @@
+## v0.13.129 — 技能名录三修：子文档不再当技能、3 路真发现点补铺、reset 后可恢复
+
+> 来源：2026-10-19 技能中心收口的三条遗留（台账 `LEDGER-skillcenter.md` 同日「修复 ①②③」）。
+> 三条不是同一类问题：① 是覆盖面不足（12 路没铺），② 是**语义错判**（把父技能的章节文档
+> 当成独立技能），③ 是环境风险（`git reset --hard` 冲掉未提交改动且无法恢复）。
+
+### ① 12 路里只有 3 路是真发现点，其余 9 路刻意不铺
+
+判据换了：不再问「这目录里有几个 SKILL.md」，而是问「对应 agent 启动时会不会扫它」。
+前者只证明目录里有东西，后者才是自动调用。逐路查完：
+
+- **铺**：`grok`（已有 3 条自研软链，非推测）、`picoclaw`（工作区技能目录）、
+  `hermes-web`（`ekko/skills/default`）。`apply_plan()` 建成 **63 条，0 冲突 0 失败**；
+  picoclaw 的 `summarize` 是自带实体目录，按「冲突不覆盖」保留。
+- **不铺**：`superpowers` / `hermes-agent` 是**上游 git clone**（软链=untracked，
+  `git clean` 或升级即丢，还会弄脏上游 `git status`）；`grok-bundled` / `qoderwake*` /
+  `qoder-alpha` 是随包资源、manifest 驱动或内容哈希目录（写完即失效）；
+  `qoder` 是安全扫描专用面；`opencode` 是 B3 已证伪的假发现点（它实际扫
+  `.claude/skills` 与 `.agents/skills`，两者本就 22/22）。
+
+理由逐条写进 `scripts/skill_visibility_sync.py` 的注释，下次想铺先得看见结论。
+
+### ② `ima-skills` 的子目录不是技能：识别它，而不是给它补 frontmatter
+
+`~/.jcode/skills/ima-skills/{notes,knowledge-base}/SKILL.md` 无 frontmatter。
+最初的修法想的是「补个 frontmatter 让它可选」——**这是错的**：父目录
+`ima-skills/SKILL.md` 的 `name` 是 `ima-skill`，正文用 `⛔ Before ANY write ...
+validate ALL string fields` 这类 MANDATORY RULES 统管两个分册。补了元数据之后，
+模型完全可能选中 `notes` 而**绕过父级的写前校验** —— 真实后果是 IMA 笔记乱码（不可逆）。
+
+改为识别：`_is_nested_doc()` 向上找祖先，父链上已有 `SKILL.md` ⇒ `nested=true`；
+`/budget` 把 `nested` 排除在可选名录外，并**如实返回 `nested_docs` 名单**
+（排除可以，静默不行）；预算面板显示「N 条子文档已排除（…，属父技能分册）」。
+全 22 路实测 `nested` 命中**仅 2 条**，无误伤；`/budget` total **375 → 373**。
+
+另：`~/.claude/skills/{system-memory,system-rules,agent-ecosystem}` 是 20260803 那批
+**索引骨架**（正文只有标题、没有内容），此前无 `name`/`description`。本轮补 frontmatter，
+description 写清触发词 **且写明「正文只是骨架，细节必须读源文件」**，把模型导向
+`MEMORY.md` / `CLAUDE.md` / 融合方案原文；正文一字未动，原文件已备份。
+
+### ③ `reset --hard` 拦不住，就保证丢了能找回来
+
+仓内没有脚本会发 `git reset --hard`（`grep` 只命中两处军规说明与一份 pip 源码），
+17:44:25 那次来自某个 agent 的临时动作。git 没有 pre-reset 钩子，
+`reference-transaction` 在 HEAD 引用值不变时也不报告 ⇒ **拦截这条路上没有可靠着力点**。
+
+改为留恢复点：`scripts/wip_snapshot.sh` 用 `git stash create` 铸 commit →
+`git update-ref refs/wip/auto` → 追加 `.git/wip-snapshots.log`；只读、不移动工作区、
+不动 index、无改动 <50ms 退出。`scripts/wip_restore.sh` 列快照 / `--diff` / 传 sha 应用回工作区。
+`agenthub-wip-snapshot.timer` 每 5 分钟跑一次（`OnCalendar`，不用 `OnUnitActiveSec`——
+与 memvitals 同一个坑：先手动 start 过 service 再 enable，NEXT 会变 `-`）。
+
+**端到端反证**：记 md5 `612d81fb` → 快照 `dafdb23e` → `git reset --hard` → md5 变
+`6490aadd` 且 `_is_nested_doc` 归零（改动确实没了）→ `wip_restore.sh dafdb23e` →
+md5 **回到 `612d81fb`**、4 处代码全回。边界：`stash create` 不含 untracked 文件，
+脚本会把 `UNTRACKED` 路径如实写进日志，但不打包。
+
+### 闸门
+
+- 新增 `tests/test_skill_nested_docs.py`（6 例）：判定层 3 条（子目录 / 顶层 / 祖先无
+  SKILL.md 不误伤）+ 扫描层 1 条（子文档仍在结果里、只是 `nested=true`）+ 预算层 2 条
+  （排除且 `nested_docs` 留名；父技能 desc 仍进 full，证明不是整路被跳过）。
+- 新增 UI 闸门 `test_js_renders_nested_docs`：读字段 / 真拼进 innerHTML / 用户可见文案。
+- **mutation 反证两条都做了**：删 `/budget` 的 nested 过滤 ⇒ 红（`notes` 进 full，total 4≠3）；
+  删 `+ nested +` 拼接 ⇒ 红（`Regex didn't match`），且只有这一条红，定位准确。
+- L0 hermetic **2394 例 0 失败**；线上 `/budget` 热路径 373 条 / 2.3ms / `routes_failed=[]`。
+
 ## v0.13.128 — 技能目录静默截断修复：371 条只回 200、12 路整路不可见（PT-20261019-03）
 
 > 来源：PT-20261019-01 需求①「自动扫描本机所有技能」的**收口审计**（2026-10-19）。

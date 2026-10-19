@@ -30,7 +30,36 @@ TARGETS = [
     ("hermes",    HOME / ".hermes/skills",    "B4 运行时主扫描面 120 条", True),
     ("qwenpaw",   HOME / ".qwenpaw/skills",   "B2 有 skill_paths 声明", True),
     ("codebuddy", HOME / ".codebuddy/skills", "D1 实测 8 条", True),
+    # ── 2026-10-19 二批：从「12 路未铺」里筛出**真发现点**的三路。判定标准是
+    # 「该目录由对应 agent 在启动时扫描」，不是「目录里有 SKILL.md」——后者只是
+    # 上游仓库/厂商资源的特征。带证据补铺，无证据不补。
+    ("grok",       HOME / ".grok/skills",
+     "grok 自读；2026-09-30 起已有 3 条自研软链落地，非推测", False),
+    ("picoclaw",   HOME / ".picoclaw/workspace/skills",
+     "picoclaw 工作区技能目录，8 个自带实体；summarize 重名按铁律保留实体、不覆盖", False),
+    ("hermes-web", HOME / ".hermes-web-ui/.ekko/skills/default",
+     "ekko profile 技能目录（default=22 条），hermes-web-ui 从此加载", False),
 ]
+
+# ── 刻意**不铺**的 9 路，理由必须能被复核（军规：禁把 SKIP 当 PASS）──
+# 这 9 路在 `src/skill.py:_DEFAULT_DIRS` 里是 hub 的**只读可见性**路由，
+# 与「agent 会不会读它」是两个问题。往下面这些地方写软链，得到的不是自动调用，
+# 而是污染上游工作树 / 与厂商清单打架 / 写进下一次升级就消失的目录：
+#   superpowers   ~/.pi/agent/git/github.com/obra/superpowers/skills
+#                 → 是 obra/superpowers 的 git clone。软链=untracked 文件，
+#                   `git clean -fd` 或升级即丢，且会让上游 `git status` 脏。
+#   hermes-agent  ~/.hermes/hermes-agent/skills
+#                 → 是 NousResearch/hermes-agent 的 git clone，同上；
+#                   且 hermes 已从 ~/.hermes/skills 读到同一批技能。
+#   grok-bundled  ~/.grok/bundled/skills        → 随包发布的 bundled 资源，升级覆盖。
+#   qoder         ~/.qoder/security/skills      → qoder 安全扫描专用面，混入通用技能会污染扫描语义。
+#   qoderwake     ~/.qoderwake/resources/builtin-skills
+#   qoderwake-cli ~/.qoderwake/qodercli/.../skills
+#                 → 厂商内置 + manifest.json 驱动，写软链会让 manifest 与磁盘不一致。
+#   qoderwake-shadow ~/.qoderwake/run/shadow-skills → run/ 下的运行时影子目录，0 条，重启即重建。
+#   qoder-alpha   ~/.qoder-alpha/extensions/<sha>/skills → 目录名是内容哈希，升级即变。
+#   opencode      ~/.config/opencode/skill     → B3 已证伪：opencode 实际扫 .claude/skills
+#                                                与 .agents/skills（两者都已是 22/22）。
 
 
 def curated():

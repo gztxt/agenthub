@@ -238,7 +238,15 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.128"
+    CURRENT_VERSION = "0.13.129"
+
+    #: v0.13.129：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「子文档不是技能」——补 frontmatter 会让模型绕过父级的 MANDATORY 校验；
+    #: 以及「reset 拦不住就留恢复点」（refs/wip/auto）。
+    VERSION_ROOT_CAUSES["0.13.129"] = (
+        "真发现点", "63", "git clone", "nested", "ima-skills", "MANDATORY",
+        "子文档", "375 → 373", "reset --hard", "refs/wip/auto",
+    )
 
     #: v0.13.128（PT-20261019-03）：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「截断必须自报」——只有 count 时，200 既可能是全部也可能是少收，

@@ -96,7 +96,19 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.128"
+VERSION = "0.13.129"
+#   v0.13.129：技能名录三修（台账 LEDGER-skillcenter.md 同日「修复 ①②③」）。
+#   ① 12 路里只有 **3 路是真发现点**（grok / picoclaw / hermes-web），补铺 63 条；
+#      其余 9 路刻意不铺：superpowers 与 hermes-agent 是上游 git clone（软链=untracked，
+#      git clean 即丢），qoderwake* 是 manifest 驱动的随包资源，opencode 是已证伪的假发现点。
+#   ② `ima-skills/{notes,knowledge-base}` **不是技能**，是父技能的子文档：父级用
+#      MANDATORY RULES 统管写前校验，补 frontmatter 让它们可选 ⇒ 模型会绕过校验。
+#      改为 `_is_nested_doc()` 标记 `nested`，`/budget` 排除并回 `nested_docs` 名单
+#      （排除可以，静默不行）。budget total 375 → 373。
+#   ③ `git reset --hard` 冲掉未提交改动后无法恢复：仓内无脚本会发它，17:44:25 那次
+#      来自 agent 临时动作，git 也没有 pre-reset 钩子 ⇒ 拦住不现实。改为
+#      `scripts/wip_snapshot.sh` 把未提交改动铸成 commit 挂到 `refs/wip/auto`，
+#      由 agenthub-wip-snapshot.timer 每 5 分钟跑一次；实测 reset 后能原样找回。
 #   v0.13.128：技能中心目录静默截断（PT-20261019-03）。`/api/skill/list` 默认 limit=200，
 #   响应只有 count ⇒ 生产 walked=487、unique=371 却只回 200 条：jcode / hermes-web /
 #   techdocs / superpowers 等 **12 路整路不可见**，前端把 200 当总量。现在响应必带 total

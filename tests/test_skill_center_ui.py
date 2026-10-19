@@ -369,6 +369,22 @@ class TestBudgetPanel(unittest.TestCase):
         self.assertRegex(fn, r"\+\s*failed\s*\+", "failed 算出来了却没拼进 innerHTML")
         self.assertIn("路扫描失败", fn, "缺用户可见的失败文案")
 
+    def test_js_renders_nested_docs(self):
+        """被排除的子文档必须可见（2026-10-19 新增 `/budget.nested_docs`）。
+
+        为什么要有这条：`_is_nested_doc` 把 ima-skills/{notes,knowledge-base}
+        从名录里剔掉后，`total` 会比磁盘上的 SKILL.md 少 2 —— 如果面板不说，
+        下一个人看到「总数对不上」只能去翻代码。同 `routes_failed` 的口径：
+        **排除可以，但必须说得出排除了谁、为什么**。
+
+        三条同样缺一不可：读字段 / 真拼进 innerHTML / 用户可见文案。
+        反证方式：把 `+ nested +` 删掉，本用例必须变红。
+        """
+        fn = self.budget_fn()
+        self.assertIn("nested_docs", fn, "前端未读 nested_docs（排除变成静默）")
+        self.assertRegex(fn, r"\+\s*nested\s*\+", "nested 算出来了却没拼进 innerHTML")
+        self.assertIn("条子文档已排除", fn, "缺用户可见的排除文案")
+
     def test_js_fallback_matches_backend_default(self):
         m = re.search(r"skillTok'\)\.value,\s*10\)\s*\|\|\s*(\d+)", self.budget_fn())
         self.assertIsNotNone(m, "未找到预算兜底值")

@@ -327,6 +327,64 @@ class TestEnvelope(unittest.TestCase):
         self.assertFalse(lp._under_excluded("/home/gztxt/realproj"))
 
 
+class TestFixtureRootBeatsRootExemption(unittest.TestCase):
+    """PT-20261019-04：硬排除必须先于点名根豁免，否则 L1 精度闸恒红。
+
+    反例实测（v0.13.130 及以前）：扫描根含 ``/home/gztxt``，``under`` 里 HOME 先把
+    ``~/hub-l0test-fixtures/**`` 整支豁免 ⇒ 168 个 L0 夹具仓被当真实项目，项目数
+    212 > 阈值 50。旧实现的 ``_under_excluded(fixture_repo, [HOME], extra=(FIXROOT,))``
+    **返回 False**，正是本组用例要钉死的形态。
+
+    同时必须保住反向豁免：测试把自己的夹具目录当 ROOTS（test_github_projects 等
+    12 例依赖）时，那些仓**必须照旧被扫到**——按名字排前缀会连它们一起杀掉。
+    """
+
+    def test_fixture_repo_under_home_root_is_excluded(self):
+        fix = "/home/gztxt/hub-l0test-fixtures"
+        self.assertTrue(lp._under_excluded(fix + "/abc/myrepo", ["/home/gztxt"],
+                                          extra_prefixes=(fix,)),
+                        "HOME 是扫描根时，夹具仓仍必须被排除（硬排除优先）")
+
+    def test_real_project_under_home_root_survives(self):
+        fix = "/home/gztxt/hub-l0test-fixtures"
+        self.assertFalse(lp._under_excluded("/home/gztxt/agent-router", ["/home/gztxt"],
+                                           extra_prefixes=(fix,)),
+                         "硬排除不得误伤同名根下的真实项目")
+
+    def test_named_root_inside_fixture_prefix_still_scanned(self):
+        fix = "/home/gztxt/hub-l0test-fixtures"
+        self.assertFalse(lp._under_excluded(fix + "/abc/root/repo", [fix + "/abc/root"],
+                                           extra_prefixes=(fix,)),
+                         "点名根落在夹具前缀内 ⇒ 那是判据要看的对象，必须豁免")
+
+    def test_tmp_root_semantics_unchanged(self):
+        self.assertFalse(lp._under_excluded("/tmp/x/repo", ["/tmp"]),
+                         "点名根在 /tmp 内时自扫仍生效（既有语义）")
+        self.assertTrue(lp._under_excluded("/tmp/x/repo", ["/home/gztxt"]),
+                        "未点名 /tmp 时必须排除")
+
+    def test_scan_skips_fixture_subtree_but_keeps_real_repo(self):
+        """扫描级：同一根下的真实仓收、夹具根下的仓不收（不是只改判据函数）。"""
+        tmp = _mktmp("lpfix-")
+        sandbox = tmp / "sandbox"
+        sandbox.mkdir()
+        real = _mkrepo(sandbox, "realproj")
+        fix = sandbox / "hub-l0test-fixtures"
+        (fix / "case1").mkdir(parents=True)
+        fake = _mkrepo(fix / "case1", "fakerepo")
+
+        saved = lp.L0_FIXTURE_ROOT
+        lp.L0_FIXTURE_ROOT = str(fix)
+        self.addCleanup(setattr, lp, "L0_FIXTURE_ROOT", saved)
+
+        projects, errors, stats = lp._scan_roots([str(sandbox)])
+        self.assertEqual(errors, [])
+        paths = {p["path"] for p in projects}
+        self.assertIn(str(real), paths, "真实仓必须被收录")
+        self.assertNotIn(str(fake), paths, "夹具根下的仓不得被当项目")
+        self.assertGreaterEqual(stats["excluded"], 1, "排除量必须如实计数（不是静默丢弃）")
+
+
 class TestFrontendQuartet(unittest.TestCase):
     """静态断言：section / 侧栏按钮在 #navTree 之上 / PAGE_LABELS / 懒加载钩子成对。"""
 

@@ -113,13 +113,29 @@ def _under_excluded(path: str, under: Optional[List[str]] = None,
     合并侧完全不豁免，于是夹具根下的仓「扫描收了、合并又排掉」，TestMerge 10 例红）。
     """
     p = os.path.normpath(path)
-    for r in (under or []):
-        rn = os.path.normpath(r)
-        if p == rn or p.startswith(rn + os.sep):
-            return False
+    roots = [os.path.normpath(r) for r in (under or [])]
+
+    def _inside(x: str, pref: str) -> bool:
+        return x == pref or x.startswith(pref + os.sep)
+
+    # v0.13.131：**硬排除先于点名根豁免**。反例（PT-20261019-04）：扫描根含
+    # ``/home/gztxt`` 时，旧写法里 ``under`` 的 HOME 先把 ``~/hub-l0test-fixtures/**``
+    # 整支豁免掉 ⇒ 168 个 L0 夹具仓被当真实项目（212 > 阈值 50），L1 精度闸恒红。
+    # 但豁免不能一刀切：测试会把 ROOTS 直接指到自己的夹具目录来验扫描逻辑
+    # （test_github_projects 的 setUp 等 12 例依赖）——那种情况点名根**落在**排除前缀
+    # 之内，是要看的对象，必须继续豁免。判据：p 在硬排除前缀内，且**没有任何点名根**
+    # 也落在同一前缀内 ⇒ 排除；否则交给下面的根豁免。
     for pref in tuple(EXCLUDE_PATH_PREFIXES) + tuple(extra_prefixes):
-        if p == pref or p.startswith(pref + os.sep):
-            return True
+        pref = os.path.normpath(pref)
+        if not _inside(p, pref):
+            continue
+        if any(_inside(r, pref) for r in roots):
+            continue
+        return True
+
+    for r in roots:
+        if _inside(p, r):
+            return False
     for seg in p.split(os.sep):
         if seg in EXCLUDE_DIR_NAMES:
             return True

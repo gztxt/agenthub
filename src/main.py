@@ -96,7 +96,17 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.129"
+VERSION = "0.13.130"
+#   v0.13.130：技能中心前端细化 + 一条闸门自身缺陷（台账 PT-20261019-01 / PT-20261019-04）。
+#   ① 技能目录/调用记录两个 tab 内联到「技能中心」标题行（`.sk-titlebar` + ARIA tabs +
+#      键盘 ←→ Home End），去掉内层重复卡头；目录补整行点击/清除/排序/计数；
+#      调用记录补徽标/行内查看/过滤计数/0 条出口。
+#   ② 调用记录恒 0 **不是查询坏**：库内 `skill.invoke`=0，日志只有 POST /invoke 401
+#      （浏览器 TERM_TOKEN 与服务端不一致）⇒ 写入在 writegate 被拒；UI 单列 401 文案。
+#   ③ L1 项目精度闸恒红（212 > 50）：`_under_excluded` 里点名根豁免压过硬排除，
+#      扫描根含 HOME 时 `~/hub-l0test-fixtures/**` 整支被豁免 ⇒ 168 个 L0 夹具仓
+#      被当真实项目。改成硬排除优先，但「点名根落在排除前缀内」仍豁免（保住 12 例）。
+
 #   v0.13.129：技能名录三修（台账 LEDGER-skillcenter.md 同日「修复 ①②③」）。
 #   ① 12 路里只有 **3 路是真发现点**（grok / picoclaw / hermes-web），补铺 63 条；
 #      其余 9 路刻意不铺：superpowers 与 hermes-agent 是上游 git clone（软链=untracked，

@@ -92,8 +92,9 @@
 - 技能页 3 处（行「查看」+ 抽屉两处 409 候选）改 `data-*` + 事件委托（§4.2 口径，
   属性值走 escapeHtml，对任意名字字符都稳）；`test_center_ui_l0` 的查看入口断言
   随之改判（机制从 inline 变委托，契约不变），并加反向扫闸门。
-- **同族其余 4 处不在本批范围**（agents 的 verifyAgent / 本地项目 cloudcliStart /
-  工具选择 pickTool / 命令面板 cmdGo）——按白名单军规报请并登记 PT-20261019-02，未顺手修。
+- **同族其余 6 处不在本批范围**（agents 的 verifyAgent / 本地项目 cloudcliStart
+  ×2 处渲染器（顶栏面板行+内嵌钮、04 分片项目列表钮）/ 工具选择 pickTool /
+  命令面板 cmdGo）——按白名单军规报请并登记 PT-20261019-02，未顺手修。
 
 ### 7. 闸门
 

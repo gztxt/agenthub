@@ -222,5 +222,21 @@ class TestNoRegressOnReadPath(unittest.TestCase):
         self.assertNotIn("os.remove", USAGE_SRC, "僵尸榜模块不得含删除动作")
 
 
+class TestInjectionDeclaresIdentity(unittest.TestCase):
+    """注入链必须自报 `caller` 与 `via=hook`。
+
+    没有这两个参数，`/relevant` 的埋点只能记成「一条没有身份的查询」：
+    既答不出「哪个 agent 自动拿的候选」，也无法与人工查询分桶（runlog._mode_of
+    只认 via=hook）。用户 2026-10-20 的原话：「agent 是否是在执行任务过程中
+    自动调用技能，不是手动指定，这个也很重要」。
+    """
+
+    def test_claude_hook_declares_caller_and_via(self):
+        src = (_REPO / "scripts" / "hub_skill_inject.py").read_text(encoding="utf-8")
+        self.assertRegex(src, r'"caller"\s*:\s*CALLER')
+        self.assertRegex(src, r'"via"\s*:\s*"hook"')
+        self.assertRegex(src, r'CALLER\s*=\s*"claude"')
+
+
 if __name__ == "__main__":
     unittest.main()

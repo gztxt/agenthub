@@ -487,7 +487,12 @@ function go(page) {
   // 不再用 memLoaded 闸：整会话只加载一次会让绿点静默变旧，而这份数据本来就是
   // 「哪一刻采的」而不是「现在怎样」——重读成本远低于误导成本。
   if (page === 'memory') memVitals();
-  if (page === 'skills' && !skillsLoaded) { skillsLoaded = true; loadSkills(); loadSkillBudget(); }
+  // 技能页：skillsLoaded 只挡「整页重载」。重进页必须补刷调用徽标——
+  // 那个闸会让徽标永远停在会话首屏那一刻（2026-10-20 用户报「一直显示 0」）。
+  if (page === 'skills') {
+    if (!skillsLoaded) { skillsLoaded = true; loadSkills(); loadSkillBudget(); }
+    else loadSkillInvBadges(false);
+  }
   if (page === 'kb' && !kbLoaded) { kbLoaded = true; loadKbStatus(); kbBrowse(); }
   if (page === 'localprojects' && !lpLoaded) { lpLoaded = true; loadLocalProjects(); }   // v0.13.30 本机项目页（09 分片）
   if (page === 'github' && !ghLoaded) { ghLoaded = true; loadGithubRepos(); }   // v0.13.31 GitHub 项目页（10 分片）

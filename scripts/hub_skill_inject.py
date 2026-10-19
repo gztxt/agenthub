@@ -39,6 +39,8 @@ TOP_N = 3
 #: 后端侧 token 上限；防止极端查询把注入块撑大。
 MAX_TOKENS = 600
 MIN_PROMPT_LEN = 4
+#: 埋点里的调用方标识。写死为 claude：本脚本只挂在 Claude Code 的 UserPromptSubmit。
+CALLER = "claude"
 
 
 def first_prompt(raw: str) -> str:
@@ -103,6 +105,10 @@ def fetch(prompt: str, timeout_ms: int = TIMEOUT_MS) -> str:
         return ""
     qs = urllib.parse.urlencode({
         "q": prompt, "n": TOP_N, "max_tokens": MAX_TOKENS, "rerank": "false",
+        # 2026-10-20：自报身份，让 /api/skill/relevant 的埋点能回答「谁自动拿的候选」。
+        # via=hook 是唯一的「自动」判据（runlog._mode_of）；缺了它，这条会被记成
+        # 人工查询，权重统计里就看不到 agent 的自动发现行为。
+        "caller": CALLER, "via": "hook",
     })
     req = urllib.request.Request(HUB + "/api/skill/relevant?" + qs,
                                  headers={"Accept": "application/json"})

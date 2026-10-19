@@ -487,7 +487,12 @@ function go(page) {
   // 不再用 memLoaded 闸：整会话只加载一次会让绿点静默变旧，而这份数据本来就是
   // 「哪一刻采的」而不是「现在怎样」——重读成本远低于误导成本。
   if (page === 'memory') memVitals();
-  if (page === 'skills' && !skillsLoaded) { skillsLoaded = true; loadSkills(); loadSkillBudget(); }
+  // 技能页：skillsLoaded 只挡「整页重载」。重进页必须补刷调用徽标——
+  // 那个闸会让徽标永远停在会话首屏那一刻（2026-10-20 用户报「一直显示 0」）。
+  if (page === 'skills') {
+    if (!skillsLoaded) { skillsLoaded = true; loadSkills(); loadSkillBudget(); }
+    else loadSkillInvBadges(false);
+  }
   if (page === 'kb' && !kbLoaded) { kbLoaded = true; loadKbStatus(); kbBrowse(); }
   if (page === 'localprojects' && !lpLoaded) { lpLoaded = true; loadLocalProjects(); }   // v0.13.30 本机项目页（09 分片）
   if (page === 'github' && !ghLoaded) { ghLoaded = true; loadGithubRepos(); }   // v0.13.31 GitHub 项目页（10 分片）
@@ -4193,10 +4198,12 @@ async function loadSkills() {
   bindSkillViewDelegation();
 }
 
-/* v0.13.127 P1：拉一次调用流水汇总，供①目录行调用徽标 ②统计条 用。
+/* v0.13.127 P1：拉一次调用流水汇总，供①目录行调用徽标 ②统计条 ③tab 徽标 用。
  * 只取汇总不取明细：明细是「调用记录」视图的事（switchSkillView 懒加载）。
- * 失败静默降级为「徽标不可用」——徽标是增强信息，不该把主列表拖黑。 */
-async function loadSkillInvBadges() {
+ * 失败静默降级为「徽标不可用」——徽标是增强信息，不该把主列表拖黑。
+ * `rebuildRows=false` 只刷数字不重绘目录行：进页/轮询时行要不要重建是两回事，
+ * 每 60 秒重建 375 行会打断正在滚动/选中的用户。 */
+async function loadSkillInvBadges(rebuildRows) {
   try {
     const d = await api('/api/skill/invocations?days=7&limit=100');
     SKILL_INV_BY_SKILL = (d.summary && d.summary.by_skill) || {};
@@ -4206,7 +4213,7 @@ async function loadSkillInvBadges() {
     SKILL_INV = null;
   }
   renderSkillStats();
-  renderSkillList();
+  if (rebuildRows !== false) renderSkillList();
 }
 
 /* 统计条：每个数字都来自后端字段（list 的 items/backends、invocations 的 summary、
@@ -4272,14 +4279,23 @@ function switchSkillView(v) {
     SKILL_INV_LOADED = true;
     loadSkillInvocations();
   }
-  if (v === 'invocations') renderSkillInvocations();
+  if (v === 'invocations') {
+    renderSkillInvocations();
+    // tab 徽标固定近 7 天，视图窗口可切 30/90 天——进这个视图就重取一次汇总，
+    // 不拿列表结果冒充徽标（2026-10-20：徽标停在首屏那次的 0）。
+    loadSkillInvBadges(false);
+  }
 }
 
-/* 顶部「刷新」按当前视图刷新：目录页刷新技能清单与徽标，调用记录页刷新流水。
- * 只留一个刷新入口——原来两个视图各有一个按钮，切视图后按错是常态。 */
+/* 顶部「刷新」按当前视图刷新：目录页刷新技能清单与徽标，调用记录页刷新流水**和徽标**。
+ * 只留一个刷新入口——原来两个视图各有一个按钮，切视图后按错是常态。
+ * 调用记录页必须同时刷徽标：徽标是固定近 7 天汇总，而视图窗口可切 30/90 天，
+ * 两者不是同一份数据，不能拿列表结果冒充。（2026-10-20 实测：列表 4 条、徽标仍 3。） */
 function refreshSkillView() {
-  if (SKILL_VIEW === 'invocations') loadSkillInvocations();
-  else loadSkills();
+  if (SKILL_VIEW === 'invocations') {
+    loadSkillInvocations();
+    loadSkillInvBadges();
+  } else loadSkills();
 }
 
 /* 标题行 tab 的点击 + 键盘（WAI-ARIA APG Tabs pattern）。
@@ -4317,6 +4333,15 @@ function clearSkillFilter() {
   renderSkillList();
   q.focus();
 }
+
+/* 徽标保活：停在技能页时，后台 agent 的调用不会自己冒出来。
+ * 60s 只重取一次 summary（不重绘 375 行），离开技能页或标签页不可见就跳过。
+ * 这不是「实时推送」——真推送需要 SSE，代价远大于收益；这里只保证数字不会
+ * 停留在打开页面那一刻（2026-10-20 用户报「一直显示 0」）。 */
+setInterval(function () {
+  if (typeof curPage !== 'undefined' && curPage === 'skills' &&
+      document.visibilityState === 'visible') loadSkillInvBadges(false);
+}, 60000);
 
 function clearInvFilters() {
   ['invName', 'invCaller'].forEach(id => { const el = $(id); if (el) el.value = ''; });
@@ -4812,26 +4837,41 @@ function renderSkillInvocations() {
   if (cnt) cnt.textContent = '显示 ' + items.length + ' / ' + all.length + ' 条';
   if (sumEl) {
     const byCaller = (SKILL_INV_VIEW.summary && SKILL_INV_VIEW.summary.by_caller) || {};
+    const byRoute = (SKILL_INV_VIEW.summary && SKILL_INV_VIEW.summary.by_route) || {};
     const bySkill = (SKILL_INV_VIEW.summary && SKILL_INV_VIEW.summary.by_skill) || {};
-    const callerTxt = Object.keys(byCaller).map(c => escapeHtml(c) + ' × ' + byCaller[c]).join('，') || '无';
+    const fmt = o => Object.keys(o).map(k => escapeHtml(k) + ' × ' + o[k]).join('，') || '无';
     const hot = Object.keys(bySkill).slice(0, 3).map(k => escapeHtml(k) + ' × ' + bySkill[k]).join('，') || '无';
     sumEl.innerHTML = '窗口内 <b>' + (SKILL_INV_VIEW.matched_total != null ? SKILL_INV_VIEW.matched_total : 0) +
-      '</b> 条 · 按调用方：' + callerTxt + ' · 最热：' + hot +
+      '</b> 条 · 按调用方：' + fmt(byCaller) + ' · 按技能来源：' + fmt(byRoute) +
+      ' · 最热：' + hot;
+    // 自动下发单独一行：这是「agent 在任务开始时被推了哪些技能」（subject=skill.relevant），
+    // 与上面的「有人点名调用」是两种证据。混成一桶就是把曝光当使用，权重会失真。
+    const auto = SKILL_INV_VIEW.auto;
+    if (auto) {
+      const un = auto.unknown_caller ? '（其中 ' + auto.unknown_caller + ' 次未自报调用方）' : '';
+      sumEl.innerHTML += '<br><span class="hint">自动下发：<b>' + (auto.total || 0) +
+        '</b> 次 · 按调用方：' + fmt(auto.by_caller || {}) + un +
+        (auto.error ? ' · 读取失败：' + escapeHtml(String(auto.error)) : '') + '</span>';
+    }
+    sumEl.innerHTML +=
       '<br><span class="hint">汇总口径＝本次抓取窗口（' + (SKILL_INV_VIEW.window_fetched || 0) + ' 条，上限 ' +
       (SKILL_INV_VIEW.fetch_cap || 0) + '），不是全历史' +
       (SKILL_INV_VIEW.bad_detail ? '；' + SKILL_INV_VIEW.bad_detail + ' 条坏账已跳过' : '') + '</span>';
   }
   el.innerHTML = items.map(x => {
-    const st = x.status === 'ok' ? '' : '<span class="badge" style="color:var(--warn)">' + escapeHtml(String(x.status || '?')) + '</span>';
+    // 运行日志的成功状态是 'success'（旧写法 'ok' 也兼容）：别把成功渲染成警告色。
+    const st = (x.status === 'ok' || x.status === 'success') ? '' : '<span class="badge" style="color:var(--warn)">' + escapeHtml(String(x.status || '?')) + '</span>';
     const who = String(x.name || '');
+    const route = String(x.route || '');
     // 行内「查看」复用目录页同一条 read 链路（不记账）；从流水直接跳到技能详情，
-    // 不用切回目录再搜一次。
+    // 不用切回目录再搜一次。**必须带 route**：同名多路时不带会 409 或看错那一路。
     const viewBtn = who
       ? '<button class="btn sm" data-sk-view="1" data-name="' + escapeHtml(who) +
-        '" data-route="" title="查看该技能详情（read 不记账）">查看</button>'
+        '" data-route="' + escapeHtml(route) + '" title="查看该技能详情（read 不记账）">查看</button>'
       : '';
     return '<div class="mem-item"><span class="tag agent" style="align-self:flex-start">' +
       escapeHtml(who || '（无名次）') + '</span>' +
+      (route ? '<span class="tag" style="align-self:flex-start">' + escapeHtml(route) + '</span>' : '') +
       '<p>caller <b>' + escapeHtml(String(x.caller || 'anonymous')) + '</b>' +
       (x.caller_reported ? ' <span class="hint">（自报）</span>' : '') + st +
       (x.task ? '<br>' + mdInline(String(x.task).slice(0, 120)) : '') +

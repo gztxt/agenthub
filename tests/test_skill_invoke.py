@@ -275,6 +275,74 @@ class TestInvocations(_InvokeCase):
         self.assertEqual(r.json()["matched_total"], 1)
         self.assertEqual(r.json()["items"][0]["task"], "任务甲")
 
+    def test_projection_carries_route_and_reported_flag(self):
+        """权重数据的最小完整键：谁调的（caller）+ 调的哪条（name）+ 来自哪一路（route）。
+
+        route 只存在于 detail，投影若不透出，同名技能跨路时无法回答「用了谁的技能」；
+        caller_reported 不落则会把自报身份显示成已取证。
+        """
+        _mk_skill(self.a, "demo")
+        self._invoke(name="demo", route="src", caller="codex", task="按来源记账")
+        b = self.client.get("/api/skill/invocations").json()
+        row = b["items"][0]
+        self.assertEqual(row["route"], "src")
+        self.assertTrue(row["caller_reported"], "invoke 的 caller 是自报，流水必须同响应一致")
+        self.assertEqual(b["summary"]["by_route"], {"src": 1})
+
+    def test_same_name_two_routes_are_distinguishable(self):
+        """同名技能在两路都有 ⇒ 流水必须按 route 分开，不能只按名字合并。
+
+        `by_skill` 仍按名字合并（目录行徽标的历史契约），但逐行数据必须能区分来源；
+        拿 by_skill 做权重会把两路算成同一条技能。
+        """
+        _mk_skill(self.a, "dup")
+        _mk_skill(self.b, "dup")
+        self._invoke(name="dup", route="src", caller="codex")
+        self._invoke(name="dup", route="other", caller="pi")
+        b = self.client.get("/api/skill/invocations").json()
+        self.assertEqual(sorted(i["route"] for i in b["items"]), ["other", "src"])
+        self.assertEqual(b["summary"]["by_route"], {"other": 1, "src": 1})
+        self.assertEqual(b["summary"]["by_skill"], {"dup": 2})
+
+    def test_failed_invoke_keeps_route_and_reported_flag(self):
+        """失败（404/409）也要能按来源统计：写进 fail detail 的 route 不许丢。"""
+        r = self._invoke(name="ghost", route="src", caller="codex")
+        self.assertEqual(r.status_code, 404, r.text)
+        b = self.client.get("/api/skill/invocations").json()
+        row = b["items"][0]
+        self.assertEqual(row["route"], "src")
+        self.assertTrue(row["caller_reported"])
+
+    def test_auto_inject_bucket_is_separate_and_carries_caller(self):
+        """自动下发（subject=skill.relevant + via=hook）必须与指名调用分桶并带 caller。
+
+        2026-10-20 用户要求：「要记录哪个 agent 调用了哪个技能，还要能分辨是执行任务时
+        自动用的、还是人手动指定的」。端点不同只是实现细节——**判据是 via=hook**。
+        这一条同时钉住：① auto.total 按窗口计 ② by_caller 有身份 ③ invoke 行仍标
+        explicit_invoke ④ 缺 via 的同一端点记为 query（不许推断成自动）。
+        """
+        _mk_skill(self.a, "demo", "演示技能 用于自动下发测试")
+        r = self.client.get("/api/skill/relevant",
+                            params={"q": "演示技能", "n": 3, "rerank": "false",
+                                    "caller": "claude", "via": "hook"})
+        self.assertEqual(r.status_code, 200, r.text)
+        n_auto = len(r.json()["bm25"]["items"])
+        self.assertEqual(n_auto, 1, "夹具只有一个技能，top-N 应恰好 1 条")
+        # 人工查询（无 via）：同一端点但不算自动，落 mode=query
+        self.client.get("/api/skill/relevant",
+                        params={"q": "演示技能", "rerank": "false"})
+        self._invoke(name="demo", caller="codex")
+
+        b = self.client.get("/api/skill/invocations").json()
+        self.assertEqual(b["auto"]["total"], 2, "两次 relevant 各落一条（按名逐行记）")
+        self.assertEqual(b["auto"]["by_caller"], {"claude": 1},
+                         "未自报的那次必须落在 unknown_caller，不许算到 anonymous 头上")
+        self.assertEqual(b["auto"]["unknown_caller"], 1)
+        self.assertEqual(b["items"][0]["mode"], "explicit_invoke")
+
+        modes = [json.loads(e["detail"]).get("mode") for e in self._events("skill.relevant")]
+        self.assertEqual(sorted(modes), ["auto_inject", "query"])
+
     def test_bad_detail_rows_are_counted_not_fatal(self):
         """坏 detail 行不许打挂面板——逐行 try、跳过并计数（与 skill_usage 同纪律）。"""
         _mk_skill(self.a, "demo")
@@ -380,6 +448,16 @@ class TestPickExtra(unittest.TestCase):
         # 超长截断（detail 不许被长文撑爆）
         got = runlog._pick_extra({"req": _Req(task="t" * 900)})
         self.assertLessEqual(len(got["task"]), runlog._TASK_MAX_CHARS)
+
+    def test_via_picked_and_mode_layered(self):
+        """via 必须进 detail；mode 由 via 决定，缺 via 不推断为自动。"""
+        self.assertEqual(runlog._pick_extra({"via": "hook"}), {"via": "hook"})
+        self.assertEqual(runlog._mode_of("skill.relevant", {"via": "hook"}), "auto_inject")
+        self.assertEqual(runlog._mode_of("skill.relevant", {"via": ""}), "query")
+        self.assertEqual(runlog._mode_of("skill.relevant", {}), "query")
+        self.assertEqual(runlog._mode_of("skill.invoke", {"caller": "codex"}),
+                         "explicit_invoke")
+        self.assertEqual(runlog._mode_of("skill.list", {}), "")
 
 
 if __name__ == "__main__":

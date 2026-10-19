@@ -246,6 +246,25 @@ class TestInvocationsPanel(unittest.TestCase):
         self.assertIn("window_fetched", JS)
         self.assertIn("不是全历史", JS)
 
+    def test_row_carries_route_and_opens_that_route(self):
+        """逐行必须显示技能来源路（by_route），且「查看」要带 route。
+
+        只显示技能名时，同名技能跨路无法区分；data-route 留空还会让 read 走 409。
+        """
+        m = re.search(r"function renderSkillInvocations\(.*?\n\}", JS, re.S)
+        self.assertTrue(m, "renderSkillInvocations 缺失")
+        body = strip_js_comments(m.group(0))
+        self.assertIn("by_route", body)
+        self.assertIn("x.route", body)
+        self.assertIn('data-route="\' + escapeHtml(route)', body,
+                      "查看按钮必须用流水里的 route，不能写死空串")
+
+    def test_success_status_not_rendered_as_warning(self):
+        """运行日志成功态是 'success'；旧判断只认 'ok' ⇒ 每次成功都挂警告色。"""
+        m = re.search(r"function renderSkillInvocations\(.*?\n\}", JS, re.S)
+        body = strip_js_comments(m.group(0))
+        self.assertIn("'success'", body)
+
 
 class TestInvokeButton(unittest.TestCase):
     """调用（操作）与查看分钮（裁定 3）：invoke 记账、read 不记账，两个入口。"""
@@ -298,6 +317,15 @@ class TestStatsBarAndBadges(unittest.TestCase):
         读一个不存在的键然后当成「没有降级」就是静默假绿。"""
         m = re.search(r"function renderSkillStats\(.*?\n\}", JS, re.S)
         self.assertIn("available", m.group(0))
+
+    def test_refresh_invocations_also_refreshes_tab_badge(self):
+        """调用记录页刷新必须同时刷徽标：徽标固定近 7 天，视图窗口可切 30/90 天，
+        两者不是同一份数据。实测缺口：列表 4 条、徽标仍 3。"""
+        m = re.search(r"function refreshSkillView\(.*?\n\}", JS, re.S)
+        self.assertTrue(m, "refreshSkillView 缺失")
+        body = strip_js_comments(m.group(0))
+        self.assertIn("loadSkillInvocations(", body)
+        self.assertIn("loadSkillInvBadges(", body)
 
 
 class TestInlineTabsAndInteraction(unittest.TestCase):
@@ -447,6 +475,62 @@ class TestBudgetPanel(unittest.TestCase):
         m = re.search(r"skillTok'\)\.value,\s*10\)\s*\|\|\s*(\d+)", self.budget_fn())
         self.assertIsNotNone(m, "未找到预算兜底值")
         self.assertEqual(m.group(1), "1200", "兜底值与后端默认不一致")
+
+
+class TestInvocationBadgeFreshness(unittest.TestCase):
+    """tab 徽标必须是「当前」的近 7 天调用数，不是首屏快照。
+
+    2026-10-20 用户报「调用记录按钮后面一直显示 0」：`go('skills')` 用
+    `skillsLoaded` 一次性闸，首次进页之后再也不取汇总 ⇒ 首屏时库里 0 条，
+    之后 agent 调多少次都仍是 0。三条出口缺一不可（重进页 / 切到记录视图 / 定时保活）。
+    """
+
+    def test_reenter_skills_refreshes_badge(self):
+        body = strip_js_comments(COREJS)
+        m = re.search(r"if\s*\(page === 'skills'\)\s*\{(.*?)\n  \}", body, re.S)
+        self.assertTrue(m, "go() 的 skills 分支缺失")
+        self.assertIn("loadSkillInvBadges(", m.group(1),
+                      "重进技能页没补刷徽标 ⇒ 徽标永远停在首屏那一刻")
+
+    def test_switching_to_invocations_refreshes_badge(self):
+        m = re.search(r"function switchSkillView\(.*?\n\}", strip_js_comments(JS), re.S)
+        self.assertTrue(m, "switchSkillView 缺失")
+        self.assertIn("loadSkillInvBadges(", m.group(0))
+
+    def test_badge_has_visibility_guarded_keepalive(self):
+        body = strip_js_comments(JS)
+        m = re.search(r"setInterval\(function \(\) \{.*?\}, 60000\);", body, re.S)
+        self.assertTrue(m, "缺 60s 保活：页面开着时数字不会跟着涨")
+        seg = m.group(0)
+        self.assertIn("curPage === 'skills'", seg, "保活必须限定在技能页")
+        self.assertIn("visibilityState", seg, "后台标签页不该继续打请求")
+        self.assertIn("loadSkillInvBadges(false)", seg, "保活只许刷数字，不许重绘行")
+
+    def test_badge_refresh_can_skip_row_rebuild(self):
+        m = re.search(r"async function loadSkillInvBadges\(([^)]*)\)", strip_js_comments(JS))
+        self.assertTrue(m, "loadSkillInvBadges 缺失")
+        self.assertNotEqual(m.group(1).strip(), "", "必须能只刷数字（否则每次轮询重绘整页）")
+        self.assertRegex(strip_js_comments(JS), r"if \(rebuildRows !== false\) renderSkillList\(\)")
+
+
+class TestAutoInjectSurfaced(unittest.TestCase):
+    """「自动下发」必须与「指名调用」在界面上分开显示。
+
+    用户要求能分辨 agent 是执行任务时自动拿到的技能，还是人手动指定的。
+    后端已按 subject/via 分桶（invocations.auto），界面混成一行就等于没分。
+    """
+
+    def test_summary_renders_auto_bucket(self):
+        fn = re.search(r"function renderSkillInvocations\(.*?\n\}", strip_js_comments(JS), re.S)
+        self.assertTrue(fn, "renderSkillInvocations 缺失")
+        body = fn.group(0)
+        self.assertIn("SKILL_INV_VIEW.auto", body, "界面没读 auto 桶")
+        self.assertIn("自动下发", body, "缺用户可见的自动下发文案")
+
+    def test_unknown_caller_is_reported_not_guessed(self):
+        body = re.search(r"function renderSkillInvocations\(.*?\n\}", strip_js_comments(JS), re.S).group(0)
+        self.assertIn("unknown_caller", body,
+                      "未自报的调用方必须显式报数，不能静默算成 anonymous")
 
 
 if __name__ == "__main__":

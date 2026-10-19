@@ -1240,10 +1240,16 @@ async def skill_invocations(name: str = Query(default="", max_length=200),
         parsed.append({
             "id": r.get("id"),
             "name": str(det.get("name") or "").strip(),
+            # 技能来自哪一路（哪个 agent 的发现点）——同名技能可存在于多路，
+            # 只记名字无法回答「用了谁的技能」，也无法按来源做权重。
+            "route": str(det.get("route") or "").strip(),
             "caller": (str(det.get("caller") or "").strip() or "anonymous"),
             "task": tdai_client.scrub(str(det.get("task") or ""))[:200],
             "channel": det.get("channel"),
             "caller_reported": bool(det.get("caller_reported")),
+            # 这条是「有人点名要这个技能」；与自动下发（subject=skill.relevant）分开计，
+            # 否则「机器推的」和「人点的」在同一张表里无法区分。
+            "mode": str(det.get("mode") or "explicit_invoke"),
             "status": r.get("status"),
             "duration_ms": r.get("duration_ms"),
             "created_at": r.get("created_at"),
@@ -1251,10 +1257,52 @@ async def skill_invocations(name: str = Query(default="", max_length=200),
     hit = [p for p in parsed
            if (not want_name or p["name"].lower() == want_name)
            and (not want_caller or p["caller"].lower() == want_caller)]
+    # 自动下发（subject=skill.relevant）单独一桶：它是「机器把哪些技能推给了谁」，
+    # 与「谁点名要了哪个技能」是两种证据。权重若把两者混加，等于把曝光当使用。
+    # 读不到就报 auto_error，不静默当 0——「0 次自动下发」和「查询失败」必须可区分。
+    auto: Dict[str, Any] = {"total": 0, "by_caller": {}, "by_skill": {}, "unknown_caller": 0}
+    auto_error = ""
+    try:
+        arows = db.query(
+            "SELECT detail FROM profile_events "
+            "WHERE source = ? AND subject = 'skill.relevant' AND created_at >= ? "
+            "ORDER BY id DESC LIMIT ?",
+            (skill_usage._SOURCE, since, fetch_cap))
+    except Exception as e:  # noqa: BLE001
+        arows = []
+        auto_error = tdai_client.scrub(f"{type(e).__name__}: {e}")[:160]
+    a_bad = 0
+    for r in arows or []:
+        det = r.get("detail")
+        try:
+            det = json.loads(det) if isinstance(det, str) else det
+        except Exception:  # noqa: BLE001
+            a_bad += 1
+            continue
+        if not isinstance(det, dict):
+            a_bad += 1
+            continue
+        auto["total"] += 1
+        who = str(det.get("caller") or "").strip().lower()
+        if who:
+            auto["by_caller"][who] = auto["by_caller"].get(who, 0) + 1
+        else:
+            auto["unknown_caller"] += 1
+        nm = str(det.get("name") or "").strip()
+        if nm:
+            auto["by_skill"][nm] = auto["by_skill"].get(nm, 0) + 1
+    auto["by_caller"] = dict(sorted(auto["by_caller"].items(), key=lambda kv: -kv[1]))
+    auto["by_skill"] = dict(sorted(auto["by_skill"].items(), key=lambda kv: -kv[1])[:20])
+    auto["bad_detail"] = a_bad
+    auto["error"] = auto_error
+    auto["scope"] = "同一抓取窗口内 subject=skill.relevant 的事件；caller 为空=旧客户端未自报"
     by_caller: Dict[str, int] = {}
+    by_route: Dict[str, int] = {}
     by_skill: Dict[str, int] = {}
     for p in parsed:                      # 汇总按**整个抓取窗口**算，不按 limit 截断后的
         by_caller[p["caller"]] = by_caller.get(p["caller"], 0) + 1
+        if p["route"]:
+            by_route[p["route"]] = by_route.get(p["route"], 0) + 1
         if p["name"]:
             by_skill[p["name"]] = by_skill.get(p["name"], 0) + 1
     return {
@@ -1267,9 +1315,11 @@ async def skill_invocations(name: str = Query(default="", max_length=200),
         "bad_detail": bad,
         "summary": {
             "by_caller": dict(sorted(by_caller.items(), key=lambda kv: -kv[1])),
+            "by_route": dict(sorted(by_route.items(), key=lambda kv: -kv[1])),
             "by_skill": dict(sorted(by_skill.items(), key=lambda kv: -kv[1])[:20]),
             "scope": "仅统计本次抓取窗口（window_fetched 条）内的流水，不是全历史",
         },
+        "auto": auto,
         "note": ("窗口内 0 条 ⇒ 没有调用记录（或都被过滤掉了）；"
                  "bad_detail>0 ⇒ 有坏事件行，已跳过并计数"),
         "took_ms": round((time.monotonic() - t0) * 1000, 1),
@@ -1484,7 +1534,9 @@ async def skill_relevant(request: Request,
                          q: str = Query(min_length=1, max_length=2000),
                          n: int = Query(default=5, ge=1, le=20),
                          max_tokens: int = Query(default=0, ge=0, le=8000),
-                         rerank: bool = Query(default=True)):
+                         rerank: bool = Query(default=True),
+                         caller: str = Query(default="", max_length=64),
+                         via: str = Query(default="", max_length=16)):
     """按一段自然语言任务描述，从**真实在用**的技能里排最相关的 n 条。
 
     **返回值刻意把 `bm25` 与 `jev` 分开报，不合成一个数字。**
@@ -1495,6 +1547,10 @@ async def skill_relevant(request: Request,
     置信常 1.00，而 score 用于主观刻度时置信会掉到 0.3 左右。「技能对某个任务的相关
     程度」正是主观刻度，用一个 0.3 置信的分数去改写排序不成立。所以本端点把 jev 的
     分数与置信度逐行回传，**排序权威仍是 BM25**，等拿到可比数据再决定是否换权。
+
+    `caller` / `via` 只进埋点，不参与检索：`via=hook` 表示这是 agent 输入钩子
+    自动打的（机器选候选），其它值/缺省表示人在查。两者在 `profile_events` 里
+    落成 `mode=auto_inject` / `query`，权重统计必须按这个分桶，不能混加。
     """
     t0 = time.monotonic()
     routes = disk_routes()

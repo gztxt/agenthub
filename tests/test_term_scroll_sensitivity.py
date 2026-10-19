@@ -238,7 +238,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.131"
+    CURRENT_VERSION = "0.13.132"
+
+    #: v0.13.132：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「一次性加载闸把实时数冻结成快照」与「曝光不是使用，必须按 via=hook 分桶」。
+    VERSION_ROOT_CAUSES["0.13.132"] = (
+        "PT-20261020-01", "一次性加载闸", "via=hook", "explicit_invoke", "unknown_caller",
+    )
 
     #: v0.13.130：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「调用记录恒 0 是写入被 401 拒，不是查询坏」（三层取证：HTTP → 库行 → 窗口），

@@ -96,7 +96,16 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.131"
+VERSION = "0.13.132"
+#   v0.13.132：调用徽标不再冻结 + 技能记账分层（PT-20261020-01）。
+#   ① 用户报「调用记录后面一直显示 0」：`skillsLoaded` 一次性加载闸把汇总请求一起挡住了，
+#      首屏那一刻库里 0 条 ⇒ 徽标永远停在 0。改为重进页/切到记录视图各补刷一次，
+#      另加 60s 保活（仅技能页可见时，只刷数字不重绘 375 行）。
+#   ② 自动下发与指名调用分桶：注入链打 /relevant 时自报 `caller` 与 `via=hook`，
+#      runlog 落 `mode`（explicit_invoke / auto_inject / query）。判据只有 via=hook，
+#      缺省不推断；无身份的旧事件在 `unknown_caller` 单列，不硬塞给任何 agent。
+#   ③ /invocations 新增 auto 桶（total/by_caller/by_skill/unknown_caller/error），
+#      界面单列「自动下发」——曝光不是使用，权重统计不能混加。
 #   v0.13.131：六处 inline onclick + jsStr 全改 data-* 委托（PT-20261019-02）——
 #   双引号属性被 jsStr 的双引号字面量截断 ⇒ 点击静默 SyntaxError（19 天无人察觉）。
 #   反向闸门扫全部分片 + 渲染态探针（敌意引号路径逐字符回读）。

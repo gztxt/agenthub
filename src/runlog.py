@@ -52,8 +52,28 @@ _Q_MAX_CHARS = 120                         # 查询词落库上限（防长文�
 #: ⚠ `name` 必须在这里再挖一遍 body：**失败路径没有 `_pick_names`**（那个读的是响应体，
 #: 而失败时响应体是 HTTPException 的 detail）⇒ 不挖的话 409/404 的 invoke 事件
 #: 不带技能名，「调用记录」面板里的失败行没有身份，等于半聋。
-_EXTRA_KEYS = ("name", "route", "caller", "task")
+_EXTRA_KEYS = ("name", "route", "caller", "task", "via")
 _TASK_MAX_CHARS = 500
+
+
+def _mode_of(subject: str, kwargs: Dict[str, Any]) -> str:
+    """这条技能事件是「指名调用」还是「自动下发」——权重统计必须先分层再计数。
+
+    口径只有一条：**`via=hook` 才是自动**。注入链（pi 的 hub-facade.ts、claude 的
+    hub_skill_inject.py）在用户输入时无条件打 `/relevant`，没人点名任何技能 ⇒ 候选
+    是机器选的；而相关性实验室/手工查询虽然也打同一端点，却是人在问。
+    故不能按端点分，只能按调用方显式声明的 `via` 分：
+      · skill.invoke            → explicit_invoke（有人点了这个技能的名字）
+      · skill.relevant + via=hook → auto_inject（机器选出来的候选）
+      · skill.relevant 其它      → query（人工检索，不是使用证据）
+    未声明 `via` 的旧客户端**不推断**为 auto：把它们算进自动桶会把「UI 里试一下」
+    当成「agent 主动用了」，权重直接失真。
+    """
+    if subject == "skill.invoke":
+        return "explicit_invoke"
+    if subject == "skill.relevant":
+        return "auto_inject" if str(kwargs.get("via") or "").strip().lower() == "hook" else "query"
+    return ""
 
 
 def _pick_extra(kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -239,7 +259,15 @@ def track(subject: str):
                     "channel": _channel_of(request),
                     # v0.13.127：caller/task（仅 invoke 有；其它端点这两键不出现）
                     **_pick_extra(kwargs),
+                    # 2026-10-20：自动下发 / 指名调用分层。没有这一列，
+                    # 「agent 自己找的技能」与「人点名的技能」在账上长得一样。
+                    **({"mode": _mode_of(subject, kwargs)} if _mode_of(subject, kwargs) else {}),
                 }
+                if subject == "skill.invoke":
+                    # /invoke 的 caller 是自报（body 字段或 x-hub-channel 通道头），
+                    # 不是协议取证。响应里写 caller_reported=true，流水也必须同样落——
+                    # 否则面板会把自报身份显示成已取证，权重统计的来源就带毒。
+                    base["caller_reported"] = True
                 names = _pick_names(data)
                 if not names:
                     _fire(subject, "success", int((time.monotonic() - t0) * 1000), base)
@@ -262,6 +290,8 @@ def track(subject: str):
                     "channel": _channel_of(request),
                     # v0.13.127：失败的 invoke（409/404）同样要答「谁调的、想干什么」
                     **_pick_extra(kwargs),
+                    **({"mode": _mode_of(subject, kwargs)} if _mode_of(subject, kwargs) else {}),
+                    **({"caller_reported": True} if subject == "skill.invoke" else {}),
                     "http": e.status_code,
                     "err": tdai_client.scrub(str(e.detail))[:200],
                 })

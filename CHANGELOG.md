@@ -1,3 +1,73 @@
+## v0.13.132 — 调用徽标不再冻结 + 技能记账分层（PT-20261020-01）
+
+> 来源：2026-10-20 用户报「调用记录按钮后面一直显示 0，应该更新为实际调用数据」。
+> 同一时刻 `GET /api/skill/invocations?days=7` 返回 `matched_total=4`，页面徽标却是 `0`
+> ⇒ 不是查询坏，是**徽标只算了一次**。
+
+### ① 徽标被一次性加载闸冻成快照
+
+`static/hub/01-core-boot.js` 的进页钩子把汇总请求挂在 `skillsLoaded` 闸后面：
+
+```js
+if (page === 'skills' && !skillsLoaded) { skillsLoaded = true; loadSkills(); ... }
+```
+
+首次进页时库里 0 条，之后 agent 调多少次都不再取汇总 ⇒ 数字永远是 0。
+闸只该挡重资产（375 条目录扫描），不该连带挡 <20ms 的 summary。
+
+三条出口一起补，缺一条换个操作路径就复现：
+
+| 出口 | 位置 | 行为 |
+|---|---|---|
+| 重进技能页 | `go('skills')` 的 else 分支 | `loadSkillInvBadges(false)` |
+| 切到调用记录 tab | `switchSkillView('invocations')` | 同左（徽标固定近 7 天，视图可切 30/90 天） |
+| 停留保活 | 60s `setInterval` | 仅 `curPage==='skills'` 且标签页可见；只刷数字不重绘行 |
+
+`loadSkillInvBadges(rebuildRows)` 新增参数：`false` 时跳过 `renderSkillList()`，
+轮询不会打断滚动/选中。
+
+### ② 自动下发与指名调用分桶
+
+用户同批要求「要能分辨 agent 是执行任务时自动用的，还是人手动指定的」。
+原账上 `skill.invoke` 有 caller 但无 mode，`skill.relevant`（注入链唯一留痕）连 caller 都没有。
+两条路打同一端点，按端点分不出来 ⇒ 判据只能是调用方声明的 `via=hook`：
+
+| subject | via | mode | 含义 |
+|---|---|---|---|
+| `skill.invoke` | — | `explicit_invoke` | 有人点名要了这个技能 |
+| `skill.relevant` | `hook` | `auto_inject` | 输入钩子自动下发的候选 |
+| `skill.relevant` | 其它/缺省 | `query` | 人工检索，不是使用证据 |
+
+- `via` 进 `runlog._EXTRA_KEYS`；`_mode_of()` 单点判定，成功/失败路径同时落。
+- 注入链自报身份：claude `scripts/hub_skill_inject.py`（`caller=claude`）、
+  pi `~/.pi/agent/extensions/hub-facade.ts`（`caller=pi`），均带 `via=hook`。
+- **缺 caller 不推断**：历史 653 条 `skill.relevant` 无身份，落 `auto.unknown_caller` 单列。
+
+### ③ `/api/skill/invocations` 新增 auto 桶
+
+`auto = {total, by_caller, by_skill, unknown_caller, bad_detail, error, scope}`，
+与显式调用并列回传；界面在汇总区单列「自动下发：N 次 · 按调用方…」。
+读库失败写 `error` 而不是静默 0——「0 次自动下发」与「查询失败」必须可区分。
+
+### 闸门
+
+```
+tests/test_skill_invoke.py::TestInvocations::test_auto_inject_bucket_is_separate_and_carries_caller
+tests/test_skill_invoke.py::TestPickExtra::test_via_picked_and_mode_layered
+tests/test_skill_center_ui.py::TestInvocationBadgeFreshness（4 例）
+tests/test_skill_center_ui.py::TestAutoInjectSurfaced（2 例）
+tests/test_skill_inject_tally.py::TestInjectionDeclaresIdentity
+```
+
+红臂实测：删掉 `else loadSkillInvBadges(false)` ⇒ `test_reenter_skills_refreshes_badge` 红；
+删掉 `"auto": auto` ⇒ `test_auto_inject_bucket...` 红。
+
+### 验收（真机）
+
+- 重启后 `/health` = 0.13.132；`/relevant?...&caller=claude&via=hook` 落 `mode=auto_inject`。
+- 真浏览器：载入徽标 4 → 外部 invoke 第 5 条 → 停留 2s 仍 4（无推送）→ 重进技能页变 5；
+  调用记录汇总出现「自动下发：656 次 · 按调用方：codebuddy × 3（其中 653 次未自报）」。
+
 ## v0.13.131 — 六处 inline onclick + jsStr 改 data-* 委托（PT-20261019-02）
 
 > 来源：v0.13.59（`1e3648f`）为防注入把 3 处 onclick 换成 `jsStr()`，却没同步属性

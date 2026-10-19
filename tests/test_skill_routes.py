@@ -1,4 +1,4 @@
-"""D1 闸门：21 路发现点（+条件 local 路）+ 排除清单 + state 四态 + glob 路。
+"""D1 闸门：22 路发现点（+条件 local 路）+ 排除清单 + state 四态 + glob 路。
 
 设计书：docs/superpowers/specs/2026-10-03-skill-center-auto-invoke-design.md §4
 计划：docs/superpowers/plans/2026-10-03-skill-center-auto-invoke.md Task 1
@@ -32,7 +32,8 @@ import tiers  # noqa: E402
 import skill  # noqa: E402
 
 
-#: 21 路 = 原有 7 + D1 新增 13 + PT-20261019-01 补 1（codebuddy 只读路由）。
+#: 22 路 = 原有 7 + D1 新增 13 + PT-20261019-01 补 1（codebuddy 只读路由）
+#:          + 2026-10-19 补 1（qwenpaw，见下）。
 #: **逐个点名**，多一个少一个都判 FAIL（防悄悄加白名单）。
 #: ⚠ 项目本地 `local` 路**不在此表**：它动态出现（有根才在 disk_routes() 里），
 #: 由 tests/test_skill_invoke.py 的本地根用例专测。
@@ -43,6 +44,10 @@ EXPECTED_ROUTES = {
     "hermes", "hermes-agent", "hermes-web", "jcode", "grok", "grok-bundled",
     "picoclaw", "qoder", "qoderwake", "qoderwake-shadow", "qoderwake-cli",
     "qoder-alpha", "opencode",
+    # 2026-10-19 补的 1 路：`~/.qwenpaw/config.json:1074` 的 skillPaths 明写该目录，
+    # 是真发现点；此前漏登记 ⇒ qwenpaw 那一路对 hub 完全不可见（agent 自己读得到、
+    # hub 数不到）。该路条目全是软链指回 techdocs，dedup 后只作 routes 别名、不增 total。
+    "qwenpaw",
     # v0.13.127 PT-20261019-01：codebuddy（目录在、当前 0 条；禁改面禁写，只读路由）
     "codebuddy",
 }
@@ -81,7 +86,7 @@ def _write_skill(root: Path, name: str) -> Path:
 class _Whitelist:
     """把 tempfile 目录挂进 `_allowed_roots`。
 
-    为什么要这个：`_scan_one` 有**硬白名单**（不在 21 路根（+local 路）之内的 realpath 一律计入
+    为什么要这个：`_scan_one` 有**硬白名单**（不在 22 路根（+local 路）之内的 realpath 一律计入
     `skipped_outside` 丢弃），这是既有安全设计不是缺陷。所以 L0 想在临时目录造夹具，
     只能临时把该目录加进白名单——**不为此改生产代码**。
     """
@@ -103,11 +108,11 @@ class _Whitelist:
 class TestRoutesL0(unittest.TestCase):
     """L0：只读本模块的字典，不碰真盘。"""
 
-    def test_21_routes_exact(self):
+    def test_22_routes_exact(self):
         self.assertEqual(set(skill.SKILL_DIRS), EXPECTED_ROUTES)
 
-    def test_21_routes_count(self):
-        self.assertEqual(len(skill.SKILL_DIRS), 21)
+    def test_22_routes_count(self):
+        self.assertEqual(len(skill.SKILL_DIRS), 22)
 
     def test_local_route_absent_when_no_local_roots(self):
         """v0.13.127：项目本地 `local` 路**动态出现**——本地根一个都没有时，

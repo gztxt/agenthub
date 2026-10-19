@@ -407,12 +407,14 @@ class TestBackendAndRoutes(_TmpSkillCase):
         v0.13.127 PT-20261019-01：20→21 路（补 codebuddy 只读路由；该目录当前 0 条，
         不登记＝「装了技能 hub 静默看不见」的盲区。项目本地 `local` 路**动态出现**，
         不在此表——它一个根都没有时压根不出现，见 disk_routes 注释）。
+        2026-10-19：21→22 路（补 qwenpaw；`~/.qwenpaw/config.json:1074` 的 skillPaths
+        明写该目录，同属「不登记＝静默看不见」那一类）。
         路线细节、条数与排除理由由 tests/test_skill_routes.py 逐项钉；本闸门只守**名字**。"""
         self.assertEqual(sorted(skill._DEFAULT_DIRS),
                          ["agents", "claude", "codebuddy", "codex", "grok", "grok-bundled",
                           "hermes", "hermes-agent", "hermes-web", "jcode", "opencode",
                           "pi", "picoclaw", "qoder", "qoder-alpha", "qoderwake",
-                          "qoderwake-cli", "qoderwake-shadow", "superpowers",
+                          "qoderwake-cli", "qoderwake-shadow", "qwenpaw", "superpowers",
                           "techdocs", "workbuddy"])
 
     def test_load_dirs_env_override_takes_effect(self):

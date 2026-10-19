@@ -82,6 +82,12 @@ _DEFAULT_DIRS: Dict[str, str] = {
     # 2026-10-19 实测：1 条（crawl4ai 软链 → 技术文档/crawl4ai，经 ARCHIVE_ROOTS
     # 进白名单）——内容只经软链到达，本地副本形态由 L1 用例钉住。
     "codebuddy": "/home/gztxt/.codebuddy/skills",
+    # 2026-10-19 补登：`~/.qwenpaw/config.json:1074` 的 skillPaths 明写
+    # "/home/gztxt/.qwenpaw/skills" ⇒ **真发现点**，此前漏登记导致 qwenpaw 那一路
+    # 完全不可见（aidev 四件套在该路建了软链，agent 自己读得到、hub 却数不到）。
+    # 该路条目全是软链指回 techdocs，`_dedup` 按 realpath 合并后只作 routes 别名，
+    # 不增加 total；补这一路的意义是「可见性归属正确」，不是「技能变多」。
+    "qwenpaw": "/home/gztxt/.qwenpaw/skills",
 
     # ── v0.13.66 D1：补齐 13 路实测发现点。条数是 2026-10-03 `find -maxdepth 3` 实测，
     # 登记时**不猜**：「目录在但 0 条」与「目录不存在」由 /status 的 state 四态分开说，
@@ -1551,10 +1557,24 @@ async def skill_budget(
     - name-only 也装不下则截断，返回 truncated 与 total——如实说「被裁了」。
     """
     t0 = time.monotonic()
-    tasks = [_scan_async(r, route_roots(r)) for r in disk_routes()]
-    scans = await asyncio.gather(*tasks)
+    route_names = disk_routes()
+    tasks = [_scan_async(r, route_roots(r)) for r in route_names]
+    scans = await asyncio.gather(*tasks, return_exceptions=True)
     items: List[Dict[str, Any]] = []
-    for s in scans:
+    # 扫描失败的路必须**逐路表态**：`_scan_one_uncached` 超时返回 `ok=False, items=[]`，
+    # 若照旧直接 extend，整路技能会像"这一路本来就没有"一样消失。
+    # 实测 hermes 路 124 条在 trimafs 上会撞 SCAN_TIMEOUT_S=2.0s ⇒ total 从 375 掉到 257，
+    # 而面板显示得一切正常。这正是本仓反复禁止的「静默形态」。
+    routes_failed: List[Dict[str, Any]] = []
+    for name, s in zip(route_names, scans):
+        if isinstance(s, BaseException):
+            routes_failed.append({"route": name, "ms": None,
+                                  "error": tdai_client.scrub(f"{type(s).__name__}: {s}")[:200]})
+            continue
+        if not s.get("ok"):
+            routes_failed.append({"route": name, "ms": s.get("ms"),
+                                  "error": s.get("error") or "扫描失败（原因未提供）"})
+            continue
         items.extend(s.get("items") or [])
     unique, _aliases = _dedup(items)
 
@@ -1598,4 +1618,6 @@ async def skill_budget(
             # 分路可见性：`total` 是**过滤后**的条数；routes_available 供前端填下拉，
             # 不写死路名，磁盘加一路就自动多一项。
             "route_filter": wanted, "routes_available": routes_available,
-            "route_unknown": route_unknown}
+            "route_unknown": route_unknown,
+            # 本次扫描失败的路（total 偏低时据此判断"是少了东西"而非"本来就没有"）
+            "routes_failed": routes_failed}

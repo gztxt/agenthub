@@ -264,14 +264,20 @@ def hub_skill_list(q: str = "", routes: str = "", limit: int = 50) -> str:
     **看到 count=0 必读 degraded/note**：「TDAI 注册表 0 行、磁盘 37 条在用」是本机现状
     （技能权威源未裁，PT-20260924-08 T2-1），不等于「本机没有技能」。
     routes 留空＝全部路；写错值直接 400，不给你静默空结果的机会。
-    `fm=false` 的条目是**没有 frontmatter 的技能**（名字回退成目录名），不是坏数据。"""
-    if limit > 200:
-        limit = 200
+    `fm=false` 的条目是**没有 frontmatter 的技能**（名字回退成目录名），不是坏数据。
+    返回里的 `total` / `truncated` 是**截断自报**（v0.13.128）：`count < total` 时
+    说明这一页没装下，调大 `limit`（上限 1000）或加 `q`——**别把 count 读成总数**。"""
+    if limit > 1000:
+        limit = 1000
     data = _get("/api/skill/list", q=q, routes=routes, limit=limit)
     if "error" in data:
         return json.dumps(data, ensure_ascii=False)
     return json.dumps({
         "count": data.get("count", 0),
+        # v0.13.128：与后端同口径。MCP 层如果只透传 count，等于在门面上复刻静默截断
+        # （v0.13.127 之前 max 200 硬顶，371 条只回 200）。
+        "total": data.get("total", 0),
+        "truncated": data.get("truncated", False),
         "engine": data.get("engine"),
         "items": [{
             "name": i.get("name"),
@@ -344,6 +350,9 @@ def hub_skill_catalog(q: str = "", limit: int = 200) -> str:
     return json.dumps({
         "count": data.get("count", 0),
         "total": data.get("total", 0),
+        # v0.13.128：catalog 后端本来就回 total；门面把「是否少收」算成一个布尔，
+        # 免得调用方自己比 count/total（比漏了就是又一次静默截断）。
+        "truncated": data.get("count", 0) < data.get("total", 0),
         "items": [{
             "name": i.get("name"),
             "description": (i.get("description") or "")[:300],

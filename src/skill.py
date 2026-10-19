@@ -855,7 +855,11 @@ async def skill_list(request: Request,
                      q: str = Query(default="", max_length=200,
                                    description="对 name/description/path/route 做不区分大小写匹配；"
                                                "先精确子串，容忍手误则按编辑距离（口径与前端搜索框一致）"),
-                     limit: int = Query(default=200, ge=1, le=500),
+                     limit: int = Query(
+                         default=200, ge=1, le=1000,
+                         description="单次最多返回条数（默认 200，上限 1000）。"
+                                     "被截断时响应必带 total 与 truncated=true——"
+                                     "**不许把截断读成『本机只有这么多』**（PT-20261019-03）"),
                      routes: Optional[str] = Query(
                          default=None,
                          description="逗号分隔；不传＝全部路。传空串＝400（与 /api/kb 同口径）")):
@@ -914,6 +918,11 @@ async def skill_list(request: Request,
     if ql:
         merged = sorted(merged, key=lambda x: (-_q_score(x, ql),
                                                str(x.get("route") or ""), str(x.get("name") or "")))
+    # v0.13.128（PT-20261019-03）：截断必须自报。此前 `merged[:limit]` 静默切掉尾部，
+    # 响应里只剩 `count=len(merged)` ⇒ 371 条只回 200 条、12 路整路不可见，
+    # 前端把 200 当总量统计。**丢哪批还取决于路由迭代序**，不是稳定口径。
+    # 现在 total=截断前的条数、truncated 明示是否少收；调用方据此收窄或分页。
+    total = len(merged)
     merged = merged[:limit]
 
     engines = [b["name"] for b in backends if b["ok"] and b["count"]]
@@ -935,6 +944,10 @@ async def skill_list(request: Request,
     return {
         "items": merged,
         "count": len(merged),
+        # total/truncated 是一对：只有 count 时「200」既可能是全部也可能是截断，
+        # 这正是 PT-20261019-03 的病灶。二者必须同时出现且口径一致。
+        "total": total,
+        "truncated": total > len(merged),
         "engine": "+".join(engines) if engines else "none",
         "backends": backends,
         "degraded": degraded,

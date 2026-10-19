@@ -96,7 +96,12 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.127"
+VERSION = "0.13.128"
+#   v0.13.128：技能中心目录静默截断（PT-20261019-03）。`/api/skill/list` 默认 limit=200，
+#   响应只有 count ⇒ 生产 walked=487、unique=371 却只回 200 条：jcode / hermes-web /
+#   techdocs / superpowers 等 **12 路整路不可见**，前端把 200 当总量。现在响应必带 total
+#   与 truncated（**截断必须自报**，不许把少收读成「本机只有这么多」），上限 500→1000，
+#   前端显式取全量并在统计条明示「本次只显示 N 条」。
 #   v0.13.127：技能中心统一调用入口（PT-20261019-01 P0）。新增 POST /api/skill/invoke
 #   （激活+记账，回 SKILL.md 指令正文，不代跑代码）、GET /api/skill/catalog（L1 发现层）、
 #   GET /api/skill/invocations（调用流水只读投影，零新表）；MCP 加 hub_skill_invoke /

@@ -4080,6 +4080,10 @@ async function previewCtx() {
 /* ── 技能中心（v0.13.26 批4）────────────────────────── */
 
 let SKILLS = [], SKILL_ROUTES = [], SKILL_STATUS = null, SKILL_ZOMBIES = {}, SKILL_ZOMBYE_ONLY = false;
+/* v0.13.128（PT-20261019-03）：total 是**过滤后**的全量条数，SKILLS 是本次拿回的那一页。
+ * 两者分开存——只存 SKILLS.length 的话，截断时统计条会把「显示到的」当成「本机有的」，
+ * 正是这个 bug 最初骗过探针的方式。 */
+let SKILL_TOTAL = 0, SKILL_TRUNCATED = false;
 /* v0.13.127 P1（PT-20261019-01 Grill 裁定 5）三份新状态：
  * SKILL_VIEW      当前视图（'catalog' | 'invocations'）——**只存变量不写盘**：
  *                 分档偏好五条之②「加载不写盘」；视图开关不是设备分档，无需记忆。
@@ -4098,9 +4102,14 @@ let SKILL_INV = null, SKILL_INV_BY_SKILL = {}, SKILL_INV_LOADED = false;
 async function loadSkills() {
   boxBusy('skillList');
   try {
-    const d = await api('/api/skill/list');
+    // v0.13.128（PT-20261019-03）：显式要上限 1000。旧代码不传 limit ⇒ 后端默认 200，
+    // 371 条里 12 路整路不可见，而界面把 200 当总量（探针原话「200 技能 / 21 路」）。
+    // 后端仍可能截断（>1000 时）⇒ 读 total/truncated 并在统计条上明示，不静默。
+    const d = await api('/api/skill/list?limit=1000');
     CENTER_HEALTH.skills = (d.degraded || []).length ? 'warn' : 'ok';
     SKILLS = d.items || d || [];
+    SKILL_TOTAL = (d.total != null) ? d.total : SKILLS.length;
+    SKILL_TRUNCATED = !!d.truncated;
     // 发现点下拉（过滤器 + 安装选择器共用）
     SKILL_ROUTES = (d.backends ? d.backends.filter(b => b.name !== 'tdai').map(b => b.name) : []) || [];
     const opt = SKILL_ROUTES.map(r => '<option value="' + r + '">' + r + '</option>').join('');
@@ -4109,7 +4118,8 @@ async function loadSkills() {
     $('instTo').innerHTML = opt;
     mountPicks('instTo');   // v0.13.40：option 每次重写 ⇒ 芯片壳跟着重挂（函数幂等）
     $('instName').innerHTML = SKILLS.map(s => '<option value="' + escapeHtml(s.name) + '">' + escapeHtml(s.name) + '</option>').join('');
-    $('skillHint').textContent = SKILLS.length + ' 个技能 · ' + SKILL_ROUTES.length + ' 路发现点';
+    $('skillHint').textContent = SKILL_TOTAL + ' 个技能 · ' + SKILL_ROUTES.length + ' 路发现点';
+    if (SKILL_TRUNCATED) $('skillHint').textContent += '（本次只显示 ' + SKILLS.length + ' 条，单次有上限）';
     if ((d.degraded || []).length) $('skillHint').textContent += ' · 降级路：' + d.degraded.join(',');
     // 工具条那句同样不再写死（它与 skillHint 同源，不然后面会再次漂移）
     $('skillRouteHint').textContent = SKILL_ROUTES.length + ' 路发现点 · 只读门面：点「查看」读正文（脱敏）';
@@ -4150,7 +4160,7 @@ async function loadSkillInvBadges() {
 function renderSkillStats() {
   const el = $('skillStats');
   if (!el) return;
-  const nSkill = SKILLS.length;
+  const nSkill = SKILL_TOTAL || SKILLS.length;
   const nRoute = SKILL_ROUTES.length;
   const invTotal = SKILL_INV ? (SKILL_INV.matched_total != null ? SKILL_INV.matched_total : 0) : 0;
   const nInvoked = Object.keys(SKILL_INV_BY_SKILL || {}).length;
@@ -4161,6 +4171,11 @@ function renderSkillStats() {
   let html = '共 <b>' + nSkill + '</b> 个技能 · <b>' + nRoute + '</b> 路发现点' +
     ' · 近 7 天调用 <b>' + invTotal + '</b> 次（<b>' + nInvoked + '</b> 个技能被调用过）' +
     ' · 零调用 <b>' + zCount + '</b> 个';
+  if (SKILL_TRUNCATED) {
+    // 「共 N 个」与「列表里有几条」必须分开说：把截断后的条数写成总数 = 这个 bug 的原始形态
+    html += ' · <span class="sk-stat-warn">本次只显示 ' + SKILLS.length +
+      ' 条（单次上限），用搜索缩小范围</span>';
+  }
   if (degraded.length) {
     html += ' · <span class="sk-stat-warn">降级路：' + escapeHtml(degraded.join(', ')) + '</span>';
   }
@@ -4264,7 +4279,7 @@ function renderSkillList() {
     '<button class="btn sm" data-sk-view="1" data-name="' + escapeHtml(s.name) +
     '" data-route="' + escapeHtml(rt == null ? '' : rt) + '" title="读全文（脱敏）">查看</button></span></div>';
   }).join('') ||
-    '<div class="hint">没有匹配的技能（' + zrows.length + ' / ' + SKILLS.length + ' 总数' +
+    '<div class="hint">没有匹配的技能（' + zrows.length + ' / ' + (SKILL_TOTAL || SKILLS.length) + ' 总数' +
     (q ? '；已启用模糊匹配仍无结果 ⇒ 换关键词或查发现点自检' : '') + '）</div>';
 }
 

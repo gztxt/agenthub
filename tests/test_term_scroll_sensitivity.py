@@ -238,7 +238,15 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.127"
+    CURRENT_VERSION = "0.13.128"
+
+    #: v0.13.128（PT-20261019-03）：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「截断必须自报」——只有 count 时，200 既可能是全部也可能是少收，
+    #: 前端与探针都把少收读成了总量（生产实测 371 只回 200、12 路整路不可见）。
+    VERSION_ROOT_CAUSES["0.13.128"] = (
+        "PT-20261019-03", "默认 limit=200", "12 路整路不可见",
+        "total", "truncated", "截断必须自报", "上限 500→1000", "本次只显示",
+    )
 
     #: v0.13.127：关键词取自版本注释里**实际写下的字句**（PT-20261019-01 P0）。
     #: 核心是「hub 只代理激活+记账、不代跑代码」的语义边界，与「HUB_URL 不许写死端口」。

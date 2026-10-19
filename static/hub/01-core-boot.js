@@ -721,6 +721,7 @@ function seatLabelOf(a) {
 function showDetail(id) {
   const a = AGENTS.find(x => x.id === id);
   if (!a) return;
+  bindDetailDelegation();
   $('detailTitle').textContent = a.name + '（' + (a.type || a.kind || '-') + ' · ' + a.status + '）';
   const rows = [['endpoint', a.endpoint], ['config_path', a.config_path], ['working_dir', a.working_dir], ['description', a.description]];
   let html = rows.filter(([, v]) => v).map(([k, v]) =>
@@ -741,7 +742,7 @@ function showDetail(id) {
       '</div>' +
       '<div class="hint" style="margin-top:2px">' +
       '<button class="act-btn" style="display:inline-block;padding:2px 8px" ' +
-      'onclick="verifyAgent(' + jsStr(a.id) + ')" ' +
+      'data-sk-verify="' + escapeHtml(a.id) + '" ' +
       'title="跑一次真实请求（耗 token，只出模型层情报，不改可用性结论）">实测应答</button>' +
       (a.verdict_at ? ' 上次 ' + escapeHtml(String(a.verdict_at).slice(0, 19).replace('T', ' ')) + 'Z' : '') +
       '</div>';
@@ -757,6 +758,36 @@ function showDetail(id) {
   if (id === 'claude' && typeof loadCloudcliProjects === 'function') loadCloudcliProjects();
 }
 function closeDetail() { closeOverlay('detailDrawer'); }
+
+/* v0.13.131（PT-20261019-02）：详情抽屉里的动作按钮改 data-* + 委托。
+ *
+ * 原形态 `onclick="verifyAgent(<jsStr(id)>)"`：jsStr 产出**双引号**字面量，
+ * 嵌在双引号界定的属性里会被 HTML 解析器提前截断成 `verifyAgent(` ⇒
+ * 点击静默 SyntaxError（v0.13.59 起 19 天，静态闸门看不出来）。
+ * data-* 值走 escapeHtml（`"` → `&quot;`），dataset 读回原值，任意 id 都不断属性。
+ *
+ * 一个容器两处受益：#1 verifyAgent（showDetail 渲染）与 #4 cloudcliStart
+ * （04 分片 loadCloudcliProjects 也渲染进 #detailBody）共用这一个监听。
+ * #detailBody 是静态元素，抽屉多次 innerHTML 重写不掉监听；marker 防重复挂。
+ */
+function bindDetailDelegation() {
+  const el = $('detailBody');
+  if (!el || el.__detailDeleg) return;
+  el.__detailDeleg = true;
+  el.addEventListener('click', e => {
+    const v = e.target.closest('[data-sk-verify]');
+    if (v && el.contains(v)) {
+      e.stopPropagation();
+      verifyAgent(v.dataset.skVerify || '');
+      return;
+    }
+    const c = e.target.closest('[data-sk-ccstart]');
+    if (c && el.contains(c)) {
+      e.stopPropagation();
+      cloudcliStart(c.dataset.skCcstart || '');
+    }
+  });
+}
 
 /* L4 体检：让 hub 现场跑一次真实一次性请求（耗 token、冷启动可近 60s），完事刷列表 */
 async function verifyAgent(id) {

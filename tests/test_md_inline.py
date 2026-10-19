@@ -183,21 +183,26 @@ class MdInlineWiringTest(unittest.TestCase):
                                   "%s 里的技能描述渲染点没走 mdInline" % needle)
 
     def test_mcp_tool_name_is_escaped_for_both_contexts(self):
-        """MCP 工具名同时进 **HTML 正文** 与 **onclick 的 JS 字面量**，两个语境都要设防。
+        """MCP 工具名同时进 **HTML 正文** 与 **属性值**，两个语境都要设防。
 
         工具名来自 MCP server（外部注册）。原实现两处都没设防：
         `<b>' + x.name + '</b>` 直接拼 HTML，`onclick="pickTool('' + x.name + '')"` 直接拼 JS。
         本仓 `jsStr` 的注释早就写明 HTML 实体转义不足以让任意串安全进 JS 字面量。
+
+        v0.13.131（PT-20261019-02）改机制：`onclick` + jsStr 本身有害（双引号字面量
+        被双引号属性截断 ⇒ 点击静默失败），现改两个 `data-sk-pt-*` 属性 + 委托，
+        值走 escapeHtml。判据跟着改：查属性值转义 + 正文转义 + 不许退回 onclick。
         """
         src = strip_comments((_REPO / "static" / "hub" / "05-chat-and-history.js")
                             .read_text(encoding="utf-8"))
         line = [l for l in src.split("\n")
-                if "pickTool(" in l and "onclick" in l]
-        self.assertTrue(line, "没找到 MCP 工具行")
+                if "data-sk-pt-server" in l and "mem-item" in l]
+        self.assertTrue(line, "没找到 MCP 工具行（data-sk-pt-server 形态）")
         l = line[0]
-        self.assertIn("jsStr(x.name)", l, "onclick 的 JS 字面量没走 jsStr")
-        self.assertIn("escapeHtml(x.name)", l, "HTML 正文里的工具名没转义")
+        self.assertIn("escapeHtml(x.server)", l, "server 进属性值没转义")
+        self.assertIn("escapeHtml(x.name)", l, "HTML 正文/属性里的工具名没转义")
         self.assertNotIn("<b>' + x.name + '</b>", l, "工具名仍是裸拼进 HTML")
+        self.assertNotIn("onclick", l, "不许退回 inline onclick（jsStr 会截断属性）")
 
     def test_skill_center_description_uses_mdinline_not_escapehtml(self):
         """技能中心那一处是最常被看到的；逐行核对它没有退回 escapeHtml。"""

@@ -238,11 +238,19 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.130"
+    CURRENT_VERSION = "0.13.131"
 
     #: v0.13.130：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「调用记录恒 0 是写入被 401 拒，不是查询坏」（三层取证：HTTP → 库行 → 窗口），
     #: 以及「闸门自己会红」——夹具仓被当项目，根因是排除优先级写反。
+    #: v0.13.131：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「双引号属性 + jsStr 双引号字面量 = 属性被截断」——只查源码调没调函数
+    #: 的静态闸门看不见它，故必须配渲染态探针。
+    VERSION_ROOT_CAUSES["0.13.131"] = (
+        "PT-20261019-02", "data-* 委托", "双引号属性", "静默 SyntaxError",
+        "反向闸门", "渲染态探针",
+    )
+
     VERSION_ROOT_CAUSES["0.13.130"] = (
         "PT-20261019-01", "PT-20261019-04", "sk-titlebar", "ARIA tabs",
         "skill.invoke", "401", "writegate", "212 > 50",

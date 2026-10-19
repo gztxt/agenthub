@@ -721,6 +721,7 @@ function seatLabelOf(a) {
 function showDetail(id) {
   const a = AGENTS.find(x => x.id === id);
   if (!a) return;
+  bindDetailDelegation();
   $('detailTitle').textContent = a.name + '（' + (a.type || a.kind || '-') + ' · ' + a.status + '）';
   const rows = [['endpoint', a.endpoint], ['config_path', a.config_path], ['working_dir', a.working_dir], ['description', a.description]];
   let html = rows.filter(([, v]) => v).map(([k, v]) =>
@@ -741,7 +742,7 @@ function showDetail(id) {
       '</div>' +
       '<div class="hint" style="margin-top:2px">' +
       '<button class="act-btn" style="display:inline-block;padding:2px 8px" ' +
-      'onclick="verifyAgent(' + jsStr(a.id) + ')" ' +
+      'data-sk-verify="' + escapeHtml(a.id) + '" ' +
       'title="跑一次真实请求（耗 token，只出模型层情报，不改可用性结论）">实测应答</button>' +
       (a.verdict_at ? ' 上次 ' + escapeHtml(String(a.verdict_at).slice(0, 19).replace('T', ' ')) + 'Z' : '') +
       '</div>';
@@ -757,6 +758,36 @@ function showDetail(id) {
   if (id === 'claude' && typeof loadCloudcliProjects === 'function') loadCloudcliProjects();
 }
 function closeDetail() { closeOverlay('detailDrawer'); }
+
+/* v0.13.131（PT-20261019-02）：详情抽屉里的动作按钮改 data-* + 委托。
+ *
+ * 原形态 `onclick="verifyAgent(<jsStr(id)>)"`：jsStr 产出**双引号**字面量，
+ * 嵌在双引号界定的属性里会被 HTML 解析器提前截断成 `verifyAgent(` ⇒
+ * 点击静默 SyntaxError（v0.13.59 起 19 天，静态闸门看不出来）。
+ * data-* 值走 escapeHtml（`"` → `&quot;`），dataset 读回原值，任意 id 都不断属性。
+ *
+ * 一个容器两处受益：#1 verifyAgent（showDetail 渲染）与 #4 cloudcliStart
+ * （04 分片 loadCloudcliProjects 也渲染进 #detailBody）共用这一个监听。
+ * #detailBody 是静态元素，抽屉多次 innerHTML 重写不掉监听；marker 防重复挂。
+ */
+function bindDetailDelegation() {
+  const el = $('detailBody');
+  if (!el || el.__detailDeleg) return;
+  el.__detailDeleg = true;
+  el.addEventListener('click', e => {
+    const v = e.target.closest('[data-sk-verify]');
+    if (v && el.contains(v)) {
+      e.stopPropagation();
+      verifyAgent(v.dataset.skVerify || '');
+      return;
+    }
+    const c = e.target.closest('[data-sk-ccstart]');
+    if (c && el.contains(c)) {
+      e.stopPropagation();
+      cloudcliStart(c.dataset.skCcstart || '');
+    }
+  });
+}
 
 /* L4 体检：让 hub 现场跑一次真实一次性请求（耗 token、冷启动可近 60s），完事刷列表 */
 async function verifyAgent(id) {
@@ -1681,6 +1712,7 @@ function renderCloudcliProjects() {
     return;
   }
   if (body.querySelector('#ccProjects')) return;   // 防重复渲染（切换 agent 多次）
+  bindCloudcliDelegation();   // v0.13.131：行/按钮走 data-* 委托（见函数注释）
   const holder = document.createElement('div');
   holder.id = 'ccProjects';
   holder.innerHTML = '<div class="hint" style="margin:8px 10px 2px">CloudCLI 项目（本机全部 · 点「开始会话」直达）</div><div class="hint" style="padding:0 10px">加载中…</div>';
@@ -1690,13 +1722,13 @@ function renderCloudcliProjects() {
       '<div class="hint" style="padding:0 10px;color:var(--st-error,var(--danger))">加载失败：' + escapeHtml(d.error || '?') + '</div>'; return; }
     const rows = (d.projects || []).map(p =>
       '<div class="mem-item" style="gap:6px;padding:6px 10px;border-bottom:1px solid var(--border);cursor:pointer" ' +
-      'onclick="cloudcliStart(' + jsStr(p.path) + ')">' +
+      'data-sk-ccstart="' + escapeHtml(p.path) + '">' +
       '<p style="min-width:0;margin:0"><b>' + escapeHtml(p.name) + '</b>' + (p.starred ? ' ★' : '') +
       (p.sessions ? ' <span class="hint">' + p.sessions + ' 会话</span>' : '') +
       '<br><span class="hint" style="font-family:var(--font-mono);font-size:var(--fs-xs)">' +
       escapeHtml(String(p.path).slice(0, 60)) +
       (p.last_activity ? ' · ' + String(p.last_activity).slice(5, 16).replace('T', ' ') : '') + '</span></p>' +
-      '<button class="btn sm" style="align-self:center" onclick="event.stopPropagation();cloudcliStart(' + jsStr(p.path) + ')">▶ 开始会话</button></div>').join('');
+      '<button class="btn sm" style="align-self:center">▶ 开始会话</button></div>').join('');
     holder.innerHTML = '<div class="hint" style="margin:8px 10px 2px">CloudCLI 项目（' + (d.count || 0) + ' 个 · 点行或「开始会话」直达）</div>' +
       '<div class="tscroll" style="max-height:220px;overflow-y:auto">' + (rows || '<div class="hint" style="padding:0 10px">无项目</div>') + '</div>';
   }).catch(e => {
@@ -1704,6 +1736,23 @@ function renderCloudcliProjects() {
       '<div class="hint" style="padding:0 10px;color:var(--st-error,var(--danger))">加载失败：' + escapeHtml(e.message || '') + '</div>';
   });
 }
+/* v0.13.131（PT-20261019-02）：CloudCLI 项目行/按钮改 data-* + 委托。
+ * 原 `onclick="cloudcliStart(<jsStr(path)>)"` 被双引号属性提前截断 ⇒ 静默 SyntaxError。
+ * 行与按钮同值 ⇒ closest() 取最近祖先，点按钮也只触发一次，**不再需要 stopPropagation**。
+ * #embedBody 是静态容器（holder 每次重渲染不换壳），监听只挂一次。 */
+function bindCloudcliDelegation() {
+  const el = document.getElementById('embedBody');
+  if (!el || el.__ccDeleg) return;
+  el.__ccDeleg = true;
+  el.addEventListener('click', e => {
+    const row = e.target.closest('[data-sk-ccstart]');
+    if (row && el.contains(row)) {
+      e.stopPropagation();
+      cloudcliStart(row.dataset.skCcstart || '');
+    }
+  });
+}
+
 /* 工作台默认形态 —— **唯一真源**（openEntity 也走这里；两处各写一份优先级必然漂移）。
    有原生终端的 Agent 先给终端：它的独立 Web 宿主（claude←cloudcli :3010）自带一套登录，
    嵌进 hub 就是一张要重新登录的白页，而终端页里的 TUI 与本机命令行完全一致。
@@ -3691,8 +3740,8 @@ async function loadCloudcliProjects() {
       '<br><span class="hint" style="font-family:var(--font-mono);font-size:var(--fs-xs)">' +
       escapeHtml(String(p.path).slice(0, 48)) +
       (p.last_activity ? ' · ' + String(p.last_activity).slice(5, 16).replace('T', ' ') : '') + '</span></p>' +
-      '<button class="btn sm" style="align-self:center" onclick="cloudcliStart(' +
-      jsStr(p.path) + ')" title="在 CloudCLI 开始此项目的新会话">▶ 开始会话</button></div>').join('');
+      '<button class="btn sm" style="align-self:center" data-sk-ccstart="' +
+      escapeHtml(p.path) + '" title="在 CloudCLI 开始此项目的新会话">▶ 开始会话</button></div>').join('');
     holder.innerHTML = '<div class="hint" style="margin:10px 0 4px">CloudCLI 项目（' + (d.count || 0) + ' 个 · 点「开始会话」直达）</div>' +
       '<div class="tscroll" style="max-height:300px;overflow-y:auto">' + (rows || '<div class="hint">无项目</div>') + '</div>';
   } catch (e) {
@@ -5307,6 +5356,7 @@ async function delServer(id) {
   try { await api('/mcp/servers/' + id, { method: 'DELETE' }); loadMcp(); } catch (e) { toast(e.message, 'err'); }
 }
 async function loadMcp() {
+  bindChatDelegation();   // v0.13.131：工具行/命令项走 data-* 委托（幂等）
   try {
     const s = await api('/mcp/servers');
     $('mcServers').innerHTML = '<table><thead><tr><th>名称</th><th>传输</th><th>目标</th><th></th></tr></thead><tbody>' +
@@ -5328,11 +5378,37 @@ async function loadMcp() {
       //               本仓 `jsStr` 的注释早写明「escapeHtml 只处理 HTML 上下文，
       //               HTML 实体转义不足以让任意 id 安全进 JS 字面量」，此处却没用。
       //               现补：`escapeHtml` 管 HTML 语境、`jsStr` 管 JS 字面量语境。
-      '<div class="mem-item" style="cursor:pointer" onclick="pickTool(' + jsStr(x.server) + ',' + jsStr(x.name) + ')" id="mt_' + escapeHtml(x.server) + '_' + escapeHtml(x.name) + '"><span class="tag agent">' + escapeHtml(x.server_name) + '</span><p><b>' + escapeHtml(x.name) + '</b> <span class="hint">' + mdInline(x.description) + '</span></p></div>').join('') ||
+      '<div class="mem-item" style="cursor:pointer" data-sk-pt-server="' + escapeHtml(x.server) + '" data-sk-pt-name="' + escapeHtml(x.name) + '" id="mt_' + escapeHtml(x.server) + '_' + escapeHtml(x.name) + '"><span class="tag agent">' + escapeHtml(x.server_name) + '</span><p><b>' + escapeHtml(x.name) + '</b> <span class="hint">' + mdInline(x.description) + '</span></p></div>').join('') ||
       '<div class="hint">无工具——注册 server 后此处聚合</div>' +
       (errs.length ? '<div class="hint" style="color:var(--danger-text)">异常 server: ' + errs.map(x => x[0] + '(' + x[1].slice(0, 40) + ')').join('; ') + '</div>' : '');
   } catch (e) { $('mcTools').innerHTML = '<span style="color:var(--danger-text)">' + e.message + '</span>'; }
 }
+/* v0.13.131（PT-20261019-02）：MCP 工具行与 ⌘K 命令项改 data-* + 委托。
+ *
+ * 原形态 `onclick="pickTool(<jsStr>…)"` / `onclick="cmdGo(<jsStr>)"`：jsStr 出双引号
+ * 字面量，被双引号界定的属性提前截断 ⇒ 点击静默 SyntaxError（只有控制台可见）。
+ * data-* 值走 escapeHtml，dataset 读回原值。#mcTools / #cmdList 都是静态容器，
+ * innerHTML 反复重写不掉监听，故 marker 防重复挂。
+ * pickTool 双参数拆两个 dataset（工具名来自外部 MCP server，两个语境都不设防过）。 */
+function bindChatDelegation() {
+  const tools = $('mcTools');
+  if (tools && !tools.__chatDeleg) {
+    tools.__chatDeleg = true;
+    tools.addEventListener('click', e => {
+      const t = e.target.closest('[data-sk-pt-server]');
+      if (t && tools.contains(t)) pickTool(t.dataset.skPtServer || '', t.dataset.skPtName || '');
+    });
+  }
+  const cmd = $('cmdList');
+  if (cmd && !cmd.__cmdDeleg) {
+    cmd.__cmdDeleg = true;
+    cmd.addEventListener('click', e => {
+      const c = e.target.closest('[data-sk-cmdgo]');
+      if (c && cmd.contains(c)) cmdGo(c.dataset.skCmdgo || '');
+    });
+  }
+}
+
 function pickTool(server, tool) {
   mcpToolSel = { server: server, tool: tool };
   document.querySelectorAll('[id^=mt_]').forEach(el => el.style.background = '');
@@ -5389,6 +5465,7 @@ async function callToolSel() {
 
 /* ── T8 命令面板（⌘K/Ctrl+K）：搜实体直达工作台 ── */
 function openCmd() {
+  bindChatDelegation();   // v0.13.131：⌘K 列表项走 data-* 委托（幂等）
   $('cmdMask').classList.add('on');
   const i = $('cmdInput');
   i.value = '';
@@ -5404,7 +5481,7 @@ function renderCmdList(q) {
     .sort((x, y) => (y.score - x.score) || String(x.a.name || '').localeCompare(String(y.a.name || '')))
     .slice(0, 12).map(x => x.a);
   box.innerHTML = items.map(a =>
-    '<div class="cmd-item" onclick="cmdGo(' + jsStr(a.id) + ')"><span>' + escapeHtml(a.name) + '</span><span class="hint">' + escapeHtml(a.id) + '</span></div>').join('') ||
+    '<div class="cmd-item" data-sk-cmdgo="' + escapeHtml(a.id) + '"><span>' + escapeHtml(a.name) + '</span><span class="hint">' + escapeHtml(a.id) + '</span></div>').join('') ||
     '<div class="hint" style="padding:8px">无匹配实体</div>';
 }
 function cmdGo(id) { closeCmd(); gotoChat(id); }

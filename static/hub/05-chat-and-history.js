@@ -55,6 +55,7 @@ async function delServer(id) {
   try { await api('/mcp/servers/' + id, { method: 'DELETE' }); loadMcp(); } catch (e) { toast(e.message, 'err'); }
 }
 async function loadMcp() {
+  bindChatDelegation();   // v0.13.131：工具行/命令项走 data-* 委托（幂等）
   try {
     const s = await api('/mcp/servers');
     $('mcServers').innerHTML = '<table><thead><tr><th>名称</th><th>传输</th><th>目标</th><th></th></tr></thead><tbody>' +
@@ -76,11 +77,37 @@ async function loadMcp() {
       //               本仓 `jsStr` 的注释早写明「escapeHtml 只处理 HTML 上下文，
       //               HTML 实体转义不足以让任意 id 安全进 JS 字面量」，此处却没用。
       //               现补：`escapeHtml` 管 HTML 语境、`jsStr` 管 JS 字面量语境。
-      '<div class="mem-item" style="cursor:pointer" onclick="pickTool(' + jsStr(x.server) + ',' + jsStr(x.name) + ')" id="mt_' + escapeHtml(x.server) + '_' + escapeHtml(x.name) + '"><span class="tag agent">' + escapeHtml(x.server_name) + '</span><p><b>' + escapeHtml(x.name) + '</b> <span class="hint">' + mdInline(x.description) + '</span></p></div>').join('') ||
+      '<div class="mem-item" style="cursor:pointer" data-sk-pt-server="' + escapeHtml(x.server) + '" data-sk-pt-name="' + escapeHtml(x.name) + '" id="mt_' + escapeHtml(x.server) + '_' + escapeHtml(x.name) + '"><span class="tag agent">' + escapeHtml(x.server_name) + '</span><p><b>' + escapeHtml(x.name) + '</b> <span class="hint">' + mdInline(x.description) + '</span></p></div>').join('') ||
       '<div class="hint">无工具——注册 server 后此处聚合</div>' +
       (errs.length ? '<div class="hint" style="color:var(--danger-text)">异常 server: ' + errs.map(x => x[0] + '(' + x[1].slice(0, 40) + ')').join('; ') + '</div>' : '');
   } catch (e) { $('mcTools').innerHTML = '<span style="color:var(--danger-text)">' + e.message + '</span>'; }
 }
+/* v0.13.131（PT-20261019-02）：MCP 工具行与 ⌘K 命令项改 data-* + 委托。
+ *
+ * 原形态 `onclick="pickTool(<jsStr>…)"` / `onclick="cmdGo(<jsStr>)"`：jsStr 出双引号
+ * 字面量，被双引号界定的属性提前截断 ⇒ 点击静默 SyntaxError（只有控制台可见）。
+ * data-* 值走 escapeHtml，dataset 读回原值。#mcTools / #cmdList 都是静态容器，
+ * innerHTML 反复重写不掉监听，故 marker 防重复挂。
+ * pickTool 双参数拆两个 dataset（工具名来自外部 MCP server，两个语境都不设防过）。 */
+function bindChatDelegation() {
+  const tools = $('mcTools');
+  if (tools && !tools.__chatDeleg) {
+    tools.__chatDeleg = true;
+    tools.addEventListener('click', e => {
+      const t = e.target.closest('[data-sk-pt-server]');
+      if (t && tools.contains(t)) pickTool(t.dataset.skPtServer || '', t.dataset.skPtName || '');
+    });
+  }
+  const cmd = $('cmdList');
+  if (cmd && !cmd.__cmdDeleg) {
+    cmd.__cmdDeleg = true;
+    cmd.addEventListener('click', e => {
+      const c = e.target.closest('[data-sk-cmdgo]');
+      if (c && cmd.contains(c)) cmdGo(c.dataset.skCmdgo || '');
+    });
+  }
+}
+
 function pickTool(server, tool) {
   mcpToolSel = { server: server, tool: tool };
   document.querySelectorAll('[id^=mt_]').forEach(el => el.style.background = '');
@@ -137,6 +164,7 @@ async function callToolSel() {
 
 /* ── T8 命令面板（⌘K/Ctrl+K）：搜实体直达工作台 ── */
 function openCmd() {
+  bindChatDelegation();   // v0.13.131：⌘K 列表项走 data-* 委托（幂等）
   $('cmdMask').classList.add('on');
   const i = $('cmdInput');
   i.value = '';
@@ -152,7 +180,7 @@ function renderCmdList(q) {
     .sort((x, y) => (y.score - x.score) || String(x.a.name || '').localeCompare(String(y.a.name || '')))
     .slice(0, 12).map(x => x.a);
   box.innerHTML = items.map(a =>
-    '<div class="cmd-item" onclick="cmdGo(' + jsStr(a.id) + ')"><span>' + escapeHtml(a.name) + '</span><span class="hint">' + escapeHtml(a.id) + '</span></div>').join('') ||
+    '<div class="cmd-item" data-sk-cmdgo="' + escapeHtml(a.id) + '"><span>' + escapeHtml(a.name) + '</span><span class="hint">' + escapeHtml(a.id) + '</span></div>').join('') ||
     '<div class="hint" style="padding:8px">无匹配实体</div>';
 }
 function cmdGo(id) { closeCmd(); gotoChat(id); }

@@ -96,7 +96,10 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.130"
+VERSION = "0.13.131"
+#   v0.13.131：六处 inline onclick + jsStr 全改 data-* 委托（PT-20261019-02）——
+#   双引号属性被 jsStr 的双引号字面量截断 ⇒ 点击静默 SyntaxError（19 天无人察觉）。
+#   反向闸门扫全部分片 + 渲染态探针（敌意引号路径逐字符回读）。
 #   v0.13.130：技能中心前端细化 + 一条闸门自身缺陷（台账 PT-20261019-01 / PT-20261019-04）。
 #   ① 技能目录/调用记录两个 tab 内联到「技能中心」标题行（`.sk-titlebar` + ARIA tabs +
 #      键盘 ←→ Home End），去掉内层重复卡头；目录补整行点击/清除/排序/计数；

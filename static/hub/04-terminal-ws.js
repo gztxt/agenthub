@@ -307,8 +307,8 @@ async function loadCloudcliProjects() {
       '<br><span class="hint" style="font-family:var(--font-mono);font-size:var(--fs-xs)">' +
       escapeHtml(String(p.path).slice(0, 48)) +
       (p.last_activity ? ' · ' + String(p.last_activity).slice(5, 16).replace('T', ' ') : '') + '</span></p>' +
-      '<button class="btn sm" style="align-self:center" onclick="cloudcliStart(' +
-      jsStr(p.path) + ')" title="在 CloudCLI 开始此项目的新会话">▶ 开始会话</button></div>').join('');
+      '<button class="btn sm" style="align-self:center" data-sk-ccstart="' +
+      escapeHtml(p.path) + '" title="在 CloudCLI 开始此项目的新会话">▶ 开始会话</button></div>').join('');
     holder.innerHTML = '<div class="hint" style="margin:10px 0 4px">CloudCLI 项目（' + (d.count || 0) + ' 个 · 点「开始会话」直达）</div>' +
       '<div class="tscroll" style="max-height:300px;overflow-y:auto">' + (rows || '<div class="hint">无项目</div>') + '</div>';
   } catch (e) {

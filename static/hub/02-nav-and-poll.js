@@ -35,6 +35,7 @@ function renderCloudcliProjects() {
     return;
   }
   if (body.querySelector('#ccProjects')) return;   // 防重复渲染（切换 agent 多次）
+  bindCloudcliDelegation();   // v0.13.131：行/按钮走 data-* 委托（见函数注释）
   const holder = document.createElement('div');
   holder.id = 'ccProjects';
   holder.innerHTML = '<div class="hint" style="margin:8px 10px 2px">CloudCLI 项目（本机全部 · 点「开始会话」直达）</div><div class="hint" style="padding:0 10px">加载中…</div>';
@@ -44,13 +45,13 @@ function renderCloudcliProjects() {
       '<div class="hint" style="padding:0 10px;color:var(--st-error,var(--danger))">加载失败：' + escapeHtml(d.error || '?') + '</div>'; return; }
     const rows = (d.projects || []).map(p =>
       '<div class="mem-item" style="gap:6px;padding:6px 10px;border-bottom:1px solid var(--border);cursor:pointer" ' +
-      'onclick="cloudcliStart(' + jsStr(p.path) + ')">' +
+      'data-sk-ccstart="' + escapeHtml(p.path) + '">' +
       '<p style="min-width:0;margin:0"><b>' + escapeHtml(p.name) + '</b>' + (p.starred ? ' ★' : '') +
       (p.sessions ? ' <span class="hint">' + p.sessions + ' 会话</span>' : '') +
       '<br><span class="hint" style="font-family:var(--font-mono);font-size:var(--fs-xs)">' +
       escapeHtml(String(p.path).slice(0, 60)) +
       (p.last_activity ? ' · ' + String(p.last_activity).slice(5, 16).replace('T', ' ') : '') + '</span></p>' +
-      '<button class="btn sm" style="align-self:center" onclick="event.stopPropagation();cloudcliStart(' + jsStr(p.path) + ')">▶ 开始会话</button></div>').join('');
+      '<button class="btn sm" style="align-self:center">▶ 开始会话</button></div>').join('');
     holder.innerHTML = '<div class="hint" style="margin:8px 10px 2px">CloudCLI 项目（' + (d.count || 0) + ' 个 · 点行或「开始会话」直达）</div>' +
       '<div class="tscroll" style="max-height:220px;overflow-y:auto">' + (rows || '<div class="hint" style="padding:0 10px">无项目</div>') + '</div>';
   }).catch(e => {
@@ -58,6 +59,23 @@ function renderCloudcliProjects() {
       '<div class="hint" style="padding:0 10px;color:var(--st-error,var(--danger))">加载失败：' + escapeHtml(e.message || '') + '</div>';
   });
 }
+/* v0.13.131（PT-20261019-02）：CloudCLI 项目行/按钮改 data-* + 委托。
+ * 原 `onclick="cloudcliStart(<jsStr(path)>)"` 被双引号属性提前截断 ⇒ 静默 SyntaxError。
+ * 行与按钮同值 ⇒ closest() 取最近祖先，点按钮也只触发一次，**不再需要 stopPropagation**。
+ * #embedBody 是静态容器（holder 每次重渲染不换壳），监听只挂一次。 */
+function bindCloudcliDelegation() {
+  const el = document.getElementById('embedBody');
+  if (!el || el.__ccDeleg) return;
+  el.__ccDeleg = true;
+  el.addEventListener('click', e => {
+    const row = e.target.closest('[data-sk-ccstart]');
+    if (row && el.contains(row)) {
+      e.stopPropagation();
+      cloudcliStart(row.dataset.skCcstart || '');
+    }
+  });
+}
+
 /* 工作台默认形态 —— **唯一真源**（openEntity 也走这里；两处各写一份优先级必然漂移）。
    有原生终端的 Agent 先给终端：它的独立 Web 宿主（claude←cloudcli :3010）自带一套登录，
    嵌进 hub 就是一张要重新登录的白页，而终端页里的 TUI 与本机命令行完全一致。

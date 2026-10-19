@@ -296,11 +296,18 @@ class TestFrontendSurface(unittest.TestCase):
         self.assertIn("/api/cloudcli/start", body)
 
     def test_projects_list_exact_name_and_start_button(self):
-        """列表必须渲染精确名称 + 「开始会话」按钮（用户核心诉求）。"""
+        """列表必须渲染精确名称 + 「开始会话」按钮（用户核心诉求）。
+
+        v0.13.131（PT-20261019-02）：按钮从 inline onclick 改 `data-sk-ccstart` 委托
+        ——原写法 `onclick="cloudcliStart(<jsStr(path)>)"` 被 jsStr 的双引号字面量
+        截断成 `cloudcliStart(`，点击静默失败。判据改为「属性在 + 委托接住」。
+        """
         m = re.search(r"async function loadCloudcliProjects\(.*?\n\}", self.w04, re.S)
         body = m.group(0)
         self.assertIn("p.name", body, "精确名称（custom_name 优先）必须上屏")
-        self.assertIn("cloudcliStart(", body, "项目行必须挂开始按钮")
+        self.assertIn('data-sk-ccstart="', body, "项目行必须挂开始按钮（data-* 委托）")
+        self.assertIn("bindDetailDelegation", self.boot,
+                      "data-sk-ccstart 必须有委托接住（#detailBody 由 01 分片统一绑定）")
 
     def test_failure_state_not_silent(self):
         m = re.search(r"async function loadCloudcliProjects\(.*?\n\}", self.w04, re.S)

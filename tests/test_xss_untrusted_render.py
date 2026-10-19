@@ -202,10 +202,15 @@ class TestTelemetryRowEscaped(unittest.TestCase):
 
 
 class TestCommandPanelIdEscaped(unittest.TestCase):
-    """命令面板：`a.id` 进 inline onclick 的 **JS 字面量**语境。
+    """命令面板：`a.id` 进 **HTML 属性值**语境（v0.13.131 起不再进 JS 字面量）。
 
-    这里用 `jsStr`（01-core-boot.js:308）而不是 `escapeHtml` —— 双语境问题，
-    理由与判据见 tests/test_html_js_escape_depth.py 的模块 docstring。
+    v0.13.131（PT-20261019-02）改机制：原实现 `onclick="cmdGo(<jsStr(id)>)"`
+    里 `jsStr` 产出**双引号**字面量，被双引号界定的属性提前截断成 `cmdGo(` ⇒
+    点击静默 SyntaxError（19 天无人察觉）。现改 `data-sk-cmdgo` + 委托：
+    值走 `escapeHtml`（HTML 属性语境，层级正确），`dataset` 读回后**不进 JS 求值**。
+
+    安全性质不变：id 仍不可裸拼。判据跟着机制走 —— 查「属性值走了 escapeHtml」
+    + 「委托真的存在」，而不是查某个 helper 名。
 
     可利用性：**当前不可达**（已实测）。`a.id` 两条写入路径都产不出引号：
       · scanner.py:49 `_scan_id` → `"scan-" + sha256[:10]`（纯十六进制）
@@ -216,9 +221,19 @@ class TestCommandPanelIdEscaped(unittest.TestCase):
     def setUp(self):
         self.body = _body(CHATHIST, "renderCmdList")
 
-    def test_inline_onclick_uses_jsstr(self):
-        self.assertRegex(self.body, r"onclick=\"cmdGo\('\s*\+\s*jsStr\(",
-                         "a.id 进 JS 字面量必须用 jsStr（escapeHtml 是 HTML 层，层级不够）")
+    def test_attribute_escaped_and_no_inline_js(self):
+        self.assertIn("""data-sk-cmdgo="' + escapeHtml(a.id)""", self.body,
+                      "a.id 进属性值必须走 escapeHtml")
+        self.assertNotIn("onclick", self.body,
+                         "命令项不许再走 inline onclick（jsStr 双引号会截断属性）")
+
+    def test_delegation_wired(self):
+        """写了 data-* 没人绑 = 死按钮（比旧 bug 更隐蔽：属性完整但点了没反应）。"""
+        src = strip_comments(CHATHIST.read_text(encoding="utf-8"))
+        self.assertIn("function bindChatDelegation(", src,
+                      "命令面板缺委托绑定函数")
+        self.assertIn("bindChatDelegation();", _body(CHATHIST, "openCmd"),
+                      "openCmd 必须调用 bindChatDelegation（否则列表项点不动）")
 
     def test_id_is_not_bare_concat(self):
         self.assertNotRegex(self.body, r"cmdGo\('\s*\+\s*a\.id\s*\+",

@@ -1,3 +1,47 @@
+## v0.13.131 — 六处 inline onclick + jsStr 改 data-* 委托（PT-20261019-02）
+
+> 来源：v0.13.59（`1e3648f`）为防注入把 3 处 onclick 换成 `jsStr()`，却没同步属性
+> 定界符。`jsStr` 产出**双引号** JS 字面量，嵌在 `onclick="…"` 里会被 HTML 解析器
+> 在第一个内层 `"` 处截断 ⇒ 属性只剩 `f(` ⇒ 点击静默 SyntaxError，只有控制台可见。
+> 存活 19 天，期间静态闸门全绿（它们只查源码调没调对函数，不查渲染出的属性完整性）。
+
+### 改法
+
+六处全部改 `data-*` + 事件委托（§4.2「一律 data-* 走委托」），属性值走 `escapeHtml`，
+`dataset` 读回原值——任意 id / 路径（含引号）都不会把属性撕开：
+
+| # | 点位 | 属性 | 绑定容器 |
+|---|---|---|---|
+| 1 | agents 抽屉「实测应答」 | `data-sk-verify` | `#detailBody` |
+| 2 | CloudCLI 行（embed 面板） | `data-sk-ccstart` | `#embedBody` |
+| 3 | 同行「▶ 开始会话」 | 无属性，`closest` 命中行 | `#embedBody` |
+| 4 | claude 抽屉 CloudCLI 按钮 | `data-sk-ccstart` | `#detailBody` |
+| 5 | MCP 工具行 | `data-sk-pt-server` + `data-sk-pt-name` | `#mcTools` |
+| 6 | ⌘K 命令项 | `data-sk-cmdgo` | `#cmdList` |
+
+#3 去掉 `event.stopPropagation()`：行与按钮同值，`closest()` 取最近祖先，点按钮
+只触发一次，不再需要靠内联冒泡控制。
+
+### 闸门（两层，缺一不可）
+
+- **L0 源码层** `tests/test_inline_onclick_shards.py`：全部活跃分片**代码行**不得
+  同时出现 `onclick=` 与 `jsStr(`；带反向自证（合成坏行必须被抓到）+ 防空转
+  （分片数/扫描行数下限）+ 六点位 data-* 与委托接线各自独立断言。
+  红向自证：回退 HEAD 旧版 ⇒ **9 例必红**。
+- **L2 渲染层** `tests/probe_inline_onclick.py`：CDP 真浏览器，用**敌意数据**
+  （路径/工具名含 `"` 与 `onclick=`）走真实模板串渲染，再真点一次，比对桩收到的
+  参数是否逐字符相等。全部动作函数与 `api()` 均替换为桩 ⇒ **零写操作**。
+  红向自证：用 HEAD 旧 `hub.js` 拦截响应跑同一脚本 ⇒ 渲染出 **10 个** 截断属性
+  （`verifyAgent(` / `cloudcliStart(` / `pickTool(` / `cmdGo(`），探针有区分力。
+
+### 验收
+
+```
+L0 tests.test_inline_onclick_shards            12/12 OK
+L2 tests.probe_inline_onclick.py (生产 3102)   ALL-PASS FAIL=0（九项）
+红向：旧分片 9 例红 / 旧 hub.js 10 个截断属性
+```
+
 ## v0.13.130 — 技能中心 tab 内联 + 调用记录恒 0 归因 + L1 精度闸恒红修复
 
 > 来源：用户 2026-10-19 报「技能目录/调用记录不要另起一行」「调用记录一直显示 0」，

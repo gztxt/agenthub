@@ -404,9 +404,12 @@ class TestBackendAndRoutes(_TmpSkillCase):
         """400 报错里回显的可用值依赖这些名字；改名会连带打破闸门与前端。
         v0.13.26 批2：4→7 路（新增 agents/codex/workbuddy 三个实测发现点，56 号文档）。
         v0.13.66 D1：7→20 路（补齐 hermes×3/jcode/grok×2/picoclaw/qoder×3+alpha/opencode）。
+        v0.13.127 PT-20261019-01：20→21 路（补 codebuddy 只读路由；该目录当前 0 条，
+        不登记＝「装了技能 hub 静默看不见」的盲区。项目本地 `local` 路**动态出现**，
+        不在此表——它一个根都没有时压根不出现，见 disk_routes 注释）。
         路线细节、条数与排除理由由 tests/test_skill_routes.py 逐项钉；本闸门只守**名字**。"""
         self.assertEqual(sorted(skill._DEFAULT_DIRS),
-                         ["agents", "claude", "codex", "grok", "grok-bundled",
+                         ["agents", "claude", "codebuddy", "codex", "grok", "grok-bundled",
                           "hermes", "hermes-agent", "hermes-web", "jcode", "opencode",
                           "pi", "picoclaw", "qoder", "qoder-alpha", "qoderwake",
                           "qoderwake-cli", "qoderwake-shadow", "superpowers",

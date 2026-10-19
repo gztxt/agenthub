@@ -47,6 +47,50 @@ _Q_KEYS = ("q", "name", "sub")            # 从 handler kwargs 提取查询词
 _LIMIT_KEYS = ("limit", "k")
 _ROUTE_KEYS = ("routes", "sources")
 _Q_MAX_CHARS = 120                         # 查询词落库上限（防长文入库膨胀 detail）
+#: v0.13.127 PT-20261019-01：附加上下文（调用流水要答「调的哪个、谁调的、想干什么」）。
+#: 只对带这些字段的端点（/api/skill/invoke、/api/skill/read）产出内容，其它端点零噪声。
+#: ⚠ `name` 必须在这里再挖一遍 body：**失败路径没有 `_pick_names`**（那个读的是响应体，
+#: 而失败时响应体是 HTTPException 的 detail）⇒ 不挖的话 409/404 的 invoke 事件
+#: 不带技能名，「调用记录」面板里的失败行没有身份，等于半聋。
+_EXTRA_KEYS = ("name", "route", "caller", "task")
+_TASK_MAX_CHARS = 500
+
+
+def _pick_extra(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """从 kwargs 顶层 + pydantic 请求体里取 name/route/caller/task（v0.13.127）。
+
+    为什么需要翻请求体：`POST /api/skill/invoke` 的这些字段在 **body**
+    （`InvokeRequest`）里，而 track 原先只认顶层 kwargs ⇒ 它们整个漏出埋点
+    ⇒「调用记录」面板看不到调了哪个、谁调的、想干什么，Grill 裁定 3 的记账模型直接瞎一半。
+    BaseModel 用 `model_dump()`/`dict()` duck-type 探测（pydantic v2/v1 都覆盖），
+    **不 import pydantic**——runlog 被六个以上模块导入，不加无谓依赖。
+    任何异常都吞掉返回空 dict：埋点不许带倒业务（本模块一贯纪律）。
+
+    成功路径上 `name` 会被随后的 `_pick_names` 逐事件值覆盖（同值，见 track 主体）；
+    失败路径没有那个覆盖，这里的 `name` 就是失败事件唯一的身份来源。
+    """
+    out: Dict[str, Any] = {}
+    srcs: List[Dict[str, Any]] = []
+    for v in list(kwargs.values()) + [kwargs]:
+        if isinstance(v, dict):
+            srcs.append(v)
+            continue
+        dump = getattr(v, "model_dump", None) or getattr(v, "dict", None)
+        if callable(dump):
+            try:
+                d = dump()
+                if isinstance(d, dict):
+                    srcs.append(d)
+            except Exception:  # noqa: BLE001 — 探测失败静默跳过，不影响埋点主体
+                pass
+    for src in srcs:
+        for k in _EXTRA_KEYS:
+            if k in out:
+                continue
+            v = src.get(k)
+            if v not in (None, ""):
+                out[k] = tdai_client.scrub(str(v))[:_TASK_MAX_CHARS]
+    return out
 
 
 def _pick_query(kwargs: Dict[str, Any]) -> str:
@@ -193,6 +237,8 @@ def track(subject: str):
                     "limit": _pick_limit(kwargs),
                     "routes": _pick_routes(kwargs),
                     "channel": _channel_of(request),
+                    # v0.13.127：caller/task（仅 invoke 有；其它端点这两键不出现）
+                    **_pick_extra(kwargs),
                 }
                 names = _pick_names(data)
                 if not names:
@@ -214,6 +260,8 @@ def track(subject: str):
                     "limit": _pick_limit(kwargs),
                     "routes": _pick_routes(kwargs),
                     "channel": _channel_of(request),
+                    # v0.13.127：失败的 invoke（409/404）同样要答「谁调的、想干什么」
+                    **_pick_extra(kwargs),
                     "http": e.status_code,
                     "err": tdai_client.scrub(str(e.detail))[:200],
                 })

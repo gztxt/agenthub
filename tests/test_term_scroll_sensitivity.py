@@ -238,7 +238,16 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.126"
+    CURRENT_VERSION = "0.13.127"
+
+    #: v0.13.127：关键词取自版本注释里**实际写下的字句**（PT-20261019-01 P0）。
+    #: 核心是「hub 只代理激活+记账、不代跑代码」的语义边界，与「HUB_URL 不许写死端口」。
+    VERSION_ROOT_CAUSES["0.13.127"] = (
+        "PT-20261019-01", "POST /api/skill/invoke", "激活+记账", "不代跑代码",
+        "GET /api/skill/catalog", "GET /api/skill/invocations", "零新表",
+        "hub_skill_invoke", "hub_skill_catalog", "codebuddy", "local", "opencode",
+        "HUB_URL", "3102", "config.port", "_pick_extra",
+    )
 
     #: v0.13.126：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「Mac/局域网 http ⇒ 只剩 execCommand，而 WebKit 的用户手势不跨微任务」，

@@ -1,4 +1,4 @@
-"""D1 闸门：20 路发现点 + 排除清单 + state 四态 + glob 路。
+"""D1 闸门：21 路发现点（+条件 local 路）+ 排除清单 + state 四态 + glob 路。
 
 设计书：docs/superpowers/specs/2026-10-03-skill-center-auto-invoke-design.md §4
 计划：docs/superpowers/plans/2026-10-03-skill-center-auto-invoke.md Task 1
@@ -15,6 +15,7 @@
      同源副本**（各 11 条）⇒ 按软链去重压不下去，收进来等于把 11 条报成 44 条。已列入排除。
   3. `qoder-alpha/extensions/42d23c0fa380/` 是**内容哈希**目录，升级即变 ⇒ 必须走 glob。
 """
+import json
 import os
 import sys
 import tempfile
@@ -31,7 +32,10 @@ import tiers  # noqa: E402
 import skill  # noqa: E402
 
 
-#: 20 路 = 原有 7 + D1 新增 13。**逐个点名**，多一个少一个都判 FAIL（防悄悄加白名单）。
+#: 21 路 = 原有 7 + D1 新增 13 + PT-20261019-01 补 1（codebuddy 只读路由）。
+#: **逐个点名**，多一个少一个都判 FAIL（防悄悄加白名单）。
+#: ⚠ 项目本地 `local` 路**不在此表**：它动态出现（有根才在 disk_routes() 里），
+#: 由 tests/test_skill_invoke.py 的本地根用例专测。
 EXPECTED_ROUTES = {
     # 原有 7 路
     "claude", "pi", "techdocs", "superpowers", "agents", "codex", "workbuddy",
@@ -39,6 +43,8 @@ EXPECTED_ROUTES = {
     "hermes", "hermes-agent", "hermes-web", "jcode", "grok", "grok-bundled",
     "picoclaw", "qoder", "qoderwake", "qoderwake-shadow", "qoderwake-cli",
     "qoder-alpha", "opencode",
+    # v0.13.127 PT-20261019-01：codebuddy（目录在、当前 0 条；禁改面禁写，只读路由）
+    "codebuddy",
 }
 
 #: 各新路的**半量下限**（2026-10-03 `_scan_one` 实测值的一半，向下取整）。
@@ -57,7 +63,10 @@ FLOORS = {
     "qoderwake-shadow": 1,    # 实测 1
     "qoderwake-cli": 1,       # 实测 1
     "qoder-alpha": 1,         # 实测 2（glob 路）
-    "opencode": 1,            # 实测 2（全软链）
+    "opencode": 1,            # 实测 3（全软链；B3 证伪 opencode 不读它，但 hub 可见性仍在）
+    # v0.13.127 PT-20261019-01：codebuddy 目录在、当前 0 条（禁改面禁写 ⇒ 空是预期形态）。
+    # floor=0 不断言条数；「路在且 state=empty」由 test_codebuddy_route_reports_empty_not_missing 钉。
+    "codebuddy": 0,
 }
 
 
@@ -72,7 +81,7 @@ def _write_skill(root: Path, name: str) -> Path:
 class _Whitelist:
     """把 tempfile 目录挂进 `_allowed_roots`。
 
-    为什么要这个：`_scan_one` 有**硬白名单**（不在 20 路根之内的 realpath 一律计入
+    为什么要这个：`_scan_one` 有**硬白名单**（不在 21 路根（+local 路）之内的 realpath 一律计入
     `skipped_outside` 丢弃），这是既有安全设计不是缺陷。所以 L0 想在临时目录造夹具，
     只能临时把该目录加进白名单——**不为此改生产代码**。
     """
@@ -94,11 +103,26 @@ class _Whitelist:
 class TestRoutesL0(unittest.TestCase):
     """L0：只读本模块的字典，不碰真盘。"""
 
-    def test_20_routes_exact(self):
+    def test_21_routes_exact(self):
         self.assertEqual(set(skill.SKILL_DIRS), EXPECTED_ROUTES)
 
-    def test_20_routes_count(self):
-        self.assertEqual(len(skill.SKILL_DIRS), 20)
+    def test_21_routes_count(self):
+        self.assertEqual(len(skill.SKILL_DIRS), 21)
+
+    def test_local_route_absent_when_no_local_roots(self):
+        """v0.13.127：项目本地 `local` 路**动态出现**——本地根一个都没有时，
+        disk_routes() 不含它（不制造永久 missing 噪声行）；有根时才挂上。
+        """
+        import unittest.mock as mock
+        with mock.patch.dict(os.environ, {"SKILL_LOCAL_ROOTS_JSON": "[]"}):
+            self.assertEqual(skill.local_roots(), [])
+            self.assertNotIn("local", skill.disk_routes())
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "skills").mkdir()
+            with mock.patch.dict(os.environ,
+                                 {"SKILL_LOCAL_ROOTS_JSON": json.dumps([td + "/skills"])}):
+                self.assertEqual(skill.local_roots(), [td + "/skills"])
+                self.assertIn("local", skill.disk_routes())
 
     def test_every_route_path_is_absolute(self):
         for r, p in skill.SKILL_DIRS.items():
@@ -294,6 +318,24 @@ class TestRoutesL1(unittest.TestCase):
                 self.assertGreaterEqual(len(r["items"]), floor,
                                         f"{route} 条数 {len(r['items'])} < 下限 {floor}，"
                                         f"疑似路径指错或扫描被截断")
+
+    def test_codebuddy_route_reports_empty_not_missing(self):
+        """v0.13.127：codebuddy 路必须「在且可扫」，状态只允许 ok/empty——**不许 missing**。
+
+        判据不是「0 条」：本机实测该目录有 1 条 `crawl4ai` 软链（→ 技术文档/crawl4ai，
+        经 ARCHIVE_ROOTS 进白名单）。真正的红线是两头：
+        ① 路被摘掉 ⇒ codebuddy 装技能时 hub 静默看不见（盲区）；
+        ② 状态报成 missing/error ⇒ 把「目录在」说成「没装」。
+        另钉一条形态事实：该路内容**只经软链到达**（禁改面禁写，hub 不往里放本地副本）。
+        """
+        self.assertEqual(skill.SKILL_DIRS.get("codebuddy"), "/home/gztxt/.codebuddy/skills")
+        r = skill._scan_one("codebuddy", skill.route_roots("codebuddy"))
+        self.assertTrue(r["ok"], r.get("error"))
+        state = skill.skill_state(r, len(r["items"]))
+        self.assertIn(state, ("ok", "empty"), f"codebuddy 状态应是 ok/empty，实际 {state}")
+        for it in r["items"]:
+            self.assertTrue(it.get("via_symlink"),
+                            f"{it['name']} 不是经软链到达 ⇒ 有人往禁改面写了本地副本？")
 
     def test_opencode_entries_arrive_via_symlink(self):
         """事实①：opencode 全是软链指回 techdocs 自研目录 ⇒ 扫得到，但 `find`（无 -L）报 0。"""

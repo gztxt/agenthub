@@ -1,7 +1,7 @@
 """D3：技能调用记账与「零调用僵尸榜」。
 
 **只认 hub 通道**（`profile_events` 里 `source='rest'` 且 subject ∈ {`skill.read`, `skill.inject`,
-`skill.relevant`}）。各家 agent 直接读自己技能目录的旁路统计**本批未实现** ⇒ 置信度封顶 `medium`。
+`skill.relevant`, `skill.invoke`}）。各家 agent 直接读自己技能目录的旁路统计**本批未实现** ⇒ 置信度封顶 `medium`。
 
 军规落地（禁把 SKIP 当 PASS）：**不取证的第二数据源绝不能报 `high`**。设计书 §7 定的口径是
 「两源皆零 → high；仅 hub 源为零 → medium」；`DIRECT_SOURCE = "not-implemented"` 就是把
@@ -35,7 +35,14 @@ DIRECT_SOURCE = "not-implemented"
 #:
 #: ⚠ `skill.inject` 保留但**当前无生产者**——它是给「将来某端点显式回写注入」预留的口子，
 #:   不是死 subject。真正在产出的是 `skill.relevant`（注入链）与 `skill.read`（读全文）。
-_SUBJECTS = ("skill.read", "skill.inject", "skill.relevant")
+#:
+#: 【为什么含 `skill.invoke`（2026-10-19 PT-20261019-01 补）】统一调用入口
+#: （POST /api/skill/invoke + MCP hub_skill_invoke）是**显式激活**：agent/用户点名
+#: 要某个技能并拿走了指令正文。这是比 read 更强的使用证据——不计数的话，
+#: 「天天被 invoke 的技能」反而会上零调用榜，与榜单的立身目的正相反。
+#: 单独记 `invokes` 桶（不并入 reads）：调用流水面板要能分开展示
+#: 「被看过」与「被调用」，混一桶则面板退化成猜。
+_SUBJECTS = ("skill.read", "skill.inject", "skill.relevant", "skill.invoke")
 
 #: hub 自身事件通道。`hook.py:131` 的 agent 画像聚合是按 `source != 'rest'` 排除本通道的，
 #: 也就是说 'rest' 正是「hub 自己干的事」——技能门面的读写走这里。
@@ -80,13 +87,17 @@ def counts(days: int = 7) -> Dict[str, Dict[str, Any]]:
         name = _name_of(row.get("detail"))
         if not name:
             continue
-        e = out.setdefault(name, {"reads": 0, "injects": 0, "last_at": "", "via": []})
-        if row.get("subject") == "skill.read":
+        e = out.setdefault(name, {"reads": 0, "injects": 0, "invokes": 0, "last_at": "", "via": []})
+        subj = row.get("subject")
+        if subj == "skill.read":
             e["reads"] += 1
+        elif subj == "skill.invoke":
+            # v0.13.127 PT-20261019-01：显式调用单列一桶（面板要分「看过」与「调用」）
+            e["invokes"] += 1
         else:
             # skill.inject / skill.relevant 都归「注入」桶：relevant 是注入链的选人动作，
             # 对僵尸榜而言「被选进候选并被推给 agent」与「被显式注入」是同一件事
-            #（`zombies()` 只判 reads/injects 是否全零，桶标签只影响展示）。
+            #（`zombies()` 只判 reads/injects/invokes 是否全零，桶标签只影响展示）。
             e["injects"] += 1
         at = str(row.get("created_at") or "")
         if at > e["last_at"]:
@@ -136,7 +147,7 @@ def zombies(items: Iterable[Dict[str, Any]], counts_map: Dict[str, Dict[str, Any
         if not name or name in seen:
             continue
         c = counts_map.get(name) or {}
-        if (c.get("reads") or 0) or (c.get("injects") or 0):
+        if (c.get("reads") or 0) or (c.get("injects") or 0) or (c.get("invokes") or 0):
             continue
         seen.add(name)
         routes = [str(x) for x in (it.get("routes") or []) if str(x)]

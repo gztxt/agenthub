@@ -2,11 +2,12 @@
 
 【为什么不建 hub 自己的技能表】
 与 `kb.py` 同一口径：hub 只做**门面 + 归并 + 审计**，一个字都不存。技能的权威副本就是
-磁盘上那 37 个 `SKILL.md`（pi/claude 直接读它们），在 hub 里建一张 `skills` 表就是
+磁盘上那些 `SKILL.md`（pi/claude 直接读它们），在 hub 里建一张 `skills` 表就是
 **第二权威副本**——它会腐烂、会与源头不一致，正是 0924 方案被否决的那条路
 （见 /fs/1000/ftp/技术文档/PENDING-TASKS.md PT-20260924-08：「本机记忆/技能/文档索引/嵌入
-四项权威实现均已存在，hub 只当门面」）。所以本模块**只读、不写、不缓存副本**，
-每次请求都重新走一遍磁盘。37 个文件、总量 ~230KB，实测扫描是毫秒级，不需要缓存。
+四项权威实现均已存在，hub 只当门面」）。所以本模块**只读、不写、不缓存副本**。
+（条数口径：2026-10-19 实测 21 路 + local 条件路，walked 487、按 realpath 去重后 **371** 条；
+本 docstring 早期记的「37 个」是 2026-09-24 首版时的四路口径，勿再引用。）
 
 【磁盘侧的四条实测事实（2026-09-24 13:0x，Python 3.11.2，本会话亲自取证）】
 ① **`Path.rglob()` 会漏报**：`/home/gztxt/.pi/agent/skills/agent-dispatch` 是**软链目录**
@@ -45,6 +46,7 @@ import os
 import re
 import skill_relevance
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -73,6 +75,13 @@ _DEFAULT_DIRS: Dict[str, str] = {
     "agents": "/home/gztxt/.agents/skills",
     "codex": "/home/gztxt/.codex/skills",
     "workbuddy": "/home/gztxt/.workbuddy/skills",
+    # v0.13.127 PT-20261019-01：codebuddy 只读路由。该目录是
+    # `scripts/skill_visibility_sync.py` 明写的禁改面目标——禁的是**写**，
+    # 加只读路由不触线。不登记的理由曾「省一个 empty 行」，但真代价是：
+    # codebuddy 哪天装了技能，hub 列表**静默看不见**（比空目录难发现得多）。
+    # 2026-10-19 实测：1 条（crawl4ai 软链 → 技术文档/crawl4ai，经 ARCHIVE_ROOTS
+    # 进白名单）——内容只经软链到达，本地副本形态由 L1 用例钉住。
+    "codebuddy": "/home/gztxt/.codebuddy/skills",
 
     # ── v0.13.66 D1：补齐 13 路实测发现点。条数是 2026-10-03 `find -maxdepth 3` 实测，
     # 登记时**不猜**：「目录在但 0 条」与「目录不存在」由 /status 的 state 四态分开说，
@@ -91,7 +100,13 @@ _DEFAULT_DIRS: Dict[str, str] = {
     # qoder-alpha 的扩展目录名是**内容哈希**（42d23c0fa380），升级即变 ⇒ 写死必然有一天
     # 变成 missing。登记 glob 让它跟着升级走。
     "qoder-alpha": "/home/gztxt/.qoder-alpha/extensions/*/skills",         # 2 · glob，命中随版本变
-    "opencode": "/home/gztxt/.config/opencode/skill",             # 2 · 全是软链指回 techdocs 自研目录（find 不带 -L 会报 0，勿再据此下结论）
+    # ⚠ opencode 是**已证伪的假发现点**（B3，2026-10-03）：opencode 1.18.34 二进制字面量
+    # GA="skills/**/SKILL.md" / SA="{skill,skills}/**/SKILL.md" 配 bA=".claude"、xA=".agents"，
+    # 且 opencode.json 无 skills 键 ⇒ opencode 自己扫的是**项目本地** .claude/skills 与
+    # .agents/skills（见 _LOCAL_ROOTS_REL），本目录不被它读取。hub 侧仍能扫到 3 条
+    # （全是软链指回 techdocs，dedup 后不重复计数）——那是 hub 的可见性，不是 opencode 的。
+    # 保留占位只为「将来真装了技能」可见；详见 ROUTE_NOTES 与 /status 每路 note。
+    "opencode": "/home/gztxt/.config/opencode/skill",             # 3 · 假发现点（B3 证伪），hub 可见 ≠ opencode 读
 }
 
 # ── v0.13.66 D1：明确排除的目录。**排除是结论，必须能被面板读到理由**——
@@ -140,6 +155,71 @@ ARCHIVE_ROOTS: Dict[str, str] = {
     "/fs/1000/ftp/技术文档/Agent-Reach": "1 条 · 09-25 用户点名评估并安装的技能仓",
 }
 
+# ── v0.13.127 PT-20261019-01：路由级注记（B3 证伪事实的落点）────────────────
+# 为什么单独一张表而不写进 _DEFAULT_DIRS 的 value：value 是**路径**（要被 glob 展开、
+# 要被 install 当源目录用），注记是**给面板看的事实」。混在一个字段里，路径校验
+# （startswith("/")）会误伤注记文本。面板与 /list 的 note 都从这里取，单一出处。
+ROUTE_NOTES: Dict[str, str] = {
+    "opencode": ("已证伪非发现点（B3，2026-10-03）：opencode 1.18.34 字面量 "
+                 "GA=\"skills/**/SKILL.md\" / SA=\"{skill,skills}/**/SKILL.md\" 配 "
+                 "bA=\".claude\"、xA=\".agents\"，opencode.json 无 skills 键 ⇒ 本目录不被 "
+                 "opencode 读取（它扫项目本地根，见 local 路）。hub 侧扫到的 3 条全是软链指回 "
+                 "techdocs 的别名（dedup 后不重复计数）——那是 hub 的可见性，不是 opencode 的。"
+                 "保留占位只为将来真装时可见。"),
+}
+
+# ── v0.13.127 PT-20261019-01：项目本地技能根（PT-20261002-14 候选 2）─────────
+# 证据（B3 / PT-20261002-14 侦察，非发明）：
+#   · opencode 1.18.34：GA="skills/**/SKILL.md"、SA="{skill,skills}/**/SKILL.md"
+#     配 bA=".claude"、xA=".agents" ⇒ 扫 <base>/skills/**、<base>/.claude/skills/**、
+#     <base>/.agents/skills/**；
+#   · jcode 0.89.3 用户可见帮助串：~/.jcode/skills（global）+ ./.jcode/skills +
+#     ./.claude/skills（compatibility）。
+# ⇒ 「仓内放 skills/ 所有 agent 都扫得到」是本机既有约定；hub 看不见它是模型缺口
+#   （PT-20261002-14：「同一条技能放全局看得见、放项目里看不见」）。
+#
+# 【为什么 base 取仓根而非 os.getcwd()】测试与运维可能从任意 cwd 起进程，cwd 里
+# 碰巧有没有 skills/ 会改变路由名单与 _allowed_roots() 白名单 ⇒ **同码两态**
+# （本仓反复禁的形态）。生产 unit 的 WorkingDirectory 恰为仓根（实测 /proc/PID/cwd），
+# 两者同值；要换基座有 SKILL_LOCAL_ROOTS_BASE 显式覆盖，不靠猜。
+_LOCAL_ROUTE = "local"
+_LOCAL_ROOTS_REL = ("skills", ".claude/skills", ".agents/skills", ".jcode/skills")
+
+
+def _local_roots_base() -> str:
+    """项目本地根的基准目录（默认仓根，见上面的同码两态注释）。"""
+    return os.path.realpath(os.getenv("SKILL_LOCAL_ROOTS_BASE")
+                            or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def local_roots() -> List[str]:
+    """仓内项目本地技能根，**只回存在的目录**（一个都没有 ⇒ local 路不出现，
+    不制造一条永久 missing 的噪声行）。
+
+    `SKILL_LOCAL_ROOTS_JSON` 可整体覆盖（字符串数组；相对路径按 base 解析）。
+    给它两个使用者：① L0 hermetic 钉空集（`"[]"`）保持与宿主无关；
+    ② 运维显式加/换基座下的本地根。非法 JSON / 形状不对 ⇒ 警告 + 回退默认，
+    **不静默**（与 `_load_dirs` 同口径）。
+    """
+    raw = os.getenv("SKILL_LOCAL_ROOTS_JSON")
+    if raw:
+        items: Optional[List[str]] = None
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+                items = parsed
+            else:
+                log.warning("SKILL_LOCAL_ROOTS_JSON 形状不对（要字符串数组），已忽略，用默认本地根")
+        except ValueError as e:
+            log.warning("SKILL_LOCAL_ROOTS_JSON 不是合法 JSON（%s），已忽略，用默认本地根", e)
+        if items is not None:
+            base = _local_roots_base()
+            return [p if os.path.isabs(p) else os.path.join(base, p) for p in items
+                    if os.path.isdir(p if os.path.isabs(p) else os.path.join(base, p))]
+    base = _local_roots_base()
+    return [os.path.join(base, rel) for rel in _LOCAL_ROOTS_REL
+            if os.path.isdir(os.path.join(base, rel))]
+
 
 def expand_roots(pattern: str) -> List[str]:
     """把可能含 `*` 的路径展开成真实存在的根列表。**非 glob 原样返回**（含不存在的路径）。
@@ -155,6 +235,8 @@ def expand_roots(pattern: str) -> List[str]:
 
 def route_roots(route: str) -> List[str]:
     """一路对应的真实根（已展开 glob）。白名单与扫描共用它，避免两处口径。"""
+    if route == _LOCAL_ROUTE:                 # v0.13.127：项目本地路（多根，动态）
+        return local_roots()
     pat = SKILL_DIRS.get(route, "")
     roots = [r for r in expand_roots(pat) if r and os.path.isdir(r)]
     return roots or ([pat] if pat else [""])
@@ -237,8 +319,14 @@ _scan_locks: Dict[str, "asyncio.Lock"] = {}
 def disk_routes() -> Tuple[str, ...]:
     """磁盘路名单。**每次调用时现算**，不在 import 期固化成常量——
     否则闸门/测试猴补 `SKILL_DIRS` 之后，白名单还是旧的，400 断言会假绿。
-    （`kb.py` 的 `ROUTES` 是静态的因为它那三路不含可变目录；这里含。）"""
-    return tuple(SKILL_DIRS)
+    （`kb.py` 的 `ROUTES` 是静态的因为它那三路不含可变目录；这里含。）
+
+    v0.13.127：末尾附条件挂上 `local` 路（项目本地根一个都没有就不出现——
+    不制造永久 missing 噪声行）。它不在 `SKILL_DIRS` 里，故 400 报错的
+    「可用值」与 install/remove 的目标校验都天然不含它：本地根是**只读**发现面，
+    不经 hub 写（写侧军规：软链铺设走 `skill_visibility_sync.py`，不走 HTTP）。
+    """
+    return tuple(SKILL_DIRS) + ((_LOCAL_ROUTE,) if local_roots() else ())
 
 
 def all_routes() -> Tuple[str, ...]:
@@ -313,8 +401,14 @@ def _allowed_roots() -> List[str]:
     【放宽不等于撤防】这仍是防「软链 SKILL.md 指向 `/etc/passwd`」的唯一闸门，
     所以任何不在发现点也不在归档根里的 realpath —— `/etc/passwd`、`~/.ssh`、快照与备份子树 ——
     依然拒读。`tests/test_archive_roots.py` 的负向用例是这个判据的守卫。
+
+    v0.13.127：项目本地根（`local` 路）也过同一道闸门——它同样是「从哪读」的答案，
+     realpath 解析后必须落在这些根之内。测试猴补 `SKILL_DIRS` 时若仓内恰好有
+    `skills/` 等目录，白名单会多出本地根；L0 hermetic 用 `SKILL_LOCAL_ROOTS_JSON="[]"`
+    钉空集（`tests/test_skill_invoke.py` 的用法即样板）。
     """
     roots = [r for route in SKILL_DIRS for r in route_roots(route) if r and os.path.isdir(r)]
+    roots += local_roots()
     roots += [r for r in ARCHIVE_ROOTS_ACTIVE if os.path.isdir(r)]
     return [os.path.realpath(r) for r in roots]
 
@@ -853,17 +947,30 @@ async def skill_list(request: Request,
 
 
 def _find_disk(name: str, route: Optional[str]) -> List[Dict[str, Any]]:
-    """在磁盘路上按技能名找候选（同步；调用方负责放子线程）。"""
+    """在磁盘路上按技能名找候选（同步；调用方负责放子线程）。
+
+    v0.13.127 两处修正（都不是新功能，是让 /read 与 /invoke 的口径和 /list 对齐）：
+    ① 走 `route_roots()` 而不是裸 `SKILL_DIRS[r]` —— glob 路（qoder-alpha 的
+       extensions/*/skills）的 value 含 `*`，`os.path.isdir(pattern)` 恒 False
+       ⇒ 旧实现把这些路的技能全部漏掉（/list 列得出、/read 按名找不到）；
+    ② 含 `local` 项目本地路 —— 它不在 SKILL_DIRS 里，但不含它则「仓内技能
+       列表可见、正文读不到」。
+    """
     cands: List[Dict[str, Any]] = []
-    for r, root in SKILL_DIRS.items():
-        if route and r != route:
-            continue
-        if not root or not os.path.isdir(root):
-            continue
-        scan = _scan_one(r, root)
-        for it in scan.get("items") or []:
-            if (it.get("name") or "").lower() == name.strip().lower():
-                cands.append(it)
+    if route:
+        # 未知 route 的回空由调用方（/read、/invoke）先做 400 校验，这里不重复拒
+        targets = [(route, route_roots(route))] if (route in SKILL_DIRS or route == _LOCAL_ROUTE) else []
+    else:
+        targets = [(r, route_roots(r)) for r in SKILL_DIRS]
+        targets.append((_LOCAL_ROUTE, local_roots()))
+    for r, roots in targets:
+        for root in roots:
+            if not root or not os.path.isdir(root):
+                continue
+            scan = _scan_one(r, root)
+            for it in scan.get("items") or []:
+                if (it.get("name") or "").lower() == name.strip().lower():
+                    cands.append(it)
     return cands
 
 
@@ -880,16 +987,15 @@ def _guard_inside_whitelist(path: str) -> str:
     return rp
 
 
-@router.get("/read")
-@runlog.track("skill.read")
-async def skill_read(request: Request,
-                     name: str = Query(min_length=1, max_length=200),
-                     route: Optional[str] = Query(default=None),
-                     with_body: bool = Query(default=True, description="false 则只回元信息不回正文")):
-    """读一个技能的全文（脱敏后）。同名多路 ⇒ 409 报候选，**不静默挑一个**。"""
+async def _resolve_skill(name: str, route: Optional[str], with_body: bool) -> Dict[str, Any]:
+    """找技能 → 越界闸门 → 读正文（截断/脱敏）。`/read` 与 `/invoke` 共用。
+
+    v0.13.127 从 `/read` 原样提取（行为逐字不变）：409 带 candidates、404 带可用名提示、
+    截断显式标注、正文过 scrub。抽出的理由：invoke 与 read 的差别只在「记不记账、
+    带不带 caller/task」，**找路与读文件的口径必须单一出处**——各写一份必然漂移，
+    而漂移的形态是「同一个技能两条链路读出不同正文」。
+    """
     t0 = time.monotonic()
-    if route is not None and route not in SKILL_DIRS:
-        raise HTTPException(400, f"未知 route: {route!r}；可用值 {sorted(SKILL_DIRS)}")
     try:
         cands = await asyncio.wait_for(asyncio.to_thread(_find_disk, name, route),
                                        timeout=SCAN_TIMEOUT_S)
@@ -932,6 +1038,199 @@ async def skill_read(request: Request,
     return out
 
 
+@router.get("/read")
+@runlog.track("skill.read")
+async def skill_read(request: Request,
+                     name: str = Query(min_length=1, max_length=200),
+                     route: Optional[str] = Query(default=None),
+                     with_body: bool = Query(default=True, description="false 则只回元信息不回正文")):
+    """读一个技能的全文（脱敏后）。同名多路 ⇒ 409 报候选，**不静默挑一个**。
+
+    v0.13.127：route 校验放行 `local`（项目本地路）；解析逻辑提取到
+    `_resolve_skill`（与 /invoke 共用，见那里的注释）。
+    """
+    if route is not None and route not in SKILL_DIRS and route != _LOCAL_ROUTE:
+        raise HTTPException(400, f"未知 route: {route!r}；可用值 {sorted(all_routes())}")
+    return await _resolve_skill(name, route, with_body)
+
+
+# ── v0.13.127 PT-20261019-01：统一调用（激活）入口 ───────────────────────────
+# Grill 裁定 1（2026-10-19，用户逐条确认）：hub 代理「**激活 + 记账**」——返回技能的
+# SKILL.md 指令正文（Agent Skills 开放标准 L2），**执行仍由各 agent 在自己的工具
+# 环境里完成**。hub 不建沙箱、不代跑技能自带脚本：那会击穿本模块「只读门面」的
+# 立身之本，且标准方（skill.md）与三个生态先例（AgentBrew / SkillHub / mcp-hub）
+# 无一例外都是「技能作为工具返回指令」这个语义。
+#
+# 与 /read 的分工（Grill 裁定 5「查看与操作分钮」）：
+#   /read   = 查看：不记账、无 caller/task；
+#   /invoke = 操作：记账（subject=skill.invoke）+ 可带 caller（谁调的）与
+#             task（想干什么，审计上下文）。
+# 找路 / 越界闸门 / 409 candidates / 截断 / 脱敏的口径**单一出处**
+# （`_resolve_skill`）——两份实现必然漂移，而漂移的形态是「同一技能两条链路
+# 读出不同正文」，正是本仓反复禁的静默形态。
+class InvokeRequest(BaseModel):
+    name: str
+    route: Optional[str] = None
+    caller: str = ""            # 自报身份：MCP 工具传 agent 名（如 "codex"），web 传 "web"
+    task: str = ""              # 调用方想用它干什么（截断后落 detail，供调用记录面板）
+    with_body: bool = True      # false＝只激活记账不回正文（注入链只想留痕时用）
+
+
+@router.post("/invoke")
+@runlog.track("skill.invoke")
+async def skill_invoke(req: InvokeRequest, request: Request):
+    """激活一个技能：回传其 SKILL.md 指令正文，并记一条调用流水。
+
+    - **caller 三层回落**：显式字段 > `x-hub-channel` 头（MCP 轨为 "mcp"）> "anonymous"。
+      自报身份**不是协议取证**（hubmcp 读不到 MCP clientInfo），detail 里落
+      `caller_reported=true` 明示——把自报当取证用，早晚出一张「看起来很确定」的假表。
+    - 同名多路 409 带 candidates（镜像 /read）；未知名 404；软链越界 400。
+    - 记账经 `runlog.track("skill.invoke")`：成功/失败都留痕，subject 计入
+      `skill_usage._SUBJECTS` ⇒ 被显式调用过的技能不再上零调用僵尸榜。
+    - 鉴权：POST 过 writeauth 全局中间件（x-hub-token / ?token=）。
+    """
+    if len(req.caller) > 64:
+        raise HTTPException(400, "caller 过长（≤64 字符）")
+    if len(req.task) > 2000:
+        raise HTTPException(400, "task 过长（≤2000 字符）")
+    # 空串 route＝未指定（表单/MCP 工具的默认形态就是 ""）——不当成未知值 400，
+    # 否则「不传 route」在 JSON body 里必然踩空（GET 查询串省略即 None，JSON 省略不了）。
+    route = (req.route or "").strip() or None
+    if route is not None and route not in SKILL_DIRS and route != _LOCAL_ROUTE:
+        raise HTTPException(400, f"未知 route: {route!r}；可用值 {sorted(all_routes())}")
+    out = await _resolve_skill(req.name.strip(), route, req.with_body)
+    out["caller"] = (req.caller.strip() or request.headers.get("x-hub-channel")
+                     or "anonymous")[:64]
+    out["task"] = tdai_client.scrub(req.task.strip())[:500]
+    out["caller_reported"] = True           # 自报，不是协议取证（见 docstring）
+    out["recorded_subject"] = "skill.invoke"
+    return out
+
+
+@router.get("/catalog")
+async def skill_catalog(route: Optional[str] = None,
+                        q: str = Query(default="", max_length=200),
+                        limit: int = Query(default=500, ge=1, le=1000)):
+    """Level-1 技能说明目录（Agent Skills 标准的「发现层」语义，Grill 裁定 2）。
+
+    给两类调用方：① agent 启动时发现「本机有什么技能可用」（MCP `hub_skill_catalog`）；
+    ② 前端目录视图。**只给静态面**：调用次数走 `/invocations` 与 `/zombies`，
+    不在这里混记账数据（单一出处，混一处就会两处不一致）。
+
+    与 `/budget` 的分工：budget＝注入通道的 token 裁剪（三档降级）；
+    catalog＝不裁剪的完整 L1 面，多给整包 `digest`（供「技能是否被改过」的比对）。
+
+    **刻意不埋点**：`/list` 已按技能逐条记 `skill.list`，catalog 是它的投影，
+    再记一遍 = 同一动作双账（且每回一行会刷出 limit 条事件）。
+    """
+    t0 = time.monotonic()
+    if route is not None and route not in SKILL_DIRS and route != _LOCAL_ROUTE:
+        raise HTTPException(400, f"未知 route: {route!r}；可用值 {sorted(all_routes())}")
+    want_routes = [route] if route else list(disk_routes())
+    scans = await asyncio.gather(*[_scan_async(r, route_roots(r)) for r in want_routes])
+    items: List[Dict[str, Any]] = []
+    for s in scans:
+        items.extend(s.get("items") or [])
+    unique, _aliases = _dedup(items)
+    ql = (q or "").strip().lower()
+    if ql:
+        unique = [x for x in unique if _match_q(x, ql)]
+    rows = [{
+        "name": x.get("name"),
+        "description": x.get("description"),
+        "route": x.get("route"),
+        "routes": x.get("routes"),
+        "digest": x.get("pkg_digest"),
+        "pkg_files": x.get("pkg_files"),
+        "pkg_bytes": x.get("pkg_bytes"),
+        "bytes": x.get("bytes"),
+        "fm": x.get("fm"),
+        "est_tokens": int(len("%s: %s" % (x.get("name") or "", x.get("description") or ""))
+                          / _CHARS_PER_TOKEN) + 1,
+    } for x in sorted(unique, key=lambda x: (x.get("name") or "").lower())]
+    return {"items": rows[:limit], "count": len(rows[:limit]), "total": len(rows),
+            "q": ql or None, "took_ms": round((time.monotonic() - t0) * 1000, 1)}
+
+
+@router.get("/invocations")
+async def skill_invocations(name: str = Query(default="", max_length=200),
+                            caller: str = Query(default="", max_length=64),
+                            days: int = Query(default=7, ge=1, le=365),
+                            limit: int = Query(default=100, ge=1, le=500)):
+    """调用流水（Grill 裁定 3）：`profile_events` 里 `subject='skill.invoke'` 的只读投影。
+    前端「调用记录」视图的数据源；**零新表**（复用 runlog 埋点，runlog.py:4 定势）。
+
+    过滤为什么在 Python 侧而不用 SQL `json_extract`：detail 是 JSON TEXT，
+    **坏 detail 行**（非 JSON / 非对象）会让整条 WHERE 抛错 ⇒ 一行脏数据打挂整个面板。
+    Python 侧逐行 try 解析、坏行跳过并计数（`bad_detail`），与 `skill_usage._name_of`
+    同一条纪律。本地量级（invoke 事件）下全窗口扫描足够；窗口上限 `fetch_cap` 明示。
+    """
+    t0 = time.monotonic()
+    d = max(1, min(365, int(days)))
+    since = (datetime.now(timezone.utc) - timedelta(days=d)).isoformat()
+    fetch_cap = min(max(limit * 20, 500), 5000)
+    try:
+        rows = db.query(
+            "SELECT id, status, duration_ms, detail, created_at FROM profile_events "
+            "WHERE source = ? AND subject = 'skill.invoke' AND created_at >= ? "
+            "ORDER BY id DESC LIMIT ?",
+            (skill_usage._SOURCE, since, fetch_cap))
+    except Exception as e:  # noqa: BLE001 — 读不到账要表态，不装成空流水
+        raise HTTPException(500, tdai_client.scrub(f"查询调用流水失败：{type(e).__name__}: {e}")[:200])
+
+    want_name = name.strip().lower()
+    want_caller = caller.strip().lower()
+    parsed: List[Dict[str, Any]] = []
+    bad = 0
+    for r in rows or []:
+        det = r.get("detail")
+        try:
+            det = json.loads(det) if isinstance(det, str) else det
+        except Exception:  # noqa: BLE001
+            bad += 1
+            continue
+        if not isinstance(det, dict):
+            bad += 1
+            continue
+        parsed.append({
+            "id": r.get("id"),
+            "name": str(det.get("name") or "").strip(),
+            "caller": (str(det.get("caller") or "").strip() or "anonymous"),
+            "task": tdai_client.scrub(str(det.get("task") or ""))[:200],
+            "channel": det.get("channel"),
+            "caller_reported": bool(det.get("caller_reported")),
+            "status": r.get("status"),
+            "duration_ms": r.get("duration_ms"),
+            "created_at": r.get("created_at"),
+        })
+    hit = [p for p in parsed
+           if (not want_name or p["name"].lower() == want_name)
+           and (not want_caller or p["caller"].lower() == want_caller)]
+    by_caller: Dict[str, int] = {}
+    by_skill: Dict[str, int] = {}
+    for p in parsed:                      # 汇总按**整个抓取窗口**算，不按 limit 截断后的
+        by_caller[p["caller"]] = by_caller.get(p["caller"], 0) + 1
+        if p["name"]:
+            by_skill[p["name"]] = by_skill.get(p["name"], 0) + 1
+    return {
+        "items": hit[:limit],
+        "count": len(hit[:limit]),
+        "matched_total": len(hit),
+        "days": d,
+        "window_fetched": len(rows or []),
+        "fetch_cap": fetch_cap,
+        "bad_detail": bad,
+        "summary": {
+            "by_caller": dict(sorted(by_caller.items(), key=lambda kv: -kv[1])),
+            "by_skill": dict(sorted(by_skill.items(), key=lambda kv: -kv[1])[:20]),
+            "scope": "仅统计本次抓取窗口（window_fetched 条）内的流水，不是全历史",
+        },
+        "note": ("窗口内 0 条 ⇒ 没有调用记录（或都被过滤掉了）；"
+                 "bad_detail>0 ⇒ 有坏事件行，已跳过并计数"),
+        "took_ms": round((time.monotonic() - t0) * 1000, 1),
+    }
+
+
 @router.get("/status")
 async def skill_status(force: bool = Query(default=False)):
     """资产面板用：每路是否可用、条目数、frontmatter 缺失清单、软链别名、注册表空不空。
@@ -964,8 +1263,14 @@ async def skill_status(force: bool = Query(default=False)):
         disk_out[name] = {
             "available": bool(r.get("ok")),
             "state": skill_state(r, len(items)),
-            "dir": tdai_client.scrub(SKILL_DIRS.get(name, "")),
-            "roots": [tdai_client.scrub(r) for r in route_roots(name)],
+            "dir": (tdai_client.scrub(SKILL_DIRS.get(name, ""))
+                    if name in SKILL_DIRS
+                    else "（项目本地，base=%s）" % tdai_client.scrub(_local_roots_base())),
+            # v0.13.127 PT-20261002-14 验收项：每路必须说清自己是全局根还是项目本地根
+            "kind": "project-local" if name == _LOCAL_ROUTE else "global",
+            "roots": [tdai_client.scrub(x) for x in route_roots(name)],
+            # v0.13.127：路由级注记（opencode 假发现点的证伪事实在这里落面板）
+            "note": ROUTE_NOTES.get(name),
             "entries": len(items),
             "fm_missing": sorted(i["name"] for i in items if not i.get("fm")),
             "via_symlink": sorted(i["name"] for i in items if i.get("via_symlink")),

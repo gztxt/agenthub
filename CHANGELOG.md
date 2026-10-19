@@ -1,3 +1,87 @@
+## v0.13.127 — 技能中心统一调用入口：invoke/catalog/invocations + MCP 双工具 + 扫描三补强（PT-20261019-01 P0）
+
+> 用户 2026-10-19 需求三件（PT-20261019-01）：① 自动扫描本机所有技能 ② 汇总后所有 agent
+> 可统一调用 ③ 前端 UI 重设计（P1 交付）。Grill 六问全部裁定后本批落地 **P0 后端**。
+> 施工分支 `wt/skillctr`（worktree `agenthub-wt-skillctr`）。
+
+### 1. 统一调用（激活）入口——hub 代理「激活+记账」，执行留在 agent 侧
+
+- `POST /api/skill/invoke`（`src/skill.py`）：回传技能 SKILL.md 指令正文（Agent Skills 开放
+  标准的 L2），**不代跑代码**——hub 不建沙箱，守住本模块「只读门面」立身之本；标准方与
+  三个生态先例（AgentBrew / SkillHub / mcp-hub）无一例外都是「技能作为工具返回指令」。
+- `GET /api/skill/catalog`：L1 发现层目录（name/description/routes/digest/est_tokens），
+  供 agent 启动时发现「本机有什么技能」；**刻意不埋点**（`/list` 已逐条记 skill.list，
+  catalog 是它的投影，再记一遍＝同一动作双账）。
+- `GET /api/skill/invocations`：调用流水只读投影（`profile_events` 里 `subject='skill.invoke'`），
+  **零新表**；过滤在 Python 侧逐行 try 解析——坏 detail 行跳过并计数（`bad_detail`），
+  一行脏数据打挂整个面板；汇总按抓取窗口算并显式声明 `scope`。
+- MCP 双轨：`hub_skill_invoke` / `hub_skill_catalog`（`src/hubmcp.py`）。invoke 是 POST 但
+  **不过 ALLOW_WRITE 门**——它只写 hub 自己的遥测账本，不碰用户状态；若算「写工具」，
+  未开 HUB_MCP_ALLOW_WRITE 的部署就没有统一调用入口。凭据读进程内 `TERM_TOKEN/HUB_PASSCODE`
+  （与 writeauth 同源，**零新增凭据**），取不到时如实回 `missing-credential`，不静默发
+  一个必然 401 的请求。
+- caller 三层回落：显式字段 > `x-hub-channel` 头 > "anonymous"；detail 落
+  `caller_reported=true` 明示**自报不是协议取证**——把自报当取证用，早晚出一张
+  「看起来很确定」的假表。
+
+### 2. 记账模型（Grill 裁定 3）
+
+- 新 subject `skill.invoke` 经 `runlog.track` 成功/失败都留痕；`skill_usage._SUBJECTS`
+  四元组（read/inject/relevant/invoke），counts 新增 `invokes` 桶，zombies 判据含它——
+  「天天被 invoke 的技能」不再上零调用榜（与榜单立身目的正相反）。
+- `src/runlog.py` 新增 `_EXTRA_KEYS`/`_pick_extra`：从 kwargs + pydantic 请求体
+  （duck-type `model_dump()`/`dict()`，**不 import pydantic**）挖 name/route/caller/task。
+  修的真缺口：**失败路径没有 `_pick_names`**（那个读响应体，失败时响应体是 HTTPException
+  的 detail）⇒ 409/404 的 invoke 事件原本不带技能名，调用记录面板里的失败行没有身份。
+
+### 3. 扫描三补强（Grill 裁定 4）
+
+- **codebuddy 只读路由**（20→21 路）：`~/.codebuddy/skills` 是 `skill_visibility_sync.py`
+  明写的禁改面——禁的是**写**；不登记只读路由的真代价是「codebuddy 哪天装了技能，
+  hub 列表静默看不见」（比空目录难发现得多）。floor=0 + state 四态呈现空目录。
+- **项目本地 `local` 路**（PT-20261002-14 模型缺口）：`skills/`、`.claude/skills/`、
+  `.agents/skills/`、`.jcode/skills/` 四形态，**动态出现**（一个根都没有就不出现，
+  不制造永久 missing 噪声行），只读（install/remove 不接受它），过同一 realpath 越界闸门。
+  base 取 `__file__` 推断仓根而非 cwd——防「同码两态」（cwd 里碰巧有没有 skills/
+  会改变路由名单与白名单）。`SKILL_LOCAL_ROOTS_JSON` 可覆盖（L0 钉空集保持与宿主无关）。
+- **opencode 假发现点证伪落注**：`ROUTE_NOTES` 新表 + `/status` 每路 `note` 字段——
+  opencode 1.18.34 字面量证明它扫的是项目本地根，本目录不被它读取；hub 扫到的 3 条
+  全是软链别名。保留占位只为「将来真装了技能」可见。
+- 修 `_find_disk` 两处口径（都不是新功能，是让 /read 与 /invoke 和 /list 对齐）：
+  ① 改走 `route_roots()`——glob 路（qoder-alpha 的 `extensions/*/skills`）的 value 含
+  `*`，旧实现 `os.path.isdir(pattern)` 恒 False ⇒ **这些路的技能 /list 列得出、
+  /read 按名找不到**；② 含 local 路。解析逻辑提取 `_resolve_skill` 与 /read 共用——
+  两份实现必然漂移，而漂移的形态是「同一个技能两条链路读出不同正文」。
+
+### 4. 顺带修掉的两个真隐患（P0 取证时抓到，不夹带功能）
+
+- **`hubmcp.HUB_URL` 写死 3102** ⇒ 影子/隔离实例上 MCP 工具调用穿过影子**直达生产**，
+  拿影子的 token 打生产 ⇒ 401「凭据不匹配」，排障时两边日志都不像自己的错
+  （隔离 smoke 的 invoke 401 真因就是这个，实测踩到）。改为从 `config.port` 推导，
+  显式覆盖仍可用 `HUB_MCP_SELF_URL`。
+- **`tests/test_archive_roots.py` 取证污染 bug**：`addCleanup` 在赋值后才捕获
+  `ARCHIVE_ROOTS_ACTIVE` ⇒ 假根泄漏给同进程后续所有测试，L1 扫描结果取决于 L0
+  有没有先跑（同码两态）。实测受害例：codebuddy 路 crawl4ai 软链在 `all` 模式下
+  被假白名单拒读报 0 条、`host` 单独跑报 1 条。修法：先捕获原值再覆写。
+
+### 5. 闸门
+
+- `tests/test_skill_invoke.py`（新增 386 行 / ~25 例，L0 hermetic）：语义边界（无 exec
+  字段）、409 candidates、404、截断显式、caller 回落链、查看/操作分账（read 不记账）、
+  catalog L1、invocations 投影/坏行/汇总、local 路只读+越界闸门、status kind/note、
+  `_pick_extra` 单测。
+- `test_skill_routes.py`：20→21 路逐个点名、FLOORS 加 `codebuddy:0`、opencode 实测 3 条
+  证伪注记、`test_local_route_absent_when_no_local_roots`；`test_skill_facade.py`：
+  路由名单同步；`test_skill_usage.py`：`_SUBJECTS` 钉四元组 + invokes 桶。
+- **L0 hermetic 2353 例 0 跳过 0 失败**；L1 host 65 例（1 个既有 work/ 目录 skip）；
+  收集器对账 2419=2419；隔离 smoke 11/11（`env -i` + 独立 .env + /vol1 DATA_DIR，
+  影子实例不碰生产：影子库 3 条 invoke 事件、生产库 0 条未写；含 MCP tools/call
+  真调用回指令正文）。
+
+> **P1 前端 / P2 agent 侧接线未在本批**（见 PT-20261019-01 分期）。
+
+---
+
 ## v0.13.126 — Mac 下终端复制/粘贴快捷键失效（有选区 Cmd+C 改走原生 copy 链）
 
 > 用户报障（2026-10-18，Mac）：「agenthub 嵌入式终端在 Mac 系统下 复制 粘贴 键盘快捷键失效」。

@@ -178,8 +178,10 @@ class TestCounts(unittest.TestCase):
         sql, params = fake.calls[0]
         self.assertIn("source = ?", sql)
         self.assertEqual(params[0], "rest")
-        # subject 集合钉死（含 skill.relevant：注入链唯一可见事件，见模块 docstring）。
-        self.assertEqual(U._SUBJECTS, ("skill.read", "skill.inject", "skill.relevant"))
+        # subject 集合钉死（含 skill.relevant：注入链唯一可见事件，见模块 docstring；
+        # 含 skill.invoke：v0.13.127 统一调用入口的显式激活，比 read 更强的使用证据）。
+        self.assertEqual(U._SUBJECTS,
+                         ("skill.read", "skill.inject", "skill.relevant", "skill.invoke"))
         self.assertEqual(params[1:1 + len(U._SUBJECTS)], U._SUBJECTS)
         # SQL 里的 ? 个数必须与「source + N 个 subject + 时间窗」一致——
         # 写死 `(?, ?)` 会在加 subject 时错位，是历史 bug 的形态。
@@ -200,6 +202,22 @@ class TestCounts(unittest.TestCase):
         self.assertEqual(c["agent-dispatch"]["reads"], 0)
         # 该技能不再是僵尸（正是台账 PT-20261009-04 的验收判据）
         self.assertEqual(U.zombies([{"name": "agent-dispatch", "routes": ["pi"]}], c), [])
+
+    def test_invoke_row_counts_as_invoke_bucket(self):
+        """v0.13.127 PT-20261019-01：skill.invoke 单列 invokes 桶（不并入 reads/injects）。
+
+        两条判据：① 桶分开——面板要能分「被看过」与「被调用」；
+        ② 有 invoke ⇒ 不再是僵尸——天天被点名调用的技能上零调用榜与榜单目的正相反。
+        """
+        rows = [{"subject": "skill.invoke",
+                 "detail": '{"name": "crawl4ai", "caller": "codex"}',
+                 "created_at": "2026-10-19T01:00:00.000000+00:00"}]
+        with _PatchDB(_FakeDB(rows)):
+            c = U.counts(days=7)
+        self.assertEqual(c["crawl4ai"]["invokes"], 1)
+        self.assertEqual(c["crawl4ai"]["reads"], 0)
+        self.assertEqual(c["crawl4ai"]["injects"], 0)
+        self.assertEqual(U.zombies([{"name": "crawl4ai", "routes": ["techdocs"]}], c), [])
 
     def test_tallies_reads_and_injects_separately(self):
         rows = [

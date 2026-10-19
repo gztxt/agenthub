@@ -9,6 +9,9 @@
 
 注册工具：hub_list_agents / hub_list_ports / hub_memory_search / hub_memory_context
           / hub_kb_search / hub_kb_status / hub_skill_list / hub_skill_read / hub_skill_status
+          / hub_skill_invoke / hub_skill_catalog（后两个 v0.13.127 PT-20261019-01：
+          统一调用入口。invoke 是 POST 但**不算写工具**——只写 hub 自己的遥测账本，
+          不过 ALLOW_WRITE 门，理由见 `_post` 注释）
 """
 import json
 import os
@@ -22,11 +25,19 @@ import memfed
 import memindex
 import kb as kb_mod
 import memory as memory_mod
+from config import config as _cfg
 from mcp.server.mcpserver import MCPServer
 
-HUB_URL = os.getenv("HUB_MCP_SELF_URL", "http://127.0.0.1:3102")
 TIMEOUT_S = float(os.getenv("HUB_MCP_TIMEOUT", "10"))
 ALLOW_WRITE = os.getenv("HUB_MCP_ALLOW_WRITE", "0") == "1"
+
+#: 自指 URL。**默认从 config.port 推导，不写死 3102**（v0.13.127 PT-20261019-01）：
+# 写死的版本在影子/隔离实例上会出一个很难看的失败模式——MCP 工具调用穿过影子
+# **直达生产 :3102**，拿着影子的 token 打生产 ⇒ 401「凭据不匹配」，而排障时
+# 两边日志都不像自己的错（实测踩到：隔离 smoke 的 invoke 401，真因就是这个）。
+# 换端口自环正确以后，该失败模式连同「影子误写生产」的风险一起消失。
+# 显式覆盖仍可用 HUB_MCP_SELF_URL。
+HUB_URL = os.getenv("HUB_MCP_SELF_URL") or ("http://127.0.0.1:%d" % _cfg.port)
 
 server = MCPServer("agent-hub")
 
@@ -48,6 +59,48 @@ def _get(path: str, **params) -> dict:
         # 把 hub 刚做好的失败表态又剥掉一次 —— 与本文件 99-101 行记的那条教训同型。
         # 补 detail 是 additive：error / path 两个旧键不动，既有工具不受影响。
         # 正文必须过 scrub：技能与记忆正文是凭据高危面。
+        detail = ""
+        try:
+            detail = tdai_client.scrub(e.read().decode("utf-8", "replace"))[:400]
+        except Exception:  # noqa: BLE001 — 取不到正文不该盖掉原本的 HTTP 码
+            pass
+        return {"error": f"hub REST {e.code}", "path": path,
+                "http": e.code, "detail": detail}
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}", "path": path}
+
+
+def _post(path: str, body: dict, **params) -> dict:
+    """转发 POST 到 hub 自身 REST（v0.13.127 PT-20261019-01：`hub_skill_invoke` 用）。
+
+    与 `_get` 的两处差别，都是有原因的：
+    ① **带凭据**：POST 过 writeauth 全局中间件（x-hub-token / ?token=）。MCP server
+       与 hub 同进程（main.py 挂载），凭据名与 writeauth 完全同源
+       （`TERM_TOKEN`/`HUB_PASSCODE`，.env 经 load_dotenv 进 os.environ）⇒
+       **零新增凭据**，也不把 token 写进任何配置文件。取不到时如实回
+       `error=...missing-credential`，不静默发一个必然 401 的请求。
+    ② **不过 ALLOW_WRITE 门**：invoke 只往 hub 自己的遥测账本（profile_events）
+       写一行，不碰任何用户状态/配置；若把它算「写工具」，未开 HUB_MCP_ALLOW_WRITE
+       的部署就根本没有统一调用入口——Grill 裁定 2 的功能直接不存在。
+       真正的配置写工具仍在 `if ALLOW_WRITE:` 段里，不受影响。
+    """
+    token = os.getenv("TERM_TOKEN", "") or os.getenv("HUB_PASSCODE", "")
+    if not token:
+        return {"error": "missing-credential", "path": path,
+                "detail": "hub 进程未配置 TERM_TOKEN/HUB_PASSCODE，POST 类工具不可用"}
+    qs = urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "")})
+    url = f"{HUB_URL}{path}" + (f"?{qs}" if qs else "")
+    payload = json.dumps(body or {}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, method="POST",
+                                 headers={"Content-Type": "application/json",
+                                          "x-hub-token": token,
+                                          "x-hub-channel": "mcp"})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # 409 的 candidates / 400 的可用值清单都在上游正文里——剥掉它等于在 MCP 层
+        # 把 hub 的失败表态再灭一次（与 _get 同一条教训）。
         detail = ""
         try:
             detail = tdai_client.scrub(e.read().decode("utf-8", "replace"))[:400]
@@ -255,6 +308,52 @@ def hub_skill_status() -> str:
     TDAI 注册表有几行、以及磁盘与注册表的缺口（`gap.note`）。
     动手前先调它一次，别把「某一路 degraded」当成「本机没有那个技能」。"""
     return json.dumps(_get("/api/skill/status"), ensure_ascii=False)
+
+
+@server.tool()
+def hub_skill_invoke(name: str, route: str = "", caller: str = "", task: str = "") -> str:
+    """**统一调用一个技能**（v0.13.127 PT-20261019-01）：回传它的 SKILL.md 指令正文，
+    并在 hub 记一条调用流水（`skill.invoke`）。
+
+    语义边界（重要）：hub 代理的是「激活 + 记账」——**执行仍由你（agent 侧）完成**：
+    按返回的 instructions 行事，技能自带脚本用你自己的 bash/工具跑。hub 不代跑代码。
+
+    什么时候用：hub_skill_list / hub_skill_catalog 里看到匹配的技能后，**点名**取它的
+    完整指令。`caller` 建议传你的客户端名（如 "codex"），调用记录面板按它分组；
+    不传则记 "mcp"（自报身份，不是协议取证）。`task` 一句话说明你要用它干什么。
+
+    失败态与 /read 同族：同名多路 409 带 candidates（带 route 再调）；未知名 404；
+    正文超上限 `truncated=true` 并给 `bytes_total`（不静默截断）。"""
+    body = {"name": name, "route": route, "caller": caller, "task": task}
+    return json.dumps(_post("/api/skill/invoke", body), ensure_ascii=False)
+
+
+@server.tool()
+def hub_skill_catalog(q: str = "", limit: int = 200) -> str:
+    """技能说明目录（Agent Skills 标准 L1「发现层」）：每条技能的 name + description +
+    路由分布 + 整包 digest + 估算 token。**不带正文**——正文用 hub_skill_invoke 点名取。
+
+    与 hub_skill_list 的分工：list 偏诊断（逐路 backends/degraded/dedup），
+    catalog 偏「有什么可用」（纯 L1 面 + digest，供判断技能是否被改过）。
+    `q` 与列表页同一套模糊口径（先精确子串，容忍手误按编辑距离）。"""
+    if limit > 1000:
+        limit = 1000
+    data = _get("/api/skill/catalog", q=q, limit=limit)
+    if "error" in data:
+        return json.dumps(data, ensure_ascii=False)
+    return json.dumps({
+        "count": data.get("count", 0),
+        "total": data.get("total", 0),
+        "items": [{
+            "name": i.get("name"),
+            "description": (i.get("description") or "")[:300],
+            "routes": i.get("routes"),
+            "digest": i.get("digest"),
+            "est_tokens": i.get("est_tokens"),
+        } for i in data.get("items", [])],
+        "note": "正文不在本目录里：对某条技能感兴趣就 hub_skill_invoke(name=...) 点名取指令",
+        "took_ms": data.get("took_ms"),
+    }, ensure_ascii=False)
 
 
 @server.tool()

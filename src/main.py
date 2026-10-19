@@ -96,7 +96,13 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.126"
+VERSION = "0.13.127"
+#   v0.13.127：技能中心统一调用入口（PT-20261019-01 P0）。新增 POST /api/skill/invoke
+#   （激活+记账，回 SKILL.md 指令正文，不代跑代码）、GET /api/skill/catalog（L1 发现层）、
+#   GET /api/skill/invocations（调用流水只读投影，零新表）；MCP 加 hub_skill_invoke /
+#   hub_skill_catalog；扫描三补强（codebuddy 只读路由 / 项目本地 local 路 / opencode
+#   假发现点证伪注记）。顺带修：hubmcp.HUB_URL 写死 3102（影子实例误打生产）改为从
+#   config.port 推导；runlog 失败路径不带技能名的缺口（_pick_extra）。
 #   v0.13.126：嵌入式终端「Mac 下复制/粘贴快捷键失效」（纯静态前端，服务端一字未动）。
 #   端侧取证：Mac（192.168.5.101）走 `http://192.168.5.102:3102`，即 isSecureContext=false、
 #   navigator.clipboard 不存在 ⇒ 复制只剩 execCommand 一条路。两条独立根因：

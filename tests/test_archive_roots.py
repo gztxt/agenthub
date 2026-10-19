@@ -33,9 +33,16 @@ class ArchiveRootsTest(unittest.TestCase):
     def setUp(self):
         # 钉成**假根**（本机不存在 ⇒ 必被 `isdir` 过滤掉），于是白名单只剩发现点，
         # 与宿主无关；正向/负向断言仍全部有效。
+        # ⚠ v0.13.127 修一个**取证污染 bug**（PT-20261019-01 顺带抓出）：原写法先赋值、
+        #   再 `addCleanup(setattr, ..., skill.ARCHIVE_ROOTS_ACTIVE)`——cleanup 捕获的是
+        #   **赋值后的假根**，于是本类跑完假根泄漏给同进程后续所有测试 ⇒ L1 host 层的
+        #   扫描结果取决于 L0 有没有先跑（同码两态）。实测受害例：codebuddy 路的
+        #   crawl4ai 软链在 `all` 模式下被假白名单拒读报 0 条、`host` 单独跑报 1 条。
+        #   修法：**先捕获原值再覆写**。
+        _saved_archive = skill.ARCHIVE_ROOTS_ACTIVE
         skill.ARCHIVE_ROOTS_ACTIVE = {"/nonexistent-archive-root-a": "x",
                                        "/nonexistent-archive-root-b": "y"}
-        self.addCleanup(setattr, skill, "ARCHIVE_ROOTS_ACTIVE", skill.ARCHIVE_ROOTS_ACTIVE)
+        self.addCleanup(setattr, skill, "ARCHIVE_ROOTS_ACTIVE", _saved_archive)
         self.allowed = skill._allowed_roots()
 
     def _inside(self, rp: str, allowed=None) -> bool:

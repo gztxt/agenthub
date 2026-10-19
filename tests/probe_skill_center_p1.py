@@ -249,6 +249,13 @@ def main():
         ok("影子库新增 caller=web 调用 %d → %d" % (before, after))
     else:
         bad("影子库未见新增调用（before=%r after=%r）" % (before, after))
+    # 成功记账后，tab 上的数量徽标也必须 0→1（不让用户再怀疑「记录了但界面不动」）
+    badge = wait_until(cdp, "(()=>{const e=document.getElementById('skillInvTabBadge');"
+                            "return e && e.textContent==='1';})()", 5)
+    if badge:
+        ok("调用记录 tab 徽标 0 → 1")
+    else:
+        bad("调用记录 tab 徽标未随记账更新")
 
     print("== F 「复制接入片段」")
     evaluate(cdp, "skillCopySnippet()")

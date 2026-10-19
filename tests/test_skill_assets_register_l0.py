@@ -162,13 +162,18 @@ class TestEndToEnd(unittest.TestCase):
 
 
 class TestRealTreeContract(unittest.TestCase):
-    """对真实目录的**只读**契约：不写任何库，只验「18 个包 + 两根异常 name」。"""
+    """对真实目录的**只读**契约：不写任何库，只验「当前包数 + 两根异常 name」。
+
+    包数随盘上新增而变（2026-10-19 16:54 加 aidev 四件套 ⇒ 18→22）。这个断言是
+    **哨兵不是常量**：盘上变了就该红一次、催人同步，同步时只改这个数与本文档。
+    """
 
     def test_real_skills_tree_shape(self):
         if not reg.SKILLS_ROOT.is_dir():
             self.skipTest("本机无 技术文档/skills（运行器不在宿主机上）")
         items = reg.discover()
-        self.assertEqual(len(items), 18, "盘上技能包数变了 ⇒ 台账与缺口注释要同步改")
+        self.assertEqual(len(items), 22,
+                         "盘上技能包数变了 ⇒ 台账与缺口注释要同步改（只改本数与本类 docstring）")
         names = {s: (f.get("name") or "") for s, _p, f in items}
         self.assertEqual(names.get("agent-browser-cli"), "agent-browser")
         self.assertEqual(names.get("web-anti-crawl-search"), "web-search")

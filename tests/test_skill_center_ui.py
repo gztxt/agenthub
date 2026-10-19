@@ -315,5 +315,65 @@ class TestDiagnosticsFold(unittest.TestCase):
         self.assertIn('id="skillLab"', diag, "实验室必须收进诊断折叠区")
 
 
+class TestBudgetPanel(unittest.TestCase):
+    """③ 预算面板：分路过滤 + 失败表态必须真的在代码里，不只是注释里。
+
+    2026-10-19 起因：`/api/skill/budget` 加了 `route=` 与 `routes_failed`，但前端
+    契约没有闸门。删掉 `&route=` 只要后端还好着，页面会静默变成「总是全部路」——
+    与「HTML 写死 20 路」同属第二真相，因此按同一口径钉。
+
+    **作用域必须是函数体**：第一版写成对整份 JS 的 `assertIn("&route=")`，反证时
+    把预算那处改成 `&routX=` 仍然全绿——因为技能详情按钮那行（`SKILL_DOC.route`）
+    也含 `&route=`，断言被它借过了。整份文件级别的 assertIn 在本仓等同于没写。
+    """
+
+    @staticmethod
+    def budget_fn() -> str:
+        """截出 `loadSkillBudget` 的函数体（剥注释后）。"""
+        code = strip_js_comments(JS)
+        start = code.find("async function loadSkillBudget(")
+        assert start != -1, "未找到 loadSkillBudget（面板被改名？）"
+        rest = code[start:]
+        # 到下一个顶层 `async function` / `function` 定义为止
+        nxt = min([i for i in (rest.find("\nasync function ", 1),
+                               rest.find("\nfunction ", 1)) if i != -1] or [len(rest)])
+        return rest[:nxt]
+
+    def test_html_has_route_select_and_1200_default(self):
+        self.assertIn('id="skillBudgetRoute"', HTML, "预算面板缺分路下拉")
+        m = re.search(r'id="skillTok"[^>]*value="(\d+)"', HTML)
+        self.assertIsNotNone(m, "预算输入框缺失")
+        self.assertEqual(m.group(1), "1200", "预算默认值须为 1200（后端 Query 默认同步）")
+
+    def test_js_sends_route_param(self):
+        fn = self.budget_fn()
+        self.assertIn("'/api/skill/budget?max_tokens='", fn, "预算请求 URL 变了")
+        self.assertIn("&route=", fn, "预算请求未带 route 参数")
+        self.assertIn("encodeURIComponent", fn, "route 未编码（路名含空格/逗号会拼坏 URL）")
+
+    def test_js_fills_select_from_backend(self):
+        self.assertIn("routes_available", self.budget_fn(),
+                      "下拉未由后端 routes_available 填充（写死即第二真相）")
+
+    def test_js_renders_scan_failures(self):
+        """扫描失败必须显示。`_scan_one_uncached` 超时返回 ok=False/items=[]，
+        前端不表态时「整路静默消失」看起来和「这一路本来没有技能」一模一样。
+
+        三条一起断言，缺一条都拦不住真实回归：
+        ① `routes_failed` 被读了；② 算出的 `failed` 真的拼进 innerHTML
+        （只算不拼 = 白算，反证时把 `+ failed +` 删掉仍全绿过，故补这条）；
+        ③ 用户真能看到的字面量。
+        """
+        fn = self.budget_fn()
+        self.assertIn("routes_failed", fn, "前端未读 routes_failed")
+        self.assertRegex(fn, r"\+\s*failed\s*\+", "failed 算出来了却没拼进 innerHTML")
+        self.assertIn("路扫描失败", fn, "缺用户可见的失败文案")
+
+    def test_js_fallback_matches_backend_default(self):
+        m = re.search(r"skillTok'\)\.value,\s*10\)\s*\|\|\s*(\d+)", self.budget_fn())
+        self.assertIsNotNone(m, "未找到预算兜底值")
+        self.assertEqual(m.group(1), "1200", "兜底值与后端默认不一致")
+
+
 if __name__ == "__main__":
     unittest.main()

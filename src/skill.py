@@ -1533,8 +1533,16 @@ _CHARS_PER_TOKEN = 2.5
 
 
 @router.get("/budget")
-async def skill_budget(max_tokens: int = Query(default=800, ge=50, le=8000)):
-    """按 token 预算裁剪的技能清单（批5 注入通道 hub-facade 的数据源）。
+async def skill_budget(
+    max_tokens: int = Query(default=1200, ge=50, le=8000),
+    route: str = Query(default="", description="逗号分隔的路名过滤（如 claude,codex）；空=全部"),
+):
+    """按 token 预算裁剪的技能清单——**诊断面板用**，不是注入通道的数据源。
+
+    ⚠️ 历史注释曾写「批5 注入通道 hub-facade 的数据源」，实测已不成立：
+    `~/.pi/agent/extensions/hub-facade.ts:116` 与 `scripts/hub_skill_inject.py:105`
+    都打 `/api/skill/relevant`（top-3 / max_tokens=600），没有 agent 调本端点。
+    本端点的真实用途是 UI「技能预算」面板，回答「这个预算够装多少条」。
 
     56 号文档结论：把全部技能描述注入上下文会吃掉可观预算（39 技能 desc 全量约数
     千 token）；agent 侧需要的是「花 N 个 token 知道有哪些技能」。策略：
@@ -1549,6 +1557,16 @@ async def skill_budget(max_tokens: int = Query(default=800, ge=50, le=8000)):
     for s in scans:
         items.extend(s.get("items") or [])
     unique, _aliases = _dedup(items)
+
+    # 分路过滤必须在 _dedup 之后：`routes` 是去重时才聚合的（同一 realpath 经多条
+    # 软链可见），早于它过滤会把「多路共享」误判成单路，还会让路由统计失真。
+    wanted = [r.strip() for r in route.split(",") if r.strip()]
+    routes_available = sorted({str(r) for it in unique for r in (it.get("routes") or [])})
+    route_unknown = [r for r in wanted if r not in routes_available]
+    if wanted:
+        wanted_set = set(wanted)
+        unique = [it for it in unique
+                  if wanted_set & {str(r) for r in (it.get("routes") or [])}]
 
     def est(s: str) -> int:
         return int(len(s) / _CHARS_PER_TOKEN) + 1
@@ -1576,4 +1594,8 @@ async def skill_budget(max_tokens: int = Query(default=800, ge=50, le=8000)):
     return {"budget": max_tokens, "used_est": used, "full": full,
             "name_only": name_only,
             "truncated": len(dropped) - len(name_only),
-            "total": len(unique), "took_ms": round((time.monotonic() - t0) * 1000, 1)}
+            "total": len(unique), "took_ms": round((time.monotonic() - t0) * 1000, 1),
+            # 分路可见性：`total` 是**过滤后**的条数；routes_available 供前端填下拉，
+            # 不写死路名，磁盘加一路就自动多一项。
+            "route_filter": wanted, "routes_available": routes_available,
+            "route_unknown": route_unknown}

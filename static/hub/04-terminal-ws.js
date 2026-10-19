@@ -1283,10 +1283,22 @@ async function skillInstall() {
 }
 
 async function loadSkillBudget() {
-  const tok = parseInt($('skillTok').value, 10) || 800;
+  const tok = parseInt($('skillTok').value, 10) || 1200;
+  const route = ($('skillBudgetRoute') && $('skillBudgetRoute').value) || '';
   boxBusy('skillBudget');
   try {
-    const d = await api('/api/skill/budget?max_tokens=' + tok);
+    const d = await api('/api/skill/budget?max_tokens=' + tok + (route ? '&route=' + encodeURIComponent(route) : ''));
+    /* 下拉选项由后端 routes_available 填充——不写死路名，磁盘加一路就自动多一项；
+       dataset.filled 防重复追加（面板会反复刷）。 */
+    const sel = $('skillBudgetRoute');
+    if (sel && !sel.dataset.filled && (d.routes_available || []).length) {
+      (d.routes_available || []).forEach(r => {
+        const o = document.createElement('option');
+        o.value = r; o.textContent = r; sel.appendChild(o);
+      });
+      sel.dataset.filled = '1';
+      if (route) sel.value = route;
+    }
     const full = (d.full || []).map(f => escapeHtml(f.name) + (f.description ? ' — ' + mdInline(f.description.slice(0, 80)) : ''));
     const names = (d.name_only || []).map(n => escapeHtml(n));
     // 三档分区：full（全描述）/ name_only（仅名）/ truncated（被裁）
@@ -1298,11 +1310,14 @@ async function loadSkillBudget() {
       bar.setAttribute('aria-label', '注入预算占用 ' + pct + '%');
       bar.classList.toggle('over', (d.used_est || 0) > (d.budget || 1));
     }
+    const scope = (d.route_filter && d.route_filter.length) ? d.route_filter.join(',') : '全部路';
+    const unknown = (d.route_unknown || []).length ? ' · <b>未知路 ' + d.route_unknown.map(escapeHtml).join(',') + '</b>' : '';
     $('skillBudget').innerHTML =
-      '预算 ' + d.budget + ' tok · 实际约 ' + d.used_est + '（' + pct + '%） · 全条目 ' + full.length + ' / 仅名 ' + names.length +
-      (d.truncated ? ' / <b>被裁 ' + d.truncated + '</b>' : '') + '（共 ' + d.total + '）<br>' +
+      '范围 ' + escapeHtml(scope) + ' · 预算 ' + d.budget + ' tok · 实际约 ' + d.used_est + '（' + pct + '%） · 全条目 ' + full.length + ' / 仅名 ' + names.length +
+      (d.truncated ? ' / <b>被裁 ' + d.truncated + '</b>' : '') + '（共 ' + d.total + '）' + unknown + '<br>' +
       full.concat(names).map(s => '· ' + s).join('<br>') +
-      '<br><span class="hint">被裁 = 预算不够时连名字都留不下 ⇒ 注入时 agent <b>看不到</b>它。</span>';
+      '<br><span class="hint">被裁 = 预算不够时连名字都留不下 ⇒ 注入时 agent <b>看不到</b>它。' +
+      '本面板只预览清单；agent 实际注入走 /api/skill/relevant（BM25 top-3），不受此预算约束。</span>';
   } catch (e) { boxFail('skillBudget', e, 'loadSkillBudget'); }
 }
 

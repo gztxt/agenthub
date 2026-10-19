@@ -2049,8 +2049,11 @@
                             <div class="sp-cell">
                                 <div class="sp-sub">token 预算化清单</div>
                                 <div class="toolbar">
-                                    <input id="skillTok" type="number" value="800" min="50" max="8000" style="max-width:100px" onchange="loadSkillBudget()" title="max_tokens">
-                                    <span class="hint">max_tokens（注入通道上限）</span>
+                                    <input id="skillTok" type="number" value="1200" min="50" max="8000" style="max-width:100px" onchange="loadSkillBudget()" title="max_tokens">
+                                    <select id="skillBudgetRoute" onchange="loadSkillBudget()" title="只统计某一路的技能（选项由后端 routes_available 填充）">
+                                        <option value="">全部路</option>
+                                    </select>
+                                    <span class="hint">max_tokens（清单预算；注入走 /relevant，不受此限）</span>
                                 </div>
                                 <div class="sk-budget" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="skillBudgetBar"><i id="skillBudgetFill"></i></div>
                                 <div class="sp-bd box flush tscroll" style="border-top:1px solid var(--divider)"><div id="skillBudget" class="hint">加载中…</div></div>
@@ -2655,6 +2658,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=67953bf4"></script>
+    <script src="/static/hub.js?v=cd46a07b"></script>
 </body>
 </html>

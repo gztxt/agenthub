@@ -532,6 +532,13 @@ class TestAutoInjectSurfaced(unittest.TestCase):
         self.assertIn("unknown_caller", body,
                       "未自报的调用方必须显式报数，不能静默算成 anonymous")
 
+    def test_query_and_legacy_are_not_folded_into_auto(self):
+        """同端点的人工检索与旧账要单列：折进「自动下发」会把曝光分母吹大（656 vs 6）。"""
+        body = re.search(r"function renderSkillInvocations\(.*?\n\}", strip_js_comments(JS), re.S).group(0)
+        self.assertIn("auto.query", body, "人工检索条数没显示")
+        self.assertIn("auto.legacy", body, "旧账条数没显示")
+        self.assertIn("不计入", body, "必须明说这些条目不参与自动下发计数")
+
 
 if __name__ == "__main__":
     unittest.main()

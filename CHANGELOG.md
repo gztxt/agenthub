@@ -1,3 +1,71 @@
+## v0.13.133 — 技能权重端点 + auto 口径统一（PT-20261020-01）
+
+> 来源：用户「权重公式按台账 PT-20261020-01 实现」。台账要求：**曝光 ≠ 使用**，
+> `auto_inject` 只作分母/先验，`explicit_invoke` 与 `read` 才是正样本；身份、旧账、阈值都要有判据。
+
+### ① `GET /api/skill/usage`（新端点）
+
+```
+use   = 2*explicit + read      （invoke 拿走指令正文，read 只是查看；W_EXPLICIT/W_READ 可改）
+auto  = skill.relevant 中声明 mode=auto_inject 或 via=hook 的条数
+score = use² / (use + auto)    （use+auto=0 时为 0）
+```
+
+三条性质由闸门钉住：从没曝光 ⇒ `score == use`；只曝光不使用 ⇒ `score == 0`；
+auto 增大 ⇒ score 单调不增（**auto 永远不是加分项**）。
+
+- 身份 = `(name, route)`；同名多路各算一行，另给 `by_name`（routes 并列，分数在各自层级重算，不相加）。
+- `caller` 过滤是**先过滤再算分**：换个人看分母不带别人的曝光。
+- `legacy`（无 mode/via 的旧 `skill.relevant`）单列，不进 use 也不进 auto；
+  2026-10-20 前 653 条无 caller 的注入事件只落 `unknown_caller`，**不按时间/技能名反推**。
+- 每条明细带 `evidence`（event id，可回溯）与 `evidence_total`（截断前的真实次数）。
+- `usage_class` 四档：`used` / `stale`（超过 `stale_after_days=30` 未点名使用）/
+  `exposed_only`（只被推、从未打开）/ `unknown`（只有旧账）。**stale 只作观察，不是删除依据。**
+
+### ② 修 `/relevant` 曝光落错 route（上一轮埋点的真缺陷）
+
+`relevant` 的 `route` 是**逐条目字段**，原实现一次响应只记一个 name 且不带该条 route
+⇒ 曝光落到 `route=""` 的另一行，auto 永远配不到使用上（权重恒为「无曝光」）。
+改为逐名落事件、每条带自己那条的 route，与 `skill.invoke` 同形状。
+
+### ③ 两个端点的 `auto` 统一成同一个量
+
+同一时刻实测 `/invocations.auto.total=656`、`/usage.totals.auto=6`：前者把整张
+`skill.relevant`（含 653 条无 mode 旧账 + 人工查询）都算「自动下发」。
+同一个词在两张页面指两件事，读的人必然做错判断 ⇒ 判据收敛到 `skill_weights.classify()`：
+
+| 端点字段 | 含义 |
+|---|---|
+| `auto.total` | 声明为自动下发的事件数（与权重榜的 auto 同值） |
+| `auto.query` | 同端点的人工检索，单列 |
+| `auto.legacy` | 旧客户端未自报 mode，单列 |
+| `auto.unknown_caller` | 自动下发中未自报调用方（只可能来自旧客户端） |
+
+界面同步：`自动下发：N 次（另有 人工检索 X、旧事件未自报 Y 条，不计入）`。
+
+### ④ totals 口径显式化
+
+`totals.events`（各桶事件之和，含无技能名的注入回包）与 `totals.named`（能进榜单的事件数）
+分开报——两者不等是口径差异，不是丢数据；响应里用 `totals_note` 自答。
+
+### 闸门
+
+```
+tests/test_skill_weights.py（公式 5 + 端点 8：证据 id / caller 先过滤 / 身份 / route /
+                            legacy / auto 跨端点一致 / totals 口径 / usage_class）
+tests/test_skill_invoke.py::...::test_auto_inject_bucket_is_separate_and_carries_caller
+tests/test_skill_center_ui.py::TestAutoInjectSurfaced::test_query_and_legacy_are_not_folded_into_auto
+```
+
+红臂实测：把 `/invocations` 的 auto 改回「整张 relevant 都算」⇒ 跨端点一致用例红；
+把界面 query/legacy 文案删掉 ⇒ UI 用例红。
+
+### 验收（真机）
+
+- `/api/skill/usage?days=7` 返回 `formula / weights / identity / stale_after_days / usage_classes`；
+  `totals.auto=6`，`totals.legacy=653`，与 `/invocations.auto` 逐项相等。
+- `/health` 版本 0.13.133，`db_ok=true`、`needs_restart=false`。
+
 ## v0.13.132 — 调用徽标不再冻结 + 技能记账分层（PT-20261020-01）
 
 > 来源：2026-10-20 用户报「调用记录按钮后面一直显示 0，应该更新为实际调用数据」。

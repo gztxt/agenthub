@@ -238,7 +238,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.132"
+    CURRENT_VERSION = "0.13.133"
+
+    #: v0.13.133：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「曝光只作分母」与「逐名 route 缺失会让 auto 配不到使用上」。
+    VERSION_ROOT_CAUSES["0.13.133"] = (
+        "PT-20261020-01", "只作分母", "use^2/(use+auto)", "逐条目字段", "legacy",
+    )
 
     #: v0.13.132：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「一次性加载闸把实时数冻结成快照」与「曝光不是使用，必须按 via=hook 分桶」。

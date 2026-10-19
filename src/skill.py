@@ -55,6 +55,7 @@ from pydantic import BaseModel
 import db
 import runlog
 import skill_usage
+import skill_weights
 import tdai_client
 import tooldesc       # P2 C17：描述质量（模板归一 + 完备性三态）
 import writeauth
@@ -1260,7 +1261,8 @@ async def skill_invocations(name: str = Query(default="", max_length=200),
     # 自动下发（subject=skill.relevant）单独一桶：它是「机器把哪些技能推给了谁」，
     # 与「谁点名要了哪个技能」是两种证据。权重若把两者混加，等于把曝光当使用。
     # 读不到就报 auto_error，不静默当 0——「0 次自动下发」和「查询失败」必须可区分。
-    auto: Dict[str, Any] = {"total": 0, "by_caller": {}, "by_skill": {}, "unknown_caller": 0}
+    auto: Dict[str, Any] = {"total": 0, "by_caller": {}, "by_skill": {}, "unknown_caller": 0,
+                            "query": 0, "legacy": 0}
     auto_error = ""
     try:
         arows = db.query(
@@ -1282,20 +1284,30 @@ async def skill_invocations(name: str = Query(default="", max_length=200),
         if not isinstance(det, dict):
             a_bad += 1
             continue
+        # 用与权重榜**同一个**分类函数：这个端点过去把整张 skill.relevant 都算成
+        # 「自动下发」，于是 653 条无 mode 的旧账 + 人工查询全被计入，界面显示 656 次
+        # 而权重榜只有 6 次——同一个词在两处指两件事。判据只留一份。
+        bucket, nm = skill_weights.classify("skill.relevant", det)
+        if bucket == "query":
+            auto["query"] += 1
+            continue
+        if bucket != "auto":
+            auto["legacy"] += 1
+            continue
         auto["total"] += 1
         who = str(det.get("caller") or "").strip().lower()
         if who:
             auto["by_caller"][who] = auto["by_caller"].get(who, 0) + 1
         else:
             auto["unknown_caller"] += 1
-        nm = str(det.get("name") or "").strip()
         if nm:
             auto["by_skill"][nm] = auto["by_skill"].get(nm, 0) + 1
     auto["by_caller"] = dict(sorted(auto["by_caller"].items(), key=lambda kv: -kv[1]))
     auto["by_skill"] = dict(sorted(auto["by_skill"].items(), key=lambda kv: -kv[1])[:20])
     auto["bad_detail"] = a_bad
     auto["error"] = auto_error
-    auto["scope"] = "同一抓取窗口内 subject=skill.relevant 的事件；caller 为空=旧客户端未自报"
+    auto["scope"] = ("同一抓取窗口内**声明为自动下发**（mode=auto_inject 或 via=hook）的 "
+                     "skill.relevant 事件；query=人工检索、legacy=旧客户端未自报 mode，两者单列不计入")
     by_caller: Dict[str, int] = {}
     by_route: Dict[str, int] = {}
     by_skill: Dict[str, int] = {}
@@ -1324,6 +1336,26 @@ async def skill_invocations(name: str = Query(default="", max_length=200),
                  "bad_detail>0 ⇒ 有坏事件行，已跳过并计数"),
         "took_ms": round((time.monotonic() - t0) * 1000, 1),
     }
+
+
+@router.get("/usage")
+async def skill_usage_report(days: int = Query(default=30, ge=1, le=365),
+                             route: str = Query(default="", max_length=40),
+                             caller: str = Query(default="", max_length=64),
+                             limit: int = Query(default=100, ge=1, le=500)):
+    """技能权重榜（PT-20261020-01）：`use` 与 `auto` 分开报，再给一个可解释的 score。
+
+    口径与公式写在 `skill_weights` 模块 docstring 里（本端点不另立第二套）：
+    `use = 2*explicit + read`，`score = use²/(use+auto)`——**曝光只作分母**。
+    `caller` 过滤是**先过滤再算分**（按某个 agent 自己的使用与曝光重算），
+    不是对全机榜单做后过滤；后者会把别人的曝光算进它的分母。
+    读库失败抛 500 而不是回空榜：空榜的语义是「这个窗口没人用」，不能与故障同形。
+    """
+    try:
+        return skill_weights.load(days=days, route=route, caller=caller, limit=limit)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, tdai_client.scrub(
+            f"查询技能权重失败：{type(e).__name__}: {e}")[:200])
 
 
 @router.get("/status")

@@ -197,6 +197,44 @@ def _pick_names(data: Any) -> List[str]:
         return []
 
 
+def _route_of(data: Any) -> str:
+    """单对象返回体的来源路（`/read`、`/invoke` 顶层有 `route`）。取不到返回空串。"""
+    try:
+        if isinstance(data, dict):
+            return str(data.get("route") or "").strip()[:_NAME_MAX_CHARS]
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _route_by_name(data: Any) -> Dict[str, str]:
+    """列表型返回体里的 `name → route` 映射（`/relevant` 的 bm25.items[]）。
+
+    **为什么需要**：`/relevant` 的 route 是**逐条目**字段，原先只取名字 ⇒ 自动下发事件
+    没有 route，(name, route) 维度的权重表会把「曝光」和「使用」拆成两行，除以 0 次曝光，
+    自动下发对分数完全失效。逐名事件必须带上它自己那条的 route。
+    同名多路在 `_dedup` 阶段已合并为规范路，这里取首个非空值即可。
+    """
+    out: Dict[str, str] = {}
+    try:
+        items: Any = None
+        if isinstance(data, dict):
+            bm = data.get("bm25")
+            items = bm.get("items") if isinstance(bm, dict) else data.get("items")
+        if not isinstance(items, list):
+            return out
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            nm = str(it.get("name") or "").strip()
+            rt = str(it.get("route") or "").strip()
+            if nm and rt and nm not in out:
+                out[nm] = rt[:_NAME_MAX_CHARS]
+    except Exception:  # noqa: BLE001
+        return {}
+    return out
+
+
 def _channel_of(request: Any) -> str:
     try:
         h = request.headers.get("x-hub-channel", "")
@@ -263,6 +301,12 @@ def track(subject: str):
                     # 「agent 自己找的技能」与「人点名的技能」在账上长得一样。
                     **({"mode": _mode_of(subject, kwargs)} if _mode_of(subject, kwargs) else {}),
                 }
+                # 来源路以**返回体**兜底：/read 不传 route 时（名字唯一）也要能记下实际那一路；
+                # /relevant 的 route 只能从返回体拿（逐条目字段）。
+                _rr = _route_of(data)
+                if _rr and not base.get("route"):
+                    base["route"] = _rr
+                _routes = _route_by_name(data)
                 if subject == "skill.invoke":
                     # /invoke 的 caller 是自报（body 字段或 x-hub-channel 通道头），
                     # 不是协议取证。响应里写 caller_reported=true，流水也必须同样落——
@@ -276,9 +320,13 @@ def track(subject: str):
                     # 塞成数组它会整个str() 成一个怪串、账照样记不上（判例 103）。
                     # first 名重复写进 base.first_name 供人读，完整清单在 names。
                     for i, nm in enumerate(names):
-                        _fire(subject, "success", int((time.monotonic() - t0) * 1000),
-                              {**base, "name": nm, **({"first_name": names[0]} if i == 0 else {}),
-                               "name_count": len(names)})
+                        ev = {**base, "name": nm, **({"first_name": names[0]} if i == 0 else {}),
+                              "name_count": len(names)}
+                        # 逐名事件带自己那条的 route（auto 的曝光必须落到 (name, route) 同一行）
+                        _rt = _routes.get(nm)
+                        if _rt:
+                            ev["route"] = _rt
+                        _fire(subject, "success", int((time.monotonic() - t0) * 1000), ev)
                 return data
             except HTTPException as e:
                 # 失败路径同样留痕（查询词 scrub 后截 200），然后原样 re-raise——

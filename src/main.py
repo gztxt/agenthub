@@ -96,8 +96,16 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.132"
-#   v0.13.132：调用徽标不再冻结 + 技能记账分层（PT-20261020-01）。
+VERSION = "0.13.133"
+#   v0.13.133：技能权重端点 `/api/skill/usage`（PT-20261020-01）。
+#   ① 公式 `use = 2*explicit + read; score = use^2/(use+auto)`：曝光（auto_inject）
+#      **只作分母**，从曝光不使用的技能得 0 分；explicit_invoke 与 read 才是正样本。
+#   ② 身份 = (name, route)：同名多路分开计，另给 by_name 汇总（分数在各自层级重算）。
+#   ③ caller 过滤**先过滤再算分**（按某个 agent 自己的曝光重算分母），不是后过滤。
+#   ④ 修埋点缺口：/relevant 的 route 是逐条目字段，原实现只记名字 ⇒ 曝光落到 route=""
+#      的另一行，auto 永远配不到使用上。改为逐名事件带自己那条的 route。
+#   ⑤ legacy（无 mode/via 的旧 relevant）单列，不进 use 也不进 auto；坏 detail 计数。
+#   v0.13.132：调用徽标不再冻结 + 自动下发/指名调用分桶（PT-20261020-01）。
 #   ① 用户报「调用记录后面一直显示 0」：`skillsLoaded` 一次性加载闸把汇总请求一起挡住了，
 #      首屏那一刻库里 0 条 ⇒ 徽标永远停在 0。改为重进页/切到记录视图各补刷一次，
 #      另加 60s 保活（仅技能页可见时，只刷数字不重绘 375 行）。

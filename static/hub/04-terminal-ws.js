@@ -1411,8 +1411,14 @@ function renderSkillInvocations() {
     const auto = SKILL_INV_VIEW.auto;
     if (auto) {
       const un = auto.unknown_caller ? '（其中 ' + auto.unknown_caller + ' 次未自报调用方）' : '';
+      // query/legacy 单列：它们是「同端点的另一种用途」，混进自动下发会把
+      // 人工检索和旧账算成曝光，权重分母凭空变大（656 那次就是这么来的）。
+      const other = [];
+      if (auto.query) other.push('人工检索 ' + auto.query);
+      if (auto.legacy) other.push('旧事件未自报 ' + auto.legacy);
       sumEl.innerHTML += '<br><span class="hint">自动下发：<b>' + (auto.total || 0) +
         '</b> 次 · 按调用方：' + fmt(auto.by_caller || {}) + un +
+        (other.length ? '（另有 ' + other.join('、') + ' 条，不计入）' : '') +
         (auto.error ? ' · 读取失败：' + escapeHtml(String(auto.error)) : '') + '</span>';
     }
     sumEl.innerHTML +=

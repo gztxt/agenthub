@@ -334,10 +334,13 @@ class TestInvocations(_InvokeCase):
         self._invoke(name="demo", caller="codex")
 
         b = self.client.get("/api/skill/invocations").json()
-        self.assertEqual(b["auto"]["total"], 2, "两次 relevant 各落一条（按名逐行记）")
-        self.assertEqual(b["auto"]["by_caller"], {"claude": 1},
-                         "未自报的那次必须落在 unknown_caller，不许算到 anonymous 头上")
-        self.assertEqual(b["auto"]["unknown_caller"], 1)
+        # 只有声明 via=hook 的那次算自动下发；人工查询单列 query。
+        # 旧实现把整张 skill.relevant 都算 auto（实测把 653 条旧账算成「自动下发 656 次」），
+        # 与权重榜的 auto 差两个数量级——同一个词必须是同一件事。
+        self.assertEqual(b["auto"]["total"], 1, "未声明 via 的人工查询不许算自动下发")
+        self.assertEqual(b["auto"]["query"], 1, "人工检索单列，不从账上消失")
+        self.assertEqual(b["auto"]["by_caller"], {"claude": 1})
+        self.assertEqual(b["auto"]["unknown_caller"], 0)
         self.assertEqual(b["items"][0]["mode"], "explicit_invoke")
 
         modes = [json.loads(e["detail"]).get("mode") for e in self._events("skill.relevant")]
@@ -448,6 +451,21 @@ class TestPickExtra(unittest.TestCase):
         # 超长截断（detail 不许被长文撑爆）
         got = runlog._pick_extra({"req": _Req(task="t" * 900)})
         self.assertLessEqual(len(got["task"]), runlog._TASK_MAX_CHARS)
+
+    def test_route_extraction_from_list_and_single(self):
+        """逐名事件必须能带上来源路：/relevant 的 route 在条目里，/read 在顶层。
+
+        没有它，(name, route) 维度的权重会把曝光记到 route="" 的另一行，
+        auto 永远配不到使用上 ⇒ 自动下发对分数失效（2026-10-20 实测）。
+        """
+        self.assertEqual(
+            runlog._route_by_name({"bm25": {"items": [{"name": "a", "route": "pi"}]}}),
+            {"a": "pi"})
+        self.assertEqual(runlog._route_by_name({"items": [{"name": "b", "route": "claude"}]}),
+                         {"b": "claude"})
+        self.assertEqual(runlog._route_by_name({"items": [{"name": "c"}]}), {})
+        self.assertEqual(runlog._route_of({"name": "x", "route": "codex"}), "codex")
+        self.assertEqual(runlog._route_of({"items": []}), "")
 
     def test_via_picked_and_mode_layered(self):
         """via 必须进 detail；mode 由 via 决定，缺 via 不推断为自动。"""

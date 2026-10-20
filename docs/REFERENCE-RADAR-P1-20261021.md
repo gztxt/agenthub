@@ -79,6 +79,7 @@
 | `tests/test_skill_center_ui.py` | 84 例通过 |
 | `tests/test_staticguard.py` | 12 例通过 |
 | `tests/test_hubjs_split.py` | 3 例通过（`static/hub.js` 与分片逐字节一致，`?v=` 已随内容更新） |
+| `bash scripts/run_tests.sh hermetic` | **2572 例通过 / 0 跳过 / 0 失败**（工作树无 `venv` 时会有 5 例环境错误，软链后消失；不是代码问题） |
 | `tests/probe_refscout_ui.py`（真 Chromium） | 9/9：tab 切换、4 卡渲染、详情 4379 字含 `as of`/可借鉴点、390px 横向溢出 0px、无阻塞对话框 |
 | MCP 端到端 | `initialize` → `tools/call hub_ref_get` 返回 3 张卡；`hub_ref_scout`/`hub_ref_get` 已注册（共 16 个工具） |
 

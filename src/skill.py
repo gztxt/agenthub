@@ -1189,6 +1189,77 @@ async def skill_invoke(req: InvokeRequest, request: Request):
     return out
 
 
+class AutoRequest(BaseModel):
+    #: 一句任务描述（不是技能名）。服务端自己选技能——这是「自动调用」与
+    #: `/invoke`（点名调用）的唯一差别。
+    task: str
+    caller: str = ""
+    #: false = 只用本地，**不联网、不写盘**（注入钩子/短预算场景用）。
+    allow_store: bool = True
+
+
+@router.post("/auto")
+@runlog.track("skill.invoke",
+              skip_when=lambda d: not (isinstance(d, dict) and d.get("ok")),
+              mode="auto_invoke")
+async def skill_auto(req: AutoRequest, request: Request):
+    """按任务描述**自动选一个技能并激活**：本地优先，本地不够像才走商店。
+
+    与两个既有入口的分工（三者不重叠，避免「同一件事三条链路各写一套」）：
+      · `/relevant` 只给候选（名字+用途，**不激活**）——注入钩子用，预算 500ms；
+      · `/invoke`   **点名**激活（调用方已经知道技能名）；
+      · `/auto`     **不点名**激活：收一句任务描述，由服务端排序后直接回正文。
+        agent 在工具环里不知道「该用哪个技能」时调它，一次调用就拿到说明书。
+
+    选人逻辑**完全复用** `/api/skill/store/acquire`（本地 BM25 归一化 ≥0.40 ⇒ 本地；
+    否则商店六维择优 + 安全报告 + 免 Key 优先 + 小时额度）。本端点不另立门槛：
+    两套门槛必然漂移，而漂移的形态是「同一个任务在两个入口选出不同技能」。
+
+    记账：成功时落 `skill.invoke`，`mode=auto_invoke`。**不与 explicit_invoke 混桶**
+    （`skill_weights` 单列 `auto_use`，权重 1；有人点名的是 2）——「服务端选的」
+    与「人点名的」在账上必须能分开，否则热门榜会被自动取用刷成另一张榜。
+
+    失败一律 **200 + ok=false + reason**（与 acquire 同口径）：对 agent 来说
+    「没找到」是正常结果，不该用 404 逼它猜是路径错还是真没有。
+    未命中时回 `local.candidates` 与 `store.ranking`，供它换词重试或人工挑。
+    """
+    task = (req.task or "").strip()
+    if not task:
+        raise HTTPException(400, "task 不能为空：传一句你想做的事（不是技能名）")
+    if len(task) > 2000:
+        raise HTTPException(400, "task 过长（≤2000 字符）")
+    caller = (req.caller.strip() or request.headers.get("x-hub-channel")
+              or "anonymous")[:64]
+    import skill_store          # 延迟导入：skill_store 依赖本模块（顶层会成环）
+    try:
+        got = await skill_store.acquire(task, caller=caller, task=task,
+                                        allow_install=bool(req.allow_store),
+                                        local_only=not req.allow_store)
+    except skill_store.StoreError as se:
+        # 参数错 / 额度满 / 目标不可写：这些是「这次没做成」，不是「没有这个技能」。
+        # 保留 HTTP 语义（429/409），正文带 auto 块说明这一步停在哪。
+        raise HTTPException(se.status, {
+            "error": str(se), "activated": False, "auto": True,
+            "source": "none", "caller": caller,
+            "task": tdai_client.scrub(task)[:500],
+        })
+    keep = ("name", "route", "content", "truncated", "bytes", "bytes_total", "path",
+            "matched", "matched_in", "slug", "version", "trust", "warning",
+            "reason", "would_install", "local", "store", "took_ms")
+    out = {k: got.get(k) for k in keep if k in got}
+    out.update({
+        "ok": bool(got.get("ok")),
+        "activated": bool(got.get("ok")),
+        "auto": True,
+        "source": got.get("source") or "none",
+        "caller": caller,
+        "task": tdai_client.scrub(task)[:500],
+        "caller_reported": True,          # 自报，不是协议取证（同 /invoke）
+        "recorded_subject": "skill.invoke" if got.get("ok") else "",
+    })
+    return out
+
+
 @router.get("/catalog")
 async def skill_catalog(route: Optional[str] = None,
                         q: str = Query(default="", max_length=200),
@@ -1382,7 +1453,9 @@ async def skill_usage_report(days: int = Query(default=30, ge=1, le=365),
     """技能权重榜（PT-20261020-01）：`use` 与 `auto` 分开报，再给一个可解释的 score。
 
     口径与公式写在 `skill_weights` 模块 docstring 里（本端点不另立第二套）：
-    `use = 2*explicit + read`，`score = use²/(use+auto)`——**曝光只作分母**。
+    `use = 2*explicit + read + auto_use`，`score = use²/(use+auto)`——**曝光只作分母**。
+    `auto_use`＝`/auto` 自动激活（服务端选的，交付了正文）⇒ 算使用但按 1 分，
+    与有人点名的 `explicit`（2 分）分桶；只当曝光的 `auto` 仍是 0 分。
     `caller` 过滤是**先过滤再算分**（按某个 agent 自己的使用与曝光重算），
     不是对全机榜单做后过滤；后者会把别人的曝光算进它的分母。
     读库失败抛 500 而不是回空榜：空榜的语义是「这个窗口没人用」，不能与故障同形。

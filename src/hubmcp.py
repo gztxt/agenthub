@@ -15,6 +15,8 @@
           / hub_skill_acquire（v0.13.135：任务描述 → 本地优先 + 商店自动补货。
           会经 `/api/skill/store/acquire` 往 techdocs 发现点写技能文件，故
           **只在调用方显式传 allow_install=true 时**才可能落盘；默认值见工具说明）
+          / hub_skill_auto（v0.13.138：任务描述 → 自动选中并**激活**，一次调用回正文。
+          与 acquire 同一条选人逻辑，差别是记账分桶 auto_invoke 且语义是「拿来用」）
 """
 import json
 import os
@@ -354,9 +356,13 @@ def hub_skill_acquire(query: str, caller: str = "", task: str = "",
     这是「我需要在做 X，但技能中心没有对应技能」时的入口——传一句任务/需求
     （中文英文都可以），不用先知道技能叫什么：
       ① 本地 BM25 命中够强 ⇒ `source=local`，直接回正文，**不联网、不装东西**；
-      ② 本地不够像 ⇒ 搜商店，候选与查询的覆盖率过门槛才装（默认装到 `techdocs`），
-         装完**立刻**回该技能的指令正文（`source=store`，带 `trust=community` 警告）；
-      ③ 都没有 ⇒ `ok=false` + `reason`，并回 `local.candidates` / `store.candidates`
+      ② 本地不够像 ⇒ 搜商店。**同类往往有十几条**，所以不是「搜到第一条就装」：
+         按六维打分（相关性/安全报告/下载量/维护度/认证/是否要自带 Key）排序，
+         安全报告 `suspicious` 与「不像」都是硬否决，质量分低于 0.45 也不装；
+         同类有免 Key 的就优先免 Key。装好（默认装到 `techdocs`）后**立刻**回该技能
+         的指令正文（`source=store`，带 `trust=community` 警告）。
+         `store.ranking` 里逐条给出各维度分与否决理由，可据此判断要不要换词重试。
+      ③ 都没有 ⇒ `ok=false` + `reason`，并回 `local.candidates` / `store.ranking`
          供你自己判断下一步，**不会随便装一个不相干的东西**。
 
     `allow_install=false` 只检索、报告「将会装什么」（配合 `dry_run` 预览）。
@@ -366,6 +372,28 @@ def hub_skill_acquire(query: str, caller: str = "", task: str = "",
     body = {"query": query, "caller": caller or "mcp", "task": task,
             "allow_install": bool(allow_install)}
     return json.dumps(_post("/api/skill/store/acquire", body), ensure_ascii=False)
+
+
+@server.tool()
+def hub_skill_auto(task: str, caller: str = "", allow_store: bool = True) -> str:
+    """**按任务描述自动选技能并激活**（v0.13.138）：不用先知道技能叫什么。
+
+    什么时候用：接到一个任务、**手里没有具体技能名**时，先调它一次。服务端按
+    任务描述排序：本地技能够像就直接回正文（不联网）；不够像才搜 SkillHub 商店
+    并按六维质量分择优安装（默认 techdocs），装完立刻回正文。
+    这比「先 list 再挑名字再 invoke」少两轮，也不会因为名字记错而漏掉本机等价技能。
+
+    返回 `source=local|store|none` 说明这次从哪拿到；`content` 是技能的 SKILL.md
+    指令正文。**执行仍由你在自己的工具环境里完成**——hub 只做「选中 + 激活 + 记账」，
+    不代跑技能自带脚本（与 hub_skill_invoke 同一边界）。
+
+    失败是 200 + `ok=false` + `reason`，并回 `local.candidates` / `store.ranking`
+    让你判断要不要换更具体的词；**不会为了交差随便装一个不相干的技能**（商店有
+    「不像 / 安全可疑 / 质量分 <0.45」三重门槛，自动安装还有小时额度）。
+    `allow_store=false` = 只用本地，不联网不写盘（短预算/离线场景）。
+    """
+    body = {"task": task, "caller": caller or "mcp", "allow_store": bool(allow_store)}
+    return json.dumps(_post("/api/skill/auto", body), ensure_ascii=False)
 
 
 @server.tool()

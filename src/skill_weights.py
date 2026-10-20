@@ -6,9 +6,14 @@
 全机最热会变成「每轮都被推但没人读」的那几个，与「常用技能」的语义正相反。
 
 【公式】
-    使用量 use = 2×explicit + 1×read
+    使用量 use = 2×explicit + 1×read + 1×auto_use
     曝光量 auto = skill.relevant 中 mode=auto_inject 的条数
     score = use² / (use + auto)      （use+auto=0 时为 0）
+
+`auto_use`（v0.13.138）＝ `/api/skill/auto` 自己按任务描述选中并**激活**的技能。
+它既不是「同一批候选的曝光」（那个是 auto），也不是「有人点名」（那个是 explicit）：
+机器选完把说明书交出去了，技能**确实被用了**，但不该与指名调用同权（少一分信任），
+更不该只当曝光（那样自动取用会被算成 0 分，等于「越自动越吃亏」）。
 
 三个性质是可验证的，不是修辞：
 
@@ -44,9 +49,12 @@ SOURCE = "rest"
 #: 计入权重的 subject。`skill.list` 是浏览目录，不是使用；`skill.inject` 目前无生产者。
 SUBJECTS = ("skill.read", "skill.invoke", "skill.relevant")
 
-#: 使用强度。invoke 拿走指令正文（要执行），read 只是查看。
+#: 使用强度。点名 invoke 拿走指令正文（要执行）＝2；read 只是查看＝1；
+#: auto_use 是服务端选出来并激活（不是人点的）＝1，与 read 同权而已——它比 read
+#: 强（交付了正文），但比 explicit 弱（没人许诺要用它）。
 W_EXPLICIT = 2
 W_READ = 1
+W_AUTO_USE = 1
 
 #: 每条明细最多回带多少个 event id（可追溯性 vs 响应体积）。超出只报数。
 EVIDENCE_CAP = 20
@@ -92,13 +100,17 @@ def _parse_detail(raw: Any) -> Optional[Dict[str, Any]]:
 
 
 def classify(subject: str, det: Dict[str, Any]) -> Tuple[str, str]:
-    """把一个事件归到 `(bucket, name)`。bucket ∈ explicit/read/auto/query/legacy/skip。
+    """把一个事件归到 `(bucket, name)`。bucket ∈ explicit/read/auto_use/auto/query/legacy/skip。
 
     判据只有一条：**auto 必须由调用方显式声明**（`mode=auto_inject` 或旧写法 `via=hook`）。
     缺声明时宁可归 legacy，也不猜——猜错的代价是权重被系统性抬高。
     """
     name = str(det.get("name") or det.get("first_name") or "").strip()
     if subject == "skill.invoke":
+        mode = str(det.get("mode") or "").strip().lower()
+        via = str(det.get("via") or "").strip().lower()
+        if mode in ("auto_invoke", "auto") or (not mode and via in ("auto", "hook")):
+            return "auto_use", name
         return "explicit", name
     if subject == "skill.read":
         return "read", name
@@ -113,12 +125,17 @@ def classify(subject: str, det: Dict[str, Any]) -> Tuple[str, str]:
     return "skip", name
 
 
+#: 需要按调用方/证据分桶的**使用**桶（auto 曝光是另一个量，见模块 docstring）。
+_USE_BUCKETS = ("explicit", "read", "auto_use")
+_EVIDENCE_BUCKETS = ("explicit", "read", "auto_use", "auto")
+
+
 def _new_row(name: str, route: str) -> Dict[str, Any]:
     return {
         "name": name, "route": route,
-        "explicit": 0, "read": 0, "auto": 0, "query": 0, "legacy": 0,
-        "by_caller": {"explicit": {}, "read": {}, "auto": {}},
-        "evidence": {"explicit": [], "read": [], "auto": []},
+        "explicit": 0, "read": 0, "auto_use": 0, "auto": 0, "query": 0, "legacy": 0,
+        "by_caller": {b: {} for b in _EVIDENCE_BUCKETS},
+        "evidence": {b: [] for b in _EVIDENCE_BUCKETS},
         "last_used_at": "",
     }
 
@@ -142,17 +159,18 @@ def _parse_ts(raw: Any) -> Optional[datetime]:
 
 
 def _finalize(row: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
-    use = W_EXPLICIT * row["explicit"] + W_READ * row["read"]
+    use = (W_EXPLICIT * row["explicit"] + W_READ * row["read"]
+           + W_AUTO_USE * row["auto_use"])
     s, conv = score(use, row["auto"])
     row["use"] = use
     row["score"] = s
     row["conversion"] = conv
-    for b in ("explicit", "read", "auto"):
+    for b in _EVIDENCE_BUCKETS:
         row["by_caller"][b] = dict(sorted(row["by_caller"][b].items(), key=lambda kv: (-kv[1], kv[0])))
     ev = row["evidence"]
     # 总数按桶计数（每事件在该技能下只落一行），不按 evidence 列表长度——
     # 后者被 EVIDENCE_CAP 截断，用它当「共几次」会把 200 次说成 20 次。
-    row["evidence_total"] = {"explicit": row["explicit"], "read": row["read"], "auto": row["auto"]}
+    row["evidence_total"] = {b: row[b] for b in _EVIDENCE_BUCKETS}
     row["evidence"] = {k: v[:EVIDENCE_CAP] for k, v in ev.items()}
     # 冷热分层：把「没人用」的两种成因分开——从没被用过 vs 被推过但没人打开。
     # 这不是删除依据（STALE_AFTER_DAYS 是可改常量，只作观察）。
@@ -182,7 +200,8 @@ def build(rows: Iterable[Dict[str, Any]], only_caller: str = "",
     want = (only_caller or "").strip().lower()
     per: Dict[Tuple[str, str], Dict[str, Any]] = {}
     counts = {"rows": 0, "bad_detail": 0, "no_name": 0, "filtered_out": 0,
-              "explicit": 0, "read": 0, "auto": 0, "query": 0, "legacy": 0, "skip": 0}
+              "explicit": 0, "read": 0, "auto_use": 0, "auto": 0,
+              "query": 0, "legacy": 0, "skip": 0}
     for r in rows or []:
         det = _parse_detail(r.get("detail"))
         if det is None:
@@ -206,19 +225,18 @@ def build(rows: Iterable[Dict[str, Any]], only_caller: str = "",
         row = per.setdefault((name, route), _new_row(name, route))
         ev_id = r.get("id")
         ts = str(r.get("created_at") or "")
-        if bucket in ("explicit", "read", "auto"):
+        if bucket in _EVIDENCE_BUCKETS:
             # 同一事件按名逐行落库（runlog 的既有形状），id 可重复指向同一次调用；
             # evidence 保留首次出现的顺序即可，计数在 *_total 里如实反映。
             if ev_id is not None and len(row["evidence"][bucket]) < EVIDENCE_CAP * 5:
                 row["evidence"][bucket].append(ev_id)
             _bump(row["by_caller"][bucket], caller)
-            if bucket in ("explicit", "read") and ts > row["last_used_at"]:
+            if bucket in _USE_BUCKETS and ts > row["last_used_at"]:
                 row["last_used_at"] = ts
         row[bucket] += 1
 
-    items = [_finalize(dict(v, by_caller={"explicit": dict(v["by_caller"]["explicit"]),
-                                          "read": dict(v["by_caller"]["read"]),
-                                          "auto": dict(v["by_caller"]["auto"])},
+    items = [_finalize(dict(v, by_caller={b: dict(v["by_caller"][b])
+                                          for b in _EVIDENCE_BUCKETS},
                             evidence={k: list(v) for k, v in v["evidence"].items()}), now=now)
              for v in per.values()]
     items.sort(key=lambda x: (-x["score"], -x["use"], -x["auto"], x["name"], x["route"]))
@@ -227,17 +245,17 @@ def build(rows: Iterable[Dict[str, Any]], only_caller: str = "",
     for it in items:
         n = by_name.setdefault(it["name"], {
             "name": it["name"], "routes": [], "explicit": 0, "read": 0,
-            "auto": 0, "query": 0, "legacy": 0, "by_caller": {"explicit": {}, "read": {}, "auto": {}},
-            "evidence": {"explicit": [], "read": [], "auto": []}, "last_used_at": "",
+            "auto_use": 0, "auto": 0, "query": 0, "legacy": 0,
+            "by_caller": {b: {} for b in _EVIDENCE_BUCKETS},
+            "evidence": {b: [] for b in _EVIDENCE_BUCKETS}, "last_used_at": "",
         })
         if it["route"] and it["route"] not in n["routes"]:
             n["routes"].append(it["route"])
-        for k in ("explicit", "read", "auto", "query", "legacy"):
+        for k in ("explicit", "read", "auto_use", "auto", "query", "legacy"):
             n[k] += it[k]
-        for b in ("explicit", "read", "auto"):
+        for b in _EVIDENCE_BUCKETS:
             for c, v in it["by_caller"][b].items():
                 n["by_caller"][b][c] = n["by_caller"][b].get(c, 0) + v
-        for b in ("explicit", "read", "auto"):
             if len(n["evidence"][b]) < EVIDENCE_CAP:
                 n["evidence"][b].extend(it["evidence"][b][:EVIDENCE_CAP - len(n["evidence"][b])])
         if it["last_used_at"] > n["last_used_at"]:
@@ -248,8 +266,8 @@ def build(rows: Iterable[Dict[str, Any]], only_caller: str = "",
     # `rows` 只数「带技能名、能进榜单」的事件，而各 bucket 数的是全部事件
     # （含无名的注入回包）⇒ 两者相加必然对不上。把口径显式写进 totals，
     # 让「为什么 654 行却有 666 个 bucket 计数」在响应里自答，不靠读代码。
-    counts["events"] = counts["explicit"] + counts["read"] + counts["auto"] \
-        + counts["query"] + counts["legacy"]
+    counts["events"] = counts["explicit"] + counts["read"] + counts["auto_use"] \
+        + counts["auto"] + counts["query"] + counts["legacy"]
     counts["named"] = counts["rows"]
     return {
         "items": items,
@@ -284,13 +302,14 @@ def load(days: int = 30, route: str = "", caller: str = "",
         "days": d,
         "identity": "(name, route)",
         "filters": {"route": route.strip() or None, "caller": (caller or "").strip().lower() or None},
-        "weights": {"explicit": W_EXPLICIT, "read": W_READ, "auto": "denominator-only"},
-        "formula": "use = 2*explicit + read; score = use^2 / (use + auto)",
+        "weights": {"explicit": W_EXPLICIT, "read": W_READ, "auto_use": W_AUTO_USE,
+                    "auto": "denominator-only"},
+        "formula": "use = 2*explicit + read + auto_use; score = use^2 / (use + auto)",
         "scope": "仅 hub 通道（source=rest）；agent 直读磁盘的旁路不计入 ⇒ 置信度封顶 medium",
         "legacy_note": "mode/via 缺失的 skill.relevant 记 legacy，不进 use 也不进 auto",
         "stale_after_days": STALE_AFTER_DAYS,
         "usage_classes": {
-            "used": "窗口内有 explicit/read，且最近一次使用在 stale_after_days 内",
+            "used": "窗口内有 explicit/read/auto_use，且最近一次使用在 stale_after_days 内",
             "stale": "有使用记录，但最近一次已超过 stale_after_days（只作观察，不是删除依据）",
             "exposed_only": "只被自动推过、从未被点名或阅读 ⇒ score=0",
             "unknown": "只有 legacy/query 事件，无法判定用途",

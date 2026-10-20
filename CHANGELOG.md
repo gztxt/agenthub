@@ -1,3 +1,256 @@
+## v0.13.139 — 中文任务：不再因语言被扣分、整句搜不到时用短词补候选（且不自动装）
+
+> 来源：用户「测试执行本任务时就可以自动调用技能 包括本地技能和技能商店技能」的实测。
+> 上一版 `/auto` 对英文任务已经通畅，但**纯中文长句**几乎全军覆没。这一版专治三处。
+
+### 一、中文技能被语言系统性扣分（真缺陷，不是调参）
+
+相关性里的 `kw_name` 只对 **ASCII 关键词**有定义（`_store_keywords` 只抽英文词）。
+中文任务该通道**结构性恒 0** ⇒ `rel` 上限 0.35，而英文任务上限是 1.0。
+后果：名字完全对得上的中文技能也过不了质量底线——实测 `播客音频转知识笔记`
+六维合计 **0.4355 < 0.45**，被否决的不是「不像」，是「不是英文」。
+
+改为：
+
+```
+rel = 0.65 * max(kw_name, qcov_name) + 0.35 * qcov
+```
+
+`qcov_name` 是任务二字组在**技能名**上的覆盖率，即 `kw_name` 的中文可达形式；
+取大不取和（相加会把同一个「像不像」判断重复计一次）。
+
+### 二、整句搜不到：上游对中文是**词级匹配**（约 4 字以内）
+
+实测同一句 `把播客音频转成带说话人标注的文字稿`：
+
+| 发出的查询 | 首条结果 | 相关 |
+|---|---|---|
+| 整句 | 编程专家Pro.Skill | 否 |
+| `播客 音频 文字稿`（空格分隔） | 编程专家Pro.Skill | 否（更差） |
+| `播客音频`（4 字） | 播客音频转知识笔记 | **是** |
+| `带说话人标注`（6 字） | 编程专家Pro.Skill | 否 |
+
+新增 `_cn_segments()`：按虚词切段（≤5 字整段保留，超过取头/尾 4 字），
+**只在首轮无候选时**再搜一轮（两路并发）。不做无条件 fan-out——那会让每次兜底
+多付网络往返，而绝大多数任务首轮就命中了。
+
+### 三、派生短词补到的候选**不许自动装**
+
+短词命中的可能是**反向技能**：`播客音频` 能命中「播客音频**生成**」，而任务是
+「转成文字稿」。故新增 `matched_main`：**整句**达标才允许自动安装；
+只靠派生短词命中的行一律 `veto`（文案写明「需人工看一眼再装」），只进排行榜。
+
+这一轮也因此不查安全报告（反正装不了）：实测整条兜底 **8.6s → 4.0s**。
+
+### 四、两处口径修正
+
+- `store.ok` 装成功后没翻绿 ⇒ 同一个响应里「store 失败」与「已落盘」并存；
+- `/auto` 的 `keep` 里只有 `bytes_total`（**仅截断时才存在**），缺 `bytes`
+  ⇒ 未截断时 `bytes=null`，调用方拿到正文却不知道多大。
+
+### 五、验证（2026-10-20，生产 :3102）
+
+- `语音转文字`：本地归一化 0.247 不够像 ⇒ 商店选 `@user_03f2ab96/yuyinzhuanxie`
+  （Q=0.867、两家报告 benign、下载 9.9k）⇒ 装入 techdocs、回 3322B 正文、3.1s；
+  **再问同一句走本地**（`source=local`，不联网）——这正是「装过的下次直接用」。
+- `把播客音频转成带说话人标注的文字稿`：整句覆盖 0.38 ⇒ 派生短词补到播客类技能
+  （Q=0.72）但**不落盘**，`reason` 明说「只靠派生短词命中」。
+- 记账：`/auto` 落 `skill.invoke` + `mode=auto_invoke`，权重榜 `auto_use` 单独一列
+  （实测 pdf auto_use=3、speech-to-text auto_use=1，explicit 仍分开）。
+- L0：新增 `TestCnSegment`（4 例）、`TestCnScoring`（3 例）。
+- 红臂四条（逐条先红后绿）：撤 `rel` 取大 / 撤 `matched_main` 否决 / 撤派生补搜 /
+  撤 `store.ok` 翻绿。
+
+## v0.13.138 — 自动取用：一句任务描述 → 选中技能并激活（本地优先 / 商店兜底）
+
+> 来源：用户「测试执行本任务时就可以自动调用技能 包括本地技能和技能商店技能」。
+> 与 v0.13.135 的分工：那个补的是「点名了但本地没有 → 商店补货」，
+> 这个补的是「**根本不知道该点名谁** → 服务端自己选」。
+
+### 一、新端点 `POST /api/skill/auto`
+
+```json
+{"task": "把这份 PDF 转成 Markdown", "caller": "codex", "allow_store": true}
+```
+
+返回与 `/invoke` 同形（`name` / `route` / `content` / `truncated` / `bytes_total` / `path`），
+另加 `activated`、`source=local|store|none`、`local`、`store`（含逐条排序与否决理由）。
+选人逻辑**完全复用** `/api/skill/store/acquire`：本地归一化 BM25 ≥0.40 就激活，
+否则商店六维择优（相关性/安全/下载量/维护度/认证/免 Key）+ 硬否决 + 小时额度。
+**不另立第二套门槛**——两套门槛必然漂移，漂移的形态是「同一个任务在两个入口选出不同技能」。
+
+失败一律 `200 + ok=false + reason`（参数错才 400）：对 agent 来说「没找到」是正常结果，
+用 404 会逼它猜是路径错还是真没有。
+
+### 二、`local_only` 不是 `allow_install=false`
+
+后者只阻止落盘，**搜索照打**（语义是「只报告将会装什么」）。`/auto` 的
+`allow_store=false` 映射到新的 `local_only=True`：本地不够像就直接回未命中，
+**不联网、不写盘**。混用会让「本地没找到」静默等一次网络超时。
+
+### 三、记账分桶：`auto_invoke` / `auto_use`
+
+自动激活落 `skill.invoke` + `mode=auto_invoke`；权重榜单列 `auto_use` 桶：
+
+```
+use = 2*explicit + 1*read + 1*auto_use
+score = use² / (use + auto)
+```
+
+- 不许混进 `explicit`（2 分）：「有人点名」与「服务端选的」在账上必须分开；
+- 也不许只当曝光（0 分）：自动取用交付了正文，算成 0 分等于「越自动越吃亏」。
+
+### 四、顺带修 `acquire` 的四处半截话
+
+搜索失败 / 商店无结果 / 无候选 / 自动安装关闭，原先只在 `store.reason` 里写原因，
+顶层没有 ⇒ 调用方读顶层看到「没原因」。现全部回填顶层 `reason`。
+
+### 五、MCP
+
+新增 `hub_skill_auto(task, caller, allow_store)`：agent 在工具环里不必先 list 再猜名字，
+一次调用拿回说明书；`allow_store=false` 时纯本地可用（短预算/离线）。
+
+### 六、验证
+
+- L0 `tests/test_skill_auto.py` 9 例：本地命中不联网、local_only 不搜索、商店兜底装完回正文、
+  不相关候选不落盘、无候选回 reason、自动/点名分桶、MCP 转发、空任务 400。
+- 红臂四条（逐条先红后绿）：取消 `mode` 强制 / 取消 `local_only` / 取消 `auto_use` 分桶 /
+  去掉顶层 `reason`。
+
+## v0.13.137 — 端到端实测暴露的四处修补（计划态语义 / 记账 / 状态字段 / 默认目标）
+
+> 来源：用户「测试一次搜索 下载 安装 调用技能商店的技能，多维度评估技能契合度」。
+> 下面四条**都是实测跑出来的**，不是读代码猜的。
+
+### 一、计划态不再冒充「没找到」
+
+`POST /api/skill/store/acquire` 的 `dry_run=true` 与 `allow_install=false` 原先都返回
+`ok=false` + `source=none`，**顶层连 `reason` 都没有**（实测 `/tmp/acq_dry.json` 只有
+`ok/query/caller/task/source/took_ms`）。这跟「商店里真没有」完全同形，agent 只能猜。
+
+现在回：
+
+```json
+{"ok": false, "source": "none", "reason": "dry_run：只报告将装到哪",
+ "would_install": {"slug": "@kunlungrowth/excel", "name": "Excel", "route": "techdocs",
+                   "quality": 0.822, "security": "benign",
+                   "how_to_proceed": "确认要装就再调一次 allow_install=true"}}
+```
+
+### 二、计划态不算一次使用
+
+`/store/acquire` 用 `skill.invoke` 记账（它确实交付正文），但 dry_run 交付 0 字节，
+却照样留一条 **name 为空** 的流水：调用记录多一条无名行，`use` 分子跟着虚增
+（实测 id 17141 / 17144 就是这么来的）。
+
+`runlog.track` 新增 `skip_when(data)->bool`；`ok=false` 时不记成功事件
+（HTTPException / fail 路径不变，仍照记）。反向用例同时钉住「真交付必须留痕」。
+
+### 三、`cli_present` 与 `available` 同源
+
+生产实测 `available=true` 而 `cli_present=false`：后者用 `shutil.which("skillhub")`
+查**本进程 PATH**，systemd 下没有 `~/.local/bin`。改成「CLI 这个文件可执行」。
+
+### 四、安装目标默认＝自动兜底目标
+
+真浏览器截图发现：面板写着「自动兜底 → techdocs」，下拉却停在列表第一项 `claude`。
+点安装就把第三方技能写进 `~/.claude/skills`，与策略说的是两回事。
+`_fillStoreTargets(targets, preferred)` 用 `auto.route` 兜底（用户手选过则尊重手选）。
+
+### 五、本轮实测记录（生产 :3102，2026-10-20）
+
+| 步骤 | 结果 |
+|---|---|
+| 搜索 `ppt` | `via=api`，12 条，富字段齐全（下载 8.8万 / 151万…，其中 1 条标「需自带 Key」） |
+| 本地优先 | 装好后再查同一句 ⇒ `source=local`，不再联网、不再装第二份 |
+| 六维评估 | 24 条候选 → 12 条可装；冠军 `@user_f9ab891e/666-v2` Q=0.846（rel 0.80 / 安全 benign 两实验室 / 下载 151,663 / 新） |
+| 安装 | 3.96s（含两路搜索 + 3 次安全报告 + 下载），落到 `skills/@user_f9ab891e/666-v2`，回 1085B 正文 |
+| 调用 | `POST /api/skill/invoke` 26ms，`recorded_subject=skill.invoke`，调用记录首条即它（caller=codebuddy，自报） |
+| 权重 | `/api/skill/usage`：ppt-generator explicit=3、use=6、auto=0 |
+| 安全否决 | `@clawhub_kirkraman/martin-pdf` 不带 force ⇒ 409「科恩:安全 / 云鼎:可疑」，**未落盘** |
+| 面板 | 1440 宽无横向溢出；行内含「下载 8.8万」依据；自动兜底行 1/6；账号行未登录但标明搜索/下载免登录 |
+
+### 六、闸门
+
+`tests/test_skill_store.py` 36 例（新增 4）：计划态可区分 / 计划态不记账 /
+真交付必留痕 / `cli_present` 与 `available` 同源；`tests/test_skill_center_ui.py` 76 例
+（新增 1）：安装目标默认取 `auto.route`。红臂实测：撤 `skip_when` ⇒ 记账用例红；
+删 `would_install` ⇒ 计划态用例红。
+
+## v0.13.136 — 同类技能择优：六维打分 + 两条硬否决 + 中选者必查安全
+
+> 来源：用户「技能商店里同类型的技能会有很多，搜索下载安装调用时也要根据多维度数据
+> 来确定使用哪个技能，不能随便安装又不能达到相应的效果」。
+
+### 一、先解决「拿不到数据」
+
+`skillhub search --json` 只透出 slug/name/description/version，**把上游已经返回的**
+`downloads` / `stars` / `labels.requires_api_key` / `updated_at` 全丢了（读
+`~/.skillhub/skills_store_cli.py:1683` 的 `fetch_remote_search_results` 可见）。
+没有这些字段，「多维度」就只剩关键词，等于没做。
+
+处置：直连**同一个**端点 `https://api.skillhub.cn/api/v1/search` 取富字段，
+任何失败（超时/非 JSON/空结果）都回落 CLI，返回体 `via=api|cli` 如实标注。
+`downloads=null`（CLI 路径）显示「未知」并给 0.35 分——**未知不是 0**：
+按 0 计会把所有候选一起打压，排序退化成只看关键词。
+
+### 二、六维打分（权重和为 1.0）
+
+| 维度 | 权重 | 取值 | 依据 |
+|---|---|---|---|
+| 相关性 | 0.35 | 0.65×关键词名称命中 + 0.35×整句覆盖 | 「不像」的装上也用不上 |
+| 安全 | 0.20 | benign 1.0 / unknown 0.5 / suspicious 0 | 科恩 + 云鼎报告 |
+| 下载量 | 0.25 | `log10(1+n)/6` 截断 1.0 | 唯一跨作者可比的「别人真用过」 |
+| 维护度 | 0.10 | ≤120d 1.0 / ≤1y 0.7 / ≤2y 0.4 / 更早 0.2 | 停更的技能踩坑没人修 |
+| 认证 | 0.05 | 平台 `verified` | 弱信号，不给大权重 |
+| 免 Key | 0.05 | 要 Key 记 0 | 装完还得停下来要凭据＝没达到效果 |
+
+**硬否决**（不参与排序，直接出局）：与查询不够像；安全报告 `suspicious`；
+质量分 < 0.45。**免 Key 优先**是选择顺序而非否决：同类有免 Key 的就不选要 Key 的，
+全组都要 Key 时才选分最高的并把 `warning` 带回去。
+
+### 三、中选者一定查过报告
+
+安全报告逐 slug 一次子进程，12 条候选全查要十几秒 ⇒ 只查初筛前 3 名。
+但「没查过」会被当成 unknown=0.5 分混进冠军位，所以**重排后若冠军不在已查集合，
+补查它再重排**（最多两轮）。人工安装走同一判据：`suspicious` 默认 409 拒绝，
+`force=true` 才装；面板拦截后先 `confirm()` 把报告摆出来，用户确认才带 force 重试。
+
+### 四、实测标定（不是拍脑袋定阈值）
+
+真实语料 375 条 + 真实商店，8 条任务描述 dry-run（`work/store-cal/cal3.py`）：
+
+- `把 PDF 拆成图片` / 浏览器截图 / git / 小红书 / 记忆召回 / 网页转 md ⇒ 6 条命中本地，
+  不联网不装盘；
+- `生成一份 PPT 汇报材料` ⇒ 商店首名 `ppt-generator-skill`（0.842，324,382 下载，
+  两家报告均 benign），次名 `ppt`（0.819）、`PPT生成助手`（0.819）；
+- `翻译一段英文合同` ⇒ **none**（候选整句覆盖仅 0.14，全部否决）——宁可不装。
+
+真机安装（临时发现点）：`@user_3b34947d/ppt-generator-skill` v1.0.2 装入后回
+7,337B 正文，`took_ms=3,140`（含两路搜索 + 3 次报告 + 下载）。
+`pdf` 一词对照：`Pdf Extract`（0.903，72,736 下载，免 Key）胜过
+`PDF和图片文字提取`（0.875，247,878 下载，**需 Key**）——免 Key 优先生效；
+`martin-pdf` 被云鼎标 `suspicious`（该条实测否决）。
+
+### 五、面板
+
+商店结果行加一行依据：`下载 3.6k · 需自带 Key · 已认证`；`downloads=null` 写「下载未知」。
+安装完成 toast 带安全结论（通过 / 可疑（你已确认）/ 无公开报告）。
+
+### 六、闸门
+
+```
+tests/test_skill_store.py::TestMultiDim（10 例）
+  未知下载量不当 0 / 下载量破平局 / suspicious 一票否决 / 免 Key 优先 /
+  「像但弱」被质量底线拒 / 未核查冠军必须补查 / 404 记 unknown 不记 benign /
+  install 拒绝可疑且 force 可装 / API 失败回落 CLI 且 via=cli
+tests/test_skill_center_ui.py（+2 例）
+  行内依据来自后端字段（禁写死下载量）/ 安装带 check_security 且 force 必须显式
+```
+
+红臂五条（改坏必红、改回必绿，均实测）：删 suspicious 否决、`downloads=None→0`、
+取消补查、rc≠0 当 benign、取消免 Key 优先、`STORE_QUALITY_MIN=0` —— 各自对应用例红。
+
 ## v0.13.135 — 技能商店自动兜底（找不到就搜、够像才装、装完即回正文）+ 账号入口
 
 > 来源：用户「技能商店的作用就是 agent 在技能中心没有对应技能时要自动搜索技能商店并下载调用；

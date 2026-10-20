@@ -238,7 +238,31 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.135"
+    CURRENT_VERSION = "0.13.139"
+
+    #: v0.13.139：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「中文技能不被语言扣分」「整句搜不到靠派生短词」「短词命中不许自动装」。
+    VERSION_ROOT_CAUSES["0.13.139"] = (
+        "qcov_name", "_cn_segments", "matched_main", "派生短词",
+    )
+
+    #: v0.13.138：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「自动取用」「local_only 不等于 allow_install=false」「auto_invoke 单列」。
+    VERSION_ROOT_CAUSES["0.13.138"] = (
+        "自动取用", "local_only", "auto_invoke", "auto_use",
+    )
+
+    #: v0.13.137：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「计划态不冒充未命中」「计划态不算使用」「cli_present 同源」「默认目标＝兜底目标」。
+    VERSION_ROOT_CAUSES["0.13.137"] = (
+        "计划态", "skip_when", "cli_present", "自动兜底目标",
+    )
+
+    #: v0.13.136：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「富字段取回」「六维加权」「两条硬否决」「中选者必查报告」。
+    VERSION_ROOT_CAUSES["0.13.136"] = (
+        "富字段", "六维加权", "硬否决", "中选者必查过报告",
+    )
 
     #: v0.13.135：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「找不到才补货」「归一化 BM25 判本地」「store_auto 记账当额度」「第三方要标明来源」。

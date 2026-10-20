@@ -361,6 +361,39 @@ class TestStoreView(unittest.TestCase):
         self.assertNotIn("/home/", body, "额度/目标不许由前端拼路径")
         self.assertNotIn("AUTO_MAX", body)
 
+    def test_install_target_defaults_to_auto_route(self):
+        """默认目标必须是自动兜底那个（`auto.route`），不是下拉第一项。
+
+        面板同时显示「自动兜底 → techdocs」与「安装目标 claude」时，用户点安装
+        会把技能写进另一个 agent 的发现点——实测过（2026-10-20 真浏览器截图）。
+        """
+        body = re.search(r"function _fillStoreTargets\(.*?\n\}", JS, re.S).group(0)
+        self.assertIn("preferred", body)
+        self.assertIn("sel.value = preferred", body)
+        call = re.search(r"_fillStoreTargets\(STORE_STATE\.targets[^)]*\)", JS).group(0)
+        self.assertIn("auto", call, "调用点必须把 auto.route 传进去")
+
+    def test_store_rows_show_choice_signals(self):
+        """同类技能多 ⇒ 行里必须摆出选择依据（下载量、是否要自带 Key）。
+
+        `downloads=null`（CLI 兜底路径）要写「未知」而不是 `0`——把未知画成 0
+        等于告诉用户「没人用过」，那是编数据。
+        """
+        body = re.search(r"function renderStore\(.*?\n\}", JS, re.S).group(0)
+        self.assertIn("fmtCount(it.downloads)", body)
+        self.assertIn("it.needs_key", body)
+        self.assertIn("下载未知", body)
+        self.assertNotIn("5187606", body, "不许把某个具体技能的下载量写死进前端")
+        self.assertNotIn("requires_api_key", body, "字段名归后端，前端只读归一化后的 needs_key")
+
+    def test_install_reports_security_and_needs_explicit_force(self):
+        """安装要带安全结论；确认可疑仍要装必须**显式 force**（前端只在用户确认后传）。"""
+        body = re.search(r"async function installStore\(.*?\n\}", JS, re.S).group(0)
+        self.assertIn("check_security: true", body)
+        self.assertIn("force: !!force", body)
+        self.assertIn("confirm(", body, "可疑拦截后必须先问人，不许静默重试")
+        self.assertIn("d.security", body, "装完要把安全结论回显给用户")
+
     def test_auth_entry_is_password_input_and_delegated(self):
         """账号入口：Token 输入必须 type=password，且走 data-* 委托（值不进事件属性）。"""
         body = re.search(r"function _renderStoreMeta\(.*?\n\}", JS, re.S).group(0)

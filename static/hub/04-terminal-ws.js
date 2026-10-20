@@ -863,14 +863,20 @@ function switchSkillView(v) {
  * 「调用」不在本视图里另开一条链路：装完回技能目录，用既有 read/invoke（正文不出机器）。
  * 不接 `skillhub run`（在线执行会把正文发到第三方服务）。 */
 
-function _fillStoreTargets(targets) {
+function _fillStoreTargets(targets, preferred) {
   const sel = $('storeRoute');
   if (!sel || !targets || !targets.length) return;
   const keep = sel.value;
   sel.innerHTML = targets.map(t =>
     '<option value="' + escapeHtml(t.route) + '"' + (t.writable ? '' : ' disabled') + '>' +
     escapeHtml(t.route) + (t.writable ? '' : '（只读）') + '</option>').join('');
-  if (keep && targets.some(t => t.route === keep && t.writable)) sel.value = keep;
+  // 默认选**自动兜底的那个目标**，不是列表第一个。否则面板说「自动兜底 → techdocs」
+  // 而下拉停在 claude，用户点安装就把技能写进了另一个 agent 的发现点（实测 2026-10-20）。
+  if (keep && targets.some(t => t.route === keep && t.writable)) {
+    sel.value = keep;
+  } else if (preferred && targets.some(t => t.route === preferred && t.writable)) {
+    sel.value = preferred;
+  }
 }
 
 async function loadStoreStatus() {
@@ -879,7 +885,7 @@ async function loadStoreStatus() {
     STORE_STATE.targets = d.targets || [];
     STORE_STATE.available = !!d.available;
     STORE_STATE.error = d.available ? '' : (d.error || 'SkillHub CLI 不可用');
-    _fillStoreTargets(STORE_STATE.targets);
+    _fillStoreTargets(STORE_STATE.targets, (d.auto || {}).route);
     _renderStoreMeta(d);
     const hint = $('storeHint');
     if (hint) {
@@ -985,6 +991,14 @@ async function searchStore(q) {
   }
 }
 
+function fmtCount(n) {
+  const v = Number(n);
+  if (!isFinite(v) || v <= 0) return '0';
+  if (v >= 10000) return (v / 10000).toFixed(v >= 100000 ? 0 : 1) + '万';
+  if (v >= 1000) return (v / 1000).toFixed(1) + 'k';
+  return String(v);
+}
+
 function renderStore() {
   const el = $('storeList');
   if (!el) return;
@@ -1008,11 +1022,19 @@ function renderStore() {
     const installed = STORE_STATE.installed && STORE_STATE.installed[it.slug];
     const meta = [it.version ? 'v' + it.version : '', it.namespace || it.source || '']
       .filter(Boolean).map(escapeHtml).join(' · ');
+    // 同类技能很多，光看名字分不出该装哪个 ⇒ 把选择依据摆出来（下载量/是否要 Key）。
+    // 下载量可能为 null（CLI 兜底路径拿不到）——显示“未知”，不显示 0。
+    const sig = [];
+    if (it.downloads === 0 || it.downloads) sig.push('下载 ' + fmtCount(it.downloads));
+    else sig.push('下载未知');
+    if (it.needs_key) sig.push('<span class="sk-inv-bad">需自带 Key</span>');
+    if (it.verified) sig.push('已认证');
     return '<div class="mem-item sk-store-row">' +
       '<div class="sk-store-main">' +
         '<div class="sk-inv-head"><span class="sk-inv-name">' + escapeHtml(it.name || it.slug) +
           '</span>' + (meta ? '<span class="sk-inv-route">' + meta + '</span>' : '') + '</div>' +
         '<div class="sk-store-desc">' + escapeHtml(it.description || '（无描述）') + '</div>' +
+        '<div class="sk-inv-meta">' + sig.join(' · ') + '</div>' +
         '<div class="sk-store-slug">' + escapeHtml(it.slug) + '</div>' +
       '</div>' +
       '<div class="sk-store-act">' +
@@ -1024,7 +1046,7 @@ function renderStore() {
   }).join('');
 }
 
-async function installStore(slug, name) {
+async function installStore(slug, name, force) {
   const sel = $('storeRoute');
   const route = sel ? sel.value : '';
   if (!route) { toast('没有可写的发现点，先确认 SKILL_DIRS 配置', 'err'); return; }
@@ -1034,16 +1056,28 @@ async function installStore(slug, name) {
   try {
     const d = await api('/api/skill/store/install', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ slug: slug, route: route }),
+      body: JSON.stringify({ slug: slug, route: route,
+                             check_security: true, force: !!force }),
     });
     STORE_STATE.installed = STORE_STATE.installed || {};
     STORE_STATE.installed[slug] = d.route;
-    toast('已安装 ' + (d.name || name || slug) + ' → ' + d.route + '（可在技能目录查看与试调用）', 'ok');
+    const sec = (d.security || {}).verdict;
+    toast('已安装 ' + (d.name || name || slug) + ' → ' + d.route +
+      '（安全报告：' + (sec === 'benign' ? '通过' : sec === 'suspicious' ? '可疑（你已确认）' : '无公开报告') +
+      '）', 'ok');
     // 目录重扫：不刷的话新技能要等 TTL，用户会以为没装上。
     loadSkills();
     loadSkillInvBadges(false);
   } catch (e) {
-    toast('安装失败：' + (e.message || e), 'err');
+    const msg = String(e.message || e);
+    // 409 = 安全报告可疑被默认拦下。此时必须**把报告摆出来**再问，不能一句「失败」了事；
+    // 用户明确知情后仍要装，才带 force 重试（后端只认显式 force）。
+    if (msg.indexOf('可疑') >= 0 && !force && confirm('安全报告标记可疑：\n' + msg +
+        '\n\n确认知情并仍要安装？')) {
+      if (btn) { btn.disabled = false; btn.textContent = '安装'; }
+      return installStore(slug, name, true);
+    }
+    toast('安装失败：' + msg, 'err');
     if (btn) { btn.disabled = false; btn.textContent = '安装'; }
   }
   renderStore();

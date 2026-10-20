@@ -56,21 +56,28 @@ _EXTRA_KEYS = ("name", "route", "caller", "task", "via")
 _TASK_MAX_CHARS = 500
 
 
-def _mode_of(subject: str, kwargs: Dict[str, Any]) -> str:
-    """这条技能事件是「指名调用」还是「自动下发」——权重统计必须先分层再计数。
+def _mode_of(subject: str, kwargs: Dict[str, Any], forced: str = "") -> str:
+    """这条技能事件是「指名调用」还是「自动取用/下发」——权重统计必须先分层再计数。
 
-    口径只有一条：**`via=hook` 才是自动**。注入链（pi 的 hub-facade.ts、claude 的
+    口径只有一条：**调用方显式声明才算自动**。注入链（pi 的 hub-facade.ts、claude 的
     hub_skill_inject.py）在用户输入时无条件打 `/relevant`，没人点名任何技能 ⇒ 候选
-    是机器选的；而相关性实验室/手工查询虽然也打同一端点，却是人在问。
-    故不能按端点分，只能按调用方显式声明的 `via` 分：
-      · skill.invoke            → explicit_invoke（有人点了这个技能的名字）
-      · skill.relevant + via=hook → auto_inject（机器选出来的候选）
-      · skill.relevant 其它      → query（人工检索，不是使用证据）
+    是机器选的；`/auto` 更是服务端自己按任务描述选技能并激活。而相关性实验室/手工
+    查询虽然也打同一端点，却是人在问。故不能按端点分，只能按调用方显式声明分：
+      · skill.invoke + via=auto/hook → auto_invoke（服务端/注入链选出来的技能被激活）
+      · skill.invoke 其它             → explicit_invoke（有人点了这个技能的名字）
+      · skill.relevant + via=hook     → auto_inject（机器选出来的候选，未激活）
+      · skill.relevant 其它            → query（人工检索，不是使用证据）
     未声明 `via` 的旧客户端**不推断**为 auto：把它们算进自动桶会把「UI 里试一下」
     当成「agent 主动用了」，权重直接失真。
+
+    `forced` 由端点自己声明（`track(..., mode="auto_invoke")`）——`/auto` 的语义
+    写在代码里，不交给客户端传 `via`；客户端伪造 `via` 只能影响它自己的埋点。
     """
+    if forced:
+        return forced
     if subject == "skill.invoke":
-        return "explicit_invoke"
+        via = str(kwargs.get("via") or "").strip().lower()
+        return "auto_invoke" if via in ("auto", "hook") else "explicit_invoke"
     if subject == "skill.relevant":
         return "auto_inject" if str(kwargs.get("via") or "").strip().lower() == "hook" else "query"
     return ""
@@ -272,11 +279,19 @@ def _fire(subject: str, status: str, duration_ms: int, detail: Dict[str, Any]) -
         print(f"[runlog] 埋点失败(不影响业务)：{subject} {type(e).__name__}: {e}", flush=True)
 
 
-def track(subject: str):
+def track(subject: str, skip_when=None, mode: str = ""):
     """装饰器：包住三中心只读检索端点，记 q/limit/routes/channel/逐路健康/耗时。
 
     用装饰器而不是逐点手写：6+1 个端点形状同构（kwargs 进 dict 出），散写必漏；
     漏一个不是「少一条日志」，是「通道盲区」——和 writeauth 做中间件的理由同型。
+
+    `skip_when(data) -> bool`：返回 True 就**不记这条成功事件**。给「语义上是查询
+    不是使用」的调用用——`/api/skill/store/acquire` 的 dry_run / allow_install=false
+    只是报「将会装什么」，什么都没交付。它原先记成 `skill.invoke` 且 name 为空，
+    在调用记录里长成一条**没有技能名的使用流水**，权重账也跟着虚增（2026-10-20 实测）。
+
+    `mode`：端点自己声明的分层（如 `/auto` 的 `auto_invoke`）。传了就不再看
+    kwargs 里的 `via`——避免「客户端传个 via 就改了自己的账目口径」。
     """
     def deco(fn):
         @functools.wraps(fn)
@@ -287,8 +302,16 @@ def track(subject: str):
             request = kwargs.get("request")
             if request is None and args:
                 request = args[0]
+            _mode = _mode_of(subject, kwargs, mode)
             try:
                 data = await fn(*args, **kwargs)
+                if skip_when is not None:
+                    try:
+                        _skip = bool(skip_when(data))
+                    except Exception:  # noqa: BLE001 — 判据自己坏了不许带倒业务
+                        _skip = False
+                    if _skip:
+                        return data
                 base = {
                     **_backend_routes(data),
                     "q": tdai_client.scrub(_pick_query(kwargs)),
@@ -299,7 +322,7 @@ def track(subject: str):
                     **_pick_extra(kwargs),
                     # 2026-10-20：自动下发 / 指名调用分层。没有这一列，
                     # 「agent 自己找的技能」与「人点名的技能」在账上长得一样。
-                    **({"mode": _mode_of(subject, kwargs)} if _mode_of(subject, kwargs) else {}),
+                    **({"mode": _mode} if _mode else {}),
                 }
                 # 来源路以**返回体**兜底：/read 不传 route 时（名字唯一）也要能记下实际那一路；
                 # /relevant 的 route 只能从返回体拿（逐条目字段）。
@@ -338,7 +361,7 @@ def track(subject: str):
                     "channel": _channel_of(request),
                     # v0.13.127：失败的 invoke（409/404）同样要答「谁调的、想干什么」
                     **_pick_extra(kwargs),
-                    **({"mode": _mode_of(subject, kwargs)} if _mode_of(subject, kwargs) else {}),
+                    **({"mode": _mode} if _mode else {}),
                     **({"caller_reported": True} if subject == "skill.invoke" else {}),
                     "http": e.status_code,
                     "err": tdai_client.scrub(str(e.detail))[:200],

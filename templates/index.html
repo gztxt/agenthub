@@ -2065,6 +2065,9 @@
                                 <button class="sk-tab" id="skillTabWeights" role="tab" aria-selected="false"
                                         aria-controls="skillViewWeights" tabindex="-1"
                                         data-skill-view="weights">权重榜</button>
+                                <button class="sk-tab" id="skillTabRefs" role="tab" aria-selected="false"
+                                        aria-controls="skillViewRefs" tabindex="-1"
+                                        data-skill-view="refs">参考情报</button>
                             </div>
                         </div>
                         <div class="sp-r">
@@ -2168,6 +2171,41 @@
                             <span class="hint">use = 2×点名 + 1×自动激活 + 1×读取；score = use² / (use + 曝光)</span>
                         </div>
                         <div class="sp-bd box"><div id="skillUsageList" class="sp-list">加载中…</div></div>
+                    </div>
+
+                    <!-- ── 视图五：参考情报（PT-20261021-04）──
+                         给一个功能模块找 GitHub 借鉴源：多臂检索 + 三轴打分 + 许可证闸门。
+                         **只读**：不克隆、不改项目、不自动加依赖；卡上每条都有 as of。
+                         提交是异步任务：先出词法版卡，重排完成原地升级（不必空等 60~80s）。 -->
+                    <div id="skillViewRefs" role="tabpanel" aria-labelledby="skillTabRefs" style="display:none">
+                        <div class="sp-tools">
+                            <div class="toolbar">
+                                <input id="refModule" placeholder="要调研的功能模块（如：终端 WebSocket 与端口转发）"
+                                       style="max-width:340px"
+                                       onkeydown="if(event.key==='Enter'){event.preventDefault();submitRefScout();}">
+                                <input id="refKeywords" placeholder="英文关键词（可空，逗号分隔）"
+                                       style="max-width:230px"
+                                       onkeydown="if(event.key==='Enter'){event.preventDefault();submitRefScout();}">
+                                <label class="hint" for="refPaid" title="免费档失败时用付费快档重排（单次约几千 token）">
+                                    <input type="checkbox" id="refPaid"> 允许付费重排
+                                </label>
+                                <button class="btn sm" id="refSubmit" onclick="submitRefScout()">检索</button>
+                                <span class="hint sk-cnt" id="refHint"></span>
+                            </div>
+                            <div class="hint" style="margin:-6px 0 12px">
+                                只读采集：不克隆、不改项目、不自动加依赖 · 卡片带 as of 与 SPDX 许可证 ·
+                                判定列 <b>unjudged</b> ≠ 已认可（仅表示本轮重排未覆盖）
+                            </div>
+                        </div>
+                        <div class="sp-bd box"><div id="refCards" class="sp-list">加载中…</div></div>
+                        <div class="sp-bd box" id="refDetailBox" style="display:none;margin-top:12px">
+                            <div class="toolbar" style="margin-bottom:8px">
+                                <span class="hint" id="refDetailTitle"></span>
+                                <button class="btn ghost sm" data-ref-act="close">收起</button>
+                            </div>
+                            <pre id="refDetail" style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0"></pre>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="sp-card">
@@ -2808,6 +2846,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=b8f18d1d"></script>
+    <script src="/static/hub.js?v=f11fd07e"></script>
 </body>
 </html>

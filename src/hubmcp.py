@@ -17,6 +17,9 @@
           **只在调用方显式传 allow_install=true 时**才可能落盘；默认值见工具说明）
           / hub_skill_auto（v0.13.138：任务描述 → 自动选中并**激活**，一次调用回正文。
           与 acquire 同一条选人逻辑，差别是记账分桶 auto_invoke 且语义是「拿来用」）
+          / hub_ref_scout / hub_ref_get（PT-20261021-04：功能模块 → GitHub 借鉴源情报卡。
+          scout 是异步任务，先回 job_id；get 读任务进度或整张卡。**只读采集**：
+          不克隆、不改项目、不自动加依赖）
 """
 import json
 import os
@@ -424,6 +427,74 @@ def hub_skill_catalog(q: str = "", limit: int = 200) -> str:
         } for i in data.get("items", [])],
         "note": "正文不在本目录里：对某条技能感兴趣就 hub_skill_invoke(name=...) 点名取指令",
         "took_ms": data.get("took_ms"),
+    }, ensure_ascii=False)
+
+
+@server.tool()
+def hub_ref_scout(module: str, keywords: str = "", lang: str = "",
+                  identifiers: str = "", allow_paid: bool = False) -> str:
+    """**给一个功能模块找 GitHub 借鉴源**（PT-20261021-04）。异步任务：立即返回
+    `job_id`，用 `hub_ref_get(job_id=...)` 轮询；检索完成前就能按 card_id 读词法版卡。
+
+    `keywords` 传英文技术词、逗号分隔（如 "terminal,websocket,pty"）；留空则由
+    后台用免费模型抽词，失败退中文词典。`identifiers` 是代码里的函数/类名，用于
+    代码搜索臂（最多 2 个）。`allow_paid=true` 允许重排用付费快档（单次约几千 token，
+    **默认关闭**）；关着时只走免费档，失败就降级为纯词法并在卡上注明。
+
+    卡上每条都有 `as of`、下次刷新时间、SPDX 许可证与 copyleft 提示。
+    **只出建议与固定引用（repo@sha），不克隆、不改项目、不自动加依赖。**"""
+    body = {"module": module,
+            "keywords": [k.strip() for k in keywords.split(",") if k.strip()],
+            "lang": lang.strip(),
+            "identifiers": [i.strip() for i in identifiers.split(",") if i.strip()],
+            "allow_paid": bool(allow_paid)}
+    data = _post("/api/ref/scout", body)
+    if "error" in data:
+        return json.dumps(data, ensure_ascii=False)
+    return json.dumps({**data,
+                       "next": "轮询 hub_ref_get(job_id=...)；status=done 后读 card_id 的 md"},
+                      ensure_ascii=False)
+
+
+@server.tool()
+def hub_ref_get(card_id: str = "", job_id: str = "", q: str = "",
+                limit: int = 10) -> str:
+    """读参考情报：`job_id` 看任务进度；`card_id` 取整张卡（含 Markdown 正文）；
+    都不传给则列出最近的卡（`q` 按模块名过滤）。
+
+    情报卡的读法：先看候选表的「功能/实现/设计」三列与判定列，
+    再看「可借鉴点」里的 `repo@sha` 固定引用。**判定列为 `unjudged` 表示本轮
+    重排没覆盖到（输出截断），不要当成已认可**；`lexical_fallback` 表示整卡只有
+    词法分，相关度需要人工复核。"""
+    if job_id:
+        data = _get(f"/api/ref/jobs/{job_id}")
+        if "error" in data:
+            return json.dumps(data, ensure_ascii=False)
+        card = data.get("card") or {}
+        return json.dumps({
+            "job_id": job_id, "status": data.get("status"), "stage": data.get("stage"),
+            "error": data.get("error"), "card_id": data.get("card_id"),
+            "card_status": card.get("status"), "elapsed_s": card.get("elapsed_s"),
+            "ready": bool(card),
+        }, ensure_ascii=False)
+    if card_id:
+        data = _get(f"/api/ref/cards/{card_id}")
+        if "error" in data:
+            return json.dumps(data, ensure_ascii=False)
+        return json.dumps({"id": data.get("id"), "module": data.get("module"),
+                           "status": data.get("status"), "as_of": data.get("as_of"),
+                           "next_refresh": data.get("next_refresh"),
+                           "md": data.get("md")}, ensure_ascii=False)
+    data = _get("/api/ref/cards", q=q, limit=max(1, min(limit, 50)))
+    if "error" in data:
+        return json.dumps(data, ensure_ascii=False)
+    return json.dumps({
+        "total": data.get("total"),
+        "items": [{"id": i.get("id"), "module": i.get("module"),
+                   "status": i.get("status"), "as_of": i.get("as_of"),
+                   "candidates": i.get("candidates"), "top": (i.get("top") or {}).get("repo")}
+                  for i in data.get("items", [])],
+        "note": "传 card_id 取整张卡；传 job_id 看任务进度",
     }, ensure_ascii=False)
 
 

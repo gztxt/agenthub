@@ -75,6 +75,7 @@ import export_batch                   # 导出取消息的批量 IN（L0 可测�
 import models_cache                   # 模型清单的成功路径缓存（同上，纯函数层）
 import writeauth                    # 导出端点按写端点同等鉴权（复用 decide 的 fail-closed）
 import audit as audit_mod           # 资产变更审计的只读查询门面（GET /api/audit/list）
+import refscout as refscout_mod     # PT-20261021-04：参考情报（GitHub 借鉴源采集 + 三轴打分）
 import runlog as runlog_mod         # 运行日志：三中心检索留痕 + GET /api/runlog 查询门面
 import cloudcli as cloudcli_mod     # CloudCLI 项目直达：项目清单（直读 auth.db）+ 会话启动代理
 import localprojects as localprojects_mod  # 本机项目清单（多根 git 扫描 + cloudcli 合并）
@@ -1234,6 +1235,7 @@ app.include_router(skill_assets_mod.router)      # P1-5：/api/skill-assets（�
 app.include_router(actionplane_mod.router)       # P2 A10：/api/actions（行动台账，只读为主）
 app.include_router(admission_mod.router)        # P2 C7：/api/admission（外部资产准入六阶段）
 app.include_router(hublog_mod.router)
+app.include_router(refscout_mod.router)          # PT-20261021-04：/api/ref/*（情报卡）
 
 # D2：Hub MCP Server —— 把本机事实源以 MCP 暴露给 Hermes 等外部 Agent。
 # 端点为 /hub-mcp/mcp（streamable_http_app 自带 /mcp 子路由，故挂在 /hub-mcp 下，避免与 mcpgw 的 /mcp/* REST 冲突）。
@@ -1568,6 +1570,8 @@ async def startup():
     skill_assets_mod.ensure_schema()
     # P2 A10：行动三表（requests/decisions/results），幂等建表
     actionplane_mod.ensure_schema()
+    # PT-20261021-04：情报卡与采集任务两表（幂等建表）
+    refscout_mod.ensure_schema()
     tasks_mod.set_context(
         chat_fn=lambda a, m, s=None, mo=None, tr=None: _chat_dispatch(a, m, s, mo, tr),
         agent_ids_fn=lambda: [c["id"] for c in appstate.discovery.all_configs()])
@@ -1582,6 +1586,7 @@ async def startup():
     # 就是「前端空白最长 60 秒」的同义词。
     _spawn(term_mod.fast_reap_loop())
     _spawn(wal_checkpoint_loop())   # WAL 周期检查点（把自动检查点从逐帧写路径挪走）
+    _spawn(refscout_mod.refresh_loop())   # 情报卡到期自动重跑（30 天/次，REF_AUTO_REFRESH=0 可关）
     mcpgw_mod.ensure_schema()
     cronjobs_mod.ensure_schema()
     cronjobs_mod.set_context(

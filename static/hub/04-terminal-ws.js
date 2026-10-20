@@ -845,9 +845,10 @@ function renderSkillStats() {
 /* 视图切换（Grill 裁定 5：技能目录 / 调用记录两视图）。
  * 懒加载：调用记录第一次切到才拉数据——首屏请求数不因它增加。 */
 function switchSkillView(v) {
-  if (v !== 'catalog' && v !== 'invocations' && v !== 'store' && v !== 'weights') return;
+  if (v !== 'catalog' && v !== 'invocations' && v !== 'store' &&
+      v !== 'weights' && v !== 'refs') return;
   SKILL_VIEW = v;
-  ['catalog', 'invocations', 'store', 'weights'].forEach(k => {
+  ['catalog', 'invocations', 'store', 'weights', 'refs'].forEach(k => {
     const tab = $('skillTab' + k[0].toUpperCase() + k.slice(1));
     const view = $('skillView' + k[0].toUpperCase() + k.slice(1));
     if (tab) {
@@ -880,6 +881,11 @@ function switchSkillView(v) {
     // 首进必须先拉一次（榜单窗口默认近 30 天，与端点默认一致）。
     if (!SKILL_USAGE_LOADED) { SKILL_USAGE_LOADED = true; loadSkillUsage(); }
     else renderSkillUsage();
+  }
+  if (v === 'refs') {
+    bindRefActions();
+    if (!REF_LOADED) { REF_LOADED = true; loadRefCards(); }
+    else renderRefCards();
   }
 }
 
@@ -1177,6 +1183,174 @@ function clearSkillFilter() {
   q.value = '';
   renderSkillList();
   q.focus();
+}
+
+/* ── 参考情报（PT-20261021-04）──────────────────────────────────────────────
+ * 异步任务：POST /api/ref/scout 立即回 job_id；检索完先落「词法卡」，重排完成再原地
+ * 升级。所以这里**不阻塞**界面等重排——轮询到 job 有 card 就先渲染，stage=rerank 时
+ * 提示「词法版已可用」。
+ * 只渲染后端字段：三轴分、判定、许可证、as_of 全部来自 /api/ref/cards，页面不重算。
+ * 产物只在 hub 库（不写到项目目录），避免前端决定写哪。
+ */
+let REF_CARDS = [], REF_LOADED = false, REF_POLL = null, REF_CARD_ID = '';
+
+function refStatusText(st) {
+  return ({
+    lexical: '仅词法', reranked: '已重排', lexical_fallback: '重排失败·仅词法'
+  })[st] || st || '—';
+}
+
+function bindRefActions() {
+  const box = $('refCards');
+  if (box && !box.__refBind) {
+    box.__refBind = true;
+    box.addEventListener('click', e => {
+      const btn = e.target.closest('[data-ref-act]');
+      if (!btn || !box.contains(btn)) return;
+      const id = btn.dataset.id || '';
+      if (btn.dataset.refAct === 'open') openRefCard(id);
+      else if (btn.dataset.refAct === 'refresh') refreshRefCard(id);
+    });
+  }
+  const detail = $('refDetailBox');
+  if (detail && !detail.__refBind) {
+    detail.__refBind = true;
+    detail.addEventListener('click', e => {
+      const btn = e.target.closest('[data-ref-act="close"]');
+      if (btn) { detail.style.display = 'none'; REF_CARD_ID = ''; }
+    });
+  }
+}
+
+async function loadRefCards() {
+  const el = $('refCards');
+  if (!el) return;
+  boxBusy('refCards');
+  try {
+    const d = await api('/api/ref/cards?limit=50');
+    REF_CARDS = d.items || [];
+    renderRefCards();
+  } catch (e) {
+    boxFail('refCards', e, 'loadRefCards');
+  }
+}
+
+function renderRefCards() {
+  const el = $('refCards');
+  if (!el) return;
+  if (!REF_CARDS.length) {
+    el.innerHTML = '<div class="sk-empty"><b>还没有情报卡</b>：在上方填一个功能模块，点「检索」。' +
+      '第一次会走 GitHub 多臂检索（约 20~60s），词法版先出，语义重排随后原地升级。</div>';
+    return;
+  }
+  el.innerHTML = REF_CARDS.map(c => {
+    const top = c.top || {};
+    const deg = (c.degraded || 0) > 0
+      ? '<span class="badge" title="有检索臂失败，卡内「逐路表态」列了原因">降级 ' + c.degraded + '</span>' : '';
+    return '<div class="mem-item">' +
+      '<span class="tag agent" style="align-self:flex-start">' + escapeHtml(c.module) + '</span>' +
+      '<p><b>' + escapeHtml(refStatusText(c.status)) + '</b> · ' +
+      '<span class="hint">' + escapeHtml(String(c.as_of || '').replace('T', ' ').slice(0, 19)) +
+      ' · 候选 ' + (c.candidates || 0) + '（实现 ' + (c.impl_count || 0) + '）</span>' +
+      (top.repo ? '<br>最相关：<b>' + escapeHtml(top.repo) + '</b>　功能/实现/设计 ' +
+        Number(top.func || 0).toFixed(2) + ' / ' + Number(top.impl || 0).toFixed(2) + ' / ' +
+        Number(top.design || 0).toFixed(2) : '') +
+      '</p>' + deg +
+      '<button class="btn ghost sm" data-ref-act="open" data-id="' + escapeHtml(c.id) + '">查看</button>' +
+      '<button class="btn ghost sm" data-ref-act="refresh" data-id="' + escapeHtml(c.id) + '">重跑</button>' +
+      '</div>';
+  }).join('');
+}
+
+async function submitRefScout() {
+  const mod = ($('refModule').value || '').trim();
+  const hint = $('refHint');
+  if (mod.length < 2) { hint.textContent = '先填功能模块名（至少 2 个字）'; return; }
+  const kws = ($('refKeywords').value || '').split(',').map(x => x.trim()).filter(Boolean);
+  const btn = $('refSubmit');
+  btn.disabled = true;
+  hint.textContent = '提交中…';
+  try {
+    const d = await api('/api/ref/scout', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        module: mod, keywords: kws,
+        allow_paid: !!($('refPaid') && $('refPaid').checked)
+      })
+    });
+    hint.textContent = '已排队：' + d.job_id + (d.deduped ? '（同一模块已有任务，复用）' : '');
+    pollRefJob(d.job_id, d.card_id);
+  } catch (e) {
+    hint.textContent = '提交失败：' + e.message;
+    toast('参考情报提交失败：' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* 轮询：任务状态是**唯一真相**。卡先出现就渲染（stage=rerank 时已经能看词法结果），
+ * job 结束才停——不用固定等待时间猜「应该差不多了」。 */
+function pollRefJob(jobId, cardId) {
+  if (REF_POLL) { clearInterval(REF_POLL); REF_POLL = null; }
+  let ticks = 0;
+  const hint = $('refHint');
+  const tick = async () => {
+    ticks += 1;
+    try {
+      const d = await api('/api/ref/jobs/' + encodeURIComponent(jobId));
+      const st = d.status + '/' + (d.stage || '');
+      if (d.card) {
+        hint.textContent = st + ' · 卡已可用（' + refStatusText(d.card.status) + '）';
+        await loadRefCards();
+      } else {
+        hint.textContent = st + ' …';
+      }
+      if (d.status === 'done' || d.status === 'failed') {
+        clearInterval(REF_POLL); REF_POLL = null;
+        hint.textContent = d.status === 'failed'
+          ? ('任务失败：' + (d.error || '见卡内逐路表态'))
+          : ('完成（' + (d.card ? refStatusText(d.card.status) : '') + '）');
+        await loadRefCards();
+        if (cardId) openRefCard(cardId);
+      }
+    } catch (e) {
+      hint.textContent = '轮询失败：' + e.message;
+      clearInterval(REF_POLL); REF_POLL = null;
+    }
+    if (ticks > 120 && REF_POLL) {   // 5 分钟硬上限：不无限轮询
+      clearInterval(REF_POLL); REF_POLL = null;
+      hint.textContent = '任务仍在后台运行，稍后点刷新查看';
+    }
+  };
+  REF_POLL = setInterval(tick, 2500);
+  tick();
+}
+
+async function openRefCard(id) {
+  if (!id) return;
+  try {
+    const d = await api('/api/ref/cards/' + encodeURIComponent(id));
+    REF_CARD_ID = id;
+    $('refDetailBox').style.display = '';
+    $('refDetailTitle').textContent = d.module + ' · ' + refStatusText(d.status) +
+      ' · as of ' + String(d.as_of || '').replace('T', ' ').slice(0, 19) +
+      ' · 下次刷新 ' + String(d.next_refresh || '').slice(0, 10);
+    $('refDetail').textContent = d.md || '';
+  } catch (e) {
+    toast('读取情报卡失败：' + e.message, 'err');
+  }
+}
+
+async function refreshRefCard(id) {
+  if (!id) return;
+  const hint = $('refHint');
+  hint.textContent = '正在重跑…';
+  try {
+    const d = await api('/api/ref/cards/' + encodeURIComponent(id) + '/refresh', { method: 'POST' });
+    pollRefJob(d.job_id, id);
+  } catch (e) {
+    hint.textContent = '重跑失败：' + e.message;
+  }
 }
 
 /* 徽标保活：停在技能页时，后台 agent 的调用不会自己冒出来。

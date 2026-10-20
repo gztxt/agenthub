@@ -211,6 +211,29 @@ class TestUsageEndpoint(_WeightsCase):
         self.assertEqual({x["route"] for x in b["items"]}, {"src"})
         self.assertTrue(all("src" in x["routes"] for x in b["by_name"]))
 
+    def test_route_filter_also_scopes_totals(self):
+        """`route` 与 `caller` 同口径：**先过滤再统计**，`totals` 也必须跟着缩。
+
+        2026-10-20 实测缺陷：`?route=techdocs` 只筛了 `items`，顶部 `totals` 仍是全机
+        （点名 20 / 曝光 8），于是**同一个屏幕里有两份真相**——列表说这一路，汇总说全机。
+        页面把 `totals` 直接铺在汇总带里，用户看不出哪个数是这一路的。
+        """
+        _mk_skill(self.a, "one", "权重技能演示")
+        _mk_skill(self.b, "two", "权重技能演示")
+        self._invoke(name="one", route="src")
+        self._invoke(name="one", route="src")
+        self._invoke(name="two", route="other")
+
+        g = self._usage()
+        self.assertEqual(g["totals"]["explicit"], 3, g["totals"])
+
+        s = self._usage(route="src")
+        self.assertEqual(s["totals"]["explicit"], 2,
+                         "汇总没跟着 route 缩 ⇒ 同一屏两份真相")
+        self.assertEqual({x["route"] for x in s["items"]}, {"src"})
+        # 过滤掉的事件要能解释去哪了，不能凭空消失
+        self.assertGreaterEqual(s["totals"]["filtered_out"], 1, s["totals"])
+
     def test_legacy_relevant_not_counted_as_auto(self):
         """无 mode/via 的旧事件不许算曝光：那可能是 UI 人工查询。"""
         db.execute("INSERT INTO profile_events(source,subject,status,duration_ms,detail,created_at)"

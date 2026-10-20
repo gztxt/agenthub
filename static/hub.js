@@ -4154,6 +4154,11 @@ let SKILL_INV_VIEW = null;
 let SKILL_INV = null, SKILL_INV_BY_SKILL = {}, SKILL_INV_LOADED = false;
 /* 商店视图：targets 来自后端 `_targets()`（只含可写发现点），页面不自己拼路径。 */
 let STORE_STATE = { items: [], q: '', busy: false, targets: null, error: '' };
+/* 权重榜视图（PT-20261020-01 的展示面）：只读投影，**不在前端重算 score**。
+ * 公式在服务端 skill_weights，页面照抄一份必然漂移——那时「同一技能两个分数」
+ * 就成了第二个真相。`caller` 过滤也必须打服务端：它是「先过滤再算分」，
+ * 前端后过滤会把别人的曝光留在分母里。 */
+let SKILL_USAGE = null, SKILL_USAGE_LOADED = false, SKILL_USAGE_BUSY = false;
 
 /* v0.13.69 D7 技能门面：一份数据源、一个扫描口径。
  * 主列表 + 三张诊断卡（自检 / 相关性实验室 / 注入预算）都读同一批后端字段，
@@ -4163,6 +4168,7 @@ let STORE_STATE = { items: [], q: '', busy: false, targets: null, error: '' };
 
 async function loadSkills() {
   bindSkillTabs();   // 标题行 tab 的点击/键盘委托（幂等；视图可先于数据切换）
+  bindUsageFilters();   // 权重榜三个下拉走委托（过滤打服务端，不在前端后过滤）
   bindStoreActions();   // 商店行的安装按钮走委托（数据来自远端，禁 inline onclick）
   boxBusy('skillList');
   try {
@@ -4263,9 +4269,9 @@ function renderSkillStats() {
 /* 视图切换（Grill 裁定 5：技能目录 / 调用记录两视图）。
  * 懒加载：调用记录第一次切到才拉数据——首屏请求数不因它增加。 */
 function switchSkillView(v) {
-  if (v !== 'catalog' && v !== 'invocations' && v !== 'store') return;
+  if (v !== 'catalog' && v !== 'invocations' && v !== 'store' && v !== 'weights') return;
   SKILL_VIEW = v;
-  ['catalog', 'invocations', 'store'].forEach(k => {
+  ['catalog', 'invocations', 'store', 'weights'].forEach(k => {
     const tab = $('skillTab' + k[0].toUpperCase() + k.slice(1));
     const view = $('skillView' + k[0].toUpperCase() + k.slice(1));
     if (tab) {
@@ -4292,6 +4298,12 @@ function switchSkillView(v) {
     // 首进只查 CLI 状态与目标（不自动搜——搜索是用户的显式动作，别擅自发网络请求）。
     loadStoreStatus();
     renderStore();
+  }
+  if (v === 'weights') {
+    // 懒加载：与调用记录同理，首屏请求数不因这个视图增加。
+    // 首进必须先拉一次（榜单窗口默认近 30 天，与端点默认一致）。
+    if (!SKILL_USAGE_LOADED) { SKILL_USAGE_LOADED = true; loadSkillUsage(); }
+    else renderSkillUsage();
   }
 }
 
@@ -5174,6 +5186,159 @@ function renderSkillInvocations() {
     '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">' +
     (wantName || wantCaller ? '<button class="btn ghost sm" onclick="clearInvFilters()">清空过滤</button>' : '') +
     '<button class="btn ghost sm" onclick="switchToCatalog()">去技能目录</button></div></div>');
+}
+
+/* ── 权重榜视图（PT-20261020-01 的展示面，v0.13.140）────────────────────
+ * 端点 `/api/skill/usage` 2026-10-20 就有了、14 例测试也齐，但页面**零入口**
+ * ⇒ 「数据有了没人看」，与「登记不等于入役」同型。这里补渲染。
+ *
+ * 三条口径（写死在此，勿在渲染里另算）：
+ *  ① 分数只在服务端算：前端重算必然与 `skill_weights` 漂移，漂移后「同一技能
+ *     两个分数」就是第二个真相；
+ *  ② 过滤打服务端：`caller` 是**先过滤再算分**，前端后过滤会把别人的曝光留在
+ *     分母里（分数虚低），所以三个下拉一律触发重新请求；
+ *  ③ 失败态与空态分开：空榜的语义是「这个窗口内没人用」，不能与 500 同形。 */
+async function loadSkillUsage() {
+  if (SKILL_USAGE_BUSY) return;
+  SKILL_USAGE_BUSY = true;
+  boxBusy('skillUsageList');
+  const days = (($('usageDays') || {}).value || '30');
+  const route = (($('usageRoute') || {}).value || '');
+  const caller = (($('usageCaller') || {}).value || '');
+  let qs = 'days=' + encodeURIComponent(days) + '&limit=200';
+  if (route) qs += '&route=' + encodeURIComponent(route);
+  if (caller) qs += '&caller=' + encodeURIComponent(caller);
+  try {
+    const d = await api('/api/skill/usage?' + qs);
+    SKILL_USAGE = d || { items: [] };
+    SKILL_USAGE.error = '';
+    fillUsageFacets(SKILL_USAGE);
+    renderSkillUsage();
+  } catch (e) {
+    SKILL_USAGE = { items: [], error: String((e && e.message) || e || '未知错误'), days: days };
+    renderSkillUsage();
+  } finally {
+    SKILL_USAGE_BUSY = false;
+  }
+}
+
+/* 下拉选项由**本次返回**聚合而来，不写死 agent 名单：
+ * caller 是自报字段，写死清单会让新接入的 agent 永远筛不出来。 */
+function fillUsageFacets(d) {
+  const routes = new Set(), callers = new Set();
+  (d.items || []).forEach(it => {
+    if (it.route) routes.add(it.route);
+    ['explicit', 'read', 'auto_use', 'auto'].forEach(b => {
+      const m = (it.by_caller || {})[b] || {};
+      Object.keys(m).forEach(c => callers.add(c));
+    });
+  });
+  const fill = (id, label, set) => {
+    const sel = $(id);
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">' + label + '</option>' +
+      Array.from(set).sort().map(x =>
+        '<option value="' + escapeHtml(x) + '">' + escapeHtml(x) + '</option>').join('');
+    if (cur && set.has(cur)) sel.value = cur;   // 刷新时保留用户的选择
+  };
+  fill('usageRoute', '全部发现点', routes);
+  fill('usageCaller', '全部 agent', callers);
+}
+
+function renderSkillUsage() {
+  const el = $('skillUsageList'), sum = $('skillUsageSummary');
+  if (!el) return;
+  const d = SKILL_USAGE;
+  if (!d) { el.innerHTML = '<div class="hint">加载中…</div>'; return; }
+  if (d.error) {
+    // 失败与空分开：这里必须给出错误原文，否则「0 条」会被读成「没人用」。
+    el.innerHTML = '<div class="hint" style="color:var(--st-error,var(--danger))">' +
+      '读取权重失败：' + escapeHtml(d.error) + '</div>';
+    if (sum) sum.innerHTML = '';
+    return;
+  }
+  const items = d.items || [];
+  const t = d.totals || {};
+  if (sum) {
+    const rows = [
+      ['窗口', '<b>' + escapeHtml(String(d.days || 30)) + '</b> 天'],
+      ['使用', '点名 <b>' + (t.explicit || 0) + '</b> · 自动激活 <b>' + (t.auto_use || 0) +
+        '</b> · 读取 <b>' + (t.read || 0) + '</b>'],
+      ['曝光', '<b>' + (t.auto || 0) + '</b> 次（只作分母，不计分）'],
+      ['技能身份', escapeHtml(String(d.identity || '(name, route)')) +
+        ' · 同名多路分开计'],
+    ];
+    sum.innerHTML = rows.map(([k, v]) =>
+      '<span class="sk-k">' + k + '</span><span class="sk-v">' + v + '</span>').join('') +
+      '<span class="sk-note hint">' + escapeHtml(String(d.formula || '')) +
+      (t.no_name ? '　·　另有 ' + t.no_name + ' 条事件没有技能名（旧账/计划态），未计入榜单' : '') +
+      '</span>';
+  }
+  const cnt = $('usageCount');
+  if (cnt) cnt.textContent = '显示 ' + items.length + ' 个技能';
+  if (!items.length) {
+    el.innerHTML = '<div class="sk-empty"><b>这个窗口内还没有可计分的技能</b>（近 ' +
+      escapeHtml(String(d.days || 30)) + ' 天）。<br>' +
+      '只有 <b>点名调用</b>（/api/skill/invoke）、<b>自动激活</b>（/api/skill/auto）与' +
+      '<b>读正文</b>才计分；注入曝光只进分母。<br>' +
+      '<span class="hint">若刚调用过仍是 0：先看「调用记录」页有没有这条流水——' +
+      '流水有而这里空，说明事件缺 name 字段。</span></div>';
+    return;
+  }
+  el.innerHTML = items.map(it => {
+    const cls = String(it.usage_class || '');
+    // 三类证据各自给数字，不做「加权后只剩一个总分」——那样没人能解释分数怎么来的。
+    const parts = [
+      '点名 <b>' + (it.explicit || 0) + '</b>',
+      '自动激活 <b>' + (it.auto_use || 0) + '</b>',
+      '读取 <b>' + (it.read || 0) + '</b>',
+      '曝光 <b>' + (it.auto || 0) + '</b>',
+    ];
+    const byCaller = it.by_caller || {};
+    const who = ['explicit', 'auto_use', 'read']
+      .map(b => Object.keys(byCaller[b] || {}).map(c => c + '×' + byCaller[b][c]).join('、'))
+      .filter(Boolean).join('；');
+    const ev = it.evidence_total || {};
+    const evAll = (ev.explicit || 0) + (ev.read || 0) + (ev.auto_use || 0);
+    const ts = String(it.last_used_at || '');
+    const m = ts.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}:\d{2})/);
+    const tsShort = m ? m[2] + '-' + m[3] + ' ' + m[4] : (ts || '—');
+    return '<div class="mem-item sk-inv-row">' +
+      '<div class="sk-inv-main">' +
+        '<div class="sk-inv-head">' +
+          '<span class="sk-inv-name">' + escapeHtml(String(it.name || '（无名）')) + '</span>' +
+          (it.route ? '<span class="sk-inv-route">' + escapeHtml(String(it.route)) + '</span>' : '') +
+          (cls ? '<span class="sk-inv-route">' + escapeHtml(cls) + '</span>' : '') +
+          '<span class="sk-inv-caller">' + parts.join(' · ') + '</span>' +
+        '</div>' +
+        (who ? '<div class="sk-inv-meta"><span class="sk-inv-time">按调用方 ' +
+          escapeHtml(who) + '</span></div>' : '') +
+        '<div class="sk-inv-meta">' +
+          '<span class="sk-inv-time" title="' + escapeHtml(ts) + '">最近 ' + escapeHtml(tsShort) + '</span>' +
+          '<span class="sk-inv-dur">存续 ' + (it.idle_days != null ? it.idle_days + ' 天' : '—') + '</span>' +
+          '<span class="sk-inv-dur" title="可追溯到 profile_events 的具体行 id">证据 ' +
+            evAll + ' 条</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="sk-inv-side"><b style="font-size:18px">' +
+        escapeHtml(String(it.score != null ? it.score : '—')) + '</b>' +
+        '<div class="hint">score</div></div>' +
+      '</div>';
+  }).join('');
+}
+
+/* 三个下拉共用一条委托：切换即重新请求（口径②：过滤必须打服务端）。
+ * 用 data-usage-filter 而不是 inline onchange——与 §4.2 的委托口径一致。 */
+function bindUsageFilters() {
+  const bar = $('skillViewWeights');
+  if (!bar || bar.__skUsage) return;
+  bar.__skUsage = true;
+  bar.addEventListener('change', e => {
+    const t = e.target;
+    if (!t || !t.dataset || t.dataset.usageFilter === undefined) return;
+    loadSkillUsage();
+  });
 }
 
 /* 空状态的出口：切回目录视图（不需要加载新数据）。 */

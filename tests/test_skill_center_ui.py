@@ -679,5 +679,83 @@ class TestAutoInjectSurfaced(unittest.TestCase):
         self.assertIn("不计入", body, "必须明说这些条目不参与自动下发计数")
 
 
+class TestUsageView(unittest.TestCase):
+    """权重榜视图（v0.13.140）：端点早有、页面零入口 ⇒ 这一组钉住「接上且不重算」。
+
+    为什么必须钉：`/api/skill/usage` 10-20 就有 14 例测试，但没人能看见它
+    ——「数据有了没人看」与「登记不等于入役」是同一个病。接上之后最容易犯的错
+    是**在渲染里顺手重算一遍分数**：公式一旦在服务端与前端各存一份，漂移之后
+    同一技能就有两个分数，而页面上那个看起来永远是对的。
+    """
+
+    def test_weights_is_fourth_view(self):
+        self.assertIn('id="skillTabWeights"', HTML)
+        self.assertIn('id="skillViewWeights"', HTML)
+        self.assertIn('aria-controls="skillViewWeights"', HTML)
+        self.assertIn('role="tabpanel" aria-labelledby="skillTabWeights"', HTML)
+        body = re.search(r"function switchSkillView\(.*?\n\}", strip_js_comments(JS), re.S).group(0)
+        self.assertIn("'weights'", body, "switchSkillView 不认识第四个视图")
+
+    def test_panel_lives_inside_the_tab_card(self):
+        """面板必须落在 tab 卡内（store 面板之后、预算卡之前）。
+
+        **实测踩过**：首版把 `#skillViewWeights` 插在预算卡之后、`.sp` 之下，
+        切换后 `display:block` 成立、127 行也渲染了，测试全绿——但真浏览器里
+        排行榜在**预算卡下方 900px**（实测 top=913），首屏只看得到「安装与注入预算」。
+        「元素存在 + display 不是 none」证明不了「用户看得到它」，这是第三次
+        同型：判据量的是 DOM 属性，而报障量的是视觉位置。
+        静态断言能钉住的就是**顺序**：budget 卡是 tab 卡的兄弟节点，
+        面板只要排在它前面，就一定还在 tab 卡里。
+        """
+        i_store = HTML.index('id="skillViewStore"')
+        i_weights = HTML.index('id="skillViewWeights"')
+        i_budget = HTML.index('安装与注入预算')
+        self.assertGreater(i_weights, i_store, "权重面板跑到 store 面板前面了")
+        self.assertLess(i_weights, i_budget,
+                        "权重面板在预算卡之后 ⇒ 切换后排行榜被挤到首屏下方")
+
+    def test_filters_hit_server_not_client(self):
+        """三个下拉必须触发重新请求：`caller` 是「先过滤再算分」。
+
+        前端后过滤会把别人的曝光留在分母里 ⇒ 分数虚低，而用户以为那是这个 agent 的真实分。
+        """
+        body = re.search(r"async function loadSkillUsage\(.*?\n\}", strip_js_comments(JS), re.S).group(0)
+        self.assertIn("&route=", body, "发现点过滤没打服务端")
+        self.assertIn("&caller=", body, "调用方过滤没打服务端")
+        self.assertIn("days=", body)
+        render = re.search(r"function renderSkillUsage\(.*?\n\}", strip_js_comments(JS), re.S).group(0)
+        # 只禁「对数据行做过滤」：`filter(Boolean)` 是拼文本时去空串，不是筛数据。
+        # 判据要量对象本身（哪一批被筛），不能见 `.filter(` 就报红——那是量错了对象
+        # （2026-10-20 首版断言就是这么误伤的）。
+        self.assertNotIn("items.filter(", render, "渲染里又筛了一遍数据行——那会与后端口径打架")
+        self.assertNotIn("all.filter(", render, "渲染里又筛了一遍数据行")
+
+    def test_score_is_not_recomputed(self):
+        """分数只认服务端：渲染里不许出现乘除（一旦有，就是第二套公式的开端）。"""
+        render = re.search(r"function renderSkillUsage\(.*?\n\}", strip_js_comments(JS), re.S).group(0)
+        self.assertNotIn("Math.", render, "渲染里出现了算术 ⇒ 疑似重算分数")
+        self.assertNotIn("use * use", render)
+        self.assertIn("it.score", render, "必须直接用服务端给的 score")
+
+    def test_error_and_empty_are_distinct(self):
+        """空榜 ≠ 读失败：两者同形会让「这个窗口没人用」和「服务挂了」看起来一样。"""
+        render = re.search(r"function renderSkillUsage\(.*?\n\}", strip_js_comments(JS), re.S).group(0)
+        # 口径必须是**条件分支**，不是「出现过 d.error 这个字」：
+        # 首版写成 assertIn("d.error")，把 `if (d.error)` 改成 `if (false)` 后
+        # 仍能通过（错误文案里还有 d.error），红臂当场证伪了这个断言。
+        self.assertRegex(render, r"if \(d\.error\)", "没有失败分支")
+        self.assertIn("读取权重失败", render)
+        self.assertIn("还没有可计分的技能", render)
+
+    def test_filters_use_delegation(self):
+        """下拉走 `data-usage-filter` 委托，不写 inline onchange（§4.2 同族口径）。"""
+        for sid in ("usageDays", "usageRoute", "usageCaller"):
+            m = re.search(r'<select[^>]*id="' + sid + r'"[^>]*>', HTML)
+            self.assertTrue(m, sid + " 缺失")
+            self.assertIn("data-usage-filter", m.group(0), sid + " 没挂委托标记")
+            self.assertNotIn("onchange=", m.group(0), sid + " 用了 inline onchange")
+        self.assertIn("bindUsageFilters", strip_js_comments(JS))
+
+
 if __name__ == "__main__":
     unittest.main()

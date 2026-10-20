@@ -1,3 +1,65 @@
+## v0.13.140 — 权重榜接上页面：数据有了得有人看
+
+> 来源：PT-20261020-01 的验收要求「返回逐技能 score 且能按 route/caller 下钻」。
+> 端点与 14 例测试 10-20 就已就绪，但 `grep skill/usage static/ templates/` **0 命中**
+> ⇒ 只有 API 没有入口，页面上看不到任何权重。按「登记不等于入役」的口径补展示面。
+
+### 一、技能中心第四个视图
+
+`技能目录 / 调用记录 / 技能商店 / **权重榜**`，tab 与 panel 同 id 族
+（`skillTabWeights` / `skillViewWeights`），懒加载——首屏请求数不因它增加。
+
+- 窗口：近 7 / 30 / 90 天（默认 30，与端点默认一致）
+- 发现点、调用方两个下拉：选项由**本次返回**聚合，不写死 agent 名单
+  （`caller` 是自报字段，写死会让新接入的 agent 永远筛不出来）
+- 每行：`score` + 四类证据（点名 / 自动激活 / 读取 / 曝光）+ 按调用方明细 +
+  最近使用 + 存续天数 + 证据条数（可追溯到 `profile_events` 行 id）
+
+### 二、三条口径（写死在渲染里，测试钉住）
+
+1. **不在前端重算 score**。公式在 `src/skill_weights.py`，页面照抄一份必然漂移；
+   漂移之后「同一技能两个分数」就成了第二个真相，而页面上那个看起来永远是对的。
+   渲染只读服务端 `it.score`。
+2. **过滤一律打服务端**。`caller` 的语义是「先过滤再算分」——前端后过滤会把
+   别人的曝光留在分母里，分数虚低，而用户会以为那是这个 agent 的真实分。
+3. **失败态与空态分开**。空榜的语义是「这个窗口没人用」，与 500 同形会让人去查
+   「为什么没人用」而不是「为什么读不到」。
+
+### 三、首版把面板插错了层级（真浏览器才发现）
+
+首版 `#skillViewWeights` 落在预算卡**之后**、`.sp` 之下（不在 tab 卡内）。
+所有断言都通过：`display` 是 `block`、`#skillUsageList` 里 127 行也真的渲染了——
+但 1440×900 实测面板 `top=913`，**首屏只看得到「安装与注入预算」**，排行榜在折线以下。
+
+「元素存在 + 不是 `display:none`」证明不了「用户看得见它」。这是本仓第三次同型
+（`elementFromPoint` 拿静态快照判「动作后残留哪层」、按字符串出现判「分支还在」）：
+**判据量的是 DOM 属性，报障量的是视觉位置**。已把面板移进 tab 卡，并补静态断言
+`test_panel_lives_inside_the_tab_card`（顺序：store 面板 < weights 面板 < 预算卡），
+红臂用旧版 HTML 代回验证会红。
+
+### 四、`route` 过滤只筛列表、不筛汇总（同一屏两份真相）
+
+真机下钻时发现：`?route=techdocs` 的 `items` 只剩这一路，但顶部 `totals` 仍是全机
+（点名 20 / 曝光 8）。页面把 `totals` 直接铺在汇总带里 ⇒ 用户在「发现点=techdocs」下
+看到的是**别人的数**。
+
+`caller` 早就是「先过滤再算分」，`route` 却是在 `build()` 之后筛 `items`。现统一：
+`build(only_route=...)` 在聚合前过滤，`totals` / `by_name` / `items` 同一口径，
+被过滤掉的事件计入 `filtered_out`（不许凭空消失）。测试
+`test_route_filter_also_scopes_totals`，红臂用旧实现代回会红。
+
+### 五、验证
+
+- `tests/test_skill_center_ui.py` 新增 `TestUsageView` 6 例（82 全绿）；
+  `tests/test_skill_weights.py` 新增 `test_route_filter_also_scopes_totals`（15 全绿）。
+- 红臂三条：
+  - 把 `it.score` 换成 `it.use * it.use / (it.use + it.auto)` → 必红 ✔
+  - 删掉 `&caller=` 拼接 → 必红 ✔
+  - 把 `if (d.error)` 改成 `if (false)` → **首次没红**，原断言是
+    `assertIn("d.error", render)`，而错误文案里也有 `d.error` ⇒ 条件没了也照样过。
+    改成 `assertRegex(r"if \(d\.error\)")` 后变红 ✔
+    （教训：「断言里出现某字符串」不等于「那个分支还在」。）
+
 ## v0.13.139 — 中文任务：不再因语言被扣分、整句搜不到时用短词补候选（且不自动装）
 
 > 来源：用户「测试执行本任务时就可以自动调用技能 包括本地技能和技能商店技能」的实测。

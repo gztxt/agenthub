@@ -190,14 +190,17 @@ def _finalize(row: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, 
 
 
 def build(rows: Iterable[Dict[str, Any]], only_caller: str = "",
-          now: Optional[datetime] = None) -> Dict[str, Any]:
+          now: Optional[datetime] = None, only_route: str = "") -> Dict[str, Any]:
     """把 `profile_events` 行折成 `(name, route)` 维度的权重表。**纯函数，不读库**。
 
-    `only_caller` 非空时只统计该调用方的事件（**先过滤再算分**）：
-    「codex 的常用技能榜」与「全机常用技能榜」是两个问题，不能靠对全机榜单做后过滤得到
-    （分母会带上别人的曝光）。
+    `only_caller` / `only_route` 非空时只统计这些事件（**先过滤再算分**）：
+    「codex 的常用技能榜」「techdocs 这一路的榜」与「全机榜」是三个问题，
+    不能靠对全机榜单做后过滤得到（分母会带上别人的曝光，且 `totals` 会留在全机口径上
+    ——2026-10-20 实测：`?route=techdocs` 只筛了 `items`，顶部汇总仍报全机
+    「点名 20」，同一个屏幕里两份真相）。
     """
     want = (only_caller or "").strip().lower()
+    want_route = (only_route or "").strip()
     per: Dict[Tuple[str, str], Dict[str, Any]] = {}
     counts = {"rows": 0, "bad_detail": 0, "no_name": 0, "filtered_out": 0,
               "explicit": 0, "read": 0, "auto_use": 0, "auto": 0,
@@ -214,6 +217,9 @@ def build(rows: Iterable[Dict[str, Any]], only_caller: str = "",
             continue
         caller = str(det.get("caller") or "").strip().lower()
         if want and caller != want:
+            counts["filtered_out"] += 1
+            continue
+        if want_route and str(det.get("route") or "").strip() != want_route:
             counts["filtered_out"] += 1
             continue
         counts[bucket] = counts.get(bucket, 0) + 1
@@ -290,11 +296,9 @@ def load(days: int = 30, route: str = "", caller: str = "",
         "WHERE source = ? AND subject IN (%s) AND created_at >= ? ORDER BY id DESC" % holders,
         (SOURCE,) + SUBJECTS + (since,))
     now = datetime.now(timezone.utc)
-    rep = build(rows, only_caller=caller, now=now)
-    if route.strip():
-        want = route.strip()
-        rep["items"] = [x for x in rep["items"] if x["route"] == want]
-        rep["by_name"] = [x for x in rep["by_name"] if want in x["routes"]]
+    # route 与 caller 同口径：**先过滤再统计**。原先 route 是在 build 之后筛 items，
+    # 于是列表是这一路的、顶部 totals 是全机的（同一屏两份真相）。
+    rep = build(rows, only_caller=caller, now=now, only_route=route)
     lim = max(1, min(MAX_LIMIT, int(limit)))
     rep["items"] = rep["items"][:lim]
     rep["by_name"] = rep["by_name"][:lim]

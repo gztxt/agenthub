@@ -238,7 +238,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.139"
+    CURRENT_VERSION = "0.13.140"
+
+    #: v0.13.140：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「权重榜接上页面」「不在前端重算」「过滤打服务端」。
+    VERSION_ROOT_CAUSES["0.13.140"] = (
+        "权重榜", "不在前端重算", "过滤一律打服务端", "失败态与空态分开",
+    )
 
     #: v0.13.139：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「中文技能不被语言扣分」「整句搜不到靠派生短词」「短词命中不许自动装」。

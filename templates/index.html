@@ -2062,6 +2062,9 @@
                                 <button class="sk-tab" id="skillTabStore" role="tab" aria-selected="false"
                                         aria-controls="skillViewStore" tabindex="-1"
                                         data-skill-view="store">技能商店</button>
+                                <button class="sk-tab" id="skillTabWeights" role="tab" aria-selected="false"
+                                        aria-controls="skillViewWeights" tabindex="-1"
+                                        data-skill-view="weights">权重榜</button>
                             </div>
                         </div>
                         <div class="sp-r">
@@ -2142,6 +2145,29 @@
                         </div>
                         <div class="sp-bd box"><div id="storeList" class="sp-list">输入关键词后按回车或点「搜索」。</div></div>
                     </div>
+                <!-- ── 视图四：权重榜（/api/skill/usage 只读投影；分数在服务端算）──
+                         为什么要这个视图：端点 2026-10-20 就有了、14 例测试也齐，
+                         但页面**零入口** —— 数据有了没人看，与「登记不等于入役」同型。
+                         页面只渲染，不重算：公式改一处才不会出现两个分数。
+                         过滤一律打服务端（caller 是「先过滤再算分」，前端后过滤会把
+                         别人的曝光留在分母里，分数会虚低）。 -->
+                    <div id="skillViewWeights" role="tabpanel" aria-labelledby="skillTabWeights" style="display:none">
+                        <div class="sk-stats" id="skillUsageSummary">加载中…</div>
+                        <div class="toolbar" style="margin:0 0 10px">
+                            <label class="hint" for="usageDays">窗口</label>
+                            <select id="usageDays" data-usage-filter title="统计窗口（服务端按窗口重算）">
+                                <option value="7">近 7 天</option>
+                                <option value="30" selected>近 30 天</option>
+                                <option value="90">近 90 天</option>
+                            </select>
+                            <label class="hint" for="usageRoute">发现点</label>
+                            <select id="usageRoute" data-usage-filter title="技能来源发现点"><option value="">全部</option></select>
+                            <label class="hint" for="usageCaller">调用方</label>
+                            <select id="usageCaller" data-usage-filter title="只看某个 agent 的使用与曝光（服务端重算分数）"><option value="">全部</option></select>
+                            <span class="hint sk-cnt" id="usageCount"></span>
+                            <span class="hint">use = 2×点名 + 1×自动激活 + 1×读取；score = use² / (use + 曝光)</span>
+                        </div>
+                        <div class="sp-bd box"><div id="skillUsageList" class="sp-list">加载中…</div></div>
                 </div>
 
                 <div class="sp-card">
@@ -2181,6 +2207,7 @@
                             </div>
                         </div>
                     </div>
+                </div>
                 </div>
                 <!-- v0.13.127 P1：自检与实验室下沉诊断折叠区（Grill 裁定 5）。
                      默认折叠——绿是常态，展开是取证需要；details/summary 无 JS、
@@ -2781,6 +2808,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=12e3c3aa"></script>
+    <script src="/static/hub.js?v=87e47b0c"></script>
 </body>
 </html>

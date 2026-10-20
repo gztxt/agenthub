@@ -1838,9 +1838,13 @@ function renderSkillUsage() {
       const pre = label ? label + ' ' : '';
       if (off <= 0) return pre + '<b>' + total + '</b>';
       const cut = (nb[b] || 0) - listed;
+      // 单位必须写清：total / listed / cut 数的是**事件条数**，而 listed_items
+      // 数的是**技能行数**。一行可含多条同名事件（如一次会话里点名 6 次），
+      // 混着写成「拿掉 N 行」会让人以为少渲染了 N 个技能。
       return pre + '<b>' + total + '</b><span class="hint" title="差额 ' + off +
-        ' 条 = 无技能名 ' + (ub[b] || 0) + ' 条 + 被分页拿掉 ' + cut +
-        ' 行（榜单按分数只渲染前 ' + (t.listed_items || 0) + ' 行）">（榜内 ' + listed + '）</span>';
+        ' 条事件 = 无技能名 ' + (ub[b] || 0) + ' 条 + 榜外技能行占 ' + cut +
+        ' 条（榜单只渲染前 ' + (t.listed_items || 0) + ' 行，共 ' + (t.named || 0) +
+        ' 行）">（榜内 ' + listed + ' 条）</span>';
     };
     const rows = [
       ['窗口', '<b>' + escapeHtml(String(d.days || 30)) + '</b> 天'],

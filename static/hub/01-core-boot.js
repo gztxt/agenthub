@@ -897,6 +897,10 @@ let SET_AGENTS = [];          // /api/settings/models 的 agents 段
 let SET_AGENT = '';           // 当前选中的 agent（不落盘）
 let SET_MODELS = null;        // /api/models 缓存（60s）
 let SET_DIFF = null;          // 最近一次预览结果（保存时复用同一个 model 值）
+/* 设置页 select 的「上一个合法值」：付费档取消确认时回滚到这里。
+   必须是**渲染后实际选中的值**，不能假设是 agent 的 hub_model —— 清单外补项、
+   前缀形状都会让两者不同（v0.13.86 的教训）。 */
+let SET_MODEL_PREV = '';
 let SET_DRIFT = [];           // 配置文件漂移体检（v0.13.85：此前后端算了但前端从不显示）
 /* v0.13.85：写入模式文案的单一真相源，与后端 WRITE_MODE 一一对应。
    ccr   = 该字段直接吃 CCR 的 provider/model ID
@@ -1006,6 +1010,35 @@ function settingsPickAgent(id) {
   settingsModelOptions(a);
 }
 
+/* ── 模型计费标记（判定在后端 `api_models.model_billing`，这里只渲染）──
+   为什么要有：CCR 清单里免费与付费混在同一个 vendor 分组里，
+   `alibaba/qwen3.8-max` 与 `openrouter/nvidia/nemotron-3.5-lightning:free`
+   在下拉里长得一模一样，选错就是真扣费。后端给 `billing` 字段，这里只负责
+   **让它可见**并在落到付费档时挡一次确认。
+   ⚠ 缺 `billing` 字段（旧后端 / 旧缓存串）时按付费处理 —— 宁可多问一次。 */
+function modelIsFree(m) { return !!m && m.billing === 'free'; }
+function modelBillingTag(m) { return modelIsFree(m) ? '免费' : '付费'; }
+function modelOptionLabel(mid, m) {
+  const base = (m && m.name && m.name !== mid) ? (mid + ' — ' + m.name) : mid;
+  return '[' + modelBillingTag(m) + '] ' + base;
+}
+/* 付费确认：**同一个模型 ID 只问一次**（记住答案，不每次弹）。
+   不用自定义浮层：这里只需要一个是/否，原生 confirm 不引入第二套浮层状态，
+   手机端也是系统弹窗 —— 是 §4.2「浮层唯一性」成本最低的满足方式。
+   confirmFn 可注入：闸门在 node 里跑，不需要 DOM。 */
+function modelConfirmPaid(mid, m, confirmFn) {
+  if (!mid || modelIsFree(m)) return true;
+  const key = 'hub.paidack.' + mid;
+  if (lsGet(key) === '1') return true;
+  const ask = confirmFn || (typeof window !== 'undefined' && window.confirm
+    ? function (t) { return window.confirm(t); }
+    : null);
+  if (!ask) return true;          // 宿主没有弹窗能力时不阻塞（标记仍然可见）
+  const yes = ask(mid + '\n\n按量计费，使用会计入账单（可能扣费）。确认使用？');
+  if (yes) lsSet(key, '1');
+  return !!yes;
+}
+
 async function settingsModelOptions(a) {
   const sel = $('setModelSel');
   if (!sel) return;
@@ -1060,7 +1093,7 @@ async function settingsModelOptions(a) {
       html += '<optgroup label="' + escapeHtml(gk) + '">' + g[gk].map(mid => {
         const m = (SET_MODELS.models || []).find(x => x.id === mid);
         const val = prefix + mid;                 // ← 精确：值等于该字段要的形状
-        const label = (m && m.name && m.name !== mid) ? (mid + ' — ' + m.name) : mid;
+        const label = modelOptionLabel(mid, m);   // 前置 [免费]/[付费]，值不变
         return '<option value="' + escapeHtml(val) + '"' + (val === cur ? ' selected' : '') + '>' +
           escapeHtml(label) + '</option>';
       }).join('') + '</optgroup>';
@@ -1071,7 +1104,7 @@ async function settingsModelOptions(a) {
       html += '<optgroup label="其他">' + rest.map(m => {
         const val = prefix + m.id;
         return '<option value="' + escapeHtml(val) + '"' + (val === cur ? ' selected' : '') + '>' +
-          escapeHtml(m.name || m.id) + '</option>';
+          escapeHtml(modelOptionLabel(m.id, m)) + '</option>';
       }).join('') + '</optgroup>';
     }
   }
@@ -1079,6 +1112,9 @@ async function settingsModelOptions(a) {
      其后才是「当前值不在清单内」的补项，再是各 provider 分组。
      ⚠ 补项必须带 selected 才能被选中 —— 位置不决定选中态，属性才决定。 */
   sel.innerHTML = html + extra;
+  /* 记下渲染后的合法值：用户选到付费档又拒绝确认时，回滚到这里（§4.2 ③
+     「遮罩/浮层单一出口」同理 —— 取消必须真的回到原值，不能停在半选态）。 */
+  SET_MODEL_PREV = sel.value || '';
   settingsModelHint(a);
 }
 
@@ -1086,6 +1122,41 @@ async function settingsModelOptions(a) {
    只有 argv 型（claude 之外那些「无配置文件可落」的）需要提醒"只影响 hub 拉起的会话"；
    native 型（qoder）必须说清"CCR 模型不写进该字段、只经 --model 注入"，
    否则用户会以为选了原生名就等于把 qoder 接到了 CCR 上。 */
+/* 从 select 的**值**反查模型元数据。
+   为什么单独成函数：设置页与对话页两个下拉的 value 形状不同（opencode 带
+   `ccr/` 前缀），而「值 → 模型」这一步一旦两边各写一遍就会漏掉前缀 ⇒
+   计费标记在其中一个页面静默变成「付费」（缺 m 时按 paid 兜底）。
+   返回 null = 空值（撤销项），不是错误。 */
+function modelMetaFromValue(val, a, models) {
+  if (!val) return null;
+  const list = models || [];
+  const prefix = (a && a.value_prefix) || '';
+  const mid = (prefix && val.indexOf(prefix) === 0) ? val.slice(prefix.length) : val;
+  let m = list.find(x => x.id === mid);
+  /* 前缀兜底：`SET_AGENTS` 还没加载时前端拿不到 `value_prefix`（opencode 的
+     `ccr/` 就是这么丢的），但**值一定以模型 ID 结尾**。不加这层会走向反面：
+     匹配不到 ⇒ `m` 为 null ⇒ 按 paid 兜底 ⇒ 连免费模型也弹「会扣费」，
+     用户会以为整个功能坏了。 */
+  if (!m) m = list.find(x => val.length > x.id.length && val.endsWith('/' + x.id));
+  return { id: m ? m.id : mid, m: m || null };
+}
+
+/* 设置页：选到付费档先确认；取消则**真的回到上一个值**（停在下拉里不算取消）。 */
+$('setModelSel')?.addEventListener?.('change', function () {
+  const sel = $('setModelSel');
+  if (!sel) return;
+  const a = SET_AGENTS.find(x => x.id === SET_AGENT) || null;
+  const meta = modelMetaFromValue(sel.value, a, (SET_MODELS || {}).models);
+  if (!meta) { SET_MODEL_PREV = sel.value || ''; settingsModelHint(a); return; }
+  if (!modelConfirmPaid(meta.id, meta.m)) {
+    sel.value = SET_MODEL_PREV;
+    toast('已取消：' + meta.id + ' 按量计费', 'err');
+    return;
+  }
+  SET_MODEL_PREV = sel.value;
+  settingsModelHint(a);
+});
+
 function settingsModelHint(a) {
   const el = $('setModelHint');
   if (!el) return;
@@ -1098,7 +1169,16 @@ function settingsModelHint(a) {
   if ((a.models || []).length) {
     bits.push('原生清单由 hub 内置（以 `qodercli --list-models` 为准），会随版本变化。');
   }
-  el.innerHTML = escapeHtml(bits.join(''));
+  /* 计费档必须实时跟着下拉走：这是「保存后会一直生效」的设置，
+     用户需要在下笔前就看到自己在选免费还是付费。 */
+  const meta = modelMetaFromValue(setSelectedModel(), a, (SET_MODELS || {}).models);
+  let tag = '';
+  if (meta) {
+    tag = modelIsFree(meta.m)
+      ? '<span class="stale-tag" style="color:var(--muted);border-color:var(--border)">免费</span> '
+      : '<span class="stale-tag">付费·按量</span> ';
+  }
+  el.innerHTML = tag + escapeHtml(bits.join(''));
 }
 
 function setSelectedModel() { return $('setModelSel') ? $('setModelSel').value : ''; }

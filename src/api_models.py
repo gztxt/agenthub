@@ -72,6 +72,31 @@ async def list_models(agent_id: Optional[str] = None,
     return {**payload, "cached": was_cached}
 
 
+def model_billing(mid: str) -> str:
+    """模型计费档：`"free"` / `"paid"`。**全仓唯一判定点**，前端只读不算。
+
+    判据只有一条：**ID 自带免费标记** ⇒ free，其余一律 paid。
+
+    - `openrouter/openrouter/free`（末段 `free`）⇒ free
+    - `openrouter/nvidia/nemotron-3.5-lightning:free`（`:free` 后缀）⇒ free
+    - `alibaba/qwen3.8-max`、`openrouter/anthropic/claude-opus-5.5:batch` ⇒ paid
+
+    【为什么"没有标记就算付费"而不是"未知"】CCR 的 `/v1/models` 不给价格字段
+    （`src/modelprofile.py` 已坐实：只 6 个字段）。三态会让前端必须自己处理
+    "未知"，等于把判定重新散到 UI 层。宁可保守：**没写明免费就按付费提示**，
+    误报的代价是多一次确认，漏报的代价是直接扣费。
+
+    【为什么不在前端按 ID 再判一遍】`AGENTS.md` 断点单源同理：两处规则必然漂。
+    前端只渲染 `billing` 字段，缺字段时按 paid 处理（见 01-core-boot.js `modelIsFree`）。
+    """
+    if not mid:
+        return "paid"
+    body = mid.rsplit("/", 1)[-1]
+    if body == "free" or body.endswith(":free"):
+        return "free"
+    return "paid"
+
+
 def _shape_models(out: list, adapter_id: str) -> dict:
     """把上游的原始 model 列表去重 + 分组（判据与缓存无关，故抽成独立纯函数）。"""
     seen = set()
@@ -83,7 +108,8 @@ def _shape_models(out: list, adapter_id: str) -> dict:
             continue
         seen.add(mid)
         cleaned.append({"id": mid, "name": m.get("display_name") or mid,
-                        "owner": m.get("owned_by") or "?"})
+                        "owner": m.get("owned_by") or "?",
+                        "billing": model_billing(mid)})
         # 分组键 = mid 第一段（vendor/）
         gk = mid.split("/", 1)[0] if "/" in mid else "default"
         groups.setdefault(gk, []).append(mid)

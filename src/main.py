@@ -115,7 +115,8 @@ VERSION = "0.13.141"
 #      被 9 条吃了 824，仅名区 376 tok 装 61 个用 373，剩 3 tok 装不下下一个名字
 #      就 `break` ⇒ 其后按名排序的 308 条**连续**丢弃（不是随机少）。
 #      面板现在把三段占用与「从哪个名字起断」一起写出来。
-#   测试 +4 例（逐桶对账 / 分页差额可归因 / 截断可解释 / 未截断时 truncated_head 为 null），
+#   测试 +6 例（逐桶对账 / 分页差额可归因 / 截断可解释 / 未截断时 truncated_head 为 null
+#   / 汇总逐桶「（榜内 N）」/ 预算成因 + 老后端守卫），
 #   四条红臂逐条先红后绿：unnamed 恒 0、dropped_by_limit 恒 0、truncated_head 恒 None、
 #   full_used 取在仅名循环之后。第四条是**真盘 E2E 抓出来的**：单测断言
 #   `full_used_est + name_used_est == used_est` 恒真（1197+0 也成立），

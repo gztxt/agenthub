@@ -576,6 +576,23 @@ class TestBudgetPanel(unittest.TestCase):
         self.assertIn("&route=", fn, "预算请求未带 route 参数")
         self.assertIn("encodeURIComponent", fn, "route 未编码（路名含空格/逗号会拼坏 URL）")
 
+    def test_js_explains_truncation(self):
+        """「为什么只剩 N 条」必须能由面板回答（v0.13.141）。
+
+        生产实测 1200 tok：full 9 条吃 824、仅名 61 个吃 373、剩 3 ⇒ `break` 丢掉 308。
+        原面板只显示「被裁 308」，用户只能猜。四条一起断言：
+        ① 读 `full_cap`（分段上限）；② 读 `truncated_head`（断在哪个名字）；
+        ③ 用户可见的成因文案；④ `why` 真的拼进 innerHTML（只算不拼 = 白算）。
+        另钉老后端守卫：缺 `full_cap` 时不渲染（否则页面上是 `undefined tok`）。
+        """
+        fn = self.budget_fn()
+        self.assertIn("full_cap", fn, "未用服务端给的分段上限")
+        self.assertIn("truncated_head", fn, "未说出截断起点")
+        self.assertIn("为什么被裁", fn, "缺用户可见的成因文案")
+        self.assertRegex(fn, r"\+\s*why\s*\+", "why 算出来了却没拼进 innerHTML")
+        self.assertRegex(fn, r"d\.truncated\s*&&\s*d\.full_cap != null",
+                         "没有老后端守卫：缺字段会渲染出 undefined")
+
     def test_js_fills_select_from_backend(self):
         self.assertIn("routes_available", self.budget_fn(),
                       "下拉未由后端 routes_available 填充（写死即第二真相）")
@@ -746,6 +763,22 @@ class TestUsageView(unittest.TestCase):
         self.assertRegex(render, r"if \(d\.error\)", "没有失败分支")
         self.assertIn("读取权重失败", render)
         self.assertIn("还没有可计分的技能", render)
+
+    def test_summary_reconciles_per_bucket(self):
+        """汇总必须能逐桶对账（v0.13.141）：`totals` 是全量、`items` 是 limit 子集，
+        无名事件又不进榜 ⇒ 「点名 26 / 榜内 24」必须同时可见，差额拆成两份。
+
+        同时钉住**老后端兼容**：静态文件即时生效而 API 要重启，缺 `listed_by_bucket`
+        时若照算，会把每一桶都说成「榜内 0」。判据是那个守卫**存在且是条件分支**，
+        不是「hasListed 这个词出现过」（同族于 `assertIn("d.error")` 的教训）。
+        """
+        render = re.search(r"function renderSkillUsage\(.*?\n\}", strip_js_comments(JS), re.S).group(0)
+        self.assertIn("listed_by_bucket", render, "汇总未读逐桶榜内数")
+        self.assertIn("unnamed_by_bucket", render, "差额未按无名事件拆开")
+        self.assertIn("（榜内 ", render, "缺用户可见的榜内口径")
+        self.assertRegex(render, r"t\.listed_by_bucket\s*&&\s*typeof t\.listed_items",
+                         "没有老后端守卫：缺字段时会把每桶都说成榜内 0")
+        self.assertIn("dropped_by_limit", render, "分页截掉的行未表态")
 
     def test_filters_use_delegation(self):
         """下拉走 `data-usage-filter` 委托，不写 inline onchange（§4.2 同族口径）。"""

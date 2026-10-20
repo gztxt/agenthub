@@ -1829,8 +1829,12 @@ function renderSkillUsage() {
     const ub = t.unnamed_by_bucket || {};
     const lb = t.listed_by_bucket || {};
     const nb = t.named_by_bucket || {};
+    // 静态文件是**即时生效**的，而 API 要等进程重启才有新字段 ⇒ 老后端 + 新前端
+    // 会让 `lb[b]` 恒 0，把每一桶都说成「榜内 0」。没有 listed_by_bucket 就不显示差额，
+    // 而不是显示一个假的 0。
+    const hasListed = t.listed_by_bucket && typeof t.listed_items === 'number';
     const cell = (label, b) => {
-      const total = t[b] || 0, listed = lb[b] || 0, off = total - listed;
+      const total = t[b] || 0, listed = lb[b] || 0, off = hasListed ? total - listed : 0;
       const pre = label ? label + ' ' : '';
       if (off <= 0) return pre + '<b>' + total + '</b>';
       const cut = (nb[b] || 0) - listed;
@@ -1985,7 +1989,7 @@ async function loadSkillBudget() {
      * 前端不重算：full_cap / full_used_est / name_used_est / remaining_est。
      * 注意算法是 `break`——下一个名字装不下就停，之后按名排序的整段一起丢，
      * 所以被裁必然是一段连续的尾部，而不是「随机丢了 308 条」。 */
-    const why = d.truncated
+    const why = (d.truncated && d.full_cap != null)
       ? '<br><span class="hint">为什么被裁 <b>' + d.truncated + '</b> 条：' +
         '全条目档位上限 ' + d.full_cap + ' tok（预算 70%）装了 ' + full.length + ' 条（' +
         d.full_used_est + ' tok）；其余 ' + (d.total - full.length) + ' 条降级为仅名，' +

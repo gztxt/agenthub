@@ -1022,9 +1022,12 @@ def list_cards(q: str = "", limit: int = 50) -> Dict[str, Any]:
         rows = db.query("SELECT id,module,status,as_of,next_refresh,elapsed_s,meta,"
                         "candidates FROM ref_cards WHERE module LIKE ? "
                         "ORDER BY updated_at DESC LIMIT ?", (f"%{q}%", limit))
+        total = (db.query("SELECT COUNT(*) AS n FROM ref_cards WHERE module LIKE ?",
+                          (f"%{q}%",)) or [{"n": 0}])[0]["n"]
     else:
         rows = db.query("SELECT id,module,status,as_of,next_refresh,elapsed_s,meta,"
                         "candidates FROM ref_cards ORDER BY updated_at DESC LIMIT ?", (limit,))
+        total = (db.query("SELECT COUNT(*) AS n FROM ref_cards") or [{"n": 0}])[0]["n"]
     items = []
     for r in rows:
         try:
@@ -1040,7 +1043,8 @@ def list_cards(q: str = "", limit: int = 50) -> Dict[str, Any]:
                       "impl_count": len(impls), "top": top,
                       "rerank": bool(meta.get("rerank")),
                       "degraded": len(meta.get("degraded") or [])})
-    return {"items": items, "total": len(items)}
+    return {"items": items, "total": total, "returned": len(items),
+            "truncated": total > len(items)}
 
 
 # ── HTTP 路由 ───────────────────────────────────────────────────────────────
@@ -1125,9 +1129,10 @@ async def refresh_loop(interval_s: int = 1800) -> None:
             cid = rows[0]["id"]
             row = _card_row(cid)
             kw = json.loads(row["keywords"] or "[]")
-            await asyncio.get_running_loop().run_in_executor(
-                _POOL, lambda: submit(ScoutIn(module=row["module"], keywords=kw,
-                                              lang=row["lang"] or "", refresh_of=cid)))
+            submit(ScoutIn(module=row["module"], keywords=kw,
+                           lang=row["lang"] or "",
+                           identifiers=json.loads(row["meta"] or "{}").get("identifiers") or [],
+                           refresh_of=cid))
             log.info("refscout auto refresh queued: %s", cid)
         except Exception as exc:  # noqa: BLE001 —— 定时任务失败只记日志，不拖垮循环
             log.warning("refscout auto refresh failed: %s", exc)

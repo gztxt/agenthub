@@ -128,6 +128,8 @@ def classify(subject: str, det: Dict[str, Any]) -> Tuple[str, str]:
 #: 需要按调用方/证据分桶的**使用**桶（auto 曝光是另一个量，见模块 docstring）。
 _USE_BUCKETS = ("explicit", "read", "auto_use")
 _EVIDENCE_BUCKETS = ("explicit", "read", "auto_use", "auto")
+#: 所有会计数的桶（不含 skip）。`legacy` / `query` 不进权重，但必须在 totals 里可见。
+_BUCKET_KEYS = ("explicit", "read", "auto_use", "auto", "query", "legacy")
 
 
 def _new_row(name: str, route: str) -> Dict[str, Any]:
@@ -205,6 +207,10 @@ def build(rows: Iterable[Dict[str, Any]], only_caller: str = "",
     counts = {"rows": 0, "bad_detail": 0, "no_name": 0, "filtered_out": 0,
               "explicit": 0, "read": 0, "auto_use": 0, "auto": 0,
               "query": 0, "legacy": 0, "skip": 0}
+    # 逐桶拆「进了榜单的」与「没有技能名的」。只报 no_name 总数不够：读的人想知道
+    # 「点名 26 而榜里只有 24」差的是哪 2 条，汇总一个 421 解释不了任何一桶。
+    named_by_bucket = {b: 0 for b in _BUCKET_KEYS}
+    unnamed_by_bucket = {b: 0 for b in _BUCKET_KEYS}
     for r in rows or []:
         det = _parse_detail(r.get("detail"))
         if det is None:
@@ -225,7 +231,9 @@ def build(rows: Iterable[Dict[str, Any]], only_caller: str = "",
         counts[bucket] = counts.get(bucket, 0) + 1
         if not name:
             counts["no_name"] += 1
+            unnamed_by_bucket[bucket] += 1
             continue
+        named_by_bucket[bucket] += 1
         counts["rows"] += 1
         route = str(det.get("route") or "").strip()
         row = per.setdefault((name, route), _new_row(name, route))
@@ -275,6 +283,11 @@ def build(rows: Iterable[Dict[str, Any]], only_caller: str = "",
     counts["events"] = counts["explicit"] + counts["read"] + counts["auto_use"] \
         + counts["auto"] + counts["query"] + counts["legacy"]
     counts["named"] = counts["rows"]
+    # 逐桶对账（2026-10-20 实测：点名 26 而榜里只有 24、legacy 1276 而榜里只有 858）：
+    # 任何一桶都必须满足 totals[b] == named_by_bucket[b] + unnamed_by_bucket[b]，
+    # 读的人不必再猜「差的是无名事件还是被 limit 截掉」。
+    counts["named_by_bucket"] = dict(named_by_bucket)
+    counts["unnamed_by_bucket"] = dict(unnamed_by_bucket)
     return {
         "items": items,
         "by_name": names,
@@ -300,8 +313,18 @@ def load(days: int = 30, route: str = "", caller: str = "",
     # 于是列表是这一路的、顶部 totals 是全机的（同一屏两份真相）。
     rep = build(rows, only_caller=caller, now=now, only_route=route)
     lim = max(1, min(MAX_LIMIT, int(limit)))
-    rep["items"] = rep["items"][:lim]
+    all_items = rep["items"]
+    rep["items"] = all_items[:lim]
     rep["by_name"] = rep["by_name"][:lim]
+    # 分页也是「同一屏两份真相」的一个来源：`totals` 是聚合前的全量，`items` 是
+    # limit 后的子集。2026-10-20 实测 limit=100 时 legacy 汇总 1276 而列表只有 630
+    # （其中 418 是无名事件、228 是被 limit 截掉的行）。两者差别必须能在响应里
+    # 各自归因，否则读的人只能二选一：信汇总（看不见的 228 行）或信列表（少算）。
+    tot = rep["totals"]
+    tot["listed_items"] = len(rep["items"])
+    tot["dropped_by_limit"] = len(all_items) - len(rep["items"])
+    tot["listed_by_bucket"] = {
+        b: sum(int(it.get(b) or 0) for it in rep["items"]) for b in _BUCKET_KEYS}
     rep.update({
         "days": d,
         "identity": "(name, route)",
@@ -319,6 +342,9 @@ def load(days: int = 30, route: str = "", caller: str = "",
             "unknown": "只有 legacy/query 事件，无法判定用途",
         },
         "totals_note": "events=各桶事件之和（含无技能名的注入回包）；named=能进榜单的事件数；"
+                       "对账三式：totals[b] = named_by_bucket[b] + unnamed_by_bucket[b]；"
+                       "listed_by_bucket 是本次 limit 后真正返回的行；"
+                       "dropped_by_limit>0 时 named_by_bucket[b] - listed_by_bucket[b] 就是被分页拿掉的行；"
                        "两者不等是口径差异，不是丢数据",
     })
     return rep

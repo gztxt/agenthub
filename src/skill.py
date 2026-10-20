@@ -1834,6 +1834,10 @@ async def skill_budget(
             used += c
         else:
             dropped.append(name)
+    # ⚠ 必须在**仅名循环之前**取：取在之后就等于 `full_used == used`，
+    # `name_used_est` 恒 0，面板会把「仅名区用了 373 tok」说成 0。
+    # 首版正是取在之后，直到用真盘跑 E2E 才看见（单测里两个字段之和恒等于 used，看不出来）。
+    full_used = used
     name_only: List[str] = []
     for n in dropped:
         c = est(n)
@@ -1842,9 +1846,21 @@ async def skill_budget(
             used += c
         else:
             break
+    # 2026-10-20 实测：预算 1200 时 full 9 条吃了 824（档位上限 840）、仅名 61 个吃 373、
+    # 剩 3 tok ⇒ 下一个名字装不下就 `break`，其后 308 条一条不剩被裁。
+    # 面板原先只报「被裁 308」，用户无法回答「为什么只剩 3 条」——把三段占用与
+    # 第一个装不下的名字一起报出来，让截断位置可核对（不是「随机少了 308 条」）。
+    truncated = len(dropped) - len(name_only)
     return {"budget": max_tokens, "used_est": used, "full": full,
             "name_only": name_only,
-            "truncated": len(dropped) - len(name_only),
+            "truncated": truncated,
+            "full_cap": full_cap,           # 全条目档位上限（预算的 70%）
+            "full_used_est": full_used,     # 全条目档位实际吃掉多少 tok
+            "name_used_est": used - full_used,
+            "remaining_est": max(0, max_tokens - used),
+            # 第一个装不下因而触发 break 的名字；未截断时为 None。
+            # `break` 语义 = 名字装不下就停，后面按名排序的整段一起丢 ⇒ 被裁是连续尾段。
+            "truncated_head": dropped[len(name_only)] if truncated else None,
             "total": len(unique), "took_ms": round((time.monotonic() - t0) * 1000, 1),
             # 分路可见性：`total` 是**过滤后**的条数；routes_available 供前端填下拉，
             # 不写死路名，磁盘加一路就自动多一项。

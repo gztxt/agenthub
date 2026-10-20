@@ -1,3 +1,62 @@
+## v0.13.141 — 两个「数字对不上」：口径要能在响应里自证
+
+> 来源：生产 :3102 技能中心全链路单轮探针（v0.13.140，commit `37fdd38`）。
+> 功能链路全通（auto / invoke / store/search / usage / budget / store/auth），
+> L0 440 例全绿；发现的两处都在**展示层精度**，但都会让人做出错误判断：
+> 一处让人以为「汇总在算没发生的事」，一处让人问「为什么只剩 3 条」。
+
+### 一、`/api/skill/usage`：totals 与 items 的差额必须逐桶归因
+
+实测（30 天，`limit=100`）：
+
+| 桶 | totals | 榜内 items 之和 | 差额 | 无名事件 | 被 limit 截掉 |
+|---|---|---|---|---|---|
+| explicit | 26 | 24 | 2 | 2 | 0 |
+| read | 3 | 2 | 1 | 1 | 0 |
+| auto | 26 | 26 | 0 | 0 | 0 |
+| auto_use | 13 | 13 | 0 | 0 | 0 |
+| legacy | 1276 | 630 | 646 | 418 | 228 |
+
+原响应只有全局 `no_name=421`，能算出「总计少了多少」，但**分不到任何一桶里**
+（点名差的 2 条与 legacy 差的 646 条不是一回事）。新增：
+
+- `totals.named_by_bucket` / `totals.unnamed_by_bucket`：逐桶拆开，恒等式
+  `totals[b] == named_by_bucket[b] + unnamed_by_bucket[b]`；
+- `totals.listed_items` / `totals.listed_by_bucket` / `totals.dropped_by_limit`：
+  本次 `limit` 后真正返回的行，`named - listed == dropped_by_limit`。
+
+页面按桶显示「点名 **26**（榜内 24）」，tooltip 写明差额 = 无名 N 条 + 分页拿掉 M 行；
+列表尾部再报「按分数排在后面的 N 行未显示（汇总仍含它们）」。
+
+### 二、`/api/skill/budget`：把「为什么只剩 N 条」变成可核对的数
+
+实测预算 1200：`full 9 / name_only 61 / truncated 308 / total 378`。
+原响应只有 `truncated` 一个数——面板能说出结果，说不出成因。新增
+`full_cap`（预算 70% 档位上限）、`full_used_est`、`name_used_est`、
+`remaining_est`、`truncated_head`（第一个装不下因而触发 `break` 的名字）。
+
+于是 1200 的故事变成：全条目档位上限 840，9 条吃 824；其余 369 条降级为仅名，
+仅名区可用 376 tok，61 个名字吃 373；剩 3 tok 装不下下一个名字 ⇒ **从它起按名
+排序的 308 条连续丢弃**。面板据此渲染成一句话，`truncated_head` 让「断在哪」
+可核对（不是随机少了 308 条）。
+
+### 三、测试与红臂
+
++4 例：逐桶对账恒等式、`limit` 差额可归因（限 1 / 限 500 两档对照）、
+截断可解释、未截断时 `truncated_head` 必须为 `null`。
+四条红臂逐条先红后绿（unnamed 恒 0 / dropped_by_limit 恒 0 / truncated_head 恒 None /
+`full_used` 取在仅名循环之后）。
+
+第四条是**真被 E2E 抓出来的**，不是补的假设：首版把 `full_used = used` 写在仅名循环
+之后 ⇒ `full_used == used`、`name_used_est` 恒 0，面板会说「仅名区用了 0 tok」。
+而单测里的断言是 `full_used_est + name_used_est == used_est`——**这个等式恒真**，
+两种写法都通过。真盘一跑（1200 tok）立刻现形：824 + 373 = 1197 才对，原实现报 1197 + 0。
+判据已补成「各段不得越过自己的上界 + 仅名段必须 > 0」，红臂确认变红。
+
+顺带修一处**恒真断言**：`test_totals_events_bucket_sum_and_named_are_two_numbers`
+的求和式漏了 `auto_use`，夹具里恰好为 0 才一直是绿的。同族于本仓反复记录的
+「断言恒真」——夹具里没有该桶的事件，等式就退化成 `x == x`。
+
 ## v0.13.140 — 权重榜接上页面：数据有了得有人看
 
 > 来源：PT-20261020-01 的验收要求「返回逐技能 score 且能按 route/caller 下钻」。

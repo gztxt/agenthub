@@ -275,9 +275,56 @@ class TestUsageEndpoint(_WeightsCase):
         b = self._usage()
         t = b["totals"]
         self.assertEqual(t["events"], t["explicit"] + t["read"] + t["auto"]
-                         + t["query"] + t["legacy"])
+                         + t["auto_use"] + t["query"] + t["legacy"])
         self.assertEqual(t["named"], t["rows"])
         self.assertIn("口径差异", b["totals_note"])
+
+    def test_totals_reconcile_per_bucket_with_unnamed(self):
+        """每桶都要能对账：`totals[b] == named_by_bucket[b] + unnamed_by_bucket[b]`。
+
+        2026-10-20 生产实测：点名汇总 26、把 items 加起来只有 24，legacy 1276 vs 632。
+        前者差 2 条无名事件，后者还多一层 `limit` 截断。只报一个全局 `no_name`
+        解释不了任何一桶，读的人只能猜——这里把两笔账逐桶拆开并钉住恒等式。
+        """
+        _mk_skill(self.a, "demo", "权重技能演示")
+        self._invoke()                                        # 有名 explicit=1
+        db.execute("INSERT INTO profile_events(source,subject,status,duration_ms,detail,created_at)"
+                   " VALUES('rest','skill.invoke','success',1,?, '2026-10-20T00:00:00+00:00')",
+                   (json.dumps({"route": "src", "caller": "codex"}),))   # 无名 explicit
+        b = self._usage()
+        t = b["totals"]
+        for k in ("explicit", "read", "auto_use", "auto", "query", "legacy"):
+            self.assertEqual(t[k], t["named_by_bucket"][k] + t["unnamed_by_bucket"][k],
+                             "%s 桶对不上账：%s" % (k, t))
+        self.assertEqual(t["explicit"], 2)
+        self.assertEqual(t["named_by_bucket"]["explicit"], 1)
+        self.assertEqual(t["unnamed_by_bucket"]["explicit"], 1)
+        self.assertEqual(t["listed_items"], len(b["items"]))
+        self.assertEqual(t["dropped_by_limit"], 0)
+        self.assertEqual(t["listed_by_bucket"]["explicit"], 1,
+                         "榜内只应有点名那条（无名事件不进榜）")
+
+    def test_limit_truncation_is_attributed_not_silent(self):
+        """`limit` 截掉的行必须能算出来：named - listed == dropped_by_limit。
+
+        生产实测 limit=100 时 legacy 从 858 掉到 630（少 228 行）——若响应不说
+        这 228 行去哪了，读的人只能得出「汇总在算没发生的事」或「列表丢数据」。
+        """
+        for n in ("aa", "bb", "cc"):
+            _mk_skill(self.a, n, "权重技能演示")
+            self.assertEqual(self._invoke(name=n).status_code, 200)
+        b = self._usage(limit=1)
+        t = b["totals"]
+        self.assertEqual(t["listed_items"], 1)
+        self.assertEqual(t["dropped_by_limit"], 2, t)
+        self.assertEqual(t["named_by_bucket"]["explicit"], 3)
+        self.assertEqual(t["listed_by_bucket"]["explicit"], 1)
+        self.assertEqual(t["named_by_bucket"]["explicit"] - t["listed_by_bucket"]["explicit"],
+                         t["dropped_by_limit"])
+        # 拿掉 limit 后必须逐位复原（差额只来自分页，不来自聚合）
+        full = self._usage(limit=500)["totals"]
+        self.assertEqual(full["dropped_by_limit"], 0)
+        self.assertEqual(full["listed_by_bucket"]["explicit"], 3)
 
     def test_usage_class_separates_cold_from_exposure(self):
         """「没人用」有两种：被推过没打开（exposed_only）与用过后冷掉（stale）。"""

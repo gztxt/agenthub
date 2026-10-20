@@ -97,7 +97,31 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.140"
+VERSION = "0.13.141"
+#   v0.13.141：**两个「数字对不上」**——都是展示层口径，但都能让人做出错误判断。
+#   ① `/api/skill/usage`：`totals` 与把 `items` 加起来**永远不相等**，而响应里
+#      只有一个全局 `no_name`，解释不了任何一桶。实测（生产 :3102，30 天）：
+#      点名汇总 26 / 榜内 24（差 2 条无名事件）；legacy 1276 / 榜内 630
+#      （418 条无名 + 228 条被 `limit=100` 截掉）。两个成因叠在一起，
+#      读的人只能二选一：信汇总（看不见的 228 行）或信列表（少算 418 笔）。
+#      现补 `named_by_bucket` / `unnamed_by_bucket` / `listed_by_bucket` /
+#      `listed_items` / `dropped_by_limit`，恒等式
+#      `totals[b] == named_by_bucket[b] + unnamed_by_bucket[b]` 与
+#      `named_by_bucket[b] - listed_by_bucket[b] == dropped_by_limit`
+#      在响应里自证；页面按桶显示「（榜内 N）」并在 tooltip 里拆出差额两份。
+#   ② `/api/skill/budget`：预算 1200 实测「全条目 9 / 仅名 61 / 被裁 308」，
+#      面板能显示结果却答不出「为什么只剩 3 条」。补 `full_cap` / `full_used_est` /
+#      `name_used_est` / `remaining_est` / `truncated_head`：全条目档位上限 840
+#      被 9 条吃了 824，仅名区 376 tok 装 61 个用 373，剩 3 tok 装不下下一个名字
+#      就 `break` ⇒ 其后按名排序的 308 条**连续**丢弃（不是随机少）。
+#      面板现在把三段占用与「从哪个名字起断」一起写出来。
+#   测试 +4 例（逐桶对账 / 分页差额可归因 / 截断可解释 / 未截断时 truncated_head 为 null），
+#   四条红臂逐条先红后绿：unnamed 恒 0、dropped_by_limit 恒 0、truncated_head 恒 None、
+#   full_used 取在仅名循环之后。第四条是**真盘 E2E 抓出来的**：单测断言
+#   `full_used_est + name_used_est == used_est` 恒真（1197+0 也成立），
+#   真跑才看见 824+373=1197；判据已补上「各段不过上界 + 仅名段 > 0」。
+#   顺带修 `test_totals_events_bucket_sum_and_named_are_two_numbers` 的漏项：
+#   求和式少了 `auto_use`，夹具里恰好为 0 才没红——同族「断言恒真」。
 #   v0.13.140：**权重榜接上页面**。`/api/skill/usage` 10-20 就有 14 例测试，
 #   但前端零入口 ⇒ 「数据有了没人看」，与「登记不等于入役」同型（实测 grep
 #   `skill/usage` 在 static/ 与 templates/ 里 0 命中）。

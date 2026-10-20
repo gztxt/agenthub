@@ -203,6 +203,39 @@ class TestBudget(_SkillCase):
         for it in d["full"]:
             self.assertGreater(it["est_tokens"], 0)
 
+    def test_budget_truncation_is_explained(self):
+        """「为什么只剩 N 条」要能由响应里的数自己回答（v0.13.141）。
+
+        生产实测：预算 1200 ⇒ full 9 条吃 824（档位上限 840）、仅名 61 个吃 373、
+        剩 3 tok 装不下下一个名字，`break` 把其后 308 条一起丢掉。
+        原先只回 `truncated=308`，面板只能显示结果不能解释成因。
+        """
+        # 造足量长名条目：6 条短名在 60 tok 里塞得下，不会触发截断
+        for i in range(10):
+            _mk_skill(self.a, f"long-skill-name-{i:02d}", "第 %d 号测试技能描述" % i)
+        skill._scan_cache.clear()   # 同类的更早用例可能已把 6 条的结果缓存住
+        r = self.client.get("/api/skill/budget", params={"max_tokens": 60})
+        d = r.json()
+        self.assertGreater(d["truncated"], 0)
+        self.assertEqual(d["full_cap"], 42, "full_cap 必须是预算的 70%")
+        self.assertEqual(d["full_used_est"] + d["name_used_est"], d["used_est"])
+        # 只断言「两段之和 == used」是恒真的（取错位置就变成 used+0），
+        # 必须再钉住两段各自的上界与「仅名真的用了 tok」。
+        self.assertLessEqual(d["full_used_est"], d["full_cap"])
+        self.assertGreater(d["name_used_est"], 0, "仅名区明明装了名字却报 0 tok")
+        self.assertEqual(d["remaining_est"], max(0, d["budget"] - d["used_est"]))
+        # 截断点必须点名：被裁是连续尾段，起点就是这个装不下的名字
+        self.assertTrue(d["truncated_head"], d)
+        self.assertNotIn(d["truncated_head"], d["name_only"])
+        # 三段守恒：全条目 + 仅名 + 被裁 == 名录总数
+        self.assertEqual(len(d["full"]) + len(d["name_only"]) + d["truncated"], d["total"])
+
+    def test_budget_no_truncation_has_no_head(self):
+        d = self.client.get("/api/skill/budget", params={"max_tokens": 4000}).json()
+        self.assertEqual(d["truncated"], 0)
+        self.assertIsNone(d["truncated_head"])
+        self.assertEqual(d["name_used_est"], 0)
+
 
 class TestThreeNewRoutes(_SkillCase):
     def test_default_dirs_include_new_routes(self):

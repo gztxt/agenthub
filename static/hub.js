@@ -5261,22 +5261,44 @@ function renderSkillUsage() {
   const items = d.items || [];
   const t = d.totals || {};
   if (sum) {
+    /* 逐桶对账（v0.13.141）：`totals` 是全量聚合、`items` 是 limit 后的子集，
+     * 无名事件又不进榜单 ⇒ 同一个「点名」有两个数。差额拆成两份、逐桶报出，
+     * 而不是只给一个全局 no_name（那个数解释不了任何一桶）。 */
+    const ub = t.unnamed_by_bucket || {};
+    const lb = t.listed_by_bucket || {};
+    const nb = t.named_by_bucket || {};
+    const cell = (label, b) => {
+      const total = t[b] || 0, listed = lb[b] || 0, off = total - listed;
+      const pre = label ? label + ' ' : '';
+      if (off <= 0) return pre + '<b>' + total + '</b>';
+      const cut = (nb[b] || 0) - listed;
+      return pre + '<b>' + total + '</b><span class="hint" title="差额 ' + off +
+        ' 条 = 无技能名 ' + (ub[b] || 0) + ' 条 + 被分页拿掉 ' + cut +
+        ' 行（榜单按分数只渲染前 ' + (t.listed_items || 0) + ' 行）">（榜内 ' + listed + '）</span>';
+    };
     const rows = [
       ['窗口', '<b>' + escapeHtml(String(d.days || 30)) + '</b> 天'],
-      ['使用', '点名 <b>' + (t.explicit || 0) + '</b> · 自动激活 <b>' + (t.auto_use || 0) +
-        '</b> · 读取 <b>' + (t.read || 0) + '</b>'],
-      ['曝光', '<b>' + (t.auto || 0) + '</b> 次（只作分母，不计分）'],
+      ['使用', cell('点名', 'explicit') + ' · ' + cell('自动激活', 'auto_use') +
+        ' · ' + cell('读取', 'read')],
+      ['曝光', cell('', 'auto') + ' 次（只作分母，不计分）'],
       ['技能身份', escapeHtml(String(d.identity || '(name, route)')) +
         ' · 同名多路分开计'],
     ];
+    const notes = [escapeHtml(String(d.formula || ''))];
+    if (t.no_name) notes.push('另有 ' + t.no_name + ' 条事件没有技能名（旧账/计划态），未计入榜单');
+    if (t.dropped_by_limit) {
+      notes.push('榜单只渲染前 ' + (t.listed_items || 0) + ' 行，按分数排在后面的 ' +
+        t.dropped_by_limit + ' 行未显示（汇总仍含它们）');
+    }
     sum.innerHTML = rows.map(([k, v]) =>
       '<span class="sk-k">' + k + '</span><span class="sk-v">' + v + '</span>').join('') +
-      '<span class="sk-note hint">' + escapeHtml(String(d.formula || '')) +
-      (t.no_name ? '　·　另有 ' + t.no_name + ' 条事件没有技能名（旧账/计划态），未计入榜单' : '') +
-      '</span>';
+      '<span class="sk-note hint">' + notes.join('　·　') + '</span>';
   }
   const cnt = $('usageCount');
-  if (cnt) cnt.textContent = '显示 ' + items.length + ' 个技能';
+  if (cnt) {
+    cnt.textContent = '显示 ' + items.length + ' 个技能' +
+      (t.dropped_by_limit ? '（共 ' + (items.length + t.dropped_by_limit) + ' 个，其余被 limit 截断）' : '');
+  }
   if (!items.length) {
     el.innerHTML = '<div class="sk-empty"><b>这个窗口内还没有可计分的技能</b>（近 ' +
       escapeHtml(String(d.days || 30)) + ' 天）。<br>' +
@@ -5397,9 +5419,22 @@ async function loadSkillBudget() {
     const nested = (d.nested_docs || []).length
       ? ' · ' + d.nested_docs.length + ' 条子文档已排除（' + d.nested_docs.map(n => escapeHtml(n)).join(',') + '，属父技能分册）'
       : '';
+    /* 「为什么只剩 N 条」必须能回答（v0.13.141）。三段占用都由服务端给数，
+     * 前端不重算：full_cap / full_used_est / name_used_est / remaining_est。
+     * 注意算法是 `break`——下一个名字装不下就停，之后按名排序的整段一起丢，
+     * 所以被裁必然是一段连续的尾部，而不是「随机丢了 308 条」。 */
+    const why = d.truncated
+      ? '<br><span class="hint">为什么被裁 <b>' + d.truncated + '</b> 条：' +
+        '全条目档位上限 ' + d.full_cap + ' tok（预算 70%）装了 ' + full.length + ' 条（' +
+        d.full_used_est + ' tok）；其余 ' + (d.total - full.length) + ' 条降级为仅名，' +
+        '仅名区可用 ' + Math.max(0, d.budget - d.full_used_est) + ' tok，装了 ' + names.length +
+        ' 个（' + d.name_used_est + ' tok）；剩 ' + d.remaining_est + ' tok 装不下下一个名字' +
+        (d.truncated_head ? '「' + escapeHtml(d.truncated_head) + '」' : '') +
+        ' ⇒ 从它起按名排序其后 ' + d.truncated + ' 条全部丢弃（不是随机少）。</span>'
+      : '';
     $('skillBudget').innerHTML =
       '范围 ' + escapeHtml(scope) + ' · 预算 ' + d.budget + ' tok · 实际约 ' + d.used_est + '（' + pct + '%） · 全条目 ' + full.length + ' / 仅名 ' + names.length +
-      (d.truncated ? ' / <b>被裁 ' + d.truncated + '</b>' : '') + '（共 ' + d.total + '）' + unknown + failed + nested + '<br>' +
+      (d.truncated ? ' / <b>被裁 ' + d.truncated + '</b>' : '') + '（共 ' + d.total + '）' + unknown + failed + nested + why + '<br>' +
       full.concat(names).map(s => '· ' + s).join('<br>') +
       '<br><span class="hint">被裁 = 预算不够时连名字都留不下 ⇒ 注入时 agent <b>看不到</b>它。' +
       '本面板只预览清单；agent 实际注入走 /api/skill/relevant（BM25 top-3），不受此预算约束。</span>';

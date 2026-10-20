@@ -238,7 +238,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.140"
+    CURRENT_VERSION = "0.13.141"
+
+    #: v0.13.141：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「totals 与 items 的差额要逐桶归因」「budget 被裁要说得清从哪断」。
+    VERSION_ROOT_CAUSES["0.13.141"] = (
+        "永远不相等", "418 条无名", "为什么只剩 3 条", "连续",
+    )
 
     #: v0.13.140：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「权重榜接上页面」「不在前端重算」「过滤打服务端」。

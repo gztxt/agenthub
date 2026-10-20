@@ -191,6 +191,67 @@ def _rrf_fuse(rankings, weights=None, limit=10):
     return out
 
 
+# ── 同源近分「新者优先」（2026-10-21）──────────────────────────────
+#: 带宽（相对 RRF 差）。实测反例：查「openrouter auto 扣费」时 TDAI 回
+#: 0.910「严厉禁止 openrouter/auto」与 0.909「统一使用 openrouter/auto 免费档」，
+#: 两条 created_at 只差 16 分钟、RRF 相对差 1.6% —— 名次由语义分的小抖动决定，
+#: 与「哪条是现行结论」无关。带宽内改按 created_at 新→旧，才符合「改判不删原文、
+#: 但现行结论要压住被改判的那条」。
+#: 为何只做同源：跨源分值不可比（local 那路是 LIKE，没有分数量纲），混排会把
+#: 联邦源顶到权威库之前——正是 09-24 复核修掉的那个方向错误。
+#: 为何是「相邻段」而不是按源分组：`_rank_cap` 的轮转靠**跨源交织**保多样性，
+#: 按源重排会把 TDAI 的若干条重新聚拢，等于把配额修掉的病灶装回去。
+RECENCY_TIE_REL = float(os.getenv("MEMORY_RECENCY_TIE_REL", "0.02"))
+
+
+def _ts_of(it: dict) -> float:
+    """条目时间戳（epoch 秒）。取不到 ⇒ 0.0（视作最旧，不参与「更新」方向置换）。"""
+    for k in ("created_at", "updated_at", "ts", "mtime"):
+        v = it.get(k)
+        if not v:
+            continue
+        if isinstance(v, (int, float)):
+            return float(v)
+        try:
+            return datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+    return 0.0
+
+
+def _recency_tiebreak(items: list, band: float = None) -> list:
+    """同源相邻段内、**与段首条**的相对差 < band 的条目 ⇒ 按时间新→旧。
+
+    ⚠️ 必须与**段首（该段最高分）**比，不能与**前一条**比：RRF 按名次递减，
+    相邻两名的相对差近似常数（实测约 1.6%），拿前一条作基准会让整条同源阶梯
+    每一步都「在带宽内」⇒ 整段按时间重排，名次信号被彻底抹掉
+    （2026-10-21 影子实例实测：0.01639 的「禁令」被排到第 4，0.01449 的无关条目升到第 1）。
+
+    band<=0 原样返回（保留 A/B 开关）。跨源次序逐位不变。
+    """
+    band = RECENCY_TIE_REL if band is None else band
+    if band <= 0 or len(items) < 2:
+        return items
+    out = list(items)
+    i = 0
+    while i < len(out):
+        src = out[i].get("source") or ""
+        top = float(out[i].get("rrf") or 0)
+        j = i + 1
+        while j < len(out) and (out[j].get("source") or "") == src:
+            j += 1
+        # 段内**只取与段首（该段最高分）相对差 ≤band 的前缀**；余下原样。
+        k = i + 1
+        if top > 0:
+            while k < j and abs(top - float(out[k].get("rrf") or 0)) / top <= band:
+                k += 1
+        if k - i > 1:
+            out[i:k] = sorted(out[i:k],
+                              key=lambda x: (-_ts_of(x), -float(x.get("rrf") or 0)))
+        i = j
+    return out
+
+
 def _backend(name: str, r: dict) -> dict:
     """把一次各路调度的结果压成可读诊断字段。**ok=false 时必须带 error**。"""
     return {"name": name, "ok": bool(r.get("ok")), "count": int(r.get("count") or 0),
@@ -340,6 +401,7 @@ async def search_memory(request: Request,
     ranked = _rrf_fuse([r[1] for r in routes],
                        weights=[r[2] for r in routes], limit=pool_cap)
     fused, capped_src = _rank_cap(ranked, FUSE_TOP_FRAC, limit)
+    fused = _recency_tiebreak(fused)      # 同源近分按时间新→旧（见函数注释）
     engines = [b["name"] for b in backends if b["ok"] and b["count"]]
     degraded = [b["name"] for b in backends if not b["ok"]]
     #: 配额生效的直接证据：轮转救回、而纯 RRF top-limit 里没有的源。
@@ -623,6 +685,7 @@ async def injection_context(request: Request, q: Optional[str] = None,
         fused = _rrf_fuse([local_rows, tdai_rows],
                           weights=[W_LOCAL, W_TDAI_L1], limit=30)
         fused = _rank_cap(fused, FUSE_TOP_FRAC, 10)[0]
+        fused = _recency_tiebreak(fused)   # 与 /api/memory/search 同一口径，避免两处给两个答案
         if fused:
             _add("相关记忆", "## 相关记忆\n" + "\n".join(
                 f"- [{m.get('category') or m.get('type') or 'l1'}] {m.get('content','')}"

@@ -124,6 +124,9 @@ async function chatSend() {
 
 /* ── 模型选择器（动态拉取 CCR /v1/models）── */
 let CHAT_MODELS = [];
+/* 上一个合法值：付费档取消确认时回滚（与设置页 SET_MODEL_PREV 同语义，
+   但两个下拉各自记忆 —— 切换 agent 会整表重渲染，共用一个变量会串档）。 */
+let CHAT_MODEL_PREV = '';
 async function loadChatModels(force) {
   const sel = $('chatModel');
   if (!sel) return;
@@ -152,7 +155,7 @@ async function loadChatModels(force) {
     html += '<optgroup label="' + escapeHtml(gk) + '">';
     for (const mid of groups[gk]) {
       const m = CHAT_MODELS.find(x => x.id === mid);
-      const label = m && m.name && m.name !== mid ? (mid + ' — ' + m.name) : mid;
+      const label = modelOptionLabel(mid, m);   // 前置 [免费]/[付费]，值不变
       const val = prefix + mid;
       // 选中态：兼容旧存储（裸 ID）与新存储（带前缀）
       const isSel = (val === saved) || (mid === saved);
@@ -168,14 +171,25 @@ async function loadChatModels(force) {
     for (const m of leftovers) {
       const val = prefix + m.id;
       const isSel = (val === saved) || (m.id === saved);
-      html += '<option value="' + escapeHtml(val) + '"' + (isSel ? ' selected' : '') + '>' + escapeHtml(m.name || m.id) + '</option>';
+      html += '<option value="' + escapeHtml(val) + '"' + (isSel ? ' selected' : '') + '>' + escapeHtml(modelOptionLabel(m.id, m)) + '</option>';
     }
     html += '</optgroup>';
   }
   sel.innerHTML = html;
+  CHAT_MODEL_PREV = sel.value || '';
 }
 $('chatModel')?.addEventListener?.('change', e => {
-  lsSet('hub.model.' + chatPick, e.target.value);
+  const sel = e.target;
+  const a = SET_AGENTS.find(x => x.id === chatPick) || null;
+  const meta = modelMetaFromValue(sel.value, a, CHAT_MODELS);
+  /* 「默认（网关路由）」= 空值，不确认（它不指向具体计费模型）。 */
+  if (meta && !modelConfirmPaid(meta.id, meta.m)) {
+    sel.value = CHAT_MODEL_PREV;
+    toast('已取消：' + meta.id + ' 按量计费', 'err');
+    return;
+  }
+  CHAT_MODEL_PREV = sel.value;
+  lsSet('hub.model.' + chatPick, sel.value);
 });
 
 /* ── 工作目录（CWD 选择器）── */

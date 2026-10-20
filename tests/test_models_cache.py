@@ -273,11 +273,16 @@ class ShapeModels(unittest.TestCase):
         src = MODELS_PY.read_text(encoding="utf-8")
         import ast
         tree = ast.parse(src)
-        fn = [n for n in tree.body
-              if isinstance(n, ast.FunctionDef) and n.name == "_shape_models"][0]
-        code = ast.get_source_segment(src, fn)
+        # 2026-10-21：`_shape_models` 起调用同模块的 `model_billing` 给每项标免费/付费。
+        # 必须把它一起 exec 进同一个命名空间 —— 只抠 `_shape_models` 会得到
+        # `NameError: model_billing is not defined`（这里红过一次，别再拆开）。
+        want = ("model_billing", "_shape_models")
+        fns = [n for n in tree.body
+               if isinstance(n, ast.FunctionDef) and n.name in want]
+        self.assertEqual(sorted(n.name for n in fns), sorted(want),
+                         "api_models.py 里少了 %s" % (set(want) - {n.name for n in fns},))
         ns: dict = {}
-        exec(compile(ast.Module(body=[fn], type_ignores=[]), "<shape>", "exec"), ns)
+        exec(compile(ast.Module(body=fns, type_ignores=[]), "<shape>", "exec"), ns)
         shape = ns["_shape_models"]
         out = [{"id": "a/b", "display_name": "B"}, {"id": "a/b"}, {"id": "c"}]
         r = shape(out, "claude")

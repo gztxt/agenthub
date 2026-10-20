@@ -2186,8 +2186,8 @@
                                 <input id="refKeywords" placeholder="英文关键词（可空，逗号分隔）"
                                        style="max-width:230px"
                                        onkeydown="if(event.key==='Enter'){event.preventDefault();submitRefScout();}">
-                                <label class="hint" for="refPaid" title="免费档失败时用付费快档重排（单次约几千 token）">
-                                    <input type="checkbox" id="refPaid"> 允许付费重排
+                                <label class="hint" for="refPaid" title="付费快档优先、失败再试免费档（单次约几千 token，卡上会标注）">
+                                    <input type="checkbox" id="refPaid"> 允许付费重排（优先）
                                 </label>
                                 <button class="btn sm" id="refSubmit" onclick="submitRefScout()">检索</button>
                                 <span class="hint sk-cnt" id="refHint"></span>

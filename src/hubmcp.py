@@ -438,8 +438,10 @@ def hub_ref_scout(module: str, keywords: str = "", lang: str = "",
 
     `keywords` 传英文技术词、逗号分隔（如 "terminal,websocket,pty"）；留空则由
     后台用免费模型抽词，失败退中文词典。`identifiers` 是代码里的函数/类名，用于
-    代码搜索臂（最多 2 个）。`allow_paid=true` 允许重排用付费快档（单次约几千 token，
-    **默认关闭**）；关着时只走免费档，失败就降级为纯词法并在卡上注明。
+    代码搜索臂（最多 2 个）。`allow_paid=true` 时**付费快档优先**、失败再试免费档（单次约几千
+    token，**默认关闭**）；关着时只走免费档，失败就降级为纯词法并在卡上注明。
+    为什么付费优先：实测免费两档几乎稳定返回 only-thinking 并占满超时，排在前面会把
+    预算吃光，付费档根本轮不到。
 
     卡上每条都有 `as of`、下次刷新时间、SPDX 许可证与 copyleft 提示。
     **只出建议与固定引用（repo@sha），不克隆、不改项目、不自动加依赖。**"""

@@ -99,3 +99,20 @@
 - 代码：`git revert <commit>`（仅新增文件 + main.py 3 行接线，无存量改写）。
 - 数据：`ref_cards`/`ref_jobs` 两表可 `DROP`，不影响其它表。
 - 界面：删 tab 按钮与 `skillViewRefs` 面板即可，无共享状态。
+
+## 8. 上线记录（2026-10-21）
+
+| 项 | 值 |
+|---|---|
+| 合并提交 | `3bbcf19`（`git merge --no-ff wt/refscout`，快进基线 `4a3ab92`） |
+| 回滚点 | 分支 `bak/pre-refscout-20261021_064957` → `4a3ab92`；5 个被覆盖文件同目录留 `.bak-20261021_064957-pre-refscout` |
+| 重启 | `systemctl --user restart agenthub.service`，`ExecMainStartTimestamp=2026-10-21 07:06:00 CST` |
+| 健康 | `/health` 200，`git_sha_boot=3bbcf19e`、`code_stale=false`、`needs_restart=false` |
+| 建表 | 启动时自动建 `ref_cards` / `ref_jobs`（生产库 0 条起始） |
+| MCP | `tools/list` 返回 `hub_ref_scout`、`hub_ref_get` |
+| 页面 | `/` 含 `skillTabRefs` / `skillViewRefs` / `refModule`，`/static/hub.js` 内含 `loadRefCards` |
+| 生产实测 | 任务 `7415b6002a70`（模块「会话记忆检索 时效重排」，`allow_paid=false`）：`done`，总 66.9s（词法 26.3s + 重排 40.6s），免费档 `nemotron-3-super-120b-a12b:free` 重排成功，10 条实现候选全带 SPDX |
+
+生产实测的一条**负面信号**：`core` / `fresh` / `cn` 三臂各返回 0 条，最终候选全由
+`pair` / `pair2` / `reading` 三臂贡献。说明多词 AND 收窄后 `core` 臂对「四词以上查询」
+条件过严；分臂表态机制按设计暴露了这一点，P2 做标注集时一并评估是否放宽。

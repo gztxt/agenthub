@@ -779,6 +779,10 @@ class TestUsageView(unittest.TestCase):
         self.assertRegex(render, r"t\.listed_by_bucket\s*&&\s*typeof t\.listed_items",
                          "没有老后端守卫：缺字段时会把每桶都说成榜内 0")
         self.assertIn("dropped_by_limit", render, "分页截掉的行未表态")
+        # 行数只能用行数来源：`t.named` 是**有名事件数**（实测 927）不是行数（138），
+        # 拿它当「共 M 行」是同一个量纲错换了个位置（真浏览器探针抓出）。
+        self.assertIn("rowsTotal", render, "总行数未由 listed_items + dropped_by_limit 推出")
+        self.assertNotRegex(render, r"t\.named\s*\|\|", "把有名事件数当成行数用了")
 
     def test_filters_use_delegation(self):
         """下拉走 `data-usage-filter` 委托，不写 inline onchange（§4.2 同族口径）。"""

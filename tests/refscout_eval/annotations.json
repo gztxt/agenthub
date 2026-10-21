@@ -1,7 +1,7 @@
 {
-  "version": 1,
+  "version": 3,
   "as_of": "2026-10-21",
-  "note": "5 模块标注集。targets 只收「能一句话说清解决同一问题」的仓库，每条 why 引其官方 description；判定前逐条打过 /repos/{owner}/{repo} 核验存在与描述（2026-10-21）。**未标注的仓库不等于不相关**，故 precision 只作下界，主指标是 hit@5。",
+  "note": "9 模块 / 58 个目标仓。判据（逐条打 GET /repos/{owner}/{repo} 取证，脚本 work/annot_check.py + work/annot_check_pool.py，结果 work/annot-check-20261021.json 与 work/annot-pool-20261021.json）：A 存在且 full_name 一致；B 硬过滤（archived / fork / stars>=20 —— 三者任一不满足则查询或 collect 必然排除）；C 描述能一句话说清与模块解决同一问题；D 不是零件（node-pty/xterm.js 类）；E 参考价值门槛 stars>=100（★<100 的个人 demo 不构成参考情报，此线只用于标注，不是池门槛）。`added` 区分批次（无/v2/v3），评测脚本按 added 报 v1 子集分数，跨版本只在该子集上可比。**pooling bias 必须声明**：v3 补标只覆盖「v1/v2 系统 top5 召回过」的仓，从未被召回的仓不会进标注集 ⇒ v3 的 hit@5 仍是**乐观值**（分母不完整），不能当作检索质量的真值。**未标注 ≠ 不相关**依旧成立，prec 只作下界。",
   "modules": [
     {
       "id": "terminal-ws",
@@ -9,9 +9,9 @@
       "keywords": ["terminal", "websocket", "pty", "port forwarding"],
       "lang": "",
       "targets": [
-        {"repo": "cs01/termpair", "why": "浏览器查看/控制终端，端到端加密"},
-        {"repo": "yudai/gotty", "why": "把终端分享成 web 应用"},
-        {"repo": "tsl0922/ttyd", "why": "通过 web 分享终端"}
+        {"repo": "cs01/termpair", "why": "浏览器查看/控制终端，端到端加密（★1780，210d 未推送 ⇒ 无 fresh 臂机会但可经 kw/core 入池）"},
+        {"repo": "yudai/gotty", "why": "把终端分享成 web 应用（★19555，810d 未推送，同上）"},
+        {"repo": "tsl0922/ttyd", "why": "通过 web 分享终端（★12526，70d）"}
       ]
     },
     {
@@ -20,8 +20,12 @@
       "keywords": ["llm", "gateway", "proxy", "failover", "router"],
       "lang": "",
       "targets": [
-        {"repo": "BerriAI/litellm", "why": "统一 100+ LLM API 的网关"},
-        {"repo": "Portkey-AI/gateway", "why": "带路由的 AI 网关，接 1600+ 模型"}
+        {"repo": "BerriAI/litellm", "why": "统一 100+ LLM API 的网关（★61722）"},
+        {"repo": "Portkey-AI/gateway", "why": "带路由的 AI 网关，接 1600+ 模型（★13243，149d）"},
+        {"repo": "songquanpeng/one-api", "added": "v2", "why": "LLM API 管理与分发系统，多渠道路由/负载均衡（★37218，285d ⇒ 无 fresh 臂机会）"},
+        {"repo": "maximhq/bifrost", "added": "v3", "why": "开源高性能 AI gateway / LLM gateway（★8994）"},
+        {"repo": "tbphp/gpt-load", "added": "v3", "why": "自托管 AI gateway，多渠道路由与多凭据密钥轮换（★7162）"},
+        {"repo": "ENTERPILOT/GoModel", "added": "v3", "why": "AI gateway / control plane，统一 OpenAI 兼容出口（★1262）"}
       ]
     },
     {
@@ -30,8 +34,12 @@
       "keywords": ["health", "uptime", "monitoring", "watchdog"],
       "lang": "",
       "targets": [
-        {"repo": "louislam/uptime-kuma", "why": "自托管监控/探活"},
-        {"repo": "TwiN/gatus", "why": "面向开发者的状态页 + 告警"}
+        {"repo": "louislam/uptime-kuma", "why": "自托管监控/探活（★92713）"},
+        {"repo": "TwiN/gatus", "why": "面向开发者的状态页 + 告警（★12369）"},
+        {"repo": "prometheus/blackbox_exporter", "added": "v2", "why": "黑盒探针 exporter：HTTP/TCP/ICMP/DNS 主动探测（★5906）"},
+        {"repo": "upptime/upptime", "added": "v2", "why": "GitHub Actions 驱动的 uptime 监控与状态页（★17183）"},
+        {"repo": "openstatusHQ/openstatus", "added": "v3", "why": "开源状态页 + uptime monitoring（★9207）"},
+        {"repo": "operacle/checkcle", "added": "v3", "why": "自托管监控平台，topics 含 uptime（★3308）"}
       ]
     },
     {
@@ -40,9 +48,15 @@
       "keywords": ["cron", "scheduler", "task scheduling"],
       "lang": "",
       "targets": [
-        {"repo": "agronholm/apscheduler", "why": "Python 任务调度库"},
-        {"repo": "robfig/cron", "why": "Go 的 cron 库"},
-        {"repo": "celery/celery", "why": "分布式任务队列，beat 组件负责任务调度"}
+        {"repo": "agronholm/apscheduler", "why": "Python 任务调度库，支持 cron 触发器（★7662）"},
+        {"repo": "robfig/cron", "why": "Go 的 cron 库（★14193，835d 未推送）"},
+        {"repo": "quartz-scheduler/quartz", "added": "v2", "why": "Java 作业调度框架，cron 表达式触发器（★6756）"},
+        {"repo": "go-co-op/gocron", "added": "v2", "why": "Go 的 cron 调度库（★7177）"},
+        {"repo": "distribworks/dkron", "added": "v2", "why": "分布式容错作业调度系统，cron 语义（★4740）"},
+        {"repo": "PowerJob/PowerJob", "added": "v3", "why": "企业级分布式作业调度中间件（★7800）"},
+        {"repo": "xuxueli/xxl-job", "added": "v3", "why": "分布式任务调度平台（★30624）"},
+        {"repo": "quartznet/quartznet", "added": "v3", "why": "Quartz 调度器的 .NET 实现（★7095）"},
+        {"repo": "Arcenox-co/TickerQ", "added": "v3", "why": ".NET 后台任务调度器，支持 cron + 时间触发（★3647）"}
       ]
     },
     {
@@ -51,10 +65,95 @@
       "keywords": ["full-text search", "search engine", "indexing"],
       "lang": "",
       "targets": [
-        {"repo": "meilisearch/meilisearch", "why": "轻量搜索 API，自带索引与混合检索"},
-        {"repo": "typesense/typesense", "why": "开源 Algolia 替代，轻量检索"},
-        {"repo": "quickwit-oss/quickwit", "why": "云原生搜索/可观测检索引擎"}
+        {"repo": "meilisearch/meilisearch", "why": "轻量搜索 API，自带索引与混合检索（★59619）"},
+        {"repo": "typesense/typesense", "why": "开源 Algolia 替代，轻量检索（★27017）"},
+        {"repo": "quickwit-oss/quickwit", "why": "云原生全文检索引擎，偏可观测场景（★11730；边缘：不轻量，但同问题）"},
+        {"repo": "valeriansaliou/sonic", "added": "v2", "why": "轻量无 schema 搜索后端，Elasticsearch 替代（★21366）"},
+        {"repo": "blevesearch/bleve", "added": "v2", "why": "Go 全文/数值/向量索引库，可嵌入自建检索（★11239；边缘：库而非服务）"},
+        {"repo": "zincsearch/zincsearch", "added": "v2", "why": "轻量 Elasticsearch 替代，单二进制（★17916）"},
+        {"repo": "manticoresoftware/manticoresearch", "added": "v3", "why": "全文/向量/混合检索数据库（★12063）"},
+        {"repo": "xerj-org/xerj", "added": "v3", "why": "本地优先的 BM25 全文检索引擎，单二进制（★12646）"},
+        {"repo": "RediSearch/RediSearch", "added": "v3", "why": "Redis 的查询与全文索引引擎（★6243）"},
+        {"repo": "quickwit-oss/tantivy", "added": "v3", "why": "Rust 全文检索引擎库（★16245；与 bleve 同级：库而非服务）"},
+        {"repo": "nextapps-de/flexsearch", "added": "v3", "why": "浏览器/Node 全文检索库（★13809；库而非服务）"}
+      ]
+    },
+    {
+      "id": "log-aggregation",
+      "module": "日志聚合与检索",
+      "keywords": ["log aggregation", "log collector", "centralized logging"],
+      "lang": "",
+      "added": "v2",
+      "targets": [
+        {"repo": "grafana/loki", "added": "v2", "why": "Prometheus 式日志聚合系统（★29048）"},
+        {"repo": "fluent/fluent-bit", "added": "v2", "why": "轻量日志/指标/trace 采集与转发（★8164）"},
+        {"repo": "vectordotdev/vector", "added": "v2", "why": "高性能可观测数据管道，日志采集与路由（★22747）"},
+        {"repo": "JackBister/logsuck", "added": "v3", "why": "轻量日志聚合/索引/搜索（★168，446d；按 ★>=100 线入选，质量明显低于前三条）"}
+      ]
+    },
+    {
+      "id": "tunnel-proxy",
+      "module": "内网穿透与反向代理",
+      "keywords": ["reverse proxy", "tunnel", "nat traversal"],
+      "lang": "",
+      "added": "v2",
+      "targets": [
+        {"repo": "fatedier/frp", "added": "v2", "why": "把 NAT/防火墙后的本地服务暴露到公网（★110045）"},
+        {"repo": "cloudflare/cloudflared", "added": "v2", "why": "Cloudflare Tunnel 客户端，无需开放入站端口（★16205）"},
+        {"repo": "ehang-io/nps", "added": "v3", "why": "轻量高性能内网穿透代理服务器（★34249，874d 未推送）"},
+        {"repo": "rathole-org/rathole", "added": "v3", "why": "面向 NAT 穿透的轻量反向代理（★14362）"},
+        {"repo": "tmoonlight/NSmartProxy", "added": "v3", "why": "开源内网穿透工具（★1388）"},
+        {"repo": "djylb/nps", "added": "v3", "why": "NPS 增强版：轻量内网穿透 + 反向代理（★1090）"}
+      ]
+    },
+    {
+      "id": "vector-db",
+      "module": "向量检索与相似度搜索",
+      "keywords": ["vector database", "embedding", "similarity search"],
+      "lang": "",
+      "added": "v2",
+      "targets": [
+        {"repo": "milvus-io/milvus", "added": "v2", "why": "云原生向量数据库（★46455）"},
+        {"repo": "qdrant/qdrant", "added": "v2", "why": "向量数据库与向量搜索引擎（★35176）"},
+        {"repo": "weaviate/weaviate", "added": "v2", "why": "开源向量数据库（★16896）"},
+        {"repo": "chroma-core/chroma", "added": "v2", "why": "面向 AI 的检索基础设施（★29540）"},
+        {"repo": "pgvector/pgvector", "added": "v2", "why": "Postgres 向量相似度检索扩展（★23428）"},
+        {"repo": "infiniflow/infinity", "added": "v3", "why": "面向 LLM 应用的 AI 原生数据库，含向量检索（★4742）"},
+        {"repo": "RyanCodrai/turbovec", "added": "v3", "why": "基于 TurboQuant 的向量索引（Rust，★17407）"}
+      ]
+    },
+    {
+      "id": "docs-site",
+      "module": "文档站生成（Markdown → HTML）",
+      "keywords": ["documentation site", "markdown", "docs generator"],
+      "lang": "",
+      "added": "v2",
+      "targets": [
+        {"repo": "mkdocs/mkdocs", "added": "v2", "why": "用 Markdown 写项目文档（★22508，366d ⇒ 无 fresh 臂机会）"},
+        {"repo": "facebook/docusaurus", "added": "v2", "why": "文档网站生成器（★66542）"},
+        {"repo": "docsifyjs/docsify", "added": "v2", "why": "运行时渲染 Markdown 的文档站生成器（★31553）"},
+        {"repo": "vuejs/vitepress", "added": "v2", "why": "Vite/Vue 驱动的静态文档站生成器（★18425）"},
+        {"repo": "dotnet/docfx", "added": "v3", "why": ".NET API 文档站生成器（★4444）"},
+        {"repo": "jackyzha0/quartz", "added": "v3", "why": "把 Markdown 转成文档站/数字花园的生成器（★13429）"}
       ]
     }
+  ],
+  "rejected": [
+    {"repo": "inconshreveable/ngrok", "why": "archived=true（1.x 停更，★24401）⇒ collect() 对 archived 显式 continue，作标注只会制造数学上必不命中的假失败"},
+    {"repo": "microsoft/node-pty", "why": "只是 PTY 绑定（★2051），终端分享方案的零件"},
+    {"repo": "xtermjs/xterm.js", "why": "只是浏览器终端渲染组件（★21283），同上；标注它会把 hit@5 变成零件命中率"},
+    {"repo": "celery/celery", "why": "分布式任务队列（v1 原有，v2 移除）。beat 虽能 cron 调度，但仓库一句话是「Task Queue」，与「cron 表达式调度器」不是同一问题"},
+    {"repo": "AkaraChen/browser-terminal", "why": "语义完全对口（浏览器终端 + PTY + WebSocket）但 ★24，低于 ★>=100 参考价值线"},
+    {"repo": "unkn0wn-root/resterm", "why": "终端 API 客户端（调 HTTP/gRPC 的 TUI，★1993），不是「把终端暴露成 web 服务」"},
+    {"repo": "mylxsw/llm-gateway", "why": "语义同类（LLM 代理网关）但 ★76，低于质量线"},
+    {"repo": "apache/hertzbeat", "why": "通用可观测平台（metrics/logs/APM，★7432）。topics 虽含 uptime，但一句话定位是 observability system，不是「探活看护」——判据 C 不成立，避免把通用监控混进探针模块"},
+    {"repo": "aws-solutions/centralized-logging-with-opensearch", "why": "CloudFormation 部署模板（★132），不是日志聚合实现本身"},
+    {"repo": "Dicklesworthstone/automatic_log_collector_and_analyzer", "why": "单文件式日志收集脚本（★429，601d），不是聚合系统"},
+    {"repo": "phare/sloggo", "why": "仅 RFC 5424 syslog 收集（★462），覆盖面只对应模块的一个子场景"},
+    {"repo": "Graylog2/collector-sidecar", "why": "管理采集器的 sidecar（★287），不是聚合器"},
+    {"repo": "EulerSearch/embedding_studio", "why": "向量检索的应用框架（★381，544d），不是向量库"},
+    {"repo": "TencentCloud/TencentDB-Agent-Memory", "why": "Agent 记忆服务（★29737），不是向量数据库"},
+    {"repo": "jekyll/jekyll", "why": "通用博客型静态站生成器（★51724）。docs-site 模块定义为「文档站生成」，通用 SSG 不是同一问题；v2 的 keywords 含 static site generator 过宽，v3 已移除该词——该模块 v2→v3 数字不可比"},
+    {"repo": "getzola/zola", "why": "通用静态站生成器（★17535），同上"}
   ]
 }

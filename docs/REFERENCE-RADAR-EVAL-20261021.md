@@ -180,3 +180,144 @@ llm-gateway 0.500（Portkey #5/#5/#4）、health-probe 0.500、cron-scheduler 0.
   `scheduler`→`cron/job queue`），而不是继续动池容量 —— 因为 §7.4 证明扩池必须三旋钮同调，
   而查询扩展不改变池结构，风险小得多
 
+## 8. 标注集扩样与逐条核对（v1→v3，2026-10-21 深夜）
+
+> 前七节的 `hit@5` 全部基于同一套 5 模块 / 13 仓的标注集。该集有两个结构性问题：
+> ①每模块只有 2~3 条，`hit@5` 的分辨率是 0.33 一格；②只认少数仓，而 top5 里那些
+> **真实的同类实现**（PowerJob、manticoresearch…）全被算成"未命中"。第 ① 个问题让
+> 指标抖一格就变 0.167，第 ② 个问题让指标系统性偏低。本节做的就是修这两点。
+
+### 8.1 判据：先定"什么算一条合格标注"
+
+全部逐条打 `GET /repos/{owner}/{repo}` 取证（脚本 `scripts/annot_check.py`、
+`scripts/annot_check_pool.py`），五条同时成立才收：
+
+| # | 判据 | 为什么 | 取证字段 |
+|---|---|---|---|
+| A | 存在且 `full_name` 一致 | 名字写错（大小写/改仓）会让该条**永远**不可能命中，是纯假失败 | `full_name` |
+| B | 硬过滤：`archived=false`、`fork=false`、`stars>=20` | 这三条分别写在 `collect()` 的 `continue` 和每条查询的 `stars:>=N fork:false archived:false` 里，不满足则**数学上必不命中** | `archived`/`fork`/`stargazers_count` |
+| C | 描述能一句话说清「与模块解决同一问题」 | 这是标注的定义本身 | `description` |
+| D | 不是"零件" | `node-pty`、`xterm.js` 只是终端分享方案的组件；标注零件会把 `hit@5` 变成"零件命中率" | 人判 |
+| E | `stars>=100` | 参考情报的用途是"能抄的成熟实现"，24 星的个人 demo 不算；**此线只用于标注，不是池门槛** | `stargazers_count` |
+
+**判据 B 差点写错，值得单记**：第一版脚本把 `pushed_at<=180d` 也当成硬过滤，据此
+`gotty`(810d)/`robfig/cron`(835d)/`termpair`(210d) 全部判死。但代码里 `fresh_days` **只进
+`fresh` 臂**（`pushed:>cut` + 按 `updated` 排），`core`/`pair`/`kw*` 臂都不带这个条件 ——
+这三个仓在 v1 里**实际命中过**。量错对象会把好标注误删，比漏量更危险。
+
+### 8.2 v1 那 13 条的核对结论
+
+| 结论 | 数量 | 明细 |
+|---|---:|---|
+| 保留（语义与硬过滤都过） | 12 | termpair / gotty / ttyd / litellm / Portkey / uptime-kuma / gatus / apscheduler / robfig-cron / meilisearch / typesense / quickwit |
+| **移除** | 1 | `celery/celery` —— 仓库一句话是「Distributed Task Queue」，beat 虽能 cron 调度，但不是「cron 表达式调度器」。它是 v1 为了让 cron 模块凑够 3 条塞进去的 |
+| 陈旧但合法 | 3 | gotty 810d、robfig 835d、termpair 210d：只是失去 `fresh` 臂这一次机会，仍可经 `kw*`/`core` 入池 |
+
+移除 celery 不影响可比性：v1 实测该模块 `hit@5=0`，它本来就没命中，v1 子集仍是 6/12=0.500。
+
+### 8.3 v2：把 5 模块扩到 9 模块（35 仓）
+
+新增 4 个模块（都按同一判据核过）：日志聚合与检索、内网穿透与反向代理、
+向量检索与相似度搜索、文档站生成；原 5 模块各补 1~3 条。
+
+**结果（冷缓存，`do_rerank=False`，258s）**：
+
+| 指标 | 值 |
+|---|---:|
+| hit@5（9 模块平均） | **0.331** |
+| 命中 | 10 / 35 |
+| mrr | 0.359 |
+| **v1 子集（5 模块 / 12 仓，可比口径）** | **0.500 / mrr 0.157** |
+
+v1 子集与 §2 的 v4 逐位相同（0.500 / 0.157）⇒ 扩样 + 脚本改动**没有**动到旧口径，
+两套数字可以并列。全量 0.331 低于 v1 的 0.500 不代表"变差"：分母从 12 变 35，
+新增模块里有 3 个是 0 分（日志聚合 0/3、全文检索 0/6、文档站 0.25）。
+
+### 8.4 v3：pooling 补标（58 仓）—— 这一步才把"低估"量化出来
+
+v2 的 45 个 top5 位置里有 35 个未标注。逐条取事实后，**21 个是同类的真实实现**
+（PowerJob/xxl-job/quartznet/TickerQ、manticoresearch/xerj/RediSearch/tantivy/flexsearch、
+openstatus/checkcle、nps×2/rathole/NSmartProxy、infinity/turbovec、docfx/quartz-jackyzha0…）。
+把它们补进来（判据同 8.1，语义逐条人判），得 v3 = 58 仓。
+
+**结果（冷缓存，`do_rerank=False`，259s）**：
+
+| 指标 | v2 | v3 |
+|---|---:|---:|
+| hit@5（9 模块平均） | 0.331 | **0.577** |
+| 命中 | 10 / 35 | **32 / 58** |
+| mrr | 0.359 | 0.837 |
+| prec@5（下界） | 0.222 | 0.711 |
+| **v1 子集** | **0.500 / 0.157** | **0.500 / 0.157** |
+
+逐模块（v2 → v3）：
+
+| 模块 | v2 | v3 | 该模块仍未命中的（真实名次） |
+|---|---:|---:|---|
+| 终端 WebSocket | 1.000 | 1.000 | — |
+| LLM 网关 | 0.333 | 0.667 | Portkey #12、one-api #14 |
+| 健康探针 | 0.500 | 0.667 | blackbox_exporter（未入池）、upptime #19 |
+| 定时任务 | 0.200 | 0.556 | apscheduler #14、robfig #19、quartz-java（未入池）、dkron（未入池） |
+| 全文检索 | 0.000 | 0.455 | meili #6、typesense #7、quickwit/sonic/bleve/zinc（未入池） |
+| 日志聚合 | 0.000 | 0.250 | **loki、fluent-bit、vector 全部未入池** |
+| 内网穿透 | 0.500 | 0.833 | cloudflared #14 |
+| 向量检索 | 0.200 | 0.429 | qdrant #14、weaviate #15、pgvector #18、chroma（未入池） |
+| 文档站 | 0.250 | 0.333 | mkdocs #16、docusaurus/vitepress/quartz（未入池） |
+
+**这 0.331→0.577 的涨幅全部来自补标，不来自检索**。最硬的证据：v1 子集一分未动
+（0.500 / 0.157）。换句话说，前七节那个 0.500 不是"检索只有 50 分"，而是
+**"标注集只给了 50 分的题面"**。旧数字没有错，错在把它当成了检索质量的真值。
+
+⚠️ **pooling bias 必须声明**：v3 只补了「v1/v2 的 top5 召回过」的仓。从未被召回的仓
+（如 manticoresearch 之外的长尾引擎）不会进标注集 ⇒ 分母仍不完整，v3 的 0.577 是**乐观值**。
+同时它也不能再拿去和 v2 比"好坏"——两套分母不同。
+
+### 8.5 冻结规则（防止指标自我美化）
+
+补标能无限抬高 `hit@5`（把 top5 全标上就是 1.0），这会让指标彻底失去诊断力。本轮起定死三条：
+
+1. **标注冻结**：v3 之后不再按单次评测结果追加标注。补标只允许在"换评测目标/发现新模块"时成批做。
+2. **永久双报**：任何 `hit@5` 必须同时给「v1 子集」与「全量」两个数，且注明版本。
+3. **新补标的命中要单独算**：v3 的 32 个命中里，26 个来自 v2/v3 新补的标注，
+   只有 6 个是老标注（=v1 子集那 6 个）⇒ 报"检索变好"时只能说这 6 个。
+
+### 8.6 这轮真正暴露的产品缺陷（不是标注问题）
+
+补标之后剩下的 26 条未命中，失败结构第一次变干净了：
+
+| 失败类型 | 数量 | 说明 |
+|---|---:|---|
+| 池内但排在 6~19 名 | 12 | 排序问题。词法分 `0.70*cov + 0.20*log(stars)` 让"描述词面最密 + 星最多"的仓霸榜 |
+| **完全未入池** | 14 | 召回问题，全部集中在长尾描述 |
+
+两个新发现，按严重度排：
+
+1. **日志聚合模块 0 召回**：`loki`(29k)、`fluent-bit`(8k)、`vector`(22k) 一个都没进池。
+   三个仓的描述分别是「Like Prometheus, but for logs.」「Fast and Lightweight Logs…」
+   「observability data pipeline」—— **没有一个含 `aggregation`/`collector`/`centralized logging`**。
+   这是 `SYNONYMS` 词表只覆盖 27 条通用词的直接后果：模块语义对，用户词也对，
+   但实现方的自我描述用的是另一套词。`hit@5=0.250` 这一格（最小的 logsuck 命中）
+   **恰恰是这条缺陷的反面证据**——指标上去了，主流实现还是找不到。
+2. **cron 模块 top5 全是"平台"，不是"库"**：PowerJob/xxl-job/quartznet/TickerQ 都对，
+   但用户要参考的往往是 `apscheduler`(#14)、`robfig/cron`(#19) 这种能直接嵌进项目的库。
+   当前打分不区分**形态**（库 / 服务 / 平台），只认词面密度与星数 ⇒ 30k 星的调度平台
+   永远压过 7k 星的库。这不是标注能修的，需要给 candidate 加形态维度。
+
+这两条都**没有**在本轮改动代码（用户本轮要求是"扩展标注集并核对标签"），
+仅作为下一轮的输入。
+
+### 8.7 复现
+
+```bash
+# 1) 核标注（会打出每个仓的 ★/落地天数/archived，并标出被硬过滤的）
+venv/bin/python scripts/annot_check.py                      # 候选池（v2 定稿前）
+venv/bin/python scripts/annot_check_pool.py work/eval-v3-annot.json   # pooling 补标（v3）
+
+# 2) 跑评测（冷缓存；v1 子集会随全量一起打印）
+venv/bin/python tests/eval_refscout.py --json work/eval-v3-annot.json
+```
+
+产物：`work/annot-check-20261021.json`、`work/annot-pool-20261021.json`、
+`work/eval-v2-annot.json`、`work/eval-v3-annot.json`；
+标注集历史版本备份在 `work/annotations.json.bak-*-v1|v2`。
+

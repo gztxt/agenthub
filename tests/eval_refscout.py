@@ -95,6 +95,7 @@ def main() -> int:
         return 2
 
     rows = []
+    v1_rows = []
     for m in mods:
         t0 = time.monotonic()
         got = refscout.collect(m["module"], m["keywords"], m.get("lang", ""),
@@ -102,6 +103,13 @@ def main() -> int:
                                [], bool(args.allow_paid), do_rerank=bool(args.rerank))
         targets = [t["repo"] for t in m["targets"]]
         s = _score(got["candidates"], targets, args.k)
+        # v1 子集：只留第一批（无 added 字段）的模块与标注。
+        # 为什么要单独报：v2 把分母从 13 扩到 35，跨版本比 hit@5 是拿两个不同的
+        # 平均数相减。只有在 v1 子集上重算，才能回答「检索变好了没有」。
+        v1_targets = [t["repo"] for t in m["targets"] if not t.get("added")]
+        v1_mod = not m.get("added") and bool(v1_targets)
+        if v1_mod:
+            v1_rows.append({"n": len(v1_targets), **_score(got["candidates"], v1_targets, args.k)})
         rows.append({
             "id": m["id"], "module": m["module"], "targets": targets,
             "pool": got["meta"]["pool_size"], "elapsed_s": got["elapsed"],
@@ -133,10 +141,22 @@ def main() -> int:
         "annotations_version": spec["version"],
         "as_of": spec["as_of"],
     }
+    if v1_rows:
+        agg["v1_subset"] = {
+            "modules": len(v1_rows),
+            "hit@5": round(sum(r["hit@k"] for r in v1_rows) / len(v1_rows), 3),
+            "mrr": round(sum(r["mrr"] for r in v1_rows) / len(v1_rows), 3),
+            "total_labels": sum(r["n"] for r in v1_rows),
+            "found": sum(len(r["hits"]) for r in v1_rows),
+        }
     print(f"\n== 汇总（{n} 模块 / {agg['total_labels']} 个标注仓）")
     print(f"  hit@5={agg['hit@5']}  mrr={agg['mrr']}  prec@5={agg['prec@5_lower_bound']}(下界)"
           f"  命中 {agg['found']}/{agg['total_labels']}  用时 {agg['elapsed_s']}s"
           f"  重排={'开' if args.rerank else '关'}")
+    if v1_rows:
+        v = agg["v1_subset"]
+        print(f"  └ v1 子集（可比口径）：{v['modules']} 模块 / {v['found']} 命中"
+              f"  hit@5={v['hit@5']}  mrr={v['mrr']}")
 
     if args.json:
         out = args.json if os.path.isabs(args.json) else os.path.join(ROOT, args.json)

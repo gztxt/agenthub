@@ -48,6 +48,14 @@
 3. **单独再列一段「自有来源命中」**：主表是统一排序 + `limit=8` 截断，
    自己的仓很容易被 1k+ star 的外部仓挤到第 9 名之后 ⇒ 加了来源却「看不见」。
    该段只做可见性保证，不二次排序，已进主表的标「（已在上表）」。
+4. **排序＝参考价值优先，来源只作同分次序**（2026-10-21 用户裁定「主要是要有参考价值，
+   没有参考价值就排后」）：`src_bonus` 原先**加进**加权分，0.06 足以让「我的仓」压过功能分
+   略高的外部仓。现改为 `_order_key = (桶, 三轴加权分, src_bonus)`——分不同按分排，
+   **完全同分**时才让自己的仓靠前。语义重排后另有 `judge` 档位（`use/fork` → `read` →
+   `unjudged` → `skip`），判定 skip 的一律沉底。
+5. **摘要落到卡面**：`readme_gist`（README 首段去徽章/链接/代码块，260 字）原本只喂给重排模型，
+   卡上看不到 ⇒ 用户只能凭一句 GitHub 描述判断值不值得点开。现在「可借鉴点」每条追加
+   `- 摘要：…`；「自有来源命中」也补一句描述，便于先扫价值再看仓。
 
 ## 4. 实测
 
@@ -57,9 +65,10 @@
 | 真实拉取 `gztxt:starred` | **273 仓**（`Link` 头 `rel=last` 同为 273，翻页取全）/ **12.5s 冷**、20ms 热；archived 12 → 实际入池 261；其中 fork 20 |
 | 真实采集（终端 WebSocket 与端口转发，`do_rerank=false`） | 冷 29.3s、热 0.2s；池 110；`gztxt/agenthub` 进候选（func 0.515 / cov 0.559） |
 | 真实采集（GitHub 资料收集整理，仅 starred 来源） | 46 候选；`EbookFoundation/free-programming-books`、`lukasmasuch/best-of-python`、`mahmoud/awesome-python-applications`、`punkpeye/awesome-mcp-servers`、`yzfly/Awesome-MCP-ZH` 均带 `src=['star:gztxt']` |
+| 价值优先复验（两条来源都在库，池 330/353） | 「GitHub 资料收集整理」top1-3 = `HelloGitHub`(f .65/i .85) / `computer-science` / `build-your-own-x`，全是 `star:gztxt`；「终端复用」top10 **无一条来源仓**（无关的不会因为「是我的」上榜） |
 | 无关自有仓 | `free-programming-books`（终端复用查询下 cov 0）被第 3 节口径挡住，不再进卡 |
-| 单元测试 | `tests/test_refscout_sources_l0.py` **17 例**（含 starred 归一化 2 例 / 同类名共存 1 例 / starred 翻页 1 例 / starred 入池 1 例） |
-| 全量 L0 | `run_tests.sh hermetic`：**2617 例 / 0 跳过 / 0 失败**（含新增 17 例） |
+| 单元测试 | `tests/test_refscout_sources_l0.py` **21 例**（starred 归一化 2 / 同类名共存 1 / starred 翻页 1 / starred 入池 1 / 价值优先排序 3 / 卡面摘要 1） |
+| 全量 L0 | `run_tests.sh hermetic`：**2621 例 / 0 跳过 / 0 失败**（含新增 21 例） |
 | 真 Chromium 探针 | `tests/probe_refscout_ui.py` 于影子 :3219 **14/14**（原 9 项 + 来源工具条 3 项 + 星标来源 2 项） |
 
 > 探针的删除只回滚**它自己新增**的那一条（记录 `before` 计数），避免对着已有数据的库

@@ -957,6 +957,18 @@ def apply_rerank(module: str, ranked: List[Dict[str, Any]],
     return "", used_model, attempts
 
 
+def _order_key(c: Dict[str, Any]) -> Tuple[int, float, float]:
+    """排序主键：**参考价值优先**，来源只作同分次序。
+
+    0.06 的 `src_bonus` 曾经**加进**加权分里，结果是「我的仓」能压过功能分略高的外部仓
+    —— 与「没有参考价值就排后」直接相反（2026-10-21 用户裁定）。现在它只进第三位：
+    三轴分不同就按分排，分数**完全相等**时才让自己的仓靠前。
+    """
+    return (c["bucket"] != "impl",
+            -(0.6 * c["func"] + 0.3 * c["impl"] + 0.1 * c["design"]),
+            -c.get("src_bonus", 0.0))
+
+
 def collect(module: str, keywords: List[str], lang: str, min_stars: int,
             fresh_days: int, identifiers: List[str], allow_paid: bool,
             stage: Optional[Any] = None, do_rerank: bool = True) -> Dict[str, Any]:
@@ -1104,9 +1116,7 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
             "judge": "", "why": "", "llm": None,
         })
 
-    ranked.sort(key=lambda x: (x["bucket"] != "impl",
-                               -(0.6 * x["func"] + 0.3 * x["impl"] + 0.1 * x["design"]
-                                 + x.get("src_bonus", 0))))
+    ranked.sort(key=_order_key)
     rerank_err, used_model = "", ""
     if do_rerank and ranked:
         mark("rerank")
@@ -1217,7 +1227,7 @@ def render_md(module: str, keywords: List[str], lang: str, meta: Dict[str, Any],
             for c in own[:12]:
                 tail = "（已在上表）" if id(c) in shown else ""
                 out.append(f"- [{c['repo']}]({c['url']}) — {c['bucket']}，功能 "
-                           f"{c['func']:.2f}{tail}")
+                           f"{c['func']:.2f}{tail}：{c['desc']}")
         else:
             out.append("- （无：本轮关键词未命中自有仓；可补关键词，或确认来源已同步）")
     out += ["", "## 资料/清单桶（不参与实现对比）", ""]
@@ -1237,6 +1247,10 @@ def render_md(module: str, keywords: List[str], lang: str, meta: Dict[str, Any],
     for c in picked[:limit]:
         out.append(f"### {c['repo']} · 功能{c['func']:.2f}/实现{c['impl']:.2f}/设计{c['design']:.2f}")
         out.append(f"- 一句话：{c['desc']}")
+        # README 首段早就抓了（重排用它纠偏），但一直没落到卡上 ⇒ 用户只能看一句
+        # GitHub 描述判断「值不值得点进去」。这里把**已提取的摘要**显出来，不改抓取逻辑。
+        if c.get("readme_gist"):
+            out.append(f"- 摘要：{c['readme_gist']}")
         if c.get("sources"):
             out.append("- 来源：自有仓（" + "、".join(c["sources"])
                        + "，不走搜索额度、含 fork）")

@@ -273,6 +273,46 @@ class TestStarredInPool(unittest.TestCase):
         self.assertEqual(got["meta"]["sources"][0]["kind"], "starred")
 
 
+class TestValueFirstOrder(unittest.TestCase):
+    """排序主键：参考价值优先，来源只作同分次序（用户 2026-10-21 裁定）。"""
+
+    def _c(self, bucket="impl", func=0.6, impl=0.5, design=0.2, bonus=0.0):
+        return {"bucket": bucket, "func": func, "impl": impl, "design": design,
+                "src_bonus": bonus}
+
+    def test_source_bonus_never_beats_value(self):
+        ext = self._c(func=0.62)
+        own = self._c(func=0.50, bonus=refscout.SOURCE_BONUS)
+        self.assertLess(refscout._order_key(ext), refscout._order_key(own),
+                        "0.06 加成若压过功能分，就是「是我的仓」优先于「值得借鉴」")
+
+    def test_source_wins_only_on_exact_tie(self):
+        plain = self._c(func=0.60)
+        own = self._c(func=0.60, bonus=refscout.SOURCE_BONUS)
+        self.assertLess(refscout._order_key(own), refscout._order_key(plain))
+
+    def test_low_value_impl_still_ahead_of_list_bucket(self):
+        low_impl = self._c(func=0.10, impl=0.10, design=0.0)
+        high_list = self._c(bucket="list", func=0.99, impl=0.99, design=0.99)
+        self.assertLess(refscout._order_key(low_impl), refscout._order_key(high_list))
+
+
+class TestCardSummary(unittest.TestCase):
+    def test_card_shows_extracted_readme_summary(self):
+        cand = {"repo": "a/b", "url": "https://github.com/a/b", "desc": "d",
+                "bucket": "impl", "sources": [], "src_bonus": 0.0,
+                "func": 0.6, "impl": 0.5, "design": 0.2, "coverage": 0.5,
+                "stars": 10, "license": "MIT", "copyleft": False, "fresh_days": 3,
+                "arch_docs": False, "branch": "main", "head": "",
+                "code_files": [], "topics": [], "sample_paths": [],
+                "readme_gist": "把 GitHub 上的清单聚合成可检索的索引",
+                "judge": "", "why": "", "llm": None}
+        md = refscout.render_md("X", ["a"], "", {"pool_size": 1, "arms": [], "sources": []},
+                                [cand], 1.0, "2026-10-21T00:00:00+00:00",
+                                "2026-11-20T00:00:00+00:00")
+        self.assertIn("- 摘要：把 GitHub 上的清单聚合成可检索的索引", md)
+
+
 class TestSourceApiShape(unittest.TestCase):
     def test_status_counts_sources(self):
         tmp = pathlib.Path(tempfile.mkdtemp())

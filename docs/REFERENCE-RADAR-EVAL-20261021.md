@@ -100,3 +100,83 @@ venv/bin/python tests/eval_refscout.py --json work/eval.json
    而不是继续动打分权重。
 3. 7 轮实验说明「加检索臂」会同时放大噪声 —— 扩臂必须配「池容量上限 + 分桶配额」，
    否则 top5 会被新臂捞进来的词面仓挤占。
+
+## 7. 重排实测：模型选型决定成败，不是「重排有没有用」（2026-10-21，同日续）
+
+标注集不变（v1，5 模块 / 13 仓，冷缓存）。四组跑法对比：
+
+| 跑法 | hit@5 | mrr | 命中 | 重排成功 | 用时 |
+|---|---:|---:|---:|---:|---:|
+| 词法基线（§2，2 次） | 0.300 | 0.367 | 4/13 | — | 112~116s |
+| 免费档 `openrouter/free` | 0.300 | 0.367 | 4/13 | **1/5** | 292s |
+| 付费 `alibaba/qwen3.8-flash` | 0.300 | 0.467 | 4/13 | **3/5** | 432s |
+| **付费 `agnes/agnes-2.5-flash`** | **0.467** | 0.480~0.650 | **6/13** | **14/15** | 193~269s |
+
+### 7.1 前两组为什么是零
+
+免费档与 qwen 档的 `hit@5` 与词法基线逐位相同，**不是因为重排无效，而是因为重排没跑成**：
+
+- 免费档两模型 `cap=25s`，8 条候选的 prompt 稳定超时（实测 4/5 模块 `TimeoutError`）
+- `alibaba/qwen3.8-flash` 的 `cap=60s` 同样超时；单独探测发现它**在 `max_tokens=16` 时也只回
+  `only-thinking`**，thinking 吃满输出预算。网关本身不慢（短请求 4.8s 返回 200）
+
+判据：卡上 `status` 字段是 `lexical` / `reranked` / `lexical_fallback` 三态，
+**只看汇总数字会把「没跑」误读成「没用」**。引用重排指标前必须同时报 `reranked` 占比。
+
+### 7.2 agnes 可复现（三次全量 + 一次真实代码路径）
+
+| 轮次 | 路径 | hit@5 | mrr | 重排成功 |
+|---|---|---:|---:|---:|
+| run1 | 内存替换模型 | 0.467 | 0.490 | 4/5 |
+| run2 | 内存替换模型 | 0.467 | 0.480 | 5/5 |
+| run3 | **`_ref_model()` 真实代码** | 0.467 | 0.650 | 5/5 |
+
+`hit@5` 三次完全相同；`mrr` 在 0.48~0.65 间漂（top5 内部位次摆动，不影响主指标）。
+逐模块稳定项：terminal-ws 1.000（termpair/gotty/ttyd 三次全进，ttyd #3/#3/#4）、
+llm-gateway 0.500（Portkey #5/#5/#4）、health-probe 0.500、cron-scheduler 0.333。
+
+净变化：**多找到 2 个标注仓（ttmpair 那组的 ttyd、Portkey），代价是耗时 112s→193s**。
+重排**只**解决了「入池但排太后」的 3 条里的 2 条（ttyd #8→#3、Portkey #8→#5）；
+剩下 7 条未命中里 6 条**从未入池**，重排无能为力（它只对已入池候选重排）。
+
+实施：`REF_LLM_MODEL`（默认 `agnes/agnes-2.5-flash`）只作用于重排，不动
+`MANAGER_LLM_MODEL`（后者还服务 `/api/tasks/decompose`）。前端「允许付费重排」默认勾选。
+
+### 7.3 召回层 4 组实验全部未超过 0.467（均已回退）
+
+针对 6 个「未入池」标注仓做的对照实验（其余条件同 §7.2 配置）：
+
+| 轮次 | 改了什么 | hit@5 | 关键观察 |
+|---|---|---:|---|
+| H | `core` 臂加 `in:readme`（四字段 OR） | 0.300 | 池 36→45，6 个目标仓**一个都没入池** |
+| I | 新增 `phrase` 臂：`"full-text search" in:name,description,topics,readme` | 0.300 | 池→50，meili 仍未入池 |
+| J | `phrase` 臂改 `in:readme`（去掉其余三字段） | 0.300 | 池→50，meili 仍未入池 |
+| K | `SEARCH_PER_PAGE` 10→30 | 0.233 | **meili 入池 #14**，但 llm-gateway 的 Portkey 掉到 #16、litellm #21 |
+| L | K + `MAX_CANDIDATES` 8→20（扩重排覆盖） | 0.167 | meili 仍 #15；重排 20 条也没救回，用时 443s |
+
+### 7.4 本轮最硬的发现：`SEARCH_PER_PAGE=10` 在截召回
+
+用 GitHub API 直接取证（同一查询、同一天）：
+
+```
+"full-text search" in:readme fork:false archived:false stars:>=20
+  per_page=30 → meilisearch/meilisearch 排 #13（在结果里）
+  per_page=10 → 不存在（被截断）
+```
+
+所以 K 轮 meili 能入池不是巧合，是**每臂只取 10 条**把它挡在门外。但 K/L 证明单纯扩池是负向：
+池从 37 涨到 133 后，词法排序被稀释（Portkey #8→#16），而**重排只覆盖词法前 8 名**
+（`MAX_CANDIDATES=8`），掉到 #14 的目标仓连重排机会都没有。
+
+⇒ 结论：**池容量、每臂条数、重排覆盖三者是同一个旋钮**，单独拧任何一个都会变差。
+当前配置（10 条/臂 + 重排前 8）是自洽的；要动就得三者同调并重测，且预算要按
+「20 条候选 ≈ 2.5 倍 prompt」重估。
+
+### 7.5 处置
+
+- H~L 五组全部 `git checkout -- src/refscout.py` 回退，工作树回到 `f0385f9`
+- 当前生产：词法基线口径 + `agnes/agnes-2.5-flash` 重排（`hit@5=0.467`）
+- **下一步优先级**：先做「查询扩展」（`health probe`→`healthcheck/heartbeat`、
+  `scheduler`→`cron/job queue`），而不是继续动池容量 —— 因为 §7.4 证明扩池必须三旋钮同调，
+  而查询扩展不改变池结构，风险小得多
+

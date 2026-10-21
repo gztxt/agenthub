@@ -152,6 +152,34 @@
 `{repo: judge}`。在此之前 attempts 只记 `items` 条数，判词翻转**无从复核**
 （本轮 5 就是靠这个字段才看到「skip / skip / use」的分布）。
 
+## 5.3 换实现取向关键词复验（2026-10-22 00:48，卡 `595968fff827`）
+
+上一张卡（`GitHub 资料收集整理`）问到的是「清单」，三轮全 skip、实现桶为空。
+为验证「有真实现时卡面不空」，换关键词重跑：
+
+- 模块 `GitHub 仓库抓取与去重`，关键词 `github api / crawler / dedupe / metadata`，`allow_paid=true`
+- 池 338，整卡 67.1s（词法 ≈25s + 重排 42.0s：15.2 / 11.8 / 15.1s）
+
+**结果：4 条实现桶，3 条带摘要，判定 use/use/read/read**
+
+| 仓库 | ★ | 功能 | 实现 | 判定 | 逐票 |
+|---|---:|---:|---:|---|---|
+| `seart-group/ghs` | 202 | 0.67 | 0.76 | use | use / use / fork |
+| `chenjiandongx/Github-spider` | 260 | 0.63 | 0.75 | use | read / use / use |
+| `rsain/GitHub-Crawler` | 43 | 0.56 | 0.48 | read | read / read / read |
+| `yutao8/starred` | 175 | 0.49 | 0.47 | read | skip / read / read |
+
+**噪声被正确挡下**（skipped 理由都具体到「为什么不够」）：
+`hect0x7/JMComic-Crawler-Python`（禁漫爬虫，3/3 skip）、`poozhu/crawler-for-github-trending`
+（只抓 trends 页、50 行无去重）、`enesusta/github-trending-crawler`、`Nhoya/gOSINT`（GitHub 只是子模块）。
+
+**发现一处既有缺口（未修，待裁）**：`MAX_CANDIDATES=8` 同时是「补全上限」和「重排上限」，
+但重排的 8 条是**打分后**重新取的，可能包含未补全的仓 —— 本轮 `rsain/GitHub-Crawler`、
+`enesusta/github-trending-crawler` 就是这样：卡上有行、无 `- 摘要：`，且它们的 `实现` 轴
+是在**没有 README** 的情况下算出来的（同批其它仓有这个信号）。这不是渲染 bug，
+是「补全集合 ≠ 重排集合」的口径缝隙。修法二选一：补全窗口放大到 12；或重排后再对缺
+README 的入选项补抓一次（每仓 +3 次 core API）。
+
 ## 6. 回滚
 
 - 代码：`git revert <commit>`；表可保留（空表无副作用）。

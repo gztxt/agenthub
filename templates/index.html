@@ -2190,6 +2190,15 @@
                                        style="max-width:270px"
                                        title="在 GitHub 代码里搜该字符串，命中它的仓额外加分（用于按依赖/API 找同类实现）"
                                        onkeydown="if(event.key==='Enter'){event.preventDefault();submitRefScout();}">
+                                <input id="refLang" list="refLangList" placeholder="语言（可空）"
+                                       style="max-width:120px"
+                                       title="填了就按该语言加权（不影响查询召回，只抬同语言仓的排序）。实测 cron 模块填 python 后 apscheduler #14→#4"
+                                       onkeydown="if(event.key==='Enter'){event.preventDefault();submitRefScout();}">
+                                <datalist id="refLangList">
+                                    <option value="python"><option value="go"><option value="javascript">
+                                    <option value="typescript"><option value="rust"><option value="java">
+                                    <option value="csharp"><option value="c">
+                                </datalist>
                                 <label class="hint" for="refPaid" title="付费快档优先、失败再试免费档（单次约几千 token，卡上会标注）。检索与卡片「重跑」都按此勾选执行；定时自动刷新永不付费">
                                     <input type="checkbox" id="refPaid" checked> 允许付费重排（优先）
                                 </label>
@@ -2868,6 +2877,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=42867c21"></script>
+    <script src="/static/hub.js?v=0eaa8984"></script>
 </body>
 </html>

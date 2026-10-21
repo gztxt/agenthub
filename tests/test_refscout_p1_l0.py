@@ -196,12 +196,68 @@ class TestQueryExpansion(unittest.TestCase):
         arms = refscout.build_queries(["full-text search", "search engine", "indexing"],
                                       "全文检索", 20, 180)
         qs = [a[1] for a in arms if a[0].startswith("kw")]
-        self.assertIn("full-text search in:name,description,topics", qs[0])
+        # `full-text search` 与 core 臂的 `full text search` 归一后是同一条查询
+        # （实测 top10 完全相同、total 361 vs 391），不再重复发一条烧配额；
+        # 另外两条概念必须各自成臂。
+        self.assertFalse(any(q.startswith("full-text search ") for q in qs))
         self.assertTrue(any(q.startswith("search engine ") for q in qs))
+        self.assertTrue(any(q.startswith("indexing ") for q in qs))
 
     def test_hyphen_normalization(self):
         self.assertEqual(refscout._norm_text("full-text_search"), "full text search")
         self.assertTrue(refscout._hit("a full text search engine", "full text search"))
+
+
+class TestMorphologyAndArmDedup(unittest.TestCase):
+    """第七轮：形态归一只做关键词侧是不够的 + 臂去重必须按词元集。
+
+    三个实测事实：
+    1. loki 的描述是 `for logs`、topics 是 `logging`，关键词 `log` 永远撞不上 ——
+       变体只在关键词一侧生成，被匹配文本一侧从没展开过；
+    2. `_forms_of("logging")` 旧实现得 `logg`（双写辅音没去），差一个字母就永不命中；
+    3. 去重按**原始查询串**：用户写 `Log Aggregation` 时与 `pair` 臂重复发同一查询
+       （白烧 30/min 配额），而短语型关键词与 `pair` 字面全等时 kw 臂被整条吃掉。
+    """
+
+    def test_forms_double_consonant(self):
+        self.assertIn("log", refscout._forms_of("logging"))
+        self.assertNotIn("logg", refscout._forms_of("logging"))
+        self.assertIn("process", refscout._forms_of("processing"),
+                      "-ss 不能去掉，否则 processing → proces")
+
+    def test_blob_expansion_matches_plural_and_gerund(self):
+        blob = refscout._expand_blob("like prometheus but for logs | logging")
+        self.assertTrue(refscout._hit(blob, "log"))
+        self.assertFalse(refscout._hit(blob, "logic"), "词边界仍必须生效")
+
+    def test_expansion_does_not_create_fake_phrase(self):
+        blob = refscout._expand_blob("aggregation logs")
+        self.assertFalse(refscout._hit(blob, "log aggregation"),
+                         "变体段不得拼出原文没有的短语")
+
+    def test_dedup_by_token_set_not_raw_string(self):
+        arms = refscout.build_queries(["Log Aggregation"], "日志聚合", 20, 180)
+        # 判等键必须是 (查询串, 排序键)：`core` 与 `fresh` 查询串相同但按 stars/updated
+        # 分别排，是两条不同的臂；`reading` 走 in:readme，也是不同查询。
+        keys = [(a[1], a[2]) for a in arms]
+        self.assertEqual(len(keys), len(set(keys)), "不得发两条等价查询")
+        self.assertFalse(any(a[1].startswith("Log Aggregation in:") for a in arms),
+                         "用户大写不应绕过去重")
+
+    def test_head_word_arm_off_by_default(self):
+        # 实测开臂能把 loki 从「未入池」拉到 #1，但池 66→82 把 ttyd 挤出 top5，
+        # v1 子集 0.600→0.533 ⇒ 默认关。这里钉住默认值，防止有人「顺手打开」。
+        arms = refscout.build_queries(["log aggregation", "log collector"], "日志聚合", 20, 180)
+        self.assertNotIn("head0", {a[0] for a in arms})
+
+    def test_head_word_arm_when_enabled(self):
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"REF_HEAD_ARM": "1"}):
+            arms = refscout.build_queries(["log aggregation", "log collector"], "日志聚合", 20, 180)
+        by_name = {a[0]: a[1] for a in arms}
+        self.assertIn("head0", by_name)
+        self.assertTrue(by_name["head0"].startswith("log in:name"))
 
     def test_word_boundary_no_substring_noise(self):
         self.assertFalse(refscout._hit("deep research tool", "search"),

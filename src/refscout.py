@@ -565,13 +565,56 @@ def build_queries(keywords: List[str], module: str, min_stars: int,
     # 顺序：多词关键词本身就是概念短语（`search engine`），优先；再补首个单词关键词。
     multi = [k for k in keywords if " " in str(k).strip()]
     single = [k for k in keywords if " " not in str(k).strip()]
-    seen_q = {a[1] for a in arms}
+
+    def _arm_key(q: str) -> frozenset:
+        """臂的「概念键」＝查询串里 `in:` 之前的词元集（大小写/连字符已归一）。"""
+        return frozenset(tokens_of([q.split(" in:")[0]]))
+
+    seen_k = [_arm_key(a[1]) for a in arms]
     for i, kw in enumerate(list(dict.fromkeys(multi + single))[:3]):
-        q = f"{kw} in:name,description,topics" + base
-        if q not in seen_q:
-            seen_q.add(q)
-            arms.append((f"kw{i}", q, "stars"))
-    return arms
+        kt = _arm_key(kw)
+        # 旧实现按**原始查询串**去重：`Log Aggregation`（用户大写）与 `pair` 臂的
+        # `log aggregation` 字符串不等 ⇒ 同一条查询发两遍，白烧搜索配额（30/min）；
+        # 反过来短语型关键词（`log aggregation`）与 `pair` 字面全等 ⇒ kw 臂被整条吃掉。
+        # 判等必须落在**词元集**上，且只判**相等**——不能用「子集」：
+        # 单词关键词 `health` 是 `health uptime monitoring` 的子集，但后者在 GitHub 上
+        # 常是 0 结果，子集判重会把 4 条单词臂全吃掉（实测 0 条 kw 臂），召回反而塌。
+        if not kt or any(kt == s for s in seen_k):
+            continue
+        arms.append((f"kw{i}", f"{kw} in:name,description,topics" + base, "stars"))
+        seen_k.append(kt)
+
+    # 短语首/末词臂：多词短语在 GitHub 是 AND，命中面常只剩几十个长尾仓
+    # （实测 `log aggregation` total=25、`centralized logging` total=21，而 loki/fluent-bit
+    # 都不在里面）。把短语拆成**单个词**再查能把主流实现捞回来：`log` → loki #10、
+    # `documentation` → docusaurus #6。只发首词与末词各一条，避免臂数失控。
+    # 拆出来的仓仍要过覆盖度闸门，泛词捞回的噪声在 `cov<0.18` 处会被过滤。
+    # ⚠️ 默认关。实测（v3 标注集，冷跑）：开臂能让 loki 从「未入池」到 #1，但池从 66→82，
+    # 把 terminal 的 ttyd 挤出 top5，v1 子集 0.600→0.533、全量 0.552→0.543。
+    # 「一条换一条 + 噪声更差」⇒ 不做。保留开关只为复现；短语拆词的真问题是
+    # GitHub 索引里该语义簇就用 logs/logging 描述，拆成单词只会放大星数偏差。
+    if os.getenv("REF_HEAD_ARM", "0") != "0":
+        for i, kw in enumerate(list(dict.fromkeys(multi))[:1]):
+            tk = tokens_of([kw])
+            for pos, word in (("h", tk[0] if tk else ""), ("t", tk[-1] if tk else "")):
+                if len(word) < 3 or word in STOP:   # `log`(3) 正是最有效的那个词，别按长度砍
+                    continue
+                kt = frozenset([word])
+                # 与 kw 臂不同：单词臂与短语臂的召回集合几乎不重叠，只有**完全相同**才跳过
+                if kt in seen_k:
+                    continue
+                arms.append((f"{pos}ead{i}" if pos == "h" else f"{pos}ail{i}",
+                             f"{word} in:name,description,topics" + base, "stars"))
+                seen_k.append(kt)
+    # 统一去重（查询串 + 排序键）：只有一个关键词时 `core`/`pair` 会拼出同一条查询，
+    # `fresh` 虽然查询串相同但按 updated 排，是另一条臂 —— 键里必须带 sort。
+    out, seen_q = [], set()
+    for name, q, sort in arms:
+        if (q, sort) in seen_q:
+            continue
+        seen_q.add((q, sort))
+        out.append((name, q, sort))
+    return out
 
 
 # ── 打分 ────────────────────────────────────────────────────────────────────
@@ -600,15 +643,42 @@ def _norm_text(s: str) -> str:
 
 
 def _forms_of(word: str) -> set:
-    """单词的形态变体（复数/动名词），只做可逆的几条规则，不做完整词干化。"""
+    """单词的形态变体（复数/动名词/名词化），只做可逆的几条规则，不做完整词干化。
+
+    ⚠️ 双写辅音必须去掉：旧实现 `logging[:-3]` 得 `logg`，而 blob 里是 `log`/`logs`，
+    **拼写差一个字母就永远不命中**。反过来 `processing` 的 `-ss` 不能去（否则成 `proces`）。
+    这也是「关键词 `log` 匹配不到 loki 的 `logs`/`logging`」的根因：变体只在关键词一侧
+    生成，blob 侧从来没有展开过。
+    """
     out = {word}
-    if len(word) > 3 and word.endswith("s"):
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
         out.add(word[:-1])
     if len(word) > 5 and word.endswith("ing"):
-        out.add(word[:-3])
+        base = word[:-3]
+        if len(base) >= 4 and base[-1] == base[-2] and base[-1] not in "lsz":
+            base = base[:-1]
+        out.add(base)
     if len(word) > 4 and word.endswith("er"):
         out.add(word[:-2])
+    if len(word) > 6 and word.endswith("tion"):
+        out.add(word[:-3])          # aggregation → aggregat / collection → collect
+    if len(word) > 6 and word.endswith("ctor"):
+        out.add(word[:-2])          # collector → collect
     return out
+
+
+def _expand_blob(blob: str) -> str:
+    """把形态变体**补进被匹配文本**，让 `log` 也能命中 `logs`/`logging`。
+
+    只往关键词一侧加变体是不够的（实测：`_forms_of('log')` 只有自己，而 loki 的描述写
+    `for logs`、topics 写 `logging`）。这里用 `" | "` 分隔：单词 `\\blog\\b` 仍能命中，
+    但含空格的短语不会横跨分隔符误配。
+    """
+    extra = set()
+    for tok in blob.split():
+        extra |= _forms_of(tok)
+    extra -= set(blob.split())
+    return (blob + " | " + " | ".join(sorted(extra))) if extra else blob
 
 
 def alias_groups(keywords: List[str]) -> List[Tuple[List[str], List[str]]]:
@@ -625,10 +695,15 @@ def alias_groups(keywords: List[str]) -> List[Tuple[List[str], List[str]]]:
     groups: List[Tuple[List[str], List[str]]] = []
     for kw in keywords:
         own, syn = {_norm_text(kw)}, set()
+        # 短语概念**不做形态展开**：短语的每个词都被塞进 own 之后，一个 `log` 就能让
+        # 「任何描述里带 logs 的大仓」把 log aggregation 这个概念打满，精确匹配的小仓
+        # （logsuck）反被星数压下去（实测 #5→#22，日志模块 hit 0.25→0）。
+        # 单词概念仍双向展开（`scheduler` ↔ `scheduling`），这才是 cron 模块受益的那条路径。
+        phrase = " " in str(kw).strip()
         for w in re.split(r"[^a-z0-9+#.]+", str(kw).lower()):
             if not w:
                 continue
-            own |= _forms_of(w)
+            own |= ({w} if phrase else _forms_of(w))
             for alias in SYNONYMS.get(w, []):
                 syn.add(_norm_text(alias))
         syn -= own
@@ -656,7 +731,8 @@ def _concept_weights(pool: Dict[str, Dict],
     for own, syn in groups:
         forms = own + syn
         df = sum(1 for r in pool.values()
-                 if any(_hit(_norm_text(_name_blob(r["item"])), f) for f in forms))
+                 if any(_hit(_expand_blob(_norm_text(_name_blob(r["item"]))), f)
+                        for f in forms))
         out.append(1.0 + math.log((n + 1) / (df + 1)))
     return out
 
@@ -1045,7 +1121,8 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
         if item.get("archived"):
             continue
         bucket = classify(item)
-        blob = _norm_text(_name_blob(item))
+        # 变体要补在**被匹配文本**这一侧，否则「关键词 log / 文档 logs」永远不撞
+        blob = _expand_blob(_norm_text(_name_blob(item)))
         cov, matched = _concept_cov(blob, groups, weights)
         phrase = any((" " in str(k) and _norm_text(str(k)) in blob) for k in keywords)
         hits = len(code_hits.get(key, []))

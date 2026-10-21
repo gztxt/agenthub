@@ -413,5 +413,64 @@ class TestRefreshPaidIntent(unittest.TestCase):
         self.assertIn("定时自动刷新", md)
 
 
+class TestCardDisclosure(unittest.TestCase):
+    """卡面必须写清楚「关键词哪来的」与「有没有代码标识符臂」。
+
+    `keyword_source=fallback` 意味着模型抽词失败、走了内置词典，召回往往整体跑偏；
+    不写出来，用户只会看到一张「检索不准」的卡而不知道该改关键词。
+    """
+
+    def _md(self, **meta_kw):
+        meta = {"arms": [], "pool_size": 1, "rerank": False, "rerank_error": "",
+                "degraded": [], "token": True}
+        meta.update(meta_kw)
+        return refscout.render_md("m", ["cron"], "", meta, [], 1.0, "a", "b")
+
+    def test_fallback_keywords_are_flagged(self):
+        self.assertIn("退回内置中文词典", self._md(keyword_source="fallback"))
+
+    def test_llm_keywords_are_labeled(self):
+        md = self._md(keyword_source="llm")
+        self.assertIn("关键词来源：模型从模块名抽取", md)
+        self.assertNotIn("内置中文词典", md)
+
+    def test_user_keywords_stay_quiet(self):
+        self.assertNotIn("关键词来源", self._md(keyword_source="given"))
+
+    def test_identifiers_arm_is_listed(self):
+        md = self._md(identifiers=["node-pty", "websocket"])
+        self.assertIn("代码标识符臂：node-pty、websocket", md)
+
+
+class TestIdentifierLimit(unittest.TestCase):
+    """代码搜索限额 10 次/分：payload 与 collect 的切片必须一致（都是 2）。
+
+    旧实现 payload 切 3、collect 只用前 2 ⇒ 第三个标识符**静默丢弃**，卡上却看不出来。
+    """
+
+    def test_payload_keeps_two(self):
+        rows = []
+
+        def fake_execute(sql, args):
+            rows.append((sql, args))
+
+        orig = (refscout._POOL.submit, refscout.db.query, refscout.db.execute, refscout.token)
+        refscout._POOL.submit = lambda fn, job_id: None
+        refscout.db.query = lambda *a, **k: []
+        refscout.db.execute = fake_execute
+        refscout.token = lambda: "t"
+        try:
+            refscout.submit(refscout.ScoutIn(module="终端", identifiers=["a", "b", "c"]))
+        finally:
+            (refscout._POOL.submit, refscout.db.query,
+             refscout.db.execute, refscout.token) = orig
+        payload = json.loads(rows[0][1][3])
+        self.assertEqual(payload["identifiers"], ["a", "b"])
+
+    def test_collect_reads_two(self):
+        import inspect
+        self.assertIn("identifiers[:2]", inspect.getsource(refscout.collect))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

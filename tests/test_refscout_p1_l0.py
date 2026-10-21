@@ -323,5 +323,95 @@ class TestSafetyRouter(unittest.TestCase):
         self.assertEqual(attempts[0]["error"], "safety-router")
 
 
+class TestSingleKeyword(unittest.TestCase):
+    """单关键词不得被「至少命中 2 个概念」的过滤吃光。
+
+    门槛写成常数 2 时，概念数只有 1 ⇒ `matched<=1` 恒成立 ⇒ 实现桶必空。
+    实测 `keywords=["cron"]` 对描述 "a cron library for go" 返回 0 条。
+    """
+
+    def test_single_keyword_survives_filter(self):
+        item = {"full_name": "robfig/cron", "name": "cron",
+                "description": "a cron library for go", "topics": ["cron"],
+                "stargazers_count": 12000, "html_url": "https://github.com/robfig/cron",
+                "default_branch": "master", "pushed_at": "2026-10-01T00:00:00Z",
+                "language": "Go", "license": {"spdx_id": "MIT"}, "archived": False}
+
+        def fake_get(url, ttl_s=None, limiter=None):
+            if "/search/repositories" in url:
+                return {"total_count": 1, "items": [item]}, {"ok": True, "ms": 1}
+            return None, {"ok": True, "ms": 1}
+
+        orig_get, orig_enrich = refscout.gh_get, refscout._enrich
+        refscout.gh_get = fake_get
+        refscout._enrich = lambda full, branch: {
+            "readme": "a cron library for go", "paths": ["cron.go"], "head": "abc"}
+        try:
+            got = refscout.collect("定时任务", ["cron"], "", 0, 3650, [],
+                                   False, do_rerank=False)
+        finally:
+            refscout.gh_get, refscout._enrich = orig_get, orig_enrich
+        impls = [c for c in got["candidates"] if c["bucket"] == "impl"]
+        self.assertEqual([c["repo"] for c in impls], ["robfig/cron"])
+
+
+class TestRerankNormalization(unittest.TestCase):
+    """模型输出的大小写不能改变判定：仓库名按规范名回填，judge 统一小写。"""
+
+    def test_repo_case_and_judge_case(self):
+        cand = {"repo": "robfig/cron", "stars": 1, "desc": "cron", "topics": [],
+                "readme_gist": "", "sample_paths": [], "item": {}}
+
+        def fake(prompt, model, timeout=0, max_tokens=0):
+            return ('{"items":[{"repo":"Robfig/Cron","func":0.9,"impl":0.8,'
+                    '"design":0.7,"judge":"USE","why":"同题"}]}', "", "end_turn")
+
+        orig = refscout._llm_text
+        refscout._llm_text = fake
+        try:
+            out, err, _used, _att = refscout.rerank("定时任务", [cand], allow_paid=True)
+        finally:
+            refscout._llm_text = orig
+        self.assertEqual(err, "")
+        self.assertIn("robfig/cron", out)
+        self.assertEqual(out["robfig/cron"]["judge"], "use")
+        self.assertEqual(refscout._judge_rank("USE"), 0)
+        self.assertEqual(refscout._judge_rank(" Skip "), 3)
+
+
+class TestRefreshPaidIntent(unittest.TestCase):
+    """重跑的付费档：显式参数 > 上次**请求**的意图 > 上次实际用的档。
+
+    `rerank_paid` 是「上一次真的用上付费」，付费失败回落免费后为 False；只认它
+    会把卡永久锁在免费档（免费池又被审核路由拦截），只能重新建卡才能恢复。
+    """
+
+    def _row(self, meta):
+        return {"id": "c1", "module": "模块", "keywords": '["cron"]', "lang": "",
+                "meta": json.dumps(meta)}
+
+    def test_requested_paid_survives_free_fallback(self):
+        body = refscout.refresh_body(
+            self._row({"requested_paid": True, "rerank_paid": False}), None)
+        self.assertTrue(body.allow_paid)
+        self.assertEqual(body.trigger, "manual")
+        self.assertEqual(body.refresh_of, "c1")
+
+    def test_explicit_flag_wins(self):
+        row = self._row({"requested_paid": True, "rerank_paid": True})
+        self.assertFalse(refscout.refresh_body(row, False).allow_paid)
+        self.assertTrue(refscout.refresh_body(self._row({}), True).allow_paid)
+
+    def test_legacy_card_falls_back_to_used_model(self):
+        self.assertTrue(refscout.refresh_body(self._row({"rerank_paid": True}), None).allow_paid)
+        self.assertFalse(refscout.refresh_body(self._row({}), None).allow_paid)
+
+    def test_auto_trigger_is_stated_on_card(self):
+        meta = {"arms": [], "pool_size": 1, "rerank": False, "rerank_error": "",
+                "degraded": [], "token": True, "trigger": "auto"}
+        md = refscout.render_md("m", ["k"], "", meta, [], 1.0, "a", "b")
+        self.assertIn("定时自动刷新", md)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

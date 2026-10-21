@@ -4775,7 +4775,8 @@ function renderRefCards() {
         Number(top.design || 0).toFixed(2) : '') +
       '</p>' + deg +
       '<button class="btn ghost sm" data-ref-act="open" data-id="' + escapeHtml(c.id) + '">查看</button>' +
-      '<button class="btn ghost sm" data-ref-act="refresh" data-id="' + escapeHtml(c.id) + '">重跑</button>' +
+      '<button class="btn ghost sm" data-ref-act="refresh" data-id="' + escapeHtml(c.id) +
+        '" title="重跑沿用上方「允许付费重排」勾选；自动刷新永不付费">重跑</button>' +
       '</div>';
   }).join('');
 }
@@ -4862,9 +4863,11 @@ async function openRefCard(id) {
 async function refreshRefCard(id) {
   if (!id) return;
   const hint = $('refHint');
-  hint.textContent = '正在重跑…';
+  const paid = !!($('refPaid') && $('refPaid').checked);
+  hint.textContent = '正在重跑（' + (paid ? '付费重排' : '仅免费档') + '）…';
   try {
-    const d = await api('/api/ref/cards/' + encodeURIComponent(id) + '/refresh', { method: 'POST' });
+    const d = await api('/api/ref/cards/' + encodeURIComponent(id) +
+      '/refresh?allow_paid=' + (paid ? '1' : '0'), { method: 'POST' });
     pollRefJob(d.job_id, id);
   } catch (e) {
     hint.textContent = '重跑失败：' + e.message;

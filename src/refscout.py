@@ -443,6 +443,20 @@ def _json_block(text: str) -> Optional[dict]:
     return None
 
 
+def _ref_model() -> str:
+    """重排用的付费档模型（`REF_LLM_MODEL`，默认 `agnes/agnes-2.5-flash`）。
+
+    为什么不复用 `llm.MODEL`：`MANAGER_LLM_MODEL` 同时服务交互式
+    `/api/tasks/decompose`，换它会连带改那条链路；重排只需要「稳定回 JSON、
+    不做长 thinking」的模型。
+
+    2026-10-21 实测：`alibaba/qwen3.8-flash` 在重排 prompt 上 60s 必超时
+    （短请求也 only-thinking）；`agnes/agnes-2.5-flash` 短请求 2.0s 正常返回，
+    全量两轮 hit@5 均为 0.467（基线 0.300）。
+    """
+    return os.getenv("REF_LLM_MODEL", "agnes/agnes-2.5-flash")
+
+
 def rerank(module: str, cands: List[Dict[str, Any]], allow_paid: bool,
            budget_s: float = 95.0
            ) -> Tuple[Dict[str, Dict], str, str, List[Dict[str, Any]]]:
@@ -476,7 +490,7 @@ def rerank(module: str, cands: List[Dict[str, Any]], allow_paid: bool,
         f"目标模块：{module}\n候选：\n" + "\n".join(lines)
     )
     free = [m for m in (llm.memory_model(), llm.free_fallback_model()) if m]
-    models = ([llm.MODEL] + free) if allow_paid else free
+    models = ([_ref_model()] + free) if allow_paid else free
     errors: List[str] = []
     attempts: List[Dict[str, Any]] = []
     spent = 0.0
@@ -1107,7 +1121,7 @@ async def api_status():
     return {"token": bool(token()), "cache": cache_stats(),
             "jobs": {r["status"]: r["n"] for r in jobs},
             "card_ttl_days": CARD_TTL_DAYS,
-            "paid_rerank": llm.MODEL,
+            "paid_rerank": _ref_model(),
             "free_models": [llm.memory_model(), llm.free_fallback_model()]}
 
 

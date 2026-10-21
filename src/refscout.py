@@ -69,11 +69,26 @@ SOURCE_MAX_REPOS = 300        # 单来源最多 3 页；再多也拉不动，且
 #: 不能掺「我拥有它」这种非质量信号；加成只作用在最终排序上，用于同分时先看自己的仓。
 SOURCE_BONUS = 0.06
 CACHE_README_CHARS = 6000
-MAX_CANDIDATES = 8            # 进入详情补全 / 重排的上限
+MAX_CANDIDATES = 8            # 进入**语义重排**的上限
+#: 详情补全窗口。必须严格大于 `MAX_CANDIDATES`：补全集合与重排集合若不完全包含，
+#: 重排就会拿到「没抓过 README」的仓 —— 它的实现轴缺信号、卡上也没摘要（2026-10-22 实测）。
+ENRICH_LIMIT = 12
+#: 清单展开：把 awesome / HelloGitHub 这类「清单仓」展开成它**收录的项目**。
+#: 用户要的是清单里的项目，不是清单本身（2026-10-22 裁定）。
+LIST_EXPAND_LISTS = 4         # 展开前 N 个清单仓
+LIST_EXPAND_SUBPAGES = 4      # 每个清单追 N 篇子页（HelloGitHub 把项目写在 content/ 下）
+LIST_EXPAND_PER_LIST = 30     # 单个清单最多取多少个项目（每个都要一次 core API）
+LIST_EXPAND_TOTAL = 80        # 一次采集最多新增多少个项目
+LIST_EXPAND_THREADS = 4       # GitHub 建议别并发太高，4 路足够
+#: README 里多少个「项目链接 + 同仓子页」才算清单。`HelloGitHub` 的根 README 只有
+#: 1 个项目链接 + 36 个 content/*.md，靠描述词（awesome/curated）永远识别不出来。
+LIST_SIGNAL_LINKS = 8
 SEARCH_PER_PAGE = 10
 CARD_TTL_DAYS = 30            # 卡上「下次刷新」的间隔
 JOB_KEEP_DAYS = 14
-LIST_RE = re.compile(r"awesome|curated|list of|book|tutorial|course|roadmap|cheat|"
+#: `book` 必须带词边界：裸 `book` 会把 `Storybook` / `Facebook` / `notebook`
+#: 全判成清单桶（实测 `storybookjs/storybook` 因此跳过实现桶）。
+LIST_RE = re.compile(r"awesome|curated|list of|\bbooks?\b|tutorial|course|roadmap|cheat|"
                      r"interview|examples?$", re.I)
 DOC_RE = re.compile(r"docs?$|documentation|wiki|handbook|guide", re.I)
 ARCH_TERMS = ("architecture", "design", "trade-off", "tradeoff", "why we",
@@ -805,7 +820,161 @@ def _gist(readme: str, limit: int = 260) -> str:
     return text[:limit]
 
 
-# ── LLM 重排（失败即降级，不是任务失败）──────────────────────────────────────
+# ── 清单展开：把 awesome / HelloGitHub 变成它**收录的项目** ─────────────────
+#
+# 用户要的是清单里的项目，不是清单本身（2026-10-22 裁定）。根 README 往往只是目录：
+# `HelloGitHub` 的根 README 只有 1 个项目链接 + 36 个 `content/HelloGitHubNN.md` 子页，
+# 所以只解析根 README 等于没展开。这里按「根 → 子页」两级取链接，再回填仓库元数据。
+
+_GH_LINK_RE = re.compile(r"github\.com[/:]([A-Za-z0-9][A-Za-z0-9_.-]*)/([A-Za-z0-9_.-]{1,80})")
+#: github.com 下的站点功能页，不是用户仓库（误收会把 features/pricing 当项目去拉 API）。
+_GH_RESERVED = {
+    "features", "topics", "sponsors", "marketplace", "login", "orgs", "users",
+    "settings", "about", "pricing", "apps", "collections", "trending", "search",
+    "security", "events", "readme", "contact", "enterprise", "solutions",
+    "site", "git-guides", "open-source", "customer-stories", "team", "home",
+}
+_MD_SELF_RE = re.compile(r"\]\(\s*(?!https?://|#)([^)\s]+?\.md)(?:#[^)]*)?\s*\)")
+
+
+def _gh_links(text: str, self_full: str = "") -> List[str]:
+    """从 markdown 抽 `owner/repo`（保序去重），剔站点功能页与自引用。"""
+    self_key = (self_full or "").lower()
+    seen, out = set(), []
+    for owner, repo in _GH_LINK_RE.findall(text or ""):
+        repo = re.sub(r"\.git$", "", repo, flags=re.I).strip(".,;:")
+        full = f"{owner}/{repo}"
+        key = full.lower()
+        if owner.lower() in _GH_RESERVED or key == self_key or len(repo) < 2:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(full)
+    return out
+
+
+def _md_subpages(text: str, limit: int) -> List[str]:
+    """README 里指向同仓的 .md 相对链接（HelloGitHub 的项目就写在 content/*.md）。"""
+    out: List[str] = []
+    for p in _MD_SELF_RE.findall(text or ""):
+        p = p.strip().lstrip("./")
+        if not p or p in out or not p.lower().endswith(".md"):
+            continue
+        if p.lower().split("/")[0] in ("content", "docs", "data", "posts", "pages", "issues"):
+            out.append(p)
+    return out[:limit] if limit else []
+
+
+def _blob_text(url: str) -> str:
+    """取 GitHub contents API 的 base64 正文；失败返回空串（不抛）。"""
+    data, _ = gh_get(url, ttl_s=CACHE_TTL_ENRICH)
+    if not isinstance(data, dict) or not data.get("content"):
+        return ""
+    try:
+        return base64.b64decode(data["content"]).decode("utf-8", "ignore")[:CACHE_README_CHARS * 4]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _readme_text(full: str) -> str:
+    return _blob_text(f"{GH_API}/repos/{full}/readme")
+
+
+def _contents_text(full: str, path: str) -> str:
+    return _blob_text(f"{GH_API}/repos/{full}/contents/{urllib.parse.quote(path)}")
+
+
+def _pick_lists(pre: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    """挑要展开的清单仓，返回仓库 item 列表（按预分顺序）。
+
+    只认两类，不靠「README 链接多」泛判：
+    ① 显式 `list` 桶（名字/描述像 awesome/curated）；
+    ② **自有来源**里 README 像目录的仓 —— `HelloGitHub` 的描述没有任何 list 词，
+       靠描述永远识别不出来；而它正是用户点名要展开的那种。
+    链接多 ≠ 清单：实测泛判会把 `gh-repo-stats`、`powerplatform-actions`
+    这类普通仓当清单，白烧掉整份展开预算（96 个项目的 API 额度）。
+    """
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for p in pre:
+        item = p["item"]
+        full = item.get("full_name") or ""
+        if not full or full.lower() in seen:
+            continue
+        owned = bool(p.get("sources"))
+        signals = 0
+        if owned and p.get("readme"):
+            signals = (len(_gh_links(p["readme"], full))
+                       + len(_md_subpages(p["readme"], 100)))
+        if p["bucket"] == "list" or (owned and signals >= LIST_SIGNAL_LINKS):
+            seen.add(full.lower())
+            out.append(item)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _expand_lists(lists: List[Dict[str, Any]], min_stars: int, known: set,
+                  keep: Optional[Any] = None
+                  ) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    """把清单仓展开成收录项目，返回 ({key: {item, via}}, 逐清单日志)。
+
+    `known` 是已在候选池里的 key 集合（小写 full_name），用于避免重复拉取。
+    `archived` 与 `min_stars` 照常生效：清单里常有已归档项目，拉回来只会占重排名额。
+    `keep(item)` 是与主池一致的覆盖度闸门：不该只在 `build_pre` 里过滤 —— 那样
+    无关清单会把整份展开额度吃光（实测 `awesome-claude-plugins` 一次占掉 90/96）。
+    """
+    found: Dict[str, Dict[str, Any]] = {}
+    log_rows: List[Dict[str, Any]] = []
+    for lst in lists[:LIST_EXPAND_LISTS]:
+        full = lst.get("full_name") or ""
+        if not full or len(found) >= LIST_EXPAND_TOTAL:
+            continue
+        t0 = time.monotonic()
+        readme = _readme_text(full)
+        links = _gh_links(readme, full)
+        seen = {x.lower() for x in links}
+        pages = 0
+        # 根 README 项目少 ⇒ 说明它只是目录（HelloGitHub/月刊类），继续追子页
+        if len(links) < 20:
+            for path in _md_subpages(readme, LIST_EXPAND_SUBPAGES):
+                text = _contents_text(full, path)
+                if not text:
+                    continue
+                pages += 1
+                for x in _gh_links(text, full):
+                    if x.lower() not in seen and len(links) < LIST_EXPAND_PER_LIST:
+                        seen.add(x.lower())
+                        links.append(x)
+                if len(links) >= LIST_EXPAND_PER_LIST:
+                    break
+        wanted = [x for x in links if x.lower() not in known
+                  and x.lower() not in found][:LIST_EXPAND_TOTAL - len(found)]
+        added = 0
+        with futures.ThreadPoolExecutor(max_workers=LIST_EXPAND_THREADS) as ex:
+            futs = {ex.submit(gh_get, f"{GH_API}/repos/{x}", CACHE_TTL_ENRICH): x for x in wanted}
+            for fut in futures.as_completed(futs):
+                data, _ = fut.result()
+                if not isinstance(data, dict) or not data.get("full_name"):
+                    continue
+                if data.get("archived"):
+                    continue
+                if int(data.get("stargazers_count") or 0) < min_stars:
+                    continue
+                if keep is not None and not keep(data):
+                    continue
+                key = str(data["full_name"]).lower()
+                found.setdefault(key, {"item": data, "via": set()})["via"].add(full)
+                added += 1
+        log_rows.append({"name": f"list:{full}", "q": "", "ok": bool(readme),
+                         "count": added, "links": len(links), "pages": pages,
+                         "ms": int((time.monotonic() - t0) * 1000), "cached": False,
+                         "error": None if readme else "readme 为空/拉取失败"})
+    return found, log_rows
+
+
+
 
 def _llm_text(prompt: str, model: str, timeout: int,
               max_tokens: int = 1800) -> Tuple[str, str, str]:
@@ -1098,7 +1267,9 @@ def apply_rerank(module: str, ranked: List[Dict[str, Any]],
     **独立成函数**是为了「先出词法卡、再原地升级」：任务层在重排前已经把卡落库，
     这里失败只影响状态字段，不会让用户没有结果可看。
     """
-    impls = [c for c in ranked if c["bucket"] == "impl"][:MAX_CANDIDATES]
+    # 只从**补全过**的候选里取：补全集合必须包含重排集合，否则会拿到「没抓 README」
+    # 的仓——实现轴少一个信号，卡上也没有摘要（2026-10-22 实测 rsain/enesusta）。
+    impls = [c for c in ranked if c["bucket"] == "impl" and c.get("enriched")][:MAX_CANDIDATES]
     got, err, used_model, attempts = rerank(module, impls, allow_paid)
     if not got:
         return err, "", attempts
@@ -1111,7 +1282,7 @@ def apply_rerank(module: str, ranked: List[Dict[str, Any]],
             truncated = any(a.get("stop_reason") == "max_tokens" for a in attempts)
             c["why"] = ("输出被截断（max_tokens），本条未判" if (truncated and c["repo"] in sliced)
                         else "模型未返回该条判定" if c["repo"] in sliced
-                        else "未进入语义重排队列（词法前 8 名之外）")
+                        else "未进入语义重排队列（补全窗口之外）")
     for c in ranked:
         r = got.get(c["repo"])
         if not r:
@@ -1205,45 +1376,89 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
 
     toks = tokens_of(keywords)
     groups = alias_groups(keywords)
-    weights = _concept_weights(pool, groups)
 
-    pre: List[Dict[str, Any]] = []
-    for key, rec in pool.items():
-        item = rec["item"]
-        if item.get("archived"):
-            continue
-        bucket = classify(item)
-        # 变体要补在**被匹配文本**这一侧，否则「关键词 log / 文档 logs」永远不撞
-        blob = _expand_blob(_norm_text(_name_blob(item)))
-        cov, matched = _concept_cov(blob, groups, weights)
-        phrase = any((" " in str(k) and _norm_text(str(k)) in blob) for k in keywords)
-        hits = len(code_hits.get(key, []))
-        srcs = rec.get("sources") or []
-        if bucket == "impl" and cov < 0.18 and hits == 0:
-            continue
-        # 「至少命中 2 个概念」不能写成常数 2：概念数来自用户关键词，只有 1 个关键词
-        # （或 LLM 抽词只回一条）时 `matched` 上限就是 1，这条过滤会**恒真**，
-        # 描述完全命中的仓也被丢光。实测 `keywords=["cron"]` 对 "a cron library for go"
-        # 返回 0 条实现桶。门槛必须取 min(2, 概念数)。
-        if bucket == "impl" and matched < min(2, len(groups)) and not phrase and hits == 0:
-            continue
-        # 自有来源里与原模块无关的仓**不占版面**：资料/清单桶对搜索候选不设覆盖度门槛
-        # （那是「用户主动搜 wide topic 时也能看到清单」的旧口径），但自有来源动辄几十个
-        # fork，没有门槛时 `free-programming-books` 这类 0 覆盖的仓会一直挂在卡上。
-        if srcs and matched == 0 and cov < 0.18 and not phrase and hits == 0:
-            continue
-        stars = int(item.get("stargazers_count") or 0)
-        pre.append({"key": key, "item": item, "bucket": bucket, "cov": cov, "hits": hits,
-                    "seen": rec["seen"], "sources": srcs,
-                    "pre": 0.55 * cov + 0.20 * min(1, math.log10(stars + 1) / 4)
-                    + 0.25 * min(1, hits / 3) + (SOURCE_BONUS if srcs else 0)})
+    def build_pre() -> List[Dict[str, Any]]:
+        """按**当前池**算覆盖度与预分并排序。
 
-    pre.sort(key=lambda x: (x["bucket"] != "impl", -x["pre"]))
+        独立成函数是因为「清单展开」会把新项目塞进池：IDF 与覆盖度都随之变化，
+        不重算就等于用旧权重给新候选打分。
+        """
+        weights = _concept_weights(pool, groups)
+        out: List[Dict[str, Any]] = []
+        for key, rec in pool.items():
+            item = rec["item"]
+            if item.get("archived"):
+                continue
+            bucket = classify(item)
+            # 变体要补在**被匹配文本**这一侧，否则「关键词 log / 文档 logs」永远不撞
+            blob = _expand_blob(_norm_text(_name_blob(item)))
+            cov, matched = _concept_cov(blob, groups, weights)
+            phrase = any((" " in str(k) and _norm_text(str(k)) in blob) for k in keywords)
+            hits = len(code_hits.get(key, []))
+            srcs = rec.get("sources") or []
+            if bucket == "impl" and cov < 0.18 and hits == 0:
+                continue
+            # 「至少命中 2 个概念」不能写成常数 2：概念数来自用户关键词，只有 1 个关键词
+            # （或 LLM 抽词只回一条）时 `matched` 上限就是 1，这条过滤会**恒真**，
+            # 描述完全命中的仓也被丢光。实测 `keywords=["cron"]` 对 "a cron library for go"
+            # 返回 0 条实现桶。门槛必须取 min(2, 概念数)。
+            if bucket == "impl" and matched < min(2, len(groups)) and not phrase and hits == 0:
+                continue
+            # 自有来源里与原模块无关的仓**不占版面**：资料/清单桶对搜索候选不设覆盖度门槛
+            # （那是「用户主动搜 wide topic 时也能看到清单」的旧口径），但自有来源动辄几十个
+            # fork，没有门槛时 `free-programming-books` 这类 0 覆盖的仓会一直挂在卡上。
+            if srcs and matched == 0 and cov < 0.18 and not phrase and hits == 0:
+                continue
+            stars = int(item.get("stargazers_count") or 0)
+            out.append({"key": key, "item": item, "bucket": bucket, "cov": cov, "hits": hits,
+                        "seen": rec["seen"], "sources": srcs,
+                        "via": rec.get("via") or set(),
+                        "pre": 0.55 * cov + 0.20 * min(1, math.log10(stars + 1) / 4)
+                        + 0.25 * min(1, hits / 3) + (SOURCE_BONUS if srcs else 0)})
+        out.sort(key=lambda x: (x["bucket"] != "impl", -x["pre"]))
+        return out
+
+    pre = build_pre()
+
+    def enrich_top(target: List[Dict[str, Any]]) -> None:
+        """补全前 `ENRICH_LIMIT` 个实现候选（已补过的跳过）。"""
+        n = 0
+        for p in target:
+            if p["bucket"] != "impl" or p.get("enriched"):
+                continue
+            if n >= ENRICH_LIMIT:
+                break
+            n += 1
+            p["enriched"] = True
+            branch = p["item"].get("default_branch") or "main"
+            p["branch"] = branch
+            p.update(_enrich(p["item"]["full_name"], branch))
+
     mark("enrich")
-    for p in [x for x in pre if x["bucket"] == "impl"][:MAX_CANDIDATES]:
-        branch = p["item"].get("default_branch") or "main"
-        p["branch"] = branch
-        p.update(_enrich(p["item"]["full_name"], branch))
+    # 补全窗口必须 > 重排窗口：否则重排会拿到没抓 README 的仓（实现轴缺信号、卡上没摘要）。
+    enrich_top(pre)
+
+    # ── 清单展开：awesome / HelloGitHub 只是目录，用户要的是目录里的项目 ──
+    # 为什么放在补全之后：`HelloGitHub` 的描述里没有 awesome/curated，按 `classify`
+    # 是 impl；它「是清单」的证据在 README 里（1 个项目链接 + 36 个 content 子页），
+    # 不先抓 README 就根本识别不出来。展开结果再走同一套覆盖度/三轴/许可证闸门。
+    expanded_log: List[Dict[str, Any]] = []
+    if os.getenv("REF_LIST_EXPAND", "1") != "0":
+        lists = _pick_lists(pre, LIST_EXPAND_LISTS)
+        if lists:
+            mark("expand")
+            w0 = _concept_weights(pool, groups)
+
+            def keep(item: Dict[str, Any]) -> bool:
+                blob = _expand_blob(_norm_text(_name_blob(item)))
+                return _concept_cov(blob, groups, w0)[0] >= 0.18
+
+            found, expanded_log = _expand_lists(lists, min_stars, set(pool), keep)
+            for key, rec in found.items():
+                pool[key] = {"item": rec["item"], "seen": set(), "via": rec["via"]}
+            if found:
+                pre = build_pre()      # 池变大 ⇒ IDF/覆盖度重算
+                enrich_top(pre)        # 收录项目也可能进重排，同样要补全
 
     ranked: List[Dict[str, Any]] = []
     for p in pre:
@@ -1272,6 +1487,8 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
             "desc": (item.get("description") or "")[:160], "bucket": bucket,
             "seen": sorted(p["seen"]),
             "sources": p["sources"],
+            "via": sorted(p.get("via") or []),
+            "enriched": bool(p.get("enriched")),
             "src_bonus": SOURCE_BONUS if p["sources"] else 0.0,
             "func": round(func, 3), "impl": round(impl, 3), "design": round(design, 3),
             "coverage": round(p["cov"], 3), "stars": stars, "license": lic,
@@ -1299,6 +1516,7 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
         "arms": arms_log,
         "pool_size": len(pool),
         "sources": src_overview,
+        "list_expand": expanded_log,
         "rerank": bool(used_model),
         "rerank_model": used_model,
         "rerank_paid": bool(used_model and used_model not in
@@ -1350,6 +1568,17 @@ def render_md(module: str, keywords: List[str], lang: str, meta: Dict[str, Any],
         if bad_src:
             out.append("- ⚠️ 来源拉取失败：" +
                        "、".join(f"{s['label']}（{s.get('error') or '失败'}）" for s in bad_src))
+    expand = meta.get("list_expand") or []
+    if expand:
+        parts = []
+        for e in expand:
+            name = str(e.get("name") or "").replace("list:", "")
+            if not e.get("ok"):
+                parts.append(f"{name}（失败）")
+            else:
+                parts.append(f"{name}（{e.get('pages', 0)} 页 / {e.get('links', 0)} 链接"
+                             f" → 入池 {e['count']}）")
+        out.append("- 清单展开：" + "；".join(parts))
     if meta.get("rerank"):
         cost = "（**付费档**，单次约几千 token）" if meta.get("rerank_paid") else "（免费档）"
         out.append(f"- 语义重排：{meta['rerank_model']}{cost}")
@@ -1381,8 +1610,12 @@ def render_md(module: str, keywords: List[str], lang: str, meta: Dict[str, Any],
             "|---|---|---:|---|---|---:|---:|---:|---|"]
     for c in picked[:limit]:
         lic = c["license"] + ("(copyleft)" if c["copyleft"] else "")
+        src_cell = "、".join(c.get("sources") or [])
+        if c.get("via"):
+            short = str(c["via"][0]).split("/")[-1]
+            src_cell = (src_cell + " · " if src_cell else "") + f"清单:{short}"
         out.append(f"| [{c['repo']}]({c['url']}) | "
-                   f"{'、'.join(c.get('sources') or []) or '—'} | {c['stars']} | "
+                   f"{src_cell or '—'} | {c['stars']} | "
                    f"{_badge(c['fresh_days'])} | {lic} | {c['func']:.2f} | "
                    f"{c['impl']:.2f} | {c['design']:.2f} | {c.get('judge') or '—'} |")
     # 自有来源单独再列一次：来源的目的就是「先看我自己的仓」，而上表是统一排序 +
@@ -1423,6 +1656,8 @@ def render_md(module: str, keywords: List[str], lang: str, meta: Dict[str, Any],
         if c.get("sources"):
             out.append("- 来源：自有仓（" + "、".join(c["sources"])
                        + "，不走搜索额度、含 fork）")
+        if c.get("via"):
+            out.append("- 收录于清单：" + "、".join(c["via"]) + "（本项目由清单展开得到）")
         if c.get("why"):
             out.append(f"- 重排理由：{c['why']}（{c.get('judge')}）")
         out.append(f"- 设计资料：{'有 ADR/architecture 目录' if c['arch_docs'] else '未见 ADR'}")

@@ -293,15 +293,39 @@ openstatus/checkcle、nps×2/rathole/NSmartProxy、infinity/turbovec、docfx/qua
 两个新发现，按严重度排：
 
 1. **日志聚合模块 0 召回**：`loki`(29k)、`fluent-bit`(8k)、`vector`(22k) 一个都没进池。
-   三个仓的描述分别是「Like Prometheus, but for logs.」「Fast and Lightweight Logs…」
-   「observability data pipeline」—— **没有一个含 `aggregation`/`collector`/`centralized logging`**。
-   这是 `SYNONYMS` 词表只覆盖 27 条通用词的直接后果：模块语义对，用户词也对，
-   但实现方的自我描述用的是另一套词。`hit@5=0.250` 这一格（最小的 logsuck 命中）
-   **恰恰是这条缺陷的反面证据**——指标上去了，主流实现还是找不到。
-2. **cron 模块 top5 全是"平台"，不是"库"**：PowerJob/xxl-job/quartznet/TickerQ 都对，
-   但用户要参考的往往是 `apscheduler`(#14)、`robfig/cron`(#19) 这种能直接嵌进项目的库。
-   当前打分不区分**形态**（库 / 服务 / 平台），只认词面密度与星数 ⇒ 30k 星的调度平台
-   永远压过 7k 星的库。这不是标注能修的，需要给 candidate 加形态维度。
+   已用 GitHub API 直接取证（2026-10-21 23:0x，非推断）：
+
+   ```
+   loki        desc "Like Prometheus, but for logs."        topics [… logging, loki, prometheus …]
+   fluent-bit  desc "Fast and Lightweight Logs, Metrics…"   topics [… data-collector, logging, logs …]
+   vector      desc "A high-performance observability data pipeline."  topics [… logs, monitoring …]
+
+   q="centralized logging" in:name,description,topics  stars:>=20  → total_count=21
+     top10: Kermit 1041 / Logflare 1006 / myntra-pipeline 484 / … / 第6名 ★132
+   q="log aggregation"     in:name,description,topics  stars:>=20  → total_count=25
+     top10: FalconHound 829 / pq 413 / certstream 360 / … / logsuck 168
+   ```
+
+   全站只有 **21 / 25** 个仓同时含这两个词，且全是千星以下的小仓 —— 29k 星的 loki
+   根本不在这个结果集里，不是"排在后面"。三个机制叠加造成：
+   ① **多词 AND**（`centralized` 和 `logging` 必须同时出现，loki 只有 `logging`）；
+   ② **词形**（`\blog\b` 不匹配 `logs`，`log collector` 匹配不到 `data-collector`/`logs`）；
+   ③ **星数排序**在 21 条小结果集里毫无意义。
+   所以修法不是"再加几个同义词"，而是**词干/单复数归一 + 短语拆词合并（OR + 覆盖度打分）**。
+   `hit@5=0.250` 那一格（最小仓 `logsuck` ★168 命中）恰是反面证据：指标上去了，主流实现还是找不到。
+
+   附带查出的第二个缺陷：**关键词本身是短语时，`kw*` 扩展臂整条被 `pair` 去重吃掉**。
+   本模块 `tokens_of` ⇒ `[log, aggregation, collector, centralized, logging]`，
+   `pair = "log aggregation …"` 与 `kw0` 完全相同、`pair2 = "log collector …"` 与 `kw1` 相同，
+   `seen_q` 去重后**只剩 7 个臂**（实测 arms：core 0 / pair 10 / pair2 10 / fresh 0 /
+   cn 10 / reading 10 / kw2 10）。即"一条一个概念"的扩展在短语型关键词上**从未生效**。
+2. **cron 模块 top5 与本机技术栈不匹配**：实测 top5 = PowerJob(Java 平台)、xxl-job(Java 平台)、
+   quartznet(.NET)、TickerQ(.NET)、gocron(Go)，**0 个 Python**；而本机在用的
+   `apscheduler`(Py) 排 #14、`robfig/cron`(Go) #19。
+   注意这不是"平台压库"——top5 里有 3 个就是库。真因是**语言这一维几乎没权重**
+   （`lang` 只占 `func` 的 0.10，且评测/默认调用里为空），检索把"功能词面 + 星数"
+   当成了全部信号。修法：从模块所在项目推断语言做先验，或在卡面标出「语言不匹配」，
+   而不是继续调权重。
 
 这两条都**没有**在本轮改动代码（用户本轮要求是"扩展标注集并核对标签"），
 仅作为下一轮的输入。

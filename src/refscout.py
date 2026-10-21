@@ -540,6 +540,22 @@ def _llm_text(prompt: str, model: str, timeout: int,
         return "", type(exc).__name__, ""
 
 
+#: 免费池把重排 prompt 路由到**内容审核模型**时返回的标签开头。
+_SAFETY_REPLY = re.compile(r"^\s*User\s+Safety\s*:", re.I)
+
+
+def _is_safety_reply(text: str) -> bool:
+    """这段正文是内容审核标签，不是重排结果。
+
+    2026-10-21 实测（8 候选、`allow_paid=False`，4 轮）：2 轮返回
+    `User Safety: safe`，兜底位返回 `User Safety: unsafe` +
+    `Safety Categories: Malware, Needs Caution`。**换同一池的下一个模型
+    照样撞**（两轮都中），所以命中即停，不把 95s 预算烧在审核模型上。
+    这与「模型不听话」是两回事：路由选错了模型。
+    """
+    return bool(_SAFETY_REPLY.match(text or ""))
+
+
 def _json_block(text: str) -> Optional[dict]:
     """从严到松解析模型输出。
 
@@ -635,6 +651,14 @@ def rerank(module: str, cands: List[Dict[str, Any]], allow_paid: bool,
         if not text:
             errors.append(f"{model}:{err or 'empty'}")
             continue
+        if _is_safety_reply(text):
+            attempts[-1].update({"ok": False, "error": "safety-router",
+                                 "head": text.strip()[:80]})
+            errors.append(f"{model}:safety-router")
+            # 同一免费池的下一个模型会再撞一次（实测 2/2），命中即停。
+            if model in free:
+                break
+            continue
         data = _json_block(text)
         if not data or not isinstance(data.get("items"), list):
             attempts[-1].update({"ok": False, "error": "bad-json",
@@ -667,8 +691,15 @@ def rerank(module: str, cands: List[Dict[str, Any]], allow_paid: bool,
 
 def _judge_rank(judge: str) -> int:
     """use/fork < read < 未判定 < skip。未知必须排在「已判 skip」之前、
-    「已判可读」之后 —— 把未知混进可借鉴区就是替模型编结论。"""
-    return {"use": 0, "fork": 0, "read": 1}.get(judge, 3 if judge == "unjudged" else 2)
+    「已判可读」之后 —— 把未知混进可借鉴区就是替模型编结论。
+
+    2026-10-21 修正：旧实现把 `skip` 与任意未知字符串并列在 2，又把
+    `unjudged` 单列成 3 ⇒ **未判定反而排在被明确否决的仓之后**，与本函数
+    注释相反。重排只覆盖词法前 8 名，尾部候选和「模型只返回一部分」的候选
+    全是 `unjudged`，卡面等于「没看过的仓先被压到已否决之下」。
+    现改为 skip=3、其余未知=2，档位严格是 use/fork < read < 未判定 < skip。
+    """
+    return {"use": 0, "fork": 0, "read": 1, "skip": 3}.get(judge, 2)
 
 
 def apply_rerank(module: str, ranked: List[Dict[str, Any]],

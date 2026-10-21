@@ -83,6 +83,41 @@ FALLBACK_CN = {
     "配额": "quota", "限流": "rate limit", "消息": "message", "队列": "queue",
 }
 
+#: 查询扩展词表（唯一知识源）：一个词 → 描述同一功能时常用的等价说法。
+#: 只收**跨语言/跨框架都成立**的运维与检索词汇；**不收具体产品名**，否则退化成对
+#: 评测集的过拟合。匹配侧与检索侧共用同一张表：扩充了查询，也必须让「等价说法命中」
+#: 计入覆盖度，否则扩出来的候选会被 `cov<0.18` / `matched<2` 过滤掉（实测见
+#: `docs/REFERENCE-RADAR-QX-20261021.md`）。
+SYNONYMS = {
+    "health": ["healthcheck", "health check", "liveness", "readiness", "uptime", "status page"],
+    "probe": ["healthcheck", "health check", "liveness", "readiness"],
+    "uptime": ["status page", "availability", "monitoring", "healthcheck"],
+    "monitor": ["monitoring", "observability", "watchdog", "alerting"],
+    "monitoring": ["observability", "watchdog", "alerting", "uptime"],
+    "watchdog": ["supervisor", "healthcheck", "auto restart", "monitoring"],
+    "cron": ["crontab", "cron expression", "scheduler", "scheduling"],
+    "scheduler": ["scheduling", "job scheduler", "cron", "task scheduling", "job queue"],
+    "scheduling": ["scheduler", "cron", "job scheduler", "task queue"],
+    "task": ["job", "worker", "queue", "task queue"],
+    "queue": ["task queue", "job queue", "message queue", "worker"],
+    "search": ["search engine", "full-text search", "full text search", "query"],
+    "engine": ["search engine", "index engine"],
+    "index": ["indexing", "inverted index"],
+    "indexing": ["inverted index", "index engine", "full-text search"],
+    "terminal": ["tty", "pty", "console", "shell", "web terminal"],
+    "websocket": ["socket", "realtime", "sse", "server-sent events"],
+    "pty": ["tty", "pseudo terminal", "terminal emulator"],
+    "port": ["port forwarding", "tunnel"],
+    "forwarding": ["port forwarding", "tunnel", "relay"],
+    "llm": ["language model", "ai gateway", "model gateway"],
+    "gateway": ["proxy", "router", "api gateway", "reverse proxy"],
+    "proxy": ["gateway", "relay", "router"],
+    "router": ["routing", "gateway", "proxy"],
+    "failover": ["fallback", "load balancing", "retry", "high availability"],
+    "cache": ["caching", "memoization", "key value store"],
+    "auth": ["authentication", "oauth", "sso"],
+}
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ref_cards (
     id            TEXT PRIMARY KEY,
@@ -303,6 +338,21 @@ def build_queries(keywords: List[str], module: str, min_stars: int,
         arms.append(("reading", f"{toks[0]} {toks[-1]} in:readme" + base, "stars"))
     if not arms:
         arms.append(("core", f"{module} in:name,description" + base, "stars"))
+    # ── 查询扩展臂：一条查询只放**一个概念** ────────────────────────────────
+    # GitHub 仓库搜索的多词是 AND，`core`/`fresh` 把 3~4 个概念 AND 成一条时，只要
+    # 有一个词不在仓的描述里，整臂就是 0 结果（robfig/cron 的描述只有
+    # "a cron library for go"，`cron scheduler task` 必空；meilisearch 的
+    # `full-text search indexing` 同理）。这里不再增加「词」，只把已有概念拆成
+    # 可独立命中的查询；池容量（10 条/臂）与候选上限（8）均不变。
+    # 顺序：多词关键词本身就是概念短语（`search engine`），优先；再补首个单词关键词。
+    multi = [k for k in keywords if " " in str(k).strip()]
+    single = [k for k in keywords if " " not in str(k).strip()]
+    seen_q = {a[1] for a in arms}
+    for i, kw in enumerate(list(dict.fromkeys(multi + single))[:3]):
+        q = f"{kw} in:name,description,topics" + base
+        if q not in seen_q:
+            seen_q.add(q)
+            arms.append((f"kw{i}", q, "stars"))
     return arms
 
 
@@ -322,15 +372,90 @@ def _name_blob(item: Dict[str, Any]) -> str:
                      " ".join(item.get("topics") or [])]).lower()
 
 
-def _doc_freq(pool: Dict[str, Dict], toks: List[str]) -> Dict[str, float]:
+def _norm_text(s: str) -> str:
+    """分隔符归一：`full-text-search` / `full_text_search` / `full text search` 等价。
+
+    不改这一步，topics 里连字符写法的仓（meilisearch 的 `full-text-search`）永远匹配
+    不到关键词 `full text search` —— 这是实测里 6 条「未入池」中 3 条的直接成因。
+    """
+    return re.sub(r"\s+", " ", re.sub(r"[-_/]+", " ", (s or "").lower())).strip()
+
+
+def _forms_of(word: str) -> set:
+    """单词的形态变体（复数/动名词），只做可逆的几条规则，不做完整词干化。"""
+    out = {word}
+    if len(word) > 3 and word.endswith("s"):
+        out.add(word[:-1])
+    if len(word) > 5 and word.endswith("ing"):
+        out.add(word[:-3])
+    if len(word) > 4 and word.endswith("er"):
+        out.add(word[:-2])
+    return out
+
+
+def alias_groups(keywords: List[str]) -> List[Tuple[List[str], List[str]]]:
+    """每个关键词 → (自身形态, 同义说法)。覆盖度按**概念**计，不按词元计。
+
+    这样 `uptime` 命中就能满足 `health` 这个概念：GitHub 上同功能的仓用词
+    （health / uptime / monitoring / status page）差异极大，按词元算覆盖度会把
+    「只说中一半」的正确仓判成不相关。
+
+    **同义词只给部分学分（`SYN_CREDIT`）**：实测（`docs/REFERENCE-RADAR-QX-20261021.md`）
+    给同义词满学分时，`cron` 会被 `scheduler`/`scheduling` 命中，日历类与 k8s 直接
+    占住 top5。扩展项本来就比原词弱，学分必须体现这一点。
+    """
+    groups: List[Tuple[List[str], List[str]]] = []
+    for kw in keywords:
+        own, syn = {_norm_text(kw)}, set()
+        for w in re.split(r"[^a-z0-9+#.]+", str(kw).lower()):
+            if not w:
+                continue
+            own |= _forms_of(w)
+            for alias in SYNONYMS.get(w, []):
+                syn.add(_norm_text(alias))
+        syn -= own
+        groups.append((sorted((f for f in own if f), key=len, reverse=True),
+                       sorted((f for f in syn if f), key=len, reverse=True)))
+    return groups
+
+
+def _hit(blob: str, form: str) -> bool:
+    if " " in form:
+        return form in blob
+    return re.search(r"\b" + re.escape(form) + r"\b", blob) is not None
+
+
+#: 同义词命中只算部分学分（原词 = 1.0）。取值来自实测：满学分会把日历/k8s 类仓
+#: 拉进 top5；过低（<0.5）则扩出来的正确仓排不回前五。0.7 是两者之间的唯一档。
+SYN_CREDIT = 0.7
+
+
+def _concept_weights(pool: Dict[str, Dict],
+                     groups: List[Tuple[List[str], List[str]]]) -> List[float]:
+    """概念级 IDF：越少仓命中，区分度越高（与旧词元 IDF 同式，只换了计数单位）。"""
     n = max(1, len(pool))
-    df = {t: sum(1 for r in pool.values() if t in _name_blob(r["item"])) for t in toks}
-    return {t: 1.0 + math.log((n + 1) / (df[t] + 1)) for t in toks}
+    out = []
+    for own, syn in groups:
+        forms = own + syn
+        df = sum(1 for r in pool.values()
+                 if any(_hit(_norm_text(_name_blob(r["item"])), f) for f in forms))
+        out.append(1.0 + math.log((n + 1) / (df + 1)))
+    return out
 
 
-def _weighted_cov(blob: str, toks: List[str], w: Dict[str, float]) -> float:
-    total = sum(w[t] for t in toks)
-    return sum(w[t] for t in toks if t in blob) / total if total else 0.0
+def _concept_cov(blob: str, groups: List[Tuple[List[str], List[str]]],
+                 w: List[float]) -> Tuple[float, int]:
+    """返回（加权覆盖度, 命中的概念数）。同义词最多给 `SYN_CREDIT`，不会盖过原词。"""
+    total = sum(w) or 1.0
+    score, matched = 0.0, 0
+    for (own, syn), wt in zip(groups, w):
+        if any(_hit(blob, f) for f in own):
+            score += wt
+            matched += 1
+        elif any(_hit(blob, f) for f in syn):
+            score += wt * SYN_CREDIT
+            matched += 1
+    return score / total, matched
 
 
 def _days_since(ts: Optional[str]) -> int:
@@ -637,7 +762,8 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
                     pool[key] = {"item": data2, "seen": {"code"}}
 
     toks = tokens_of(keywords)
-    weights = _doc_freq(pool, toks)
+    groups = alias_groups(keywords)
+    weights = _concept_weights(pool, groups)
 
     pre: List[Dict[str, Any]] = []
     for key, rec in pool.items():
@@ -645,10 +771,9 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
         if item.get("archived"):
             continue
         bucket = classify(item)
-        blob = _name_blob(item)
-        cov = _weighted_cov(blob, toks, weights)
-        matched = sum(1 for t in toks if t in blob)
-        phrase = any((" " in k and k.lower() in blob) for k in keywords)
+        blob = _norm_text(_name_blob(item))
+        cov, matched = _concept_cov(blob, groups, weights)
+        phrase = any((" " in str(k) and _norm_text(str(k)) in blob) for k in keywords)
         hits = len(code_hits.get(key, []))
         if bucket == "impl" and cov < 0.18 and hits == 0:
             continue

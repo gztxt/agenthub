@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "as_of": "2026-10-21",
+  "note": "5 模块标注集。targets 只收「能一句话说清解决同一问题」的仓库，每条 why 引其官方 description；判定前逐条打过 /repos/{owner}/{repo} 核验存在与描述（2026-10-21）。**未标注的仓库不等于不相关**，故 precision 只作下界，主指标是 hit@5。",
+  "modules": [
+    {
+      "id": "terminal-ws",
+      "module": "终端 WebSocket 与端口转发",
+      "keywords": ["terminal", "websocket", "pty", "port forwarding"],
+      "lang": "",
+      "targets": [
+        {"repo": "cs01/termpair", "why": "浏览器查看/控制终端，端到端加密"},
+        {"repo": "yudai/gotty", "why": "把终端分享成 web 应用"},
+        {"repo": "tsl0922/ttyd", "why": "通过 web 分享终端"}
+      ]
+    },
+    {
+      "id": "llm-gateway",
+      "module": "LLM 多模型网关与故障转移",
+      "keywords": ["llm", "gateway", "proxy", "failover", "router"],
+      "lang": "",
+      "targets": [
+        {"repo": "BerriAI/litellm", "why": "统一 100+ LLM API 的网关"},
+        {"repo": "Portkey-AI/gateway", "why": "带路由的 AI 网关，接 1600+ 模型"}
+      ]
+    },
+    {
+      "id": "health-probe",
+      "module": "服务健康探针与自动看护",
+      "keywords": ["health", "uptime", "monitoring", "watchdog"],
+      "lang": "",
+      "targets": [
+        {"repo": "louislam/uptime-kuma", "why": "自托管监控/探活"},
+        {"repo": "TwiN/gatus", "why": "面向开发者的状态页 + 告警"}
+      ]
+    },
+    {
+      "id": "cron-scheduler",
+      "module": "定时任务调度（cron 表达式）",
+      "keywords": ["cron", "scheduler", "task scheduling"],
+      "lang": "",
+      "targets": [
+        {"repo": "agronholm/apscheduler", "why": "Python 任务调度库"},
+        {"repo": "robfig/cron", "why": "Go 的 cron 库"},
+        {"repo": "celery/celery", "why": "分布式任务队列，beat 组件负责任务调度"}
+      ]
+    },
+    {
+      "id": "fulltext-search",
+      "module": "自建轻量全文检索服务",
+      "keywords": ["full-text search", "search engine", "indexing"],
+      "lang": "",
+      "targets": [
+        {"repo": "meilisearch/meilisearch", "why": "轻量搜索 API，自带索引与混合检索"},
+        {"repo": "typesense/typesense", "why": "开源 Algolia 替代，轻量检索"},
+        {"repo": "quickwit-oss/quickwit", "why": "云原生搜索/可观测检索引擎"}
+      ]
+    }
+  ]
+}

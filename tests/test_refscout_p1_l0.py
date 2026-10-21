@@ -172,5 +172,58 @@ class TestCardsDb(unittest.TestCase):
         self.assertEqual(len(d["changed"]), 1)
 
 
+class TestQueryExpansion(unittest.TestCase):
+    """查询扩展（PT-20261021-04 召回实验的第 6 轮）：只改查询与匹配口径，不动池。
+
+    守三条判据：
+    1. 扩展臂**一条只放一个概念**（多词 AND 是实测召回的主因：robfig/cron 的描述
+       只有 "a cron library for go"，`cron scheduler task` 必空）。
+    2. 连字符/下划线归一，否则 topics 里的 `full-text-search` 永远匹配不到
+       `full text search`。
+    3. 同义词只给部分学分；原词命中才满分 —— 满学分会让日历/k8s 类仓占住 top5。
+    """
+
+    def test_expansion_arm_single_concept_and_capped(self):
+        arms = refscout.build_queries(["health", "uptime", "monitoring", "watchdog"],
+                                      "服务健康探针", 20, 180)
+        kw = [a for a in arms if a[0].startswith("kw")]
+        self.assertTrue(kw, "应至少有一条扩展臂")
+        self.assertLessEqual(len(kw), 3, "扩展臂数量必须封顶（搜索配额 30/min）")
+        self.assertTrue(all(len(a[1].split(" in:")[0].split()) == 1 for a in kw),
+                        "扩展臂不得把多个概念 AND 在一起")
+
+    def test_multiword_keyword_queried_alone(self):
+        arms = refscout.build_queries(["full-text search", "search engine", "indexing"],
+                                      "全文检索", 20, 180)
+        qs = [a[1] for a in arms if a[0].startswith("kw")]
+        self.assertIn("full-text search in:name,description,topics", qs[0])
+        self.assertTrue(any(q.startswith("search engine ") for q in qs))
+
+    def test_hyphen_normalization(self):
+        self.assertEqual(refscout._norm_text("full-text_search"), "full text search")
+        self.assertTrue(refscout._hit("a full text search engine", "full text search"))
+
+    def test_word_boundary_no_substring_noise(self):
+        self.assertFalse(refscout._hit("deep research tool", "search"),
+                         "`research` 不应被当成 `search` 命中")
+
+    def test_synonym_gets_partial_credit(self):
+        groups = refscout.alias_groups(["health"])
+        own, syn = groups[0]
+        self.assertIn("health", own)
+        self.assertIn("uptime", syn)
+        cov_syn, hit_syn = refscout._concept_cov("uptime monitoring", groups, [1.0])
+        cov_own, hit_own = refscout._concept_cov("health check", groups, [1.0])
+        self.assertEqual(hit_syn, 1)
+        self.assertAlmostEqual(cov_syn, refscout.SYN_CREDIT)
+        self.assertAlmostEqual(cov_own, 1.0)
+        self.assertGreater(cov_own, cov_syn)
+
+    def test_pool_structure_untouched(self):
+        """扩展只许改查询/匹配，**不许顺手扩池**（§7.4 的教训：三旋钮必须同调）。"""
+        self.assertEqual(refscout.SEARCH_PER_PAGE, 10)
+        self.assertEqual(refscout.MAX_CANDIDATES, 8)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

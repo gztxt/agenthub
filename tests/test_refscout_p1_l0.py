@@ -225,5 +225,103 @@ class TestQueryExpansion(unittest.TestCase):
         self.assertEqual(refscout.MAX_CANDIDATES, 8)
 
 
+class TestJudgeRankLadder(unittest.TestCase):
+    """判定档位的**严格顺序**：use/fork < read < 未判定 < skip。
+
+    2026-10-21 修：旧实现 `unjudged`=3 而 `skip`=2，未判定排在被明确否决之后。
+    """
+
+    def test_full_ladder(self):
+        order = sorted(["skip", "unjudged", "read", "use", "fork"],
+                       key=refscout._judge_rank)
+        self.assertEqual(order[:2], ["use", "fork"])
+        self.assertEqual(order[2:], ["read", "unjudged", "skip"])
+
+    def test_unknown_judge_is_not_below_skip(self):
+        for j in ("", "weird", None):
+            self.assertLess(refscout._judge_rank(j), refscout._judge_rank("skip"),
+                            "未知判定不得排到已判 skip 之下（不能把没看过的当已否决）")
+
+
+class TestPartialRerankOrdering(unittest.TestCase):
+    """重排只返回部分条目时，未判定的仓必须排在**已判 skip** 之前。"""
+
+    def _cand(self, repo, func):
+        return {"repo": repo, "bucket": "impl", "stars": 100 + func * 10,
+                "desc": "d", "topics": [], "readme": "", "readme_gist": "",
+                "sample_paths": [], "item": {}, "judge": "unjudged", "why": "",
+                "func": func, "impl": func, "design": func}
+
+    def test_unjudged_above_skip(self):
+        ranked = [self._cand("a/skip", 0.9), self._cand("b/unjudged", 0.8),
+                  self._cand("c/use", 0.1)]
+        orig = refscout.rerank
+        refscout.rerank = lambda module, impls, allow_paid: (
+            {"a/skip": {"func": 0.0, "impl": 0.0, "design": 0.0,
+                        "judge": "skip", "why": "相邻"},
+             "c/use": {"func": 0.9, "impl": 0.9, "design": 0.9,
+                       "judge": "use", "why": "同题"}}, "", "fake", [])
+        try:
+            err, used, _ = refscout.apply_rerank("模块", ranked, False)
+        finally:
+            refscout.rerank = orig
+        self.assertEqual(err, "")
+        self.assertEqual([c["repo"] for c in ranked], ["c/use", "b/unjudged", "a/skip"])
+
+
+class TestSafetyRouter(unittest.TestCase):
+    """免费池会把 prompt 路由到内容审核模型，必须识别并立刻收手。"""
+
+    def test_detects_safety_label(self):
+        self.assertTrue(refscout._is_safety_reply("User Safety: safe"))
+        self.assertTrue(refscout._is_safety_reply(
+            " User Safety: unsafe\nSafety Categories: Malware, Needs Caution"))
+        self.assertFalse(refscout._is_safety_reply('{"items": []}'))
+        self.assertFalse(refscout._is_safety_reply(""))
+
+    def test_rerank_stops_instead_of_burning_budget(self):
+        calls = []
+
+        def fake(prompt, model, timeout=0, max_tokens=0):
+            calls.append(model)
+            return "User Safety: safe", "", "end_turn"
+
+        cand = {"repo": "a/b", "stars": 1, "desc": "x", "topics": [],
+                "readme_gist": "", "sample_paths": [], "item": {}}
+        orig = refscout._llm_text
+        refscout._llm_text = fake
+        try:
+            out, err, used, attempts = refscout.rerank("模块", [cand], allow_paid=False)
+        finally:
+            refscout._llm_text = orig
+        self.assertFalse(out)
+        self.assertIn("safety-router", err)
+        self.assertEqual(len(calls), 1, "同一免费池换模型只会再撞一次，必须命中即停")
+        self.assertEqual(attempts[0]["error"], "safety-router")
+
+    def test_paid_model_safety_reply_does_not_block_fallback(self):
+        """付费档若也返回标签，不能就此放弃免费兜底（付费与免费不是同一池）。"""
+        calls = []
+
+        def fake(prompt, model, timeout=0, max_tokens=0):
+            calls.append(model)
+            if len(calls) == 1:
+                return "User Safety: safe", "", "end_turn"
+            return ('{"items":[{"repo":"a/b","func":0.9,"impl":0.8,'
+                    '"design":0.7,"judge":"use","why":"同题"}]}', "", "end_turn")
+
+        cand = {"repo": "a/b", "stars": 1, "desc": "x", "topics": [],
+                "readme_gist": "", "sample_paths": [], "item": {}}
+        orig = refscout._llm_text
+        refscout._llm_text = fake
+        try:
+            out, err, used, attempts = refscout.rerank("模块", [cand], allow_paid=True)
+        finally:
+            refscout._llm_text = orig
+        self.assertIn("a/b", out)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(attempts[0]["error"], "safety-router")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

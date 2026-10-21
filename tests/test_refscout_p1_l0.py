@@ -469,6 +469,112 @@ class TestRefreshPaidIntent(unittest.TestCase):
         self.assertIn("定时自动刷新", md)
 
 
+class TestPaidCapAndRetry(unittest.TestCase):
+    """付费档必须拿到 60s，且失败后补一次。
+
+    2026-10-21 生产实测：同一张卡连点三次「允许付费重排」只有第 3 次成
+    （超时 25s → degenerate 6.5s → ok 5.6s）。两处成因：
+    ① `cap = 60 if model == llm.MODEL else 25` —— `llm.MODEL` 已改成交互链路的
+       `alibaba/qwen3.8-flash`，与付费档无关 ⇒ 永远走 25s 分支，docstring 的 60s 从未生效；
+    ② 付费档一次失败就直接落到免费池，而免费池每次都占满超时 ⇒ 整卡降级为词法。
+    """
+
+    cand = {"repo": "a/b", "stars": 1, "desc": "x", "topics": [],
+            "readme_gist": "", "sample_paths": [], "item": {}}
+    good = ('{"items":[{"repo":"a/b","func":0.9,"impl":0.8,"design":0.7,'
+            '"judge":"use","why":"同题"}]}')
+    zero = ('{"items":[{"repo":"a/b","func":0,"impl":0,"design":0,'
+            '"judge":"skip","why":"无"}]}')
+
+    def setUp(self):
+        self.orig = (refscout._llm_text, refscout.llm.memory_model,
+                     refscout.llm.free_fallback_model)
+        refscout.llm.memory_model = lambda: "free/a"
+        refscout.llm.free_fallback_model = lambda: "free/b"
+        self.paid = refscout._ref_model()
+
+    def tearDown(self):
+        (refscout._llm_text, refscout.llm.memory_model,
+         refscout.llm.free_fallback_model) = self.orig
+
+    def test_paid_gets_60s_and_is_retried_once(self):
+        calls = []
+
+        def fake(prompt, model, timeout=0, max_tokens=0):
+            calls.append((model, timeout))
+            if len(calls) == 1:
+                return "", "TimeoutError", ""
+            return self.good, "", "end_turn"
+
+        refscout._llm_text = fake
+        out, err, used, attempts = refscout.rerank("m", [self.cand], allow_paid=True)
+        self.assertEqual(err, "")
+        self.assertEqual(used, self.paid)
+        self.assertIn("a/b", out)
+        self.assertEqual([c[0] for c in calls], [self.paid, self.paid],
+                         "失败只补一次，且不先跳到免费档")
+        self.assertEqual(calls[0][1], 60,
+                         "付费档上限必须是 60s；用 llm.MODEL 判断会让它降到 25s")
+        self.assertTrue(attempts[0].get("retry"), "首次失败要打 retry 标记，卡面能看出补过")
+        self.assertTrue(attempts[1]["ok"])
+
+    def test_degenerate_is_retried(self):
+        calls = []
+
+        def fake(prompt, model, timeout=0, max_tokens=0):
+            calls.append(model)
+            return (self.zero, "", "end_turn") if len(calls) == 1 else (self.good, "", "end_turn")
+
+        refscout._llm_text = fake
+        out, err, used, _attempts = refscout.rerank("m", [self.cand], allow_paid=True)
+        self.assertEqual(err, "")
+        self.assertEqual(used, self.paid)
+        self.assertIn("a/b", out)
+        self.assertEqual(len(calls), 2)
+
+    def test_paid_gives_up_after_one_retry_then_falls_back(self):
+        calls = []
+
+        def fake(prompt, model, timeout=0, max_tokens=0):
+            calls.append(model)
+            return ("", "TimeoutError", "") if model == self.paid else (self.good, "", "end_turn")
+
+        refscout._llm_text = fake
+        out, err, used, _attempts = refscout.rerank("m", [self.cand], allow_paid=True)
+        self.assertEqual(used, "free/a", "补过一次仍失败才轮到免费档")
+        self.assertEqual(calls[:2], [self.paid, self.paid])
+        self.assertEqual(len(calls), 3)
+
+    def test_free_cap_stays_25s(self):
+        calls = []
+
+        def fake(prompt, model, timeout=0, max_tokens=0):
+            calls.append((model, timeout))
+            return self.good, "", "end_turn"
+
+        refscout._llm_text = fake
+        _out, err, used, _attempts = refscout.rerank("m", [self.cand], allow_paid=False)
+        self.assertEqual(err, "")
+        self.assertEqual(used, "free/a")
+        self.assertEqual(calls[0][1], 25, "免费档上限保持 25s：免费池只思考，给再多也是浪费")
+
+    def test_safety_reply_is_not_retried(self):
+        """内容被审核模型截住，同一 prompt 再发一次不会变；重试只是白烧预算。"""
+        calls = []
+
+        def fake(prompt, model, timeout=0, max_tokens=0):
+            calls.append(model)
+            return "User Safety: safe", "", "end_turn"
+
+        refscout._llm_text = fake
+        out, err, _used, attempts = refscout.rerank("m", [self.cand], allow_paid=True)
+        self.assertFalse(out)
+        self.assertIn("safety-router", err)
+        self.assertEqual(calls[0], self.paid)
+        self.assertFalse(any(a.get("retry") for a in attempts),
+                         "safety 命中不得触发付费档重试")
+
+
 class TestCardDisclosure(unittest.TestCase):
     """卡面必须写清楚「关键词哪来的」与「有没有代码标识符臂」。
 

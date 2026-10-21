@@ -899,7 +899,8 @@ def rerank(module: str, cands: List[Dict[str, Any]], allow_paid: bool,
 
     `allow_paid` 时**付费档优先**、免费档退居兜底：P0/P1 实测免费两档几乎稳定
     返回 only-thinking（占满超时），若排在前面会吃光预算，付费档根本轮不到。
-    总预算 95s 兜住尾延迟：付费 60s + 免费 20s×2 ⇒ 超预算直接放弃并如实标注。
+    总预算 95s 兜住尾延迟：付费 60s（失败**再补一次**，用剩余预算，通常 ≈35s）
+    + 免费 25s×2 ⇒ 超预算直接放弃并如实标注。
     """
     if not cands:
         return {}, "no-candidates", "", []
@@ -924,18 +925,29 @@ def rerank(module: str, cands: List[Dict[str, Any]], allow_paid: bool,
         "\"why\":\"不超过30字\"}]}\n\n"
         f"目标模块：{module}\n候选：\n" + "\n".join(lines)
     )
+    paid = _ref_model() if allow_paid else ""
     free = [m for m in (llm.memory_model(), llm.free_fallback_model()) if m]
-    models = ([_ref_model()] + free) if allow_paid else free
+    models = ([paid] if paid else []) + free
     errors: List[str] = []
     attempts: List[Dict[str, Any]] = []
     spent = 0.0
-    for model in models:
+
+    def _attempt(model: str) -> Tuple[Optional[Dict[str, Dict]], bool, bool]:
+        """跑一档模型，返回 `(判定表, 值得重试, 该收摊)`。
+
+        重试只对**可能一次就好的失败**开放：超时 / 空回 / 坏 JSON / 全零退化。
+        `safety-router` 不算——那是内容被审核模型截了，同一 prompt 再发一次也一样。
+        """
+        nonlocal spent
         left = budget_s - spent
         if left < 8:
             errors.append(f"{model}:budget-exhausted")
-            continue
+            return None, False, False
         t0 = time.monotonic()
-        cap = 60 if model == llm.MODEL else 25
+        # 付费档 60s、免费档 25s。**不能拿 `model == llm.MODEL` 判付费档**：
+        # `llm.MODEL` 是交互链路的模型（2026-10-21 起是 `alibaba/qwen3.8-flash`），
+        # 与重排付费档无关；旧写法让付费档永远只拿到 25s，docstring 写的 60s 从未生效。
+        cap = 60 if model == paid else 25
         text, err, stop = _llm_text(prompt, model, timeout=int(min(cap, left)),
                                     max_tokens=4000)
         spent += time.monotonic() - t0
@@ -944,21 +956,19 @@ def rerank(module: str, cands: List[Dict[str, Any]], allow_paid: bool,
                          "stop_reason": stop})
         if not text:
             errors.append(f"{model}:{err or 'empty'}")
-            continue
+            return None, True, False
         if _is_safety_reply(text):
             attempts[-1].update({"ok": False, "error": "safety-router",
                                  "head": text.strip()[:80]})
             errors.append(f"{model}:safety-router")
             # 同一免费池的下一个模型会再撞一次（实测 2/2），命中即停。
-            if model in free:
-                break
-            continue
+            return None, False, model in free
         data = _json_block(text)
         if not data or not isinstance(data.get("items"), list):
             attempts[-1].update({"ok": False, "error": "bad-json",
                                  "head": (text or "")[:120]})
             errors.append(f"{model}:bad-json")
-            continue
+            return None, True, False
         # GitHub 的 `full_name` 大小写是规范的（robfig/cron），模型常会自行改写成
         # `Robfig/Cron`。按原样比对会把这条判定直接丢掉；全丢光还会误报
         # `degenerate`（实测）。这里用 lower() 做键，回填规范名。
@@ -978,9 +988,27 @@ def rerank(module: str, cands: List[Dict[str, Any]], allow_paid: bool,
                 continue
         if out and max(max(v["func"], v["impl"], v["design"]) for v in out.values()) >= 0.05:
             attempts[-1]["items"] = len(out)
-            return out, "", model, attempts
+            return out, False, False
         attempts[-1].update({"ok": False, "error": "degenerate"})
         errors.append(f"{model}:degenerate")
+        return None, True, False
+
+    retry_left = 1 if paid else 0
+    for model in models:
+        got, retryable, halt = _attempt(model)
+        if got:
+            return got, "", model, attempts
+        if halt:
+            break
+        # 付费档失败补一次：2026-10-21 生产实测同 prompt 三次里两次栽在
+        # 超时/退化、第三次 5.6s 正常 ⇒ 单次失败不足以判定这一档不可用。
+        # 免费档不重试：实测每次都占满超时，重试只是再烧一遍预算。
+        if retryable and model == paid and retry_left > 0:
+            retry_left -= 1
+            attempts[-1]["retry"] = True
+            got, _retryable, _halt = _attempt(model)
+            if got:
+                return got, "", model, attempts
     return {}, "; ".join(errors), "", attempts
 
 

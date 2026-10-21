@@ -2186,6 +2186,10 @@
                                 <input id="refKeywords" placeholder="英文关键词（可空，逗号分隔）"
                                        style="max-width:230px"
                                        onkeydown="if(event.key==='Enter'){event.preventDefault();submitRefScout();}">
+                                <input id="refIdent" placeholder="代码标识符（可空，如 node-pty，最多 2 个）"
+                                       style="max-width:270px"
+                                       title="在 GitHub 代码里搜该字符串，命中它的仓额外加分（用于按依赖/API 找同类实现）"
+                                       onkeydown="if(event.key==='Enter'){event.preventDefault();submitRefScout();}">
                                 <label class="hint" for="refPaid" title="付费快档优先、失败再试免费档（单次约几千 token，卡上会标注）。检索与卡片「重跑」都按此勾选执行；定时自动刷新永不付费">
                                     <input type="checkbox" id="refPaid" checked> 允许付费重排（优先）
                                 </label>
@@ -2846,6 +2850,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=b1a23b04"></script>
+    <script src="/static/hub.js?v=5b2e8a6f"></script>
 </body>
 </html>

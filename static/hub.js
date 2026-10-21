@@ -4786,6 +4786,9 @@ async function submitRefScout() {
   const hint = $('refHint');
   if (mod.length < 2) { hint.textContent = '先填功能模块名（至少 2 个字）'; return; }
   const kws = ($('refKeywords').value || '').split(',').map(x => x.trim()).filter(Boolean);
+  // 代码标识符臂：在 GitHub 代码里搜这个串，命中它的仓额外加分。限额 10 次/分，
+  // 所以后端只取前 2 个（多填的会被静默丢弃，输入框已写明「最多 2 个」）。
+  const idents = (($('refIdent') || {}).value || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 2);
   const btn = $('refSubmit');
   btn.disabled = true;
   hint.textContent = '提交中…';
@@ -4793,7 +4796,7 @@ async function submitRefScout() {
     const d = await api('/api/ref/scout', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        module: mod, keywords: kws,
+        module: mod, keywords: kws, identifiers: idents,
         allow_paid: !!($('refPaid') && $('refPaid').checked)
       })
     });

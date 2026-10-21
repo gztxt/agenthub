@@ -913,6 +913,16 @@ def render_md(module: str, keywords: List[str], lang: str, meta: Dict[str, Any],
            f"- as of：{as_of}　下次刷新：{next_refresh}",
            f"- 关键词：{', '.join(keywords)}　语言：{lang or '不限'}",
            f"- 候选池：{meta['pool_size']}　耗时：{elapsed}s"]
+    # 关键词直接决定召回，但用户看不到它是自己填的、模型抽的还是词典兜底。
+    # 抽词失败退词典时结果往往「整体跑偏」，不说清楚就会被当成检索不准。
+    src = meta.get("keyword_source")
+    if src == "llm":
+        out.append("- 关键词来源：模型从模块名抽取（可能抽偏，可手填覆盖）")
+    elif src == "fallback":
+        out.append("- 关键词来源：**模型抽词失败，退回内置中文词典**（覆盖有限，建议手填关键词重跑）")
+    if meta.get("identifiers"):
+        out.append("- 代码标识符臂：" + "、".join(meta["identifiers"])
+                   + "（在代码里搜该串，命中的仓额外加分）")
     if meta.get("rerank"):
         cost = "（**付费档**，单次约几千 token）" if meta.get("rerank_paid") else "（免费档）"
         out.append(f"- 语义重排：{meta['rerank_model']}{cost}")
@@ -1083,9 +1093,10 @@ def _run_job(job_id: str) -> None:
         meta = got["meta"]
         meta["keyword_source"] = src
         meta["identifiers"] = payload.get("identifiers") or []
-        # 记住「本轮是否**请求**了付费」，而不是「是否**用上**了付费」：
-        # 付费档失败回落到免费档时 rerank_paid=False，若只看它会丢掉用户的付费意图，
-        # 之后任何重跑都永久降级成免费（而免费档在审核路由上必失败）。
+        # 记住「本轮是否**请求**了付费」，而不是「是否**用上**了付费」：付费档失败
+        # 回落到免费档时 rerank_paid=False，若只看它会丢掉用户的付费意图，之后任何
+        # 重跑都永久降级成免费。免费档并非必失败（2026-10-21 线上实测有成功轮），
+        # 但会被内容审核路由**偶发**劫持且慢约 6 倍（9.2s vs 54.6s），不能当默认。
         meta["requested_paid"] = bool(payload.get("allow_paid"))
         meta["trigger"] = payload.get("trigger") or "manual"
         as_of = _now()
@@ -1162,7 +1173,9 @@ def submit(body: ScoutIn) -> Dict[str, Any]:
     payload = {"keywords": [k.strip() for k in body.keywords if k.strip()][:8],
                "lang": body.lang.strip(), "min_stars": body.min_stars,
                "fresh_days": body.fresh_days,
-               "identifiers": [i.strip() for i in body.identifiers if i.strip()][:3],
+               # 与 collect() 的 `identifiers[:2]` 对齐：代码搜索限额 10 次/分，
+               # 之前这里切 3、下游只用 2，第三个会被静默丢弃。
+               "identifiers": [i.strip() for i in body.identifiers if i.strip()][:2],
                "allow_paid": bool(body.allow_paid),
                "trigger": body.trigger,
                "refresh_of": body.refresh_of}

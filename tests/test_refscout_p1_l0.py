@@ -469,70 +469,115 @@ class TestRefreshPaidIntent(unittest.TestCase):
         self.assertIn("定时自动刷新", md)
 
 
-class TestPaidCapAndRetry(unittest.TestCase):
-    """付费档必须拿到 60s，且失败后补一次。
+class TestPaidSampling(unittest.TestCase):
+    """付费档：上限 60s + 同一 prompt 采样取多数。
 
-    2026-10-21 生产实测：同一张卡连点三次「允许付费重排」只有第 3 次成
-    （超时 25s → degenerate 6.5s → ok 5.6s）。两处成因：
+    2026-10-21 生产实测两件事各自成立：
     ① `cap = 60 if model == llm.MODEL else 25` —— `llm.MODEL` 已改成交互链路的
        `alibaba/qwen3.8-flash`，与付费档无关 ⇒ 永远走 25s 分支，docstring 的 60s 从未生效；
-    ② 付费档一次失败就直接落到免费池，而免费池每次都占满超时 ⇒ 整卡降级为词法。
+    ② 同一张卡两轮判词相反（一轮三候选全 skip，一轮 HelloGitHub=read）
+       ⇒ 单次判定不可当结论，必须采样。
     """
 
     cand = {"repo": "a/b", "stars": 1, "desc": "x", "topics": [],
             "readme_gist": "", "sample_paths": [], "item": {}}
     good = ('{"items":[{"repo":"a/b","func":0.9,"impl":0.8,"design":0.7,'
-            '"judge":"use","why":"同题"}]}')
-    zero = ('{"items":[{"repo":"a/b","func":0,"impl":0,"design":0,'
+            '"judge":"read","why":"同题"}]}')
+    skip = ('{"items":[{"repo":"a/b","func":0,"impl":0,"design":0,'
             '"judge":"skip","why":"无"}]}')
 
     def setUp(self):
-        self.orig = (refscout._llm_text, refscout.llm.memory_model,
-                     refscout.llm.free_fallback_model)
+        self.orig = (refscout._llm_text, refscout._sample_count,
+                     refscout.llm.memory_model, refscout.llm.free_fallback_model)
         refscout.llm.memory_model = lambda: "free/a"
         refscout.llm.free_fallback_model = lambda: "free/b"
         self.paid = refscout._ref_model()
+        self.samples = 3
+        refscout._sample_count = lambda: self.samples
 
     def tearDown(self):
-        (refscout._llm_text, refscout.llm.memory_model,
+        (refscout._llm_text, refscout._sample_count, refscout.llm.memory_model,
          refscout.llm.free_fallback_model) = self.orig
 
-    def test_paid_gets_60s_and_is_retried_once(self):
+    def test_single_sample_still_gets_60s(self):
+        """采样关掉时付费档仍必须拿 60s（cap 判断不能再看 llm.MODEL）。"""
+        self.samples = 1
         calls = []
 
         def fake(prompt, model, timeout=0, max_tokens=0):
             calls.append((model, timeout))
-            if len(calls) == 1:
-                return "", "TimeoutError", ""
             return self.good, "", "end_turn"
+
+        refscout._llm_text = fake
+        out, err, used, _att = refscout.rerank("m", [self.cand], allow_paid=True)
+        self.assertEqual(err, "")
+        self.assertEqual(used, self.paid)
+        self.assertIn("a/b", out)
+        self.assertEqual(calls[0], (self.paid, 60))
+
+    def test_three_samples_take_majority(self):
+        calls = []
+        seq = [self.good, self.skip, self.good]
+
+        def fake(prompt, model, timeout=0, max_tokens=0):
+            calls.append(model)
+            return seq[len(calls) - 1], "", "end_turn"
+
+        refscout._llm_text = fake
+        out, err, _used, attempts = refscout.rerank("m", [self.cand], allow_paid=True)
+        self.assertEqual(err, "")
+        self.assertEqual(len(calls), 3, "默认采 3 次")
+        self.assertEqual(out["a/b"]["judge"], "read", "2:1 取多数")
+        self.assertEqual(out["a/b"]["func"], 0.9)
+        self.assertEqual([a["sample"] for a in attempts], [1, 2, 3],
+                         "每次采样都要留痕，卡面 attempts 能看出采了几次")
+
+    def test_tie_takes_stricter_verdict(self):
+        """2 次里 read/skip 各一票 ⇒ 按 skip（没价值就排后，不让乐观票顶上去）。"""
+        self.samples = 2
+        seq = [self.good, self.skip]
+
+        def fake(prompt, model, timeout=0, max_tokens=0):
+            return seq.pop(0), "", "end_turn"
+
+        refscout._llm_text = fake
+        out, _err, _used, _att = refscout.rerank("m", [self.cand], allow_paid=True)
+        self.assertEqual(out["a/b"]["judge"], "skip")
+
+    def test_repo_seen_once_in_three_is_dropped(self):
+        one = ('{"items":[{"repo":"a/b","func":0.9,"impl":0.8,"design":0.7,'
+               '"judge":"read","why":"x"},{"repo":"b/c","func":0.5,"impl":0.5,'
+               '"design":0.5,"judge":"read","why":"y"}]}')
+        only_other = ('{"items":[{"repo":"b/c","func":0.5,"impl":0.5,'
+                      '"design":0.5,"judge":"read","why":"y"}]}')
+        seq = [one, only_other, only_other]
+        cands = [self.cand, {"repo": "b/c", "stars": 1, "desc": "y", "topics": [],
+                             "readme_gist": "", "sample_paths": [], "item": {}}]
+
+        def fake(prompt, model, timeout=0, max_tokens=0):
+            return seq.pop(0), "", "end_turn"
+
+        refscout._llm_text = fake
+        out, _err, _used, _att = refscout.rerank("m", cands, allow_paid=True)
+        self.assertNotIn("a/b", out, "只被 1/3 采到 ⇒ 不拿单票当结论")
+        self.assertIn("b/c", out)
+
+    def test_one_timeout_costs_one_vote(self):
+        seq = [("", "TimeoutError", ""), (self.good, "", "end_turn"),
+               (self.good, "", "end_turn")]
+
+        def fake(prompt, model, timeout=0, max_tokens=0):
+            return seq.pop(0)
 
         refscout._llm_text = fake
         out, err, used, attempts = refscout.rerank("m", [self.cand], allow_paid=True)
         self.assertEqual(err, "")
         self.assertEqual(used, self.paid)
         self.assertIn("a/b", out)
-        self.assertEqual([c[0] for c in calls], [self.paid, self.paid],
-                         "失败只补一次，且不先跳到免费档")
-        self.assertEqual(calls[0][1], 60,
-                         "付费档上限必须是 60s；用 llm.MODEL 判断会让它降到 25s")
-        self.assertTrue(attempts[0].get("retry"), "首次失败要打 retry 标记，卡面能看出补过")
-        self.assertTrue(attempts[1]["ok"])
+        self.assertEqual(attempts[0]["error"], "TimeoutError")
 
-    def test_degenerate_is_retried(self):
-        calls = []
-
-        def fake(prompt, model, timeout=0, max_tokens=0):
-            calls.append(model)
-            return (self.zero, "", "end_turn") if len(calls) == 1 else (self.good, "", "end_turn")
-
-        refscout._llm_text = fake
-        out, err, used, _attempts = refscout.rerank("m", [self.cand], allow_paid=True)
-        self.assertEqual(err, "")
-        self.assertEqual(used, self.paid)
-        self.assertIn("a/b", out)
-        self.assertEqual(len(calls), 2)
-
-    def test_paid_gives_up_after_one_retry_then_falls_back(self):
+    def test_all_samples_fail_then_free_fallback(self):
+        self.samples = 3
         calls = []
 
         def fake(prompt, model, timeout=0, max_tokens=0):
@@ -540,26 +585,14 @@ class TestPaidCapAndRetry(unittest.TestCase):
             return ("", "TimeoutError", "") if model == self.paid else (self.good, "", "end_turn")
 
         refscout._llm_text = fake
-        out, err, used, _attempts = refscout.rerank("m", [self.cand], allow_paid=True)
-        self.assertEqual(used, "free/a", "补过一次仍失败才轮到免费档")
-        self.assertEqual(calls[:2], [self.paid, self.paid])
-        self.assertEqual(len(calls), 3)
-
-    def test_free_cap_stays_25s(self):
-        calls = []
-
-        def fake(prompt, model, timeout=0, max_tokens=0):
-            calls.append((model, timeout))
-            return self.good, "", "end_turn"
-
-        refscout._llm_text = fake
-        _out, err, used, _attempts = refscout.rerank("m", [self.cand], allow_paid=False)
-        self.assertEqual(err, "")
+        out, err, used, _att = refscout.rerank("m", [self.cand], allow_paid=True)
         self.assertEqual(used, "free/a")
-        self.assertEqual(calls[0][1], 25, "免费档上限保持 25s：免费池只思考，给再多也是浪费")
+        self.assertIn("a/b", out)
+        self.assertEqual(calls, [self.paid] * 3 + ["free/a"])
+        self.assertEqual(err, "")
 
-    def test_safety_reply_is_not_retried(self):
-        """内容被审核模型截住，同一 prompt 再发一次不会变；重试只是白烧预算。"""
+    def test_safety_stops_sampling_without_retry(self):
+        """内容被审核模型截住：多采几次结果一样，只留一次记录。"""
         calls = []
 
         def fake(prompt, model, timeout=0, max_tokens=0):
@@ -570,11 +603,66 @@ class TestPaidCapAndRetry(unittest.TestCase):
         out, err, _used, attempts = refscout.rerank("m", [self.cand], allow_paid=True)
         self.assertFalse(out)
         self.assertIn("safety-router", err)
-        self.assertEqual(calls[0], self.paid)
-        self.assertFalse(any(a.get("retry") for a in attempts),
-                         "safety 命中不得触发付费档重试")
+        self.assertEqual(calls.count(self.paid), 1, "付费档只发一次就收工")
+        self.assertEqual(len([a for a in attempts if a["model"] == self.paid]), 1)
+
+    def test_free_arm_is_not_sampled(self):
+        calls = []
+
+        def fake(prompt, model, timeout=0, max_tokens=0):
+            calls.append((model, timeout))
+            return self.good, "", "end_turn"
+
+        refscout._llm_text = fake
+        _out, err, used, _att = refscout.rerank("m", [self.cand], allow_paid=False)
+        self.assertEqual(err, "")
+        self.assertEqual(used, "free/a")
+        self.assertEqual(calls, [("free/a", 25)], "免费档一次 25s，不采样")
 
 
+class TestMajorityAggregation(unittest.TestCase):
+    """「取多数」的口径：多数票 + 中位数，平票往严格方向落。"""
+
+    def _rec(self, func, impl, design, judge):
+        return {"func": func, "impl": impl, "design": design,
+                "judge": judge, "why": judge}
+
+    def test_median_resists_one_outlier(self):
+        votes = [{"a/b": self._rec(0.8, 0.8, 0.6, "read")},
+                 {"a/b": self._rec(0.0, 0.0, 0.0, "skip")},
+                 {"a/b": self._rec(0.9, 0.9, 0.7, "read")}]
+        got = refscout._majority(votes)
+        self.assertEqual(got["a/b"]["judge"], "read")
+        self.assertEqual(got["a/b"]["func"], 0.8, "三次取中位数，不被 0 拉低")
+        self.assertEqual(got["a/b"]["impl"], 0.8)
+
+    def test_majority_verdict_can_be_use(self):
+        votes = [{"a/b": self._rec(0.9, 0.9, 0.9, "use")},
+                 {"a/b": self._rec(0.9, 0.9, 0.9, "use")},
+                 {"a/b": self._rec(0.1, 0.1, 0.1, "read")}]
+        got = refscout._majority(votes)
+        self.assertEqual(got["a/b"]["judge"], "use")
+
+    def test_single_vote_dataset_keeps_everything(self):
+        votes = [{"a/b": self._rec(0.5, 0.5, 0.5, "read")}]
+        got = refscout._majority(votes)
+        self.assertIn("a/b", got, "只有一次有效采样时，那一票就是结论（need=1）")
+
+    def test_empty_votes(self):
+        self.assertEqual(refscout._majority([]), {})
+
+    def test_sample_count_env_is_clamped(self):
+        import os
+        old = os.environ.get("REF_RERANK_SAMPLES")
+        try:
+            for raw, want in (("1", 1), ("3", 3), ("9", 5), ("0", 1), ("x", 3)):
+                os.environ["REF_RERANK_SAMPLES"] = raw
+                self.assertEqual(refscout._sample_count(), want, raw)
+        finally:
+            if old is None:
+                os.environ.pop("REF_RERANK_SAMPLES", None)
+            else:
+                os.environ["REF_RERANK_SAMPLES"] = old
 class TestCardDisclosure(unittest.TestCase):
     """卡面必须写清楚「关键词哪来的」与「有没有代码标识符臂」。
 

@@ -892,6 +892,56 @@ def _ref_model() -> str:
     return os.getenv("REF_LLM_MODEL", "agnes/agnes-2.5-flash")
 
 
+def _sample_count() -> int:
+    """付费档采样次数（`REF_RERANK_SAMPLES`，默认 3，夹在 1~5）。
+
+    为什么要采样：同一 prompt 同一模型判词会翻。2026-10-21 同一张卡两轮——
+    一轮三个候选全 skip，另一轮 `HelloGitHub` 判 read（func 0.8），
+    对应「实现桶整段空」与「有一条可借鉴」两种完全不同的结论。
+    """
+    try:
+        n = int(os.getenv("REF_RERANK_SAMPLES", "3"))
+    except ValueError:
+        n = 3
+    return max(1, min(5, n))
+
+
+def _median(xs: List[float]) -> float:
+    s = sorted(xs)
+    return s[len(s) // 2]
+
+
+def _majority(votes: List[Dict[str, Dict]]) -> Dict[str, Dict]:
+    """多次采样取多数：三轴取中位数，judge 取多数票，平票取**更严格**的一档。
+
+    「更严格」＝ `_judge_rank` 更大（skip 最大）——与「没有参考价值就排后」一致：
+    两次里一次 read 一次 skip 时按 skip 走，不让一次乐观判定把仓顶上去。
+    只拿到少数票的仓直接丢掉（下游记为 unjudged），不拿单票当结论。
+    """
+    agg: Dict[str, List[Dict[str, Any]]] = {}
+    for v in votes:
+        for repo, rec in v.items():
+            agg.setdefault(repo, []).append(rec)
+    if not agg:
+        return {}
+    need = 2 if len(votes) >= 2 else 1
+    out: Dict[str, Dict] = {}
+    for repo, recs in agg.items():
+        if len(recs) < need:
+            continue
+        counts: Dict[str, int] = {}
+        for r in recs:
+            counts[r["judge"]] = counts.get(r["judge"], 0) + 1
+        top = max(counts.values())
+        judge = max((j for j, c in counts.items() if c == top), key=_judge_rank)
+        why = next(r["why"] for r in recs if r["judge"] == judge)
+        out[repo] = {"func": _median([r["func"] for r in recs]),
+                     "impl": _median([r["impl"] for r in recs]),
+                     "design": _median([r["design"] for r in recs]),
+                     "judge": judge, "why": why}
+    return out
+
+
 def rerank(module: str, cands: List[Dict[str, Any]], allow_paid: bool,
            budget_s: float = 95.0
            ) -> Tuple[Dict[str, Dict], str, str, List[Dict[str, Any]]]:
@@ -899,8 +949,8 @@ def rerank(module: str, cands: List[Dict[str, Any]], allow_paid: bool,
 
     `allow_paid` 时**付费档优先**、免费档退居兜底：P0/P1 实测免费两档几乎稳定
     返回 only-thinking（占满超时），若排在前面会吃光预算，付费档根本轮不到。
-    总预算 95s 兜住尾延迟：付费 60s（失败**再补一次**，用剩余预算，通常 ≈35s）
-    + 免费 25s×2 ⇒ 超预算直接放弃并如实标注。
+    总预算 95s 兜住尾延迟：付费档按 `REF_RERANK_SAMPLES`（默认 3）**采样取多数**，
+    每次 cap 取「剩余预算 ÷ 剩余次数」（≤60s）；免费档 25s×2 ⇒ 超预算直接放弃并如实标注。
     """
     if not cands:
         return {}, "no-candidates", "", []
@@ -927,48 +977,43 @@ def rerank(module: str, cands: List[Dict[str, Any]], allow_paid: bool,
     )
     paid = _ref_model() if allow_paid else ""
     free = [m for m in (llm.memory_model(), llm.free_fallback_model()) if m]
-    models = ([paid] if paid else []) + free
     errors: List[str] = []
     attempts: List[Dict[str, Any]] = []
     spent = 0.0
 
-    def _attempt(model: str) -> Tuple[Optional[Dict[str, Dict]], bool, bool]:
-        """跑一档模型，返回 `(判定表, 值得重试, 该收摊)`。
+    def _one(model: str, cap: float, mark: Dict[str, Any]
+             ) -> Tuple[Optional[Dict[str, Dict]], str]:
+        """跑**一次**模型，返回 `(判定表, 失败原因)`；原因空串表示成功。
 
-        重试只对**可能一次就好的失败**开放：超时 / 空回 / 坏 JSON / 全零退化。
-        `safety-router` 不算——那是内容被审核模型截了，同一 prompt 再发一次也一样。
+        `cap` 由调用方给：付费档要按剩余预算均分，免费档固定 25s。
         """
         nonlocal spent
         left = budget_s - spent
         if left < 8:
             errors.append(f"{model}:budget-exhausted")
-            return None, False, False
+            return None, "budget-exhausted"
         t0 = time.monotonic()
-        # 付费档 60s、免费档 25s。**不能拿 `model == llm.MODEL` 判付费档**：
-        # `llm.MODEL` 是交互链路的模型（2026-10-21 起是 `alibaba/qwen3.8-flash`），
-        # 与重排付费档无关；旧写法让付费档永远只拿到 25s，docstring 写的 60s 从未生效。
-        cap = 60 if model == paid else 25
         text, err, stop = _llm_text(prompt, model, timeout=int(min(cap, left)),
                                     max_tokens=4000)
         spent += time.monotonic() - t0
-        attempts.append({"model": model, "ms": int((time.monotonic() - t0) * 1000),
-                         "ok": bool(text), "error": err or "",
-                         "stop_reason": stop})
+        rec = {"model": model, "ms": int((time.monotonic() - t0) * 1000),
+               "ok": bool(text), "error": err or "", "stop_reason": stop}
+        rec.update(mark)
+        attempts.append(rec)
         if not text:
             errors.append(f"{model}:{err or 'empty'}")
-            return None, True, False
+            return None, err or "empty"
         if _is_safety_reply(text):
             attempts[-1].update({"ok": False, "error": "safety-router",
                                  "head": text.strip()[:80]})
             errors.append(f"{model}:safety-router")
-            # 同一免费池的下一个模型会再撞一次（实测 2/2），命中即停。
-            return None, False, model in free
+            return None, "safety-router"
         data = _json_block(text)
         if not data or not isinstance(data.get("items"), list):
             attempts[-1].update({"ok": False, "error": "bad-json",
                                  "head": (text or "")[:120]})
             errors.append(f"{model}:bad-json")
-            return None, True, False
+            return None, "bad-json"
         # GitHub 的 `full_name` 大小写是规范的（robfig/cron），模型常会自行改写成
         # `Robfig/Cron`。按原样比对会把这条判定直接丢掉；全丢光还会误报
         # `degenerate`（实测）。这里用 lower() 做键，回填规范名。
@@ -986,29 +1031,45 @@ def rerank(module: str, cands: List[Dict[str, Any]], allow_paid: bool,
                               "why": str(item.get("why", ""))[:80]}
             except (KeyError, TypeError, ValueError):
                 continue
-        if out and max(max(v["func"], v["impl"], v["design"]) for v in out.values()) >= 0.05:
-            attempts[-1]["items"] = len(out)
-            return out, False, False
-        attempts[-1].update({"ok": False, "error": "degenerate"})
-        errors.append(f"{model}:degenerate")
-        return None, True, False
+        if not out:
+            # 只把「一个仓库都没对上」当失败。**三轴全 0 不算**：那是模型明确判
+            # 全体 skip 的合法结论（2026-10-21 生产实测：三个候选全是 awesome 清单，
+            # 模型给全 0 + skip，旧实现按 degenerate 丢掉，等于把「没价值」改判成
+            # 「模型没看懂」，再让免费档重烧一遍预算）。
+            attempts[-1].update({"ok": False, "error": "empty-verdict"})
+            errors.append(f"{model}:empty-verdict")
+            return None, "empty-verdict"
+        attempts[-1]["items"] = len(out)
+        return out, ""
 
-    retry_left = 1 if paid else 0
-    for model in models:
-        got, retryable, halt = _attempt(model)
+    # 付费档：同一 prompt 采样 N 次取多数（2026-10-22 用户裁定）。
+    # 「失败补一次」被采样吸收——单次超时只是少一票，不必再单独重试。
+    samples = _sample_count() if paid else 1
+    if paid:
+        votes: List[Dict[str, Dict]] = []
+        for i in range(samples):
+            left = budget_s - spent
+            if left < 8:
+                errors.append(f"{paid}:budget-exhausted")
+                break
+            # 均分剩余预算：前面超时不会把后面的票全吃掉；单次仍不超过 60s。
+            cap = min(60.0, max(15.0, left / max(1, samples - i)))
+            out, why = _one(paid, cap, {"sample": i + 1})
+            if out:
+                votes.append(out)
+            elif why == "safety-router":
+                break          # 内容被审核模型截住，多采几次也一样
+        got = _majority(votes)
         if got:
-            return got, "", model, attempts
-        if halt:
-            break
-        # 付费档失败补一次：2026-10-21 生产实测同 prompt 三次里两次栽在
-        # 超时/退化、第三次 5.6s 正常 ⇒ 单次失败不足以判定这一档不可用。
-        # 免费档不重试：实测每次都占满超时，重试只是再烧一遍预算。
-        if retryable and model == paid and retry_left > 0:
-            retry_left -= 1
-            attempts[-1]["retry"] = True
-            got, _retryable, _halt = _attempt(model)
-            if got:
-                return got, "", model, attempts
+            return got, "", paid, attempts
+
+    # 免费档只跑一次：实测每次都占满超时，采样只是把预算烧得更快。
+    for model in free:
+        out, why = _one(model, 25, {})
+        if out:
+            return out, "", model, attempts
+        if why == "safety-router":
+            break          # 同一免费池换模型只会再撞一次（实测 2/2）
     return {}, "; ".join(errors), "", attempts
 
 

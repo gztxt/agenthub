@@ -235,7 +235,7 @@ v1 子集与 §2 的 v4 逐位相同（0.500 / 0.157）⇒ 扩样 + 脚本改动
 
 ### 8.4 v3：pooling 补标（58 仓）—— 这一步才把"低估"量化出来
 
-v2 的 45 个 top5 位置里有 35 个未标注。逐条取事实后，**21 个是同类的真实实现**
+v2 的 45 个 top5 位置里有 35 个未标注。逐条取事实后，**23 个是同类的真实实现**
 （PowerJob/xxl-job/quartznet/TickerQ、manticoresearch/xerj/RediSearch/tantivy/flexsearch、
 openstatus/checkcle、nps×2/rathole/NSmartProxy、infinity/turbovec、docfx/quartz-jackyzha0…）。
 把它们补进来（判据同 8.1，语义逐条人判），得 v3 = 58 仓。

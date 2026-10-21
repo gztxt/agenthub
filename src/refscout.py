@@ -1040,6 +1040,9 @@ def rerank(module: str, cands: List[Dict[str, Any]], allow_paid: bool,
             errors.append(f"{model}:empty-verdict")
             return None, "empty-verdict"
         attempts[-1]["items"] = len(out)
+        # 逐次判词留档：只记条数看不出「3 次里几次 skip」，判词翻转就无从复核。
+        # 卡面 attempts 里能直接看到每次对同一仓给了什么档。
+        attempts[-1]["judges"] = {k: v["judge"] for k, v in out.items()}
         return out, ""
 
     # 付费档：同一 prompt 采样 N 次取多数（2026-10-22 用户裁定）。

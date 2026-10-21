@@ -531,6 +531,9 @@ class TestPaidSampling(unittest.TestCase):
         self.assertEqual(out["a/b"]["func"], 0.9)
         self.assertEqual([a["sample"] for a in attempts], [1, 2, 3],
                          "每次采样都要留痕，卡面 attempts 能看出采了几次")
+        self.assertEqual([a["judges"]["a/b"] for a in attempts],
+                         ["read", "skip", "read"],
+                         "逐次判词必须留档，否则「2:1」无从复核")
 
     def test_tie_takes_stricter_verdict(self):
         """2 次里 read/skip 各一票 ⇒ 按 skip（没价值就排后，不让乐观票顶上去）。"""

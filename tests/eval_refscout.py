@@ -83,6 +83,9 @@ def main() -> int:
     ap.add_argument("--allow-paid", action="store_true")
     ap.add_argument("--json", default="", help="把结果写到这个路径（相对仓根或绝对）")
     ap.add_argument("--keep-cache", action="store_true", help="复用 work/eval-data 缓存")
+    ap.add_argument("--assume-lang", default="",
+                    help="对未填 lang 的模块统一按该语言加权（只改打分，不改查询）；"
+                         "用于量「语言先验」的净效果，与不填组并列报告")
     args = ap.parse_args()
 
     data_dir = _prep_env(cold=not args.keep_cache)
@@ -98,7 +101,8 @@ def main() -> int:
     v1_rows = []
     for m in mods:
         t0 = time.monotonic()
-        got = refscout.collect(m["module"], m["keywords"], m.get("lang", ""),
+        lang = m.get("lang", "") or args.assume_lang
+        got = refscout.collect(m["module"], m["keywords"], lang,
                                int(m.get("min_stars", 20)), int(m.get("fresh_days", 180)),
                                [], bool(args.allow_paid), do_rerank=bool(args.rerank))
         targets = [t["repo"] for t in m["targets"]]
@@ -138,6 +142,7 @@ def main() -> int:
         "found": sum(len(r["hits"]) for r in rows),
         "elapsed_s": round(sum(r["elapsed_s"] for r in rows), 1),
         "rerank": bool(args.rerank),
+        "assume_lang": args.assume_lang,
         "annotations_version": spec["version"],
         "as_of": spec["as_of"],
     }

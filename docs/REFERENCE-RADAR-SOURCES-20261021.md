@@ -111,6 +111,18 @@
 - 免费两档（`openrouter/free`、`nemotron-3-super:free`）在本 prompt 上 **每次 25s 占满预算**，
   与 P0 记录一致（免费池被内容审核/只思考占满）。
 
+**已修（`672d6c8`，2026-10-22 00:02 重启生效）**：
+
+- `cap` 判断改成 `model == _ref_model()`（付费档）⇒ 60s 真正生效；免费档仍 25s。
+- 付费档失败（超时 / 空回 / 坏 JSON / 全零退化）**再补一次**，用剩余预算（通常 ≈35s）；
+  `safety-router` 不补（内容被审核截，重发同样结果），免费档不补（实测每次都占满超时）。
+  首次失败那次 attempt 打 `retry: true` 标记，卡面 attempts 能看出补过。
+- 修后首跑：`POST /api/ref/cards/00c660b6167e/refresh?allow_paid=true` 一次过，
+  `agnes` 9.9s / 3 条判定，`status=reranked`、`rerank_paid=true`；
+  本轮 `HelloGitHub` 判 **read**（功能 0.54 / 实现 0.56）⇒ 实现桶 1 条 + `- 摘要：` 1 条，
+  另两个仍 skip。**同卡同 prompt 两轮判词不同再次复现**（上轮全 skip），
+  故卡面「判定」只能当参考，不能当结论。
+
 ## 6. 回滚
 
 - 代码：`git revert <commit>`；表可保留（空表无副作用）。

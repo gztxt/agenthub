@@ -65,8 +65,9 @@
 
 - 凭据：DB 设置页 → `GITHUB_TOKEN` → `github.txt` 首行；真值不出 `token()`，错误正文过 `tdai_client.scrub`。
 - 出站：每个 URL 过 `outbound.check_url(require_https=True)`，拒绝内网/元数据端点。
-- 写端点：`POST /api/ref/scout`、`POST /api/ref/cards/{id}/refresh`、`DELETE` 均走既有 writeauth 闸门
-  （`test_writeauth.py` 13 例通过，未新增豁免）。
+- 写端点：`POST /api/ref/scout`、`POST /api/ref/cards/{id}/refresh`（可带 `?allow_paid=0|1`
+  显式指定重跑是否付费；缺省沿用上次**请求**的意图）、`DELETE` 均走既有 writeauth 闸门
+  （`test_writeauth.py` 13 例通过，未新增豁免）。定时自动刷新**永不付费**。
 - 许可证：GPL/AGPL 标 `copyleft`，卡面写「只允许借鉴设计，不得摘录代码」；`UNKNOWN/NOASSERTION` 写「默认不得复用，需人工核实」。
 - 定时：`refresh_loop` 在 hub 进程内（与 `vitals_loop` 同类），**不写系统 crontab**、不建用户面 cron job。
 

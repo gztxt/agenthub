@@ -665,18 +665,21 @@ def rerank(module: str, cands: List[Dict[str, Any]], allow_paid: bool,
                                  "head": (text or "")[:120]})
             errors.append(f"{model}:bad-json")
             continue
-        known = {c["repo"] for c in cands}
+        # GitHub 的 `full_name` 大小写是规范的（robfig/cron），模型常会自行改写成
+        # `Robfig/Cron`。按原样比对会把这条判定直接丢掉；全丢光还会误报
+        # `degenerate`（实测）。这里用 lower() 做键，回填规范名。
+        known = {str(c["repo"]).lower(): c["repo"] for c in cands}
         out: Dict[str, Dict] = {}
         for item in data["items"]:
-            repo = str(item.get("repo", ""))
-            if repo not in known:
+            canon = known.get(str(item.get("repo", "")).strip().lower())
+            if not canon:
                 continue
             try:
-                out[repo] = {"func": min(1.0, max(0.0, float(item["func"]))),
-                             "impl": min(1.0, max(0.0, float(item["impl"]))),
-                             "design": min(1.0, max(0.0, float(item["design"]))),
-                             "judge": str(item.get("judge", "read"))[:8],
-                             "why": str(item.get("why", ""))[:80]}
+                out[canon] = {"func": min(1.0, max(0.0, float(item["func"]))),
+                              "impl": min(1.0, max(0.0, float(item["impl"]))),
+                              "design": min(1.0, max(0.0, float(item["design"]))),
+                              "judge": str(item.get("judge", "read")).strip().lower()[:8],
+                              "why": str(item.get("why", ""))[:80]}
             except (KeyError, TypeError, ValueError):
                 continue
         if out and max(max(v["func"], v["impl"], v["design"]) for v in out.values()) >= 0.05:
@@ -699,7 +702,7 @@ def _judge_rank(judge: str) -> int:
     全是 `unjudged`，卡面等于「没看过的仓先被压到已否决之下」。
     现改为 skip=3、其余未知=2，档位严格是 use/fork < read < 未判定 < skip。
     """
-    return {"use": 0, "fork": 0, "read": 1, "skip": 3}.get(judge, 2)
+    return {"use": 0, "fork": 0, "read": 1, "skip": 3}.get(str(judge or "").strip().lower(), 2)
 
 
 def apply_rerank(module: str, ranked: List[Dict[str, Any]],
@@ -808,7 +811,11 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
         hits = len(code_hits.get(key, []))
         if bucket == "impl" and cov < 0.18 and hits == 0:
             continue
-        if bucket == "impl" and matched < 2 and not phrase and hits == 0:
+        # 「至少命中 2 个概念」不能写成常数 2：概念数来自用户关键词，只有 1 个关键词
+        # （或 LLM 抽词只回一条）时 `matched` 上限就是 1，这条过滤会**恒真**，
+        # 描述完全命中的仓也被丢光。实测 `keywords=["cron"]` 对 "a cron library for go"
+        # 返回 0 条实现桶。门槛必须取 min(2, 概念数)。
+        if bucket == "impl" and matched < min(2, len(groups)) and not phrase and hits == 0:
             continue
         stars = int(item.get("stargazers_count") or 0)
         pre.append({"key": key, "item": item, "bucket": bucket, "cov": cov, "hits": hits,
@@ -911,8 +918,13 @@ def render_md(module: str, keywords: List[str], lang: str, meta: Dict[str, Any],
         out.append(f"- 语义重排：{meta['rerank_model']}{cost}")
     elif meta.get("rerank_error"):
         out.append(f"- 语义重排：**未完成**，本卡仅词法分（原因：{meta['rerank_error']}）")
+        if "safety-router" in str(meta["rerank_error"]) and not meta.get("requested_paid"):
+            out.append("- ↳ 免费池被内容审核模型拦截（不是超时）；"
+                       "勾选「允许付费重排」后点「重跑」可恢复语义判定")
     else:
         out.append("- 语义重排：无（仅词法，判定列为空）")
+    if meta.get("trigger") == "auto":
+        out.append("- 触发：定时自动刷新（**不付费**；需要语义重排请手动「重跑」）")
     if meta.get("degraded"):
         out.append("- ⚠️ 降级臂：" + "；".join(meta["degraded"]))
     if not meta.get("token"):
@@ -1071,6 +1083,11 @@ def _run_job(job_id: str) -> None:
         meta = got["meta"]
         meta["keyword_source"] = src
         meta["identifiers"] = payload.get("identifiers") or []
+        # 记住「本轮是否**请求**了付费」，而不是「是否**用上**了付费」：
+        # 付费档失败回落到免费档时 rerank_paid=False，若只看它会丢掉用户的付费意图，
+        # 之后任何重跑都永久降级成免费（而免费档在审核路由上必失败）。
+        meta["requested_paid"] = bool(payload.get("allow_paid"))
+        meta["trigger"] = payload.get("trigger") or "manual"
         as_of = _now()
         next_refresh = _plus_days(CARD_TTL_DAYS)
         diff = _diff_candidates(prev, got["candidates"]) if prev else None
@@ -1128,6 +1145,7 @@ class ScoutIn(BaseModel):
     identifiers: List[str] = Field(default_factory=list)
     allow_paid: bool = False
     refresh_of: Optional[str] = None
+    trigger: str = Field(default="manual", max_length=12)
 
 
 def submit(body: ScoutIn) -> Dict[str, Any]:
@@ -1146,6 +1164,7 @@ def submit(body: ScoutIn) -> Dict[str, Any]:
                "fresh_days": body.fresh_days,
                "identifiers": [i.strip() for i in body.identifiers if i.strip()][:3],
                "allow_paid": bool(body.allow_paid),
+               "trigger": body.trigger,
                "refresh_of": body.refresh_of}
     card_id = body.refresh_of or uuid.uuid4().hex[:12]
     db.execute("INSERT INTO ref_jobs(id,card_id,module,payload,status,stage,created_at)"
@@ -1247,20 +1266,33 @@ async def api_card_md(card_id: str):
     return {"id": card_id, "module": row["module"], "md": row["md"]}
 
 
-@router.post("/cards/{card_id}/refresh")
-async def api_refresh(card_id: str):
-    row = _card_row(card_id)
-    if not row:
-        raise HTTPException(404, "情报卡不存在")
+def refresh_body(row: Dict[str, Any], allow_paid: Optional[bool] = None) -> ScoutIn:
+    """重跑请求：**显式参数优先**，未给才沿用上次「请求过」的付费意图。
+
+    不能只看 `rerank_paid`：它的含义是「上一次真的用上了付费档」，付费档失败回落
+    到免费档后就是 False。用它决定重跑 ⇒ 一次失败就把卡永久锁在免费档，而免费池
+    会被内容审核模型拦截，用户再点多少次「重跑」都回不到语义重排。
+    """
     try:
         kw = json.loads(row["keywords"] or "[]")
         meta = json.loads(row["meta"] or "{}")
     except ValueError:
         kw, meta = [], {}
-    body = ScoutIn(module=row["module"], keywords=kw, lang=row["lang"] or "",
+    if allow_paid is None:
+        want = bool(meta.get("requested_paid", meta.get("rerank_paid", False)))
+    else:
+        want = bool(allow_paid)
+    return ScoutIn(module=row["module"], keywords=kw, lang=row["lang"] or "",
                    identifiers=meta.get("identifiers") or [],
-                   allow_paid=bool(meta.get("rerank_paid")), refresh_of=card_id)
-    return submit(body)
+                   allow_paid=want, refresh_of=row["id"], trigger="manual")
+
+
+@router.post("/cards/{card_id}/refresh")
+async def api_refresh(card_id: str, allow_paid: Optional[bool] = Query(default=None)):
+    row = _card_row(card_id)
+    if not row:
+        raise HTTPException(404, "情报卡不存在")
+    return submit(refresh_body(row, allow_paid))
 
 
 @router.delete("/cards/{card_id}")
@@ -1284,7 +1316,12 @@ async def api_status():
 # ── 定时刷新 ────────────────────────────────────────────────────────────────
 
 async def refresh_loop(interval_s: int = 1800) -> None:
-    """到期的卡自动重跑（默认 30 天一次）。**每轮最多 1 张**，避免限流雪崩。"""
+    """到期的卡自动重跑（默认 30 天一次）。**每轮最多 1 张**，避免限流雪崩。
+
+    **自动刷新永不付费**（`allow_paid=False`）：定时任务花钱不可能每次都有用户确认。
+    代价是免费池若被安全分类模型拦截，卡会退回 `lexical_fallback` 并在卡面写明原因；
+    想恢复语义重排必须人工点「重跑」并显式选付费档。
+    """
     import asyncio
     while True:
         await asyncio.sleep(interval_s)
@@ -1302,7 +1339,7 @@ async def refresh_loop(interval_s: int = 1800) -> None:
             submit(ScoutIn(module=row["module"], keywords=kw,
                            lang=row["lang"] or "",
                            identifiers=json.loads(row["meta"] or "{}").get("identifiers") or [],
-                           refresh_of=cid))
+                           allow_paid=False, refresh_of=cid, trigger="auto"))
             log.info("refscout auto refresh queued: %s", cid)
         except Exception as exc:  # noqa: BLE001 —— 定时任务失败只记日志，不拖垮循环
             log.warning("refscout auto refresh failed: %s", exc)

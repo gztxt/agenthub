@@ -99,7 +99,57 @@ def main():
     else:
         bad("aria-selected 未同步")
 
-    print("== B 卡片列表渲染（数据来自 /api/ref/cards）")
+    print("== B 来源增删（自有仓，多来源）")
+    if evaluate(cdp, "!!document.getElementById('refSources') && "
+                     "!!document.getElementById('refSrcInput') && typeof addRefSource === 'function'"):
+        ok("来源工具条与函数存在")
+    else:
+        bad("来源工具条/函数缺失")
+        return finish(cdp, proc)
+    before = evaluate(cdp, "document.querySelectorAll('#refSources [data-ref-src-del]').length") or 0
+    evaluate(cdp, "(function(){var i=document.getElementById('refSrcInput');"
+                  "i.value='gztxt';addRefSource();return 1;})()")
+    added = wait_until(cdp, "document.querySelectorAll('#refSources [data-ref-src-del]').length > %d"
+                       % before)
+    label = evaluate(cdp, "(document.querySelector('#refSources [data-ref-src-del]')||{}).textContent||''")
+    if added and "gztxt" in (label or ""):
+        ok("添加后出现来源 chip：%s" % (label or "").strip())
+    else:
+        bad("添加来源后 chip 未出现（before=%d）" % before)
+    # 只回滚**本探针新增**的那一条：影子库通常为空，但生产探针绝不能删掉用户既有来源。
+    now = evaluate(cdp, "document.querySelectorAll('#refSources [data-ref-src-del]').length") or 0
+    if now > before:
+        evaluate(cdp, "(document.querySelector('#refSources [data-ref-src-del]')||{}).click && "
+                      "document.querySelector('#refSources [data-ref-src-del]').click()")
+        gone = wait_until(cdp, "document.querySelectorAll('#refSources [data-ref-src-del]').length === %d"
+                          % before)
+        (ok if gone else bad)("点 chip 删除后回到 %d 条" % before)
+    else:
+        ok("来源已存在，跳过删除（不动既有数据）")
+
+    print("== B2 星标来源（kind=starred 走同一条归一化）")
+    n0 = evaluate(cdp, "document.querySelectorAll('#refSources [data-ref-src-del]').length") or 0
+    evaluate(cdp, "(function(){var k=document.getElementById('refSrcKind');"
+                  "if(k)k.value='starred';var i=document.getElementById('refSrcInput');"
+                  "i.value='gztxt';addRefSource();return 1;})()")
+    added = wait_until(cdp, "document.querySelectorAll('#refSources [data-ref-src-del]').length > %d" % n0)
+    star_label = evaluate(cdp, "(function(){var b=[].slice.call("
+                              "document.querySelectorAll('#refSources [data-ref-src-del]'))"
+                              ".filter(function(x){return /star:gztxt/.test(x.textContent)});"
+                              "return b.length?b[0].textContent:'';})()") or ""
+    if added and star_label:
+        ok("星标来源 chip：%s" % star_label.strip())
+    else:
+        bad("星标来源未生成（label=%r n0=%d）" % (star_label, n0))
+    gone_star = evaluate(cdp, "(function(){var b=[].slice.call("
+                             "document.querySelectorAll('#refSources [data-ref-src-del]'))"
+                             ".filter(function(x){return /star:gztxt/.test(x.textContent)});"
+                             "if(b.length){b[0].click();return 1}return 0;})()")
+    if gone_star:
+        (ok if wait_until(cdp, "document.querySelectorAll('#refSources [data-ref-src-del]')"
+                               ".length === %d" % n0) else bad)("星标 chip 可删除")
+
+    print("== C 卡片列表渲染（数据来自 /api/ref/cards）")
     wait_until(cdp, "document.querySelectorAll('#refCards .mem-item').length > 0")
     n = evaluate(cdp, "document.querySelectorAll('#refCards .mem-item').length")
     if n and n > 0:
@@ -108,7 +158,7 @@ def main():
         bad("列表为空（接口无数据或渲染失败）")
         return finish(cdp, proc)
 
-    print("== C 点「查看」展开详情")
+    print("== D 点「查看」展开详情")
     evaluate(cdp, "(document.querySelector('#refCards [data-ref-act=open]')||{}).click && "
                   "document.querySelector('#refCards [data-ref-act=open]').click()")
     opened = wait_until(cdp, "document.getElementById('refDetailBox').style.display !== 'none' && "
@@ -123,7 +173,7 @@ def main():
     else:
         bad("详情未展开或正文为空")
 
-    print("== D 窄屏 390：无横向溢出")
+    print("== E 窄屏 390：无横向溢出")
     cdp.send("Emulation.setDeviceMetricsOverride", width=390, height=844,
              deviceScaleFactor=2, mobile=True)
     time.sleep(0.6)

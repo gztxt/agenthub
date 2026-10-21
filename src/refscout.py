@@ -60,6 +60,14 @@ GH_API = "https://api.github.com"
 UA = "agenthub-refscout/1.0"
 CACHE_TTL_SEARCH = 7 * 86400
 CACHE_TTL_ENRICH = 86400
+#: 自有来源整账号拉取（含 fork）走 core API（5000/h），不吃 search 的 30/min；
+#: 6h 足够新鲜，且让同一来源在多张卡之间复用同一份缓存。
+CACHE_TTL_SOURCE = 6 * 3600
+SOURCE_PAGE = 100
+SOURCE_MAX_REPOS = 300        # 单来源最多 3 页；再多也拉不动，且会稀释候选池
+#: 自有来源的**排序**加成。三轴分是「这个仓本身值不值得借鉴」的判断依据，
+#: 不能掺「我拥有它」这种非质量信号；加成只作用在最终排序上，用于同分时先看自己的仓。
+SOURCE_BONUS = 0.06
 CACHE_README_CHARS = 6000
 MAX_CANDIDATES = 8            # 进入详情补全 / 重排的上限
 SEARCH_PER_PAGE = 10
@@ -150,6 +158,21 @@ CREATE TABLE IF NOT EXISTS ref_jobs (
     finished_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_ref_jobs_status ON ref_jobs(status);
+CREATE TABLE IF NOT EXISTS ref_sources (
+    id          TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,            -- owner|repo|starred
+    value       TEXT NOT NULL,            -- gztxt | gztxt/agenthub | gztxt（星标）
+    label       TEXT NOT NULL DEFAULT '',
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL,
+    synced_at   TEXT,
+    repo_count  INTEGER NOT NULL DEFAULT 0,
+    last_error  TEXT
+);
+-- 唯一键必须带 kind：同一个 `gztxt` 既可能是「他的仓」也可能是「他标星的仓」，
+-- 两者候选集完全不同，按 value 去重会把后者静默吞掉。
+DROP INDEX IF EXISTS idx_ref_sources_value;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ref_sources_kind_value ON ref_sources(kind, value);
 """
 
 _POOL = futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="refscout")
@@ -239,6 +262,201 @@ def cache_stats() -> Dict[str, Any]:
         return {"files": len(files), "bytes": size, "dir": d}
     except OSError:
         return {"files": 0, "bytes": 0, "dir": d}
+
+
+# ── 来源（自有 GitHub 仓，含 fork）──────────────────────────────────────────
+# 用户 2026-10-21 追加：除全站搜索外，把「自己的账号 / 组织 / 指定仓」也当候选池的一路。
+# 为什么不是只做标注：自有仓常常 **0 star 或已 fork 多时**，全站搜索里根本进不来；
+# 只贴标签等于永远标不到东西。这里在池子阶段并入，再走同一套过滤/打分/闸门。
+# 代价：自有仓不吃 `stars:>=N`、`fork:false` 两个搜索限定（这正是要点），但
+# **archived 仍然拒**——许可证与维护状态是硬闸门，不因「是我自己的」而豁免。
+
+_SOURCE_SEG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z")
+_GITHUB_HOSTS = ("github.com", "www.github.com", "api.github.com")
+
+
+def _norm_source(raw: str) -> Tuple[str, str]:
+    """把用户输入归一成 `(kind, value)`。
+
+    `gztxt` → owner；`gztxt/agenthub` → repo；`starred:gztxt` / `gztxt:starred` /
+    `github.com/gztxt?tab=stars` / `github.com/stars/gztxt` → starred（该账号标星的仓）。
+
+    只接受 github.com。拒掉别的主机不是洁癖：`gitlab.com/x` 会被当成 `owner/repo`
+    拼进 GitHub API，最后以 404 收场，用户看到的是「来源没数据」而不是「地址写错」。
+    """
+    v = (raw or "").strip()
+    if not v:
+        raise HTTPException(400, "来源为空")
+    starred = False
+    v = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", v)     # https://
+    head = v.split("/")[0]
+    if head.lower() in _GITHUB_HOSTS:
+        v = v.partition("/")[2]
+    elif "." in head:
+        raise HTTPException(400, "只支持 github.com 的账号 / 组织 / 仓库 / 星标列表")
+    # `?tab=stars` 是 GitHub 星标页的真实地址；查询串必须在切段之前看，切完就丢了。
+    m = re.search(r"[?#](.*)$", v)
+    query = m.group(1) if m else ""
+    if m:
+        v = v[:m.start()]
+    if re.search(r"(?:^|&)tab=stars(?:&|$)", query, re.I):
+        starred = True
+    v = v.strip("/")
+    v = re.sub(r"\.git$", "", v, flags=re.I)
+    parts = [p for p in v.split("/") if p]
+    if parts and parts[0].lower() == "stars":              # github.com/stars/gztxt
+        starred, parts = True, parts[1:]
+    if parts and ":" in parts[0]:                          # starred:gztxt / gztxt:starred
+        left, _, right = parts[0].partition(":")
+        if left.lower() == "starred":
+            starred, parts[0] = True, right
+        elif right.lower() == "starred":
+            starred, parts[0] = True, left
+        else:
+            raise HTTPException(400, "只支持 starred:<账号> 形式的星标来源")
+    parts = parts[:2]                                      # /tree/main 之类的尾巴直接丢
+    if starred:                                            # 星标按账号取，不接 owner/repo
+        if not parts or not _SOURCE_SEG.match(parts[0]):
+            raise HTTPException(400, "星标来源只填账号名，如 gztxt:starred")
+        return "starred", parts[0]
+    if not parts or not all(_SOURCE_SEG.match(p) for p in parts):
+        raise HTTPException(400, "来源名不合法（只允许字母数字 . _ -）")
+    if len(parts) == 2:
+        return "repo", f"{parts[0]}/{parts[1]}"
+    return "owner", parts[0]
+
+
+def _source_label(row: Dict[str, Any]) -> str:
+    return (row.get("label") or row.get("value") or "").strip()
+
+
+def list_sources() -> Dict[str, Any]:
+    rows = db.query("SELECT * FROM ref_sources ORDER BY created_at")
+    items = []
+    for r in rows:
+        items.append({"id": r["id"], "kind": r["kind"], "value": r["value"],
+                      "label": _source_label(r), "enabled": bool(r["enabled"]),
+                      "created_at": r["created_at"], "synced_at": r["synced_at"],
+                      "repo_count": int(r["repo_count"] or 0),
+                      "last_error": r["last_error"] or ""})
+    return {"items": items, "total": len(items)}
+
+
+def enabled_sources() -> List[Dict[str, Any]]:
+    return db.query("SELECT * FROM ref_sources WHERE enabled=1 ORDER BY created_at")
+
+
+def add_source(value: str, label: str = "") -> Dict[str, Any]:
+    kind, norm = _norm_source(value)
+    rows = db.query("SELECT * FROM ref_sources WHERE kind=? AND value=?", (kind, norm))
+    if rows:                                   # 幂等：重复添加不报错、不产生第二条
+        return {"id": rows[0]["id"], "value": norm, "kind": rows[0]["kind"], "deduped": True}
+    sid = uuid.uuid4().hex[:10]
+    # 星标来源默认带前缀：同名的 owner 与 starred 是两条来源，chip 上必须能分辨。
+    name = (label or "").strip() or (f"star:{norm}" if kind == "starred" else norm)
+    db.execute("INSERT INTO ref_sources(id,kind,value,label,enabled,created_at,repo_count)"
+               " VALUES(?,?,?,?,1,?,0)",
+               (sid, kind, norm, name, _now()))
+    return {"id": sid, "value": norm, "kind": kind, "deduped": False}
+
+
+def delete_source(sid: str) -> Dict[str, Any]:
+    if not db.query("SELECT id FROM ref_sources WHERE id=?", (sid,)):
+        raise HTTPException(404, "来源不存在")
+    db.execute("DELETE FROM ref_sources WHERE id=?", (sid,))
+    return {"deleted": sid}
+
+
+def _touch_source(sid: str, count: int, err: Optional[str]) -> None:
+    db.execute("UPDATE ref_sources SET synced_at=?,repo_count=?,last_error=? WHERE id=?",
+               (_now(), count, (err or "")[:200], sid))
+
+
+def _fetch_source(kind: str, value: str) -> Dict[str, Any]:
+    """拉一个来源的仓库（**含 fork**，按 updated 排序）。失败不抛：来源坏了不能拖垮整卡。"""
+    t0 = time.monotonic()
+
+    def done(items: List[Dict[str, Any]], meta: Dict[str, Any]) -> Dict[str, Any]:
+        ok = bool(meta.get("ok")) or bool(items)
+        return {"items": items[:SOURCE_MAX_REPOS], "ok": ok,
+                "error": None if ok else (meta.get("error") or "fetch failed"),
+                "ms": int((time.monotonic() - t0) * 1000),
+                "cached": bool(meta.get("cached"))}
+
+    if kind == "repo":
+        data, meta = gh_get(f"{GH_API}/repos/{value}", ttl_s=CACHE_TTL_SOURCE)
+        return done([data] if data else [], meta)
+
+    if kind == "starred":
+        # 星标是「我认可的外部项目」，不是我的仓：同样只读、同样并入候选池，
+        # 但候选集来自 /starred 而非 /repos。
+        items: List[Dict[str, Any]] = []
+        meta: Dict[str, Any] = {}
+        for page in range(1, SOURCE_MAX_REPOS // SOURCE_PAGE + 1):
+            url = (f"{GH_API}/users/{value}/starred?per_page={SOURCE_PAGE}&page={page}"
+                   f"&sort=updated&direction=desc")
+            data, meta = gh_get(url, ttl_s=CACHE_TTL_SOURCE)
+            if not meta.get("ok"):
+                break
+            items.extend(data or [])
+            if len(data or []) < SOURCE_PAGE:
+                break
+        return done(items, meta)
+
+    items: List[Dict[str, Any]] = []
+    meta: Dict[str, Any] = {}
+    for page in range(1, SOURCE_MAX_REPOS // SOURCE_PAGE + 1):
+        url = (f"{GH_API}/users/{value}/repos?per_page={SOURCE_PAGE}&page={page}"
+               f"&type=owner&sort=updated")
+        data, meta = gh_get(url, ttl_s=CACHE_TTL_SOURCE)
+        if not meta.get("ok"):
+            break
+        items.extend(data or [])
+        if len(data or []) < SOURCE_PAGE:
+            break
+    # `/users/{org}` 对组织名恒 404：同一个值可能是组织，只在 404 时改走 /orgs
+    # （403/429 是限流，换端点只会多烧一次额度）。
+    if not items and meta.get("status") == 404:
+        for page in range(1, SOURCE_MAX_REPOS // SOURCE_PAGE + 1):
+            url = (f"{GH_API}/orgs/{value}/repos?per_page={SOURCE_PAGE}&page={page}"
+                   f"&type=all&sort=updated")
+            data, meta = gh_get(url, ttl_s=CACHE_TTL_SOURCE)
+            if not meta.get("ok"):
+                break
+            items.extend(data or [])
+            if len(data or []) < SOURCE_PAGE:
+                break
+    return done(items, meta)
+
+
+def _sync_sources() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]],
+                             Dict[str, Dict[str, Any]]]:
+    """拉取全部启用来源。返回 `(逐路日志, 卡面概况, full_name→{item,labels})`。
+
+    并入的是**仓库条目本身**（与搜索结果同一形态），而不是只记一个标签：
+    后续过滤/打分/许可证闸门全部复用，避免出现「来源候选走另一套规则」。
+    """
+    log: List[Dict[str, Any]] = []
+    overview: List[Dict[str, Any]] = []
+    by_key: Dict[str, Dict[str, Any]] = {}
+    for row in enabled_sources():
+        label = _source_label(row)
+        got = _fetch_source(row["kind"], row["value"])
+        repos = [it for it in got["items"]
+                 if it.get("full_name") and not it.get("archived")]
+        log.append({"name": "src:" + label, "q": row["value"], "ok": got["ok"],
+                    "count": len(repos), "ms": got["ms"], "cached": got["cached"],
+                    "error": got["error"]})
+        overview.append({"id": row["id"], "value": row["value"], "label": label,
+                         "kind": row["kind"], "count": len(repos),
+                         "ok": got["ok"], "error": got["error"]})
+        _touch_source(row["id"], len(repos), got["error"])
+        for it in repos:
+            key = it["full_name"].lower()
+            rec = by_key.setdefault(key, {"item": it, "labels": []})
+            if label not in rec["labels"]:
+                rec["labels"].append(label)
+    return log, overview, by_key
 
 
 class Limiter:
@@ -795,6 +1013,16 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
                 if data2 and data2.get("full_name"):
                     pool[key] = {"item": data2, "seen": {"code"}}
 
+    # 自有来源并入同一个池：不过滤 stars/fork（自有仓多为 0 star 或 fork），
+    # 但 archived 在 _sync_sources 里已剔除，后续过滤/打分与搜索结果完全同规则。
+    mark("sources")
+    src_log, src_overview, src_by_key = _sync_sources()
+    arms_log.extend(src_log)
+    for key, srec in src_by_key.items():
+        rec = pool.setdefault(key, {"item": srec["item"], "seen": set()})
+        rec["seen"].update("src:" + lb for lb in srec["labels"])
+        rec["sources"] = sorted(set(rec.get("sources") or []) | set(srec["labels"]))
+
     toks = tokens_of(keywords)
     groups = alias_groups(keywords)
     weights = _concept_weights(pool, groups)
@@ -809,6 +1037,7 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
         cov, matched = _concept_cov(blob, groups, weights)
         phrase = any((" " in str(k) and _norm_text(str(k)) in blob) for k in keywords)
         hits = len(code_hits.get(key, []))
+        srcs = rec.get("sources") or []
         if bucket == "impl" and cov < 0.18 and hits == 0:
             continue
         # 「至少命中 2 个概念」不能写成常数 2：概念数来自用户关键词，只有 1 个关键词
@@ -817,11 +1046,16 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
         # 返回 0 条实现桶。门槛必须取 min(2, 概念数)。
         if bucket == "impl" and matched < min(2, len(groups)) and not phrase and hits == 0:
             continue
+        # 自有来源里与原模块无关的仓**不占版面**：资料/清单桶对搜索候选不设覆盖度门槛
+        # （那是「用户主动搜 wide topic 时也能看到清单」的旧口径），但自有来源动辄几十个
+        # fork，没有门槛时 `free-programming-books` 这类 0 覆盖的仓会一直挂在卡上。
+        if srcs and matched == 0 and cov < 0.18 and not phrase and hits == 0:
+            continue
         stars = int(item.get("stargazers_count") or 0)
         pre.append({"key": key, "item": item, "bucket": bucket, "cov": cov, "hits": hits,
-                    "seen": rec["seen"],
+                    "seen": rec["seen"], "sources": srcs,
                     "pre": 0.55 * cov + 0.20 * min(1, math.log10(stars + 1) / 4)
-                    + 0.25 * min(1, hits / 3)})
+                    + 0.25 * min(1, hits / 3) + (SOURCE_BONUS if srcs else 0)})
 
     pre.sort(key=lambda x: (x["bucket"] != "impl", -x["pre"]))
     mark("enrich")
@@ -856,6 +1090,8 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
             "repo": item.get("full_name"), "url": item.get("html_url"),
             "desc": (item.get("description") or "")[:160], "bucket": bucket,
             "seen": sorted(p["seen"]),
+            "sources": p["sources"],
+            "src_bonus": SOURCE_BONUS if p["sources"] else 0.0,
             "func": round(func, 3), "impl": round(impl, 3), "design": round(design, 3),
             "coverage": round(p["cov"], 3), "stars": stars, "license": lic,
             "copyleft": bool(GPL_RE.search(lic)), "fresh_days": _days_since(item.get("pushed_at")),
@@ -869,7 +1105,8 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
         })
 
     ranked.sort(key=lambda x: (x["bucket"] != "impl",
-                               -(0.6 * x["func"] + 0.3 * x["impl"] + 0.1 * x["design"])))
+                               -(0.6 * x["func"] + 0.3 * x["impl"] + 0.1 * x["design"]
+                                 + x.get("src_bonus", 0))))
     rerank_err, used_model = "", ""
     if do_rerank and ranked:
         mark("rerank")
@@ -882,6 +1119,7 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
     meta = {
         "arms": arms_log,
         "pool_size": len(pool),
+        "sources": src_overview,
         "rerank": bool(used_model),
         "rerank_model": used_model,
         "rerank_paid": bool(used_model and used_model not in
@@ -923,6 +1161,16 @@ def render_md(module: str, keywords: List[str], lang: str, meta: Dict[str, Any],
     if meta.get("identifiers"):
         out.append("- 代码标识符臂：" + "、".join(meta["identifiers"])
                    + "（在代码里搜该串，命中的仓额外加分）")
+    srcs = meta.get("sources") or []
+    if srcs:
+        ok_src = [s for s in srcs if s.get("ok")]
+        if ok_src:
+            out.append("- 来源（自有仓，含 fork，不占搜索额度）：" +
+                       "、".join(f"{s['label']}（{s['count']} 仓）" for s in ok_src))
+        bad_src = [s for s in srcs if not s.get("ok")]
+        if bad_src:
+            out.append("- ⚠️ 来源拉取失败：" +
+                       "、".join(f"{s['label']}（{s.get('error') or '失败'}）" for s in bad_src))
     if meta.get("rerank"):
         cost = "（**付费档**，单次约几千 token）" if meta.get("rerank_paid") else "（免费档）"
         out.append(f"- 语义重排：{meta['rerank_model']}{cost}")
@@ -950,13 +1198,28 @@ def render_md(module: str, keywords: List[str], lang: str, meta: Dict[str, Any],
         picked, low = impls, []
 
     out += ["## 候选（实现桶）", "",
-            "| 仓库 | ★ | 最近推送 | 许可证 | 功能 | 实现 | 设计 | 判定 |",
-            "|---|---:|---|---|---:|---:|---:|---|"]
+            "| 仓库 | 来源 | ★ | 最近推送 | 许可证 | 功能 | 实现 | 设计 | 判定 |",
+            "|---|---|---:|---|---|---:|---:|---:|---|"]
     for c in picked[:limit]:
         lic = c["license"] + ("(copyleft)" if c["copyleft"] else "")
-        out.append(f"| [{c['repo']}]({c['url']}) | {c['stars']} | "
+        out.append(f"| [{c['repo']}]({c['url']}) | "
+                   f"{'、'.join(c.get('sources') or []) or '—'} | {c['stars']} | "
                    f"{_badge(c['fresh_days'])} | {lic} | {c['func']:.2f} | "
                    f"{c['impl']:.2f} | {c['design']:.2f} | {c.get('judge') or '—'} |")
+    # 自有来源单独再列一次：来源的目的就是「先看我自己的仓」，而上表是统一排序 +
+    # limit 截断，自己的仓很容易被 1k+ star 的外部仓挤到第 9 名之后而《看不见》。
+    # 这里不做二次打分，只保证可见性；已在上表的标出来，避免被当成两条。
+    if meta.get("sources"):
+        shown = {id(c) for c in picked[:limit]}
+        own = [c for c in ranked if c.get("sources")]
+        out += ["", "## 自有来源命中（含 fork）", ""]
+        if own:
+            for c in own[:12]:
+                tail = "（已在上表）" if id(c) in shown else ""
+                out.append(f"- [{c['repo']}]({c['url']}) — {c['bucket']}，功能 "
+                           f"{c['func']:.2f}{tail}")
+        else:
+            out.append("- （无：本轮关键词未命中自有仓；可补关键词，或确认来源已同步）")
     out += ["", "## 资料/清单桶（不参与实现对比）", ""]
     out += [f"- [{c['repo']}]({c['url']}) — {c['desc']}" for c in others] or ["- （无）"]
     if low:
@@ -974,6 +1237,9 @@ def render_md(module: str, keywords: List[str], lang: str, meta: Dict[str, Any],
     for c in picked[:limit]:
         out.append(f"### {c['repo']} · 功能{c['func']:.2f}/实现{c['impl']:.2f}/设计{c['design']:.2f}")
         out.append(f"- 一句话：{c['desc']}")
+        if c.get("sources"):
+            out.append("- 来源：自有仓（" + "、".join(c["sources"])
+                       + "，不走搜索额度、含 fork）")
         if c.get("why"):
             out.append(f"- 重排理由：{c['why']}（{c.get('judge')}）")
         out.append(f"- 设计资料：{'有 ADR/architecture 目录' if c['arch_docs'] else '未见 ADR'}")
@@ -1147,6 +1413,11 @@ def _run_job(job_id: str) -> None:
                     _INFLIGHT.pop(k, None)
 
 
+class SourceIn(BaseModel):
+    value: str = Field(min_length=1, max_length=200)
+    label: str = Field(default="", max_length=60)
+
+
 class ScoutIn(BaseModel):
     module: str = Field(min_length=2, max_length=200)
     keywords: List[str] = Field(default_factory=list)
@@ -1256,6 +1527,21 @@ async def api_scout(body: ScoutIn):
     return submit(body)
 
 
+@router.get("/sources")
+async def api_sources():
+    return list_sources()
+
+
+@router.post("/sources")
+async def api_source_add(body: SourceIn):
+    return add_source(body.value, body.label)
+
+
+@router.delete("/sources/{sid}")
+async def api_source_delete(sid: str):
+    return delete_source(sid)
+
+
 @router.get("/jobs/{job_id}")
 async def api_job(job_id: str):
     return job_view(job_id)
@@ -1321,6 +1607,7 @@ async def api_status():
     jobs = db.query("SELECT status, COUNT(*) AS n FROM ref_jobs GROUP BY status")
     return {"token": bool(token()), "cache": cache_stats(),
             "jobs": {r["status"]: r["n"] for r in jobs},
+            "sources": len(list_sources()["items"]),
             "card_ttl_days": CARD_TTL_DAYS,
             "paid_rerank": _ref_model(),
             "free_models": [llm.memory_model(), llm.free_fallback_model()]}

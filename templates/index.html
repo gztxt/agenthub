@@ -2196,9 +2196,27 @@
                                 <button class="btn sm" id="refSubmit" onclick="submitRefScout()">检索</button>
                                 <span class="hint sk-cnt" id="refHint"></span>
                             </div>
-                            <div class="hint" style="margin:-6px 0 12px">
+                            <!-- 来源＝自有 GitHub 仓（含 fork）/ 该账号标星过的仓。与全站检索同一套
+                                 过滤/打分/闸门，但**不吃** stars:>=N 与 fork:false —— 自有仓常为
+                                 0 star 或 fork，星标里也多的是小仓，这两个限定会让它们永远进不了池。 -->
+                            <div class="toolbar" style="margin:2px 0 0">
+                                <span class="sp-sub" style="margin:0">来源</span>
+                                <span id="refSources" style="display:inline-flex;gap:6px;flex-wrap:wrap">加载中…</span>
+                                <select id="refSrcKind" title="来源类型" style="max-width:120px">
+                                    <option value="owner">账号 / 组织</option>
+                                    <option value="repo">单个仓库</option>
+                                    <option value="starred">星标列表</option>
+                                </select>
+                                <input id="refSrcInput" placeholder="账号 / 组织 / owner/repo"
+                                       style="max-width:220px"
+                                       onkeydown="if(event.key==='Enter'){event.preventDefault();addRefSource();}">
+                                <button class="btn ghost sm" onclick="addRefSource()">添加来源</button>
+                                <span class="hint" id="refSrcHint"></span>
+                            </div>
+                            <div class="hint" style="margin:0 0 12px">
                                 只读采集：不克隆、不改项目、不自动加依赖 · 卡片带 as of 与 SPDX 许可证 ·
-                                判定列 <b>unjudged</b> ≠ 已认可（仅表示本轮重排未覆盖）
+                                判定列 <b>unjudged</b> ≠ 已认可（仅表示本轮重排未覆盖）·
+                                来源同步在下次「检索/重跑」时进行，archived 仍拒 · 单来源最多 300 仓
                             </div>
                         </div>
                         <div class="sp-bd box"><div id="refCards" class="sp-list">加载中…</div></div>
@@ -2850,6 +2868,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=5b2e8a6f"></script>
+    <script src="/static/hub.js?v=42867c21"></script>
 </body>
 </html>

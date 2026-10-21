@@ -884,7 +884,7 @@ function switchSkillView(v) {
   }
   if (v === 'refs') {
     bindRefActions();
-    if (!REF_LOADED) { REF_LOADED = true; loadRefCards(); }
+    if (!REF_LOADED) { REF_LOADED = true; loadRefCards(); loadRefSources(); }
     else renderRefCards();
   }
 }
@@ -1192,7 +1192,7 @@ function clearSkillFilter() {
  * 只渲染后端字段：三轴分、判定、许可证、as_of 全部来自 /api/ref/cards，页面不重算。
  * 产物只在 hub 库（不写到项目目录），避免前端决定写哪。
  */
-let REF_CARDS = [], REF_LOADED = false, REF_POLL = null, REF_CARD_ID = '';
+let REF_CARDS = [], REF_LOADED = false, REF_POLL = null, REF_CARD_ID = '', REF_SOURCES = [];
 
 function refStatusText(st) {
   return ({
@@ -1219,6 +1219,72 @@ function bindRefActions() {
       const btn = e.target.closest('[data-ref-act="close"]');
       if (btn) { detail.style.display = 'none'; REF_CARD_ID = ''; }
     });
+  }
+  // 来源 chip 的删除走委托：chips 每次 loadRefSources 都会整体重绘，
+  // 逐个挂 onclick 会在重绘后失效（且 §4.2 禁止用 inline onclick 旁路委托）。
+  const srcBox = $('refSources');
+  if (srcBox && !srcBox.__refSrcBind) {
+    srcBox.__refSrcBind = true;
+    srcBox.addEventListener('click', e => {
+      const b = e.target.closest('[data-ref-src-del]');
+      if (b && srcBox.contains(b)) delRefSource(b.dataset.refSrcDel);
+    });
+  }
+}
+
+/* 来源（自有 GitHub 仓，含 fork）：后端在**检索时**拉取并并入候选池，
+ * 页面只管增删与显示「上次同步到几个仓」。同步失败要留在 chip 上，
+ * 不能只弹一次 toast —— 用户下次打开页面仍需知道这个来源是坏的。 */
+async function loadRefSources() {
+  const el = $('refSources');
+  if (!el) return;
+  try {
+    const d = await api('/api/ref/sources');
+    REF_SOURCES = d.items || [];
+    renderRefSources();
+  } catch (e) {
+    el.textContent = '来源加载失败：' + e.message;
+  }
+}
+
+function renderRefSources() {
+  const el = $('refSources');
+  if (!el) return;
+  if (!REF_SOURCES.length) { el.innerHTML = '<span class="hint">未添加</span>'; return; }
+  el.innerHTML = REF_SOURCES.map(s => {
+    const cnt = s.synced_at ? (' · ' + (s.repo_count || 0) + ' 仓') : ' · 待同步';
+    const err = s.last_error ? ' · 失败' : '';
+    const tip = s.value + (s.last_error ? '：' + s.last_error : '') + '（点击移除）';
+    return '<button class="btn ghost sm" data-ref-src-del="' + escapeHtml(s.id) +
+      '" title="' + escapeHtml(tip) + '">' + escapeHtml(s.label) + cnt + err + ' ×</button>';
+  }).join('');
+}
+
+async function addRefSource() {
+  const inp = $('refSrcInput'), hint = $('refSrcHint');
+  const v = ((inp && inp.value) || '').trim();
+  if (!v) { if (hint) hint.textContent = '先填账号 / 组织 / owner/repo'; return; }
+  try {
+    const d = await api('/api/ref/sources', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: v })
+    });
+    if (inp) inp.value = '';
+    if (hint) hint.textContent = d.deduped ? ('已存在：' + d.value)
+      : ('已添加：' + d.value + '（下次检索时同步）');
+    await loadRefSources();
+  } catch (e) {
+    if (hint) hint.textContent = '添加失败：' + e.message;
+  }
+}
+
+async function delRefSource(id) {
+  if (!id) return;
+  try {
+    await api('/api/ref/sources/' + encodeURIComponent(id), { method: 'DELETE' });
+    await loadRefSources();
+  } catch (e) {
+    toast('移除来源失败：' + e.message, 'err');
   }
 }
 
@@ -1315,6 +1381,7 @@ function pollRefJob(jobId, cardId) {
           ? ('任务失败：' + (d.error || '见卡内逐路表态'))
           : ('完成（' + (d.card ? refStatusText(d.card.status) : '') + '）');
         await loadRefCards();
+        loadRefSources();          // 本轮同步过的「N 仓」要跟着刷新
         if (cardId) openRefCard(cardId);
       }
     } catch (e) {

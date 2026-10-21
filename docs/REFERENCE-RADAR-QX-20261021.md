@@ -292,3 +292,18 @@ Safety Categories: Malware, Needs Caution
 - mrr 0.837→0.815（−0.022）同样在单条位次摆动量级，本轮**不宣称 mrr 变化**。
 - 短语拆词真问题的定性没变：日志语义簇在 GitHub 上就用 `logs`/`logging` 描述，拆词只能
   放大星数偏差；要真正解决得靠重排（让模型判断"主题相关性"）或换数据源。
+
+### 10.6 合并后复验（`faeb2b7`，与并发「来源」系列同仓）
+
+- **逐位相同，不靠"看起来差不多"**：合并后重跑全量，9 个模块的 top5 **逐位一致**，
+  汇总 `hit@5 0.565 / mrr 0.815 / found 32/58 / v1 子集 0.600 (7/12, mrr 0.223)` 与
+  worktree 内 `work/eval-final2.json` 全等（脚本逐字段比对，非人眼比对）。
+  这验证了先前那条断言：`src_bonus=0` 时新增的 `_order_key` 与旧 lambda 等价。
+- **评测入口自身缺初始化**（本次才暴露）：`tests/eval_refscout.py` 是进程外入口，
+  合并后 `collect()` 会先走 `_sync_sources()` → `db.query()`，而 `_conn` 只由服务启动链
+  设置 ⇒ 先报 `AttributeError: 'NoneType' object has no attribute 'execute'`，
+  补 `db.init_db()` 后又报 `no such table: ref_sources`（建表挂在 `refscout.ensure_schema()`）。
+  现脚本内两步都补上，且 `DATA_DIR` 已指向临时目录 ⇒ 用的是**空 `ref_sources` 的隔离库**，
+  只跑 GitHub 默认源，不碰生产库。
+  **判据（下次加表时复用）**：进程外入口必须同时用例「建库 + 建表」，只补其一仍会红。
+

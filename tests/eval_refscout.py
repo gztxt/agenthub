@@ -89,7 +89,21 @@ def main() -> int:
     args = ap.parse_args()
 
     data_dir = _prep_env(cold=not args.keep_cache)
+    # 【为什么必须显式建库】`collect()` 会调 `_sync_sources()` → `enabled_sources()`
+    # → `db.query()`，而模块级 `_conn` 只由 `main.init_db()` 在**服务启动**时设置。
+    # 本脚本是进程外入口，不建库就是 `AttributeError: 'NoneType' object has no attribute
+    # 'execute'`（2026-10-21 合并「参考情报来源」系列后实测撞到）。
+    # 判据同 `release._ensure_db`：DATA_DIR 已在上一行指向临时目录，所以这里 init 的是
+    # **隔离库**（空的 ref_sources 表 ⇒ 只跑 GitHub 默认源），不会碰生产库。
+    import db  # noqa: E402
+    import config  # noqa: E402
+    if not db.is_open():
+        db.init_db(config.Config().db_path)
     import refscout  # noqa: E402  —— 必须在 DATA_DIR 设好之后
+    # `ref_cards`/`ref_sources` 的建表同样挂在服务启动链（`refscout.ensure_schema()`），
+    # 进程外入口必须自己补：只建库不建表 ⇒ `sqlite3.OperationalError: no such table:
+    # ref_sources`（2026-10-21 实测，补 init_db 后暴露的第二层）。
+    refscout.ensure_schema()
 
     spec = _load_annotations()
     mods = [m for m in spec["modules"] if not args.only or m["id"] == args.only]

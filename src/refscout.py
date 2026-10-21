@@ -160,8 +160,8 @@ CREATE TABLE IF NOT EXISTS ref_jobs (
 CREATE INDEX IF NOT EXISTS idx_ref_jobs_status ON ref_jobs(status);
 CREATE TABLE IF NOT EXISTS ref_sources (
     id          TEXT PRIMARY KEY,
-    kind        TEXT NOT NULL,            -- owner|repo
-    value       TEXT NOT NULL,            -- gztxt | gztxt/agenthub
+    kind        TEXT NOT NULL,            -- owner|repo|starred
+    value       TEXT NOT NULL,            -- gztxt | gztxt/agenthub | gztxt（星标）
     label       TEXT NOT NULL DEFAULT '',
     enabled     INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL,
@@ -169,7 +169,10 @@ CREATE TABLE IF NOT EXISTS ref_sources (
     repo_count  INTEGER NOT NULL DEFAULT 0,
     last_error  TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ref_sources_value ON ref_sources(value);
+-- 唯一键必须带 kind：同一个 `gztxt` 既可能是「他的仓」也可能是「他标星的仓」，
+-- 两者候选集完全不同，按 value 去重会把后者静默吞掉。
+DROP INDEX IF EXISTS idx_ref_sources_value;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ref_sources_kind_value ON ref_sources(kind, value);
 """
 
 _POOL = futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="refscout")
@@ -273,7 +276,10 @@ _GITHUB_HOSTS = ("github.com", "www.github.com", "api.github.com")
 
 
 def _norm_source(raw: str) -> Tuple[str, str]:
-    """把用户输入归一成 `(kind, value)`：`gztxt` → owner；`gztxt/agenthub` → repo。
+    """把用户输入归一成 `(kind, value)`。
+
+    `gztxt` → owner；`gztxt/agenthub` → repo；`starred:gztxt` / `gztxt:starred` /
+    `github.com/gztxt?tab=stars` / `github.com/stars/gztxt` → starred（该账号标星的仓）。
 
     只接受 github.com。拒掉别的主机不是洁癖：`gitlab.com/x` 会被当成 `owner/repo`
     拼进 GitHub API，最后以 404 收场，用户看到的是「来源没数据」而不是「地址写错」。
@@ -281,15 +287,38 @@ def _norm_source(raw: str) -> Tuple[str, str]:
     v = (raw or "").strip()
     if not v:
         raise HTTPException(400, "来源为空")
+    starred = False
     v = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", v)     # https://
     head = v.split("/")[0]
     if head.lower() in _GITHUB_HOSTS:
         v = v.partition("/")[2]
     elif "." in head:
-        raise HTTPException(400, "只支持 github.com 的账号 / 组织 / 仓库")
-    v = re.split(r"[?#]", v)[0].strip("/")
+        raise HTTPException(400, "只支持 github.com 的账号 / 组织 / 仓库 / 星标列表")
+    # `?tab=stars` 是 GitHub 星标页的真实地址；查询串必须在切段之前看，切完就丢了。
+    m = re.search(r"[?#](.*)$", v)
+    query = m.group(1) if m else ""
+    if m:
+        v = v[:m.start()]
+    if re.search(r"(?:^|&)tab=stars(?:&|$)", query, re.I):
+        starred = True
+    v = v.strip("/")
     v = re.sub(r"\.git$", "", v, flags=re.I)
-    parts = [p for p in v.split("/") if p][:2]           # /tree/main 之类的尾巴直接丢
+    parts = [p for p in v.split("/") if p]
+    if parts and parts[0].lower() == "stars":              # github.com/stars/gztxt
+        starred, parts = True, parts[1:]
+    if parts and ":" in parts[0]:                          # starred:gztxt / gztxt:starred
+        left, _, right = parts[0].partition(":")
+        if left.lower() == "starred":
+            starred, parts[0] = True, right
+        elif right.lower() == "starred":
+            starred, parts[0] = True, left
+        else:
+            raise HTTPException(400, "只支持 starred:<账号> 形式的星标来源")
+    parts = parts[:2]                                      # /tree/main 之类的尾巴直接丢
+    if starred:                                            # 星标按账号取，不接 owner/repo
+        if not parts or not _SOURCE_SEG.match(parts[0]):
+            raise HTTPException(400, "星标来源只填账号名，如 gztxt:starred")
+        return "starred", parts[0]
     if not parts or not all(_SOURCE_SEG.match(p) for p in parts):
         raise HTTPException(400, "来源名不合法（只允许字母数字 . _ -）")
     if len(parts) == 2:
@@ -319,13 +348,15 @@ def enabled_sources() -> List[Dict[str, Any]]:
 
 def add_source(value: str, label: str = "") -> Dict[str, Any]:
     kind, norm = _norm_source(value)
-    rows = db.query("SELECT * FROM ref_sources WHERE value=?", (norm,))
+    rows = db.query("SELECT * FROM ref_sources WHERE kind=? AND value=?", (kind, norm))
     if rows:                                   # 幂等：重复添加不报错、不产生第二条
         return {"id": rows[0]["id"], "value": norm, "kind": rows[0]["kind"], "deduped": True}
     sid = uuid.uuid4().hex[:10]
+    # 星标来源默认带前缀：同名的 owner 与 starred 是两条来源，chip 上必须能分辨。
+    name = (label or "").strip() or (f"star:{norm}" if kind == "starred" else norm)
     db.execute("INSERT INTO ref_sources(id,kind,value,label,enabled,created_at,repo_count)"
                " VALUES(?,?,?,?,1,?,0)",
-               (sid, kind, norm, (label or "").strip() or norm, _now()))
+               (sid, kind, norm, name, _now()))
     return {"id": sid, "value": norm, "kind": kind, "deduped": False}
 
 
@@ -355,6 +386,22 @@ def _fetch_source(kind: str, value: str) -> Dict[str, Any]:
     if kind == "repo":
         data, meta = gh_get(f"{GH_API}/repos/{value}", ttl_s=CACHE_TTL_SOURCE)
         return done([data] if data else [], meta)
+
+    if kind == "starred":
+        # 星标是「我认可的外部项目」，不是我的仓：同样只读、同样并入候选池，
+        # 但候选集来自 /starred 而非 /repos。
+        items: List[Dict[str, Any]] = []
+        meta: Dict[str, Any] = {}
+        for page in range(1, SOURCE_MAX_REPOS // SOURCE_PAGE + 1):
+            url = (f"{GH_API}/users/{value}/starred?per_page={SOURCE_PAGE}&page={page}"
+                   f"&sort=updated&direction=desc")
+            data, meta = gh_get(url, ttl_s=CACHE_TTL_SOURCE)
+            if not meta.get("ok"):
+                break
+            items.extend(data or [])
+            if len(data or []) < SOURCE_PAGE:
+                break
+        return done(items, meta)
 
     items: List[Dict[str, Any]] = []
     meta: Dict[str, Any] = {}

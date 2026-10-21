@@ -127,6 +127,28 @@ def main():
     else:
         ok("来源已存在，跳过删除（不动既有数据）")
 
+    print("== B2 星标来源（kind=starred 走同一条归一化）")
+    n0 = evaluate(cdp, "document.querySelectorAll('#refSources [data-ref-src-del]').length") or 0
+    evaluate(cdp, "(function(){var k=document.getElementById('refSrcKind');"
+                  "if(k)k.value='starred';var i=document.getElementById('refSrcInput');"
+                  "i.value='gztxt';addRefSource();return 1;})()")
+    added = wait_until(cdp, "document.querySelectorAll('#refSources [data-ref-src-del]').length > %d" % n0)
+    star_label = evaluate(cdp, "(function(){var b=[].slice.call("
+                              "document.querySelectorAll('#refSources [data-ref-src-del]'))"
+                              ".filter(function(x){return /star:gztxt/.test(x.textContent)});"
+                              "return b.length?b[0].textContent:'';})()") or ""
+    if added and star_label:
+        ok("星标来源 chip：%s" % star_label.strip())
+    else:
+        bad("星标来源未生成（label=%r n0=%d）" % (star_label, n0))
+    gone_star = evaluate(cdp, "(function(){var b=[].slice.call("
+                             "document.querySelectorAll('#refSources [data-ref-src-del]'))"
+                             ".filter(function(x){return /star:gztxt/.test(x.textContent)});"
+                             "if(b.length){b[0].click();return 1}return 0;})()")
+    if gone_star:
+        (ok if wait_until(cdp, "document.querySelectorAll('#refSources [data-ref-src-del]')"
+                               ".length === %d" % n0) else bad)("星标 chip 可删除")
+
     print("== C 卡片列表渲染（数据来自 /api/ref/cards）")
     wait_until(cdp, "document.querySelectorAll('#refCards .mem-item').length > 0")
     n = evaluate(cdp, "document.querySelectorAll('#refCards .mem-item').length")

@@ -13,6 +13,7 @@
 """
 import json
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
@@ -52,6 +53,19 @@ class TestSourceInput(unittest.TestCase):
             with self.assertRaises(Exception, msg=bad):
                 refscout._norm_source(bad)
 
+    def test_accepts_starred_forms(self):
+        """星标来源：`starred:gztxt` / 星标页地址都要归一成同一条。"""
+        for raw in ("starred:gztxt", "gztxt:starred",
+                    "https://github.com/gztxt?tab=stars",
+                    "github.com/stars/gztxt",
+                    "github.com/stars/gztxt/lists/ai"):
+            self.assertEqual(refscout._norm_source(raw), ("starred", "gztxt"), raw)
+
+    def test_starred_marker_must_be_exact(self):
+        for bad in ("gztxt:whatever", "starred:", "stars:"):
+            with self.assertRaises(Exception, msg=bad):
+                refscout._norm_source(bad)
+
 
 class TestSourceCrud(unittest.TestCase):
     def setUp(self):
@@ -73,6 +87,18 @@ class TestSourceCrud(unittest.TestCase):
         with self.assertRaises(Exception) as cm:
             refscout.delete_source("nope")
         self.assertEqual(getattr(cm.exception, "status_code", None), 404)
+
+    def test_same_account_owner_and_starred_coexist(self):
+        """`gztxt`（自己的仓）与 `gztxt:starred`（标星的仓）候选集不同，必须各存一条。"""
+        a = refscout.add_source("gztxt")
+        b = refscout.add_source("gztxt:starred")
+        self.assertNotEqual(a["id"], b["id"])
+        self.assertEqual(a["kind"], "owner")
+        self.assertEqual(b["kind"], "starred")
+        self.assertEqual(refscout.list_sources()["total"], 2)
+        labels = [s["label"] for s in refscout.list_sources()["items"]]
+        self.assertIn("star:gztxt", labels)
+        self.assertTrue(refscout.add_source("gztxt:starred")["deduped"])
 
 
 class TestSourceFetch(unittest.TestCase):
@@ -126,6 +152,27 @@ class TestSourceFetch(unittest.TestCase):
         self.assertFalse(got["ok"])
         self.assertFalse(any("/orgs/" in u for u in urls),
                          "403 是限流，换端点只会多烧一次额度")
+
+    def test_starred_paginates_and_keeps_forks(self):
+        """星标走 /starred，不带 type 过滤（星标里本来就可能是我认可的 fork）。"""
+        urls = []
+        page1 = [_repo_item(f"o/f{i}", "x") for i in range(100)]
+
+        def fake(url, ttl_s=None, limiter=None):
+            urls.append(url)
+            return (page1 if re.search(r"[?&]page=1(&|$)", url) else []), {"ok": True, "ms": 1}
+
+        old = refscout.gh_get
+        refscout.gh_get = fake
+        try:
+            got = refscout._fetch_source("starred", "gztxt")
+        finally:
+            refscout.gh_get = old
+        self.assertTrue(got["ok"])
+        self.assertEqual(len(got["items"]), 100)
+        self.assertIn("/users/gztxt/starred", urls[0])
+        self.assertNotIn("type=owner", urls[0])
+        self.assertIn("page=2", urls[1], "第一页满 100 条就必须继续翻页")
 
 
 class TestSourceInPool(unittest.TestCase):
@@ -193,6 +240,37 @@ class TestSourceInPool(unittest.TestCase):
         self.assertIn("来源（自有仓，含 fork，不占搜索额度）：gztxt", md)
         self.assertIn("| [gztxt/term-demo]", md)
         self.assertIn("gztxt，不走搜索额度", md)
+
+
+class TestStarredInPool(unittest.TestCase):
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        db.init_db(self.tmp / "agents.db")
+        refscout.ensure_schema()
+        refscout.add_source("gztxt:starred")
+
+    def test_starred_repos_join_pool_with_own_label(self):
+        def fake(url, ttl_s=None, limiter=None):
+            if "/users/gztxt/starred" in url:
+                return [_repo_item("lukasmasuch/best-of-python",
+                                   "A ranked list of awesome Python open-source libraries",
+                                   fork=False),
+                        _repo_item("someone/ttyd", "share a terminal over websocket with pty",
+                                   fork=False)], {"ok": True, "ms": 2}
+            if "/search/" in url:
+                return {"items": []}, {"ok": True, "ms": 1}
+            return None, {"ok": False, "status": 404}
+
+        old = refscout.gh_get
+        refscout.gh_get = fake
+        try:
+            got = refscout.collect("终端复用", ["terminal", "websocket", "pty"], "", 20,
+                                   180, [], False, do_rerank=False)
+        finally:
+            refscout.gh_get = old
+        cand = next(c for c in got["candidates"] if c["repo"] == "someone/ttyd")
+        self.assertEqual(cand["sources"], ["star:gztxt"])
+        self.assertEqual(got["meta"]["sources"][0]["kind"], "starred")
 
 
 class TestSourceApiShape(unittest.TestCase):

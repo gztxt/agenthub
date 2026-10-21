@@ -2,6 +2,10 @@
 
 > PT-20261021-04 追加项。用户当日裁定：**方案 A + 支持多来源可增删**——
 > 即把「自己的 GitHub 仓（含 fork）」当成候选池的**一路来源**，而不是只给候选贴一个标签。
+>
+> **追加（同日晚）**：用户澄清「是本仓库或者账户 stars 过的项目」⇒ 来源扩到
+> `kind=starred`（该账号标星的仓）。starred 与 owner 走完全相同的并入 / 过滤 / 打分 / 闸门，
+> 只有候选集来源不同（`/users/{v}/starred` 而不是 `/users/{v}/repos`）。
 
 ## 1. 为什么不是「只做标注」
 
@@ -20,14 +24,18 @@
 
 | 层 | 内容 |
 |---|---|
-| 表 | `ref_sources(id, kind, value, label, enabled, created_at, synced_at, repo_count, last_error)`，`value` 唯一 |
-| 取值 | `kind=owner`（账号或组织，含 fork）/ `kind=repo`（单仓） |
-| 拉取 | owner：`GET /users/{v}/repos?type=owner&sort=updated`，404 才回落 `/orgs/{v}/repos`；repo：`GET /repos/{v}` |
+| 表 | `ref_sources(id, kind, value, label, enabled, created_at, synced_at, repo_count, last_error)`，唯一键 `(kind, value)` |
+| 取值 | `kind=owner`（账号或组织，含 fork）/ `kind=repo`（单仓）/ `kind=starred`（该账号标星的仓） |
+| 拉取 | owner：`GET /users/{v}/repos?type=owner&sort=updated`，404 才回落 `/orgs/{v}/repos`；repo：`GET /repos/{v}`；starred：`GET /users/{v}/starred?sort=updated`（不带 `type=owner`，星标里本来就可能是我认可的 fork） |
 | 缓存 | 6h（core API 5000/h，不吃 search 的 30/min）；单来源上限 300 仓（3 页） |
-| 并入 | 池内同键合并，候选带 `sources: ["gztxt", ...]` 与 `src_bonus` |
+| 并入 | 池内同键合并，候选带 `sources: ["gztxt", "star:gztxt", ...]` 与 `src_bonus` |
 | 卡面 | 头部列「来源（自有仓，含 fork，不占搜索额度）」+ 候选表新增「来源」列 + 独立「自有来源命中」段 |
 | REST | `GET/POST /api/ref/sources`、`DELETE /api/ref/sources/{id}`（`POST` 幂等） |
-| UI | 参考情报视图「来源」工具条：chip 显示 `已同步 N 仓 / 待同步 / 失败`，点 chip 即删；输入框支持 `gztxt`、`gztxt/agenthub`、完整 URL 与 `/tree/...` 尾巴 |
+| UI | 参考情报视图「来源」工具条：类型下拉（账号/组织 · 单个仓库 · 星标列表）+ 输入框 + chip（`已同步 N 仓 / 待同步 / 失败`，点 chip 即删）；输入框也认 `gztxt`、`gztxt/agenthub`、`gztxt:starred`、完整 URL 与 `/tree/...` 尾巴 |
+
+> **唯一键为什么带 `kind`**：`gztxt`（自己的仓）与 `gztxt:starred`（标星的仓）是两个完全
+> 不同的候选集。按 `value` 去重时后加的那条会被静默判成「已存在」，用户看到 chip 却又拿不到
+> 星标候选。默认 label 也据此区分：`gztxt` vs `star:gztxt`。
 
 ## 3. 三个口径（都是为避免「看起来生效」）
 
@@ -46,20 +54,28 @@
 | 项 | 结果 |
 |---|---|
 | 真实拉取 `gztxt` | 43 仓 / 953ms（冷）、1ms（6h 缓存命中）；`gztxt/agenthub` 1 仓 / 563ms |
+| 真实拉取 `gztxt:starred` | **273 仓**（`Link` 头 `rel=last` 同为 273，翻页取全）/ **12.5s 冷**、20ms 热；archived 12 → 实际入池 261；其中 fork 20 |
 | 真实采集（终端 WebSocket 与端口转发，`do_rerank=false`） | 冷 29.3s、热 0.2s；池 110；`gztxt/agenthub` 进候选（func 0.515 / cov 0.559） |
-| 无关自有仓 | `free-programming-books`（cov 0）被第 3 节口径挡住，不再进卡 |
-| 单元测试 | `tests/test_refscout_sources_l0.py` 12 例 |
-| 全量 L0 | `run_tests.sh hermetic`：**2612 例 / 0 跳过 / 0 失败**（含新增 12 例） |
-| 真 Chromium 探针 | `tests/probe_refscout_ui.py` 于影子 :3219 **12/12**（原 9 项 + 来源工具条 3 项：存在 / 添加出 chip / 点删回退） |
+| 真实采集（GitHub 资料收集整理，仅 starred 来源） | 46 候选；`EbookFoundation/free-programming-books`、`lukasmasuch/best-of-python`、`mahmoud/awesome-python-applications`、`punkpeye/awesome-mcp-servers`、`yzfly/Awesome-MCP-ZH` 均带 `src=['star:gztxt']` |
+| 无关自有仓 | `free-programming-books`（终端复用查询下 cov 0）被第 3 节口径挡住，不再进卡 |
+| 单元测试 | `tests/test_refscout_sources_l0.py` **17 例**（含 starred 归一化 2 例 / 同类名共存 1 例 / starred 翻页 1 例 / starred 入池 1 例） |
+| 全量 L0 | `run_tests.sh hermetic`：**2617 例 / 0 跳过 / 0 失败**（含新增 17 例） |
+| 真 Chromium 探针 | `tests/probe_refscout_ui.py` 于影子 :3219 **14/14**（原 9 项 + 来源工具条 3 项 + 星标来源 2 项） |
 
 > 探针的删除只回滚**它自己新增**的那一条（记录 `before` 计数），避免对着已有数据的库
 > 误删用户来源。
 
 ## 5. 已知边界
 
-- 单来源 300 仓封顶；超出部分不参与（避免一次任务把 core 额度拉爆）。
+- 单来源 300 仓封顶；超出部分不参与（避免一次任务把 core 额度拉爆）。starred 取前 300 条，
+  `gztxt` 当前 273 条刚好全取；超过 300 的账号只能拿到最近更新的 300 个。
+- **starred 冷拉一次 12.5s（3 页）**，直接计入当轮采集耗时；命中缓存（6h）后 20ms。
+  这段是串行同步拉取，来源多了会线性叠加——真到 5+ 个大账号时要改成并发或后台预取。
+- `github.com/stars/{u}/lists/{name}` 形式的地址只取账号、**忽略 list 名**（按全部星标处理）。
+  要做「只取某个 list」得另加接口（当前 GitHub REST 不提供 list 维度）。
 - 私有仓依赖 token 的可见范围：`ghsettings` 读到的 token 无该仓权限时，来源会显示
-  `失败：HTTP404`，而不是「没有相关项目」。
+  `失败：HTTP404`，而不是「没有相关项目」。starred 走 `/users/{u}/starred` 公开端点，
+  **不含私有星标**（要私有得走 `/user/starred`，只能取 token 本人）。
 - 来源仓参与 IDF 统计（`_concept_weights` 的池就是合并后的池）⇒ 加了很多仓会轻微改变
   同批搜索的权重。未加来源时行为逐字不变。
 - 同步时机是「下次检索 / 重跑」，不是定时；chips 会明写 `待同步`。

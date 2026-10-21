@@ -4780,8 +4780,12 @@ function renderRefSources() {
 
 async function addRefSource() {
   const inp = $('refSrcInput'), hint = $('refSrcHint');
-  const v = ((inp && inp.value) || '').trim();
+  const kind = (($('refSrcKind') || {}).value) || 'owner';
+  let v = ((inp && inp.value) || '').trim();
   if (!v) { if (hint) hint.textContent = '先填账号 / 组织 / owner/repo'; return; }
+  // 星标来源由前端拼成 `gztxt:starred` 交给同一个接口：后端只认这一种字符串形态，
+  // 这样粘贴 `?tab=stars` 地址、或直接敲 `gztxt:starred` 走的是同一条归一化路径。
+  if (kind === 'starred' && !/(^|[:/])starred(:|$)/i.test(v) && !/[?&]tab=stars/i.test(v)) v += ':starred';
   try {
     const d = await api('/api/ref/sources', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },

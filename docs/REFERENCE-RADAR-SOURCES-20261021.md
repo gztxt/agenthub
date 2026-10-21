@@ -90,6 +90,27 @@
 - 同步时机是「下次检索 / 重跑」，不是定时；chips 会明写 `待同步`。
 - 自动刷新（30 天到期）也会同步来源，但不付费重排（既有铁律）。
 
+## 5.1 付费重排实测（2026-10-22 00:0x，生产 :3102，卡 `00c660b6167e`）
+
+同一张卡连点三次「允许付费重排 + 重跑」，**只有第 3 次成功**，且三次结论不一致：
+
+| 次 | 付费档 | 免费两档 | 卡状态 |
+|---|---|---|---|
+| 1 | `TimeoutError` 25024ms | 25s ×2 全超时 | `lexical_fallback` |
+| 2 | `degenerate` 6506ms（回 JSON 但三轴全 <0.05） | 25s ×2 全超时 | `lexical_fallback` |
+| 3 | ok 5611ms，3 条判定 | 未再试（付费档已成功） | `reranked`，`rerank_paid=true` |
+
+- **同一 prompt 同一模型判词会翻**：离线探针（同网关、同 2072 字 prompt）两次都给
+  `HelloGitHub` = read / func 0.8，生产第 3 轮却判 skip（"内容策展平台，非技术实现"）。
+  ⇒ 单次判定不可当结论，卡面「判定」列本身带随机性。
+- 第 3 轮结论：3 个 impl 候选全 skip ⇒ **实现桶表与「可借鉴点」为空**，只留「未入选」段。
+  这不是渲染 bug：`skip` 按 `_judge_rank` 沉底后不进主表，属于「没有参考价值就排后」的正常结果。
+- 付费档 cap 是 **25s 不是 60s**：`cap = 60 if model == llm.MODEL else 25`，而
+  `llm.MODEL` 现在是 `alibaba/qwen3.8-flash`、付费档是 `agnes/agnes-2.5-flash` ⇒
+  永远走 25s 分支，与 `rerank()` docstring「付费 60s」不符（本轮 5.6~6.5s 够用，但网关抖时就卡死）。
+- 免费两档（`openrouter/free`、`nemotron-3-super:free`）在本 prompt 上 **每次 25s 占满预算**，
+  与 P0 记录一致（免费池被内容审核/只思考占满）。
+
 ## 6. 回滚
 
 - 代码：`git revert <commit>`；表可保留（空表无副作用）。

@@ -201,5 +201,49 @@ class TestCardShowsProvenance(unittest.TestCase):
         self.assertIn("清单:HelloGitHub", md, "主表来源列也要标出来")
 
 
+class TestCatalogItselfIsNotACandidate(unittest.TestCase):
+    """用户裁定（2026-10-22）：要的是清单**收录的项目**，不是清单本身。
+
+    反例（生产卡 `0d010734abb8`）：`521xueweihan/HelloGitHub` 被 `classify` 判成
+    `impl`（描述里有 GitHub 二字），于是它自己占了实现桶表一行，而它的 impl 分是从
+    「目录 README」算出来的，与「这个项目怎么实现」无关。
+    """
+
+    def _md(self, meta_extra=None):
+        meta = {"pool_size": 10,
+                "sources": [{"label": "star:gztxt", "count": 261, "ok": True}],
+                "list_expand": [{"name": "list:521xueweihan/HelloGitHub", "ok": True,
+                                 "pages": 1, "links": 30, "count": 1}]}
+        meta.update(meta_extra or {})
+        cands = [
+            _cand(repo="521xueweihan/HelloGitHub", stars=183527,
+                  sources=["star:gztxt"], desc="分享 GitHub 上有趣的开源项目"),
+            _cand(repo="seart-group/ghs", via=["521xueweihan/HelloGitHub"]),
+        ]
+        return refscout.render_md("m", ["k"], "", meta, cands, 12.3,
+                                  "2026-10-22T00:00:00+00:00",
+                                  "2026-11-21T00:00:00+00:00")
+
+    def test_catalog_not_in_candidate_table(self):
+        md = self._md({"list_sources": ["521xueweihan/HelloGitHub"]})
+        table = md.split("## 候选（实现桶）")[1].split("##")[0]
+        self.assertNotIn("521xueweihan/HelloGitHub", table,
+                         "目录仓不能占实现桶表的一行")
+        self.assertIn("seart-group/ghs", table, "收录的项目要在表里")
+
+    def test_catalog_still_visible_as_source(self):
+        md = self._md({"list_sources": ["521xueweihan/HelloGitHub"]})
+        self.assertIn("清单仓本身是目录，不计入候选", md)
+        own = md.split("## 自有来源命中")[1].split("##")[0]
+        self.assertIn("521xueweihan/HelloGitHub", own, "自己 star 的目录仍要露脸")
+        self.assertIn("清单（已展开）", own)
+
+    def test_without_list_sources_nothing_is_filtered(self):
+        """旧卡没有 `list_sources` 字段（历史数据）⇒ 不能因为缺字段把候选吃掉。"""
+        md = self._md()
+        table = md.split("## 候选（实现桶）")[1].split("##")[0]
+        self.assertIn("521xueweihan/HelloGitHub", table)
+
+
 if __name__ == "__main__":
     unittest.main()

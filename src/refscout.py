@@ -1443,8 +1443,13 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
     # 是 impl；它「是清单」的证据在 README 里（1 个项目链接 + 36 个 content 子页），
     # 不先抓 README 就根本识别不出来。展开结果再走同一套覆盖度/三轴/许可证闸门。
     expanded_log: List[Dict[str, Any]] = []
+    # 清单仓本身是「目录」，不是「可借鉴的项目」：用户 2026-10-22 明确
+    # 「要的是 HelloGitHub 收录的项目，不是 HelloGitHub 本身」。这里记下被展开的目录，
+    # 渲染时把它们从候选表里摘掉（不进实现桶表、不占 limit 名额），只留作来源标注。
+    list_sources: List[str] = []
     if os.getenv("REF_LIST_EXPAND", "1") != "0":
         lists = _pick_lists(pre, LIST_EXPAND_LISTS)
+        list_sources = [str(x.get("full_name") or "") for x in lists if x.get("full_name")]
         if lists:
             mark("expand")
             w0 = _concept_weights(pool, groups)
@@ -1517,6 +1522,7 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
         "pool_size": len(pool),
         "sources": src_overview,
         "list_expand": expanded_log,
+        "list_sources": list_sources,
         "rerank": bool(used_model),
         "rerank_model": used_model,
         "rerank_paid": bool(used_model and used_model not in
@@ -1578,7 +1584,8 @@ def render_md(module: str, keywords: List[str], lang: str, meta: Dict[str, Any],
             else:
                 parts.append(f"{name}（{e.get('pages', 0)} 页 / {e.get('links', 0)} 链接"
                              f" → 入池 {e['count']}）")
-        out.append("- 清单展开：" + "；".join(parts))
+        out.append("- 清单展开：" + "；".join(parts)
+                   + "（清单仓本身是目录，不计入候选）")
     if meta.get("rerank"):
         cost = "（**付费档**，单次约几千 token）" if meta.get("rerank_paid") else "（免费档）"
         out.append(f"- 语义重排：{meta['rerank_model']}{cost}")
@@ -1599,6 +1606,12 @@ def render_md(module: str, keywords: List[str], lang: str, meta: Dict[str, Any],
 
     impls = [c for c in ranked if c["bucket"] == "impl"]
     others = [c for c in ranked if c["bucket"] != "impl"]
+    # 目录仓不进候选表（见 collect 里 `list_sources` 的注释）：它的 impl 分是从
+    # 目录 README 算出来的，跟「这个项目怎么实现」无关，留着只会占掉 limit 名额。
+    lset = {str(x).lower() for x in (meta.get("list_sources") or [])}
+    if lset:
+        impls = [c for c in impls if str(c.get("repo") or "").lower() not in lset]
+        others = [c for c in others if str(c.get("repo") or "").lower() not in lset]
     if meta.get("rerank"):
         picked = [c for c in impls if c.get("judge") in ("use", "fork", "read")]
         low = [c for c in impls if c.get("judge") not in ("use", "fork", "read")]
@@ -1628,7 +1641,10 @@ def render_md(module: str, keywords: List[str], lang: str, meta: Dict[str, Any],
         if own:
             for c in own[:12]:
                 tail = "（已在上表）" if id(c) in shown else ""
-                out.append(f"- [{c['repo']}]({c['url']}) — {c['bucket']}，功能 "
+                # 目录仓这里仍要露脸（「我 star 过它、它被当清单展开过」是有用信息），
+                # 但桶名要照实写「清单」，否则和上面「不计入候选」自相矛盾。
+                kind = "清单（已展开）" if str(c["repo"]).lower() in lset else c["bucket"]
+                out.append(f"- [{c['repo']}]({c['url']}) — {kind}，功能 "
                            f"{c['func']:.2f}{tail}：{c['desc']}")
         else:
             out.append("- （无：本轮关键词未命中自有仓；可补关键词，或确认来源已同步）")

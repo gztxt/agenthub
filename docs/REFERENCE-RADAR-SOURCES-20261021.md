@@ -179,6 +179,60 @@
 是在**没有 README** 的情况下算出来的（同批其它仓有这个信号）。这不是渲染 bug，
 是「补全集合 ≠ 重排集合」的口径缝隙。修法二选一：补全窗口放大到 12；或重排后再对缺
 README 的入选项补抓一次（每仓 +3 次 core API）。
+**（已修：`3fdd1c1`，补全窗口设 12 > 重排窗口 8，重排只从补全过的仓里取。）**
+
+## 5.4 清单展开生产实测 + 目录仓不计入候选（2026-10-22 01:2x）
+
+用同一组输入跑两次，一次在修复前（`0d010734abb8`）、一次在修复后（`b49470345059`）：
+模块 `GitHub 项目资料收集整理`，关键词 `github api / crawler / awesome list / metadata`，
+`allow_paid=false`，候选池 362。
+
+| 卡 | 耗时 | 状态 | HelloGitHub 在实现桶表里？ |
+|---|---:|---|---|
+| `0d010734abb8`（修复前） | 56.8s | `lexical_fallback` | **是**（第 4 行，183527★） |
+| `b49470345059`（修复后） | 26.9s（缓存热） | `lexical_fallback` | 否，只在「自有来源命中」里标 `清单（已展开）` |
+
+两次的展开日志完全一致（这部分是确定性的）：
+
+| 清单 | 页 | 链接 | 入池 |
+|---|---:|---:|---:|
+| `521xueweihan/HelloGitHub` | 1 | 30 | 1 |
+| `quemsah/awesome-claude-plugins` | 0 | 100 | 12 |
+| `fighting41love/funNLP` | 0 | 71 | 9 |
+| `public-apis/public-apis` | 0 | 14 | 6 |
+
+**①「HelloGitHub 只入池 1 条」不是 bug。** 离线复算同一份子页
+（`content/HelloGitHub126~123.md`）：4 篇共 203 个链接、拉到 158 个仓元数据，
+按**小池**权重只有 13 个过 `cov>=0.18`；生产整池 362 条时 IDF 更高、覆盖度普遍更低，
+就只剩 1 个。语义上也对：那一期收录的项目（`psf/black`、`flameshot`、`karakeep`…）
+与「收集 GitHub 数据」无关。**展开不等于放行，闸门照旧**。
+
+**② 本次修复：目录仓本身不进候选表。** `521xueweihan/HelloGitHub` 的描述里有
+「GitHub」，`classify` 判成 `impl`，于是它自己占了一行实现桶 —— 而它的 impl 分是从
+**目录 README** 算出来的，与「这个项目怎么实现」无关。用户 2026-10-22 的原话是
+「要的是 HelloGitHub 收录的项目，不是 HelloGitHub 本身」。现在 `collect` 把
+`_pick_lists` 的结果记进 `meta["list_sources"]`，渲染时从实现桶表/资料桶里摘掉，
+但仍在「自有来源命中」露脸（标注 `清单（已展开）`）——「我 star 过它、它被当目录展开过」
+是有用信息，不该一起藏起来。缺该字段的历史卡不受影响（`or []`）。
+
+**③ 遗留两处（未修，待裁）：**
+
+- **无关目录照样吃展开预算**：`funNLP` / `awesome-claude-plugins` / `public-apis`
+  与本轮模块无关，仍各花 3.8~13.6s，三份合计约占冷启动 56.8s 的一半。
+  `keep` 闸门能挡住它们的**成员**，但挡不住「去拉它」这件事本身。
+- **list/doc 桶在 `build_pre` 里没有覆盖度门槛**（旧口径：让用户搜 wide topic 时也能
+  看到清单），于是 `AniList/docs`（cov 0.168）、`sindresorhus/awesome-chatgpt`（0.194）
+  这类无关目录会以清单桶身份留在池里。它们不进实现桶表，只占「资料/清单桶」小节。
+
+**复验命令**（生产 :3102，需 `x-hub-token`）：
+
+```bash
+curl -s -X POST localhost:3102/api/ref/scout -H 'Content-Type: application/json' \
+  -H "x-hub-token: $TERM_TOKEN" \
+  -d '{"module":"GitHub 项目资料收集整理","keywords":["github api","crawler","awesome list","metadata"]}'
+# 断言：meta.list_sources 含 521xueweihan/HelloGitHub，
+#       候选表里没有该行，「自有来源命中」里有且标 清单（已展开）
+```
 
 ## 6. 回滚
 

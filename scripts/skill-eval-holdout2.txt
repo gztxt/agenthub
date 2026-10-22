@@ -1,0 +1,56 @@
+# 技能检索 **holdout-2**（2026-10-22，PT-20261022-14）
+#
+# ## 为什么还要第三份集
+# · `skill-eval-cases.txt`（开发集）—— 训练用，含事后补词；
+# · `skill-eval-holdout.txt`（holdout-1）—— 曾给出无偏读数 64.29%，
+#   但**本轮触发词覆盖从 106 扩到 270/276 时被当作开发集使用**，它的读数已不再无偏；
+# · 本文件（holdout-2）—— **未参与任何整定**：目标技能与开发集、holdout-1 **三者零重叠**，
+#   且**提交早于第一次运行**（git 可验）。
+#
+# ## 纪律（同 holdout-1，且更严）
+# 1. 提交后**不得再改**（除修「目标不存在」的标签错，并在此留痕）。
+# 2. 跑之前**不新增/修改任何触发词、不调阈值**。
+# 3. 报数时必须同时报**开发集 / holdout-1 / holdout-2** 三列，并注明哪一列无偏。
+#
+# 类别：D 直接 / P 意译 / S 短词(2~3字) / X 跨词表（不计入可达上限）。
+# 格式：query|类别|期望技能|兄弟技能(可接受，可空)|备注
+
+# ── D 直接（12）──
+用 1password 存密码|D|1password||
+用 airtable 建数据库表|D|airtable||
+给苹果备忘录加一条|D|apple-notes||
+设个苹果提醒事项|D|apple-reminders||
+用 imessage 发条短信|D|imessage||
+在 jupyter 里跑个笔记本|D|jupyter-live-kernel||
+用 litellm 做模型网关|D|litellm||
+用 comfyui 出图|D|comfyui||
+用 remotion 做视频|D|remotion||
+用 tmux 开个会话|D|tmux||
+用 litellm 看各模型价格|D|litellm||
+在 kdocs 里写文档|D|kdocs||
+
+# ── P 意译（10）──
+把密码都收进一个保险库|P|1password||
+把散落的表格汇总成一张|P|airtable|xlsx|
+让它提醒我明天打电话|P|apple-reminders||
+把这堆短信整理一下|P|imessage||
+跑一下大模型的评测基准|P|evaluating-llms-harness||
+本地把模型跑成服务|P|serving-llms-vllm|llama-cpp|
+把这页画成可交互的草图|P|p5js|sketch|
+把录音转成文字|P|speech-to-text||
+按这个规范打磨界面|P|impeccable|hallmark|
+把这个流程做成一步步向导|P|wayfinder|to-questionnaire|
+
+# ── S 短词（6）──
+保险库|S|1password||
+画布|S|p5js||
+语音|S|speech-to-text||
+基准|S|evaluating-llms-harness||
+白板|S|excalidraw||
+复盘|S|full-recap|last30days|
+
+# ── X 跨词表（4，不计入可达上限）──
+帮我记住这张银行卡的信息|X|1password||
+让多个模型自动挑便宜的|X|litellm||
+把一段音乐听出是什么歌|X|songsee||
+教我这个概念怎么理解|X|teach||

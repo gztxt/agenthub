@@ -1,0 +1,59 @@
+# 技能检索 **holdout** 集 v1（2026-10-22，PT-20261022-11 观察项 2）
+#
+# ## 与 `skill-eval-cases.txt` 的区别（这决定它能证明什么）
+#
+# `skill-eval-cases.txt`（32 条）是**开发集**：其中 4 条目标的触发词是「先跑一遍看到失败、
+# 再补词」补出来的 ⇒ 那个 67.86% 偏乐观。
+# 本文件是**未参与整定的 holdout**：目标技能**全部与开发集不重叠**，
+# 且本文件在**第一次运行之前**就已提交（git 历史可验：先提交、后跑）。
+# 因此它给出的是「对没见过的查询，检索有多准」的**无偏读数**。
+#
+# ## 纪律（三条，缺一条它就不再是 holdout）
+# 1. **本文件提交后不得再改**（除了修「目标技能不存在」这类标签错误，
+#    且必须在文件末尾记一笔）。任何为了让结果好看而改标签/补触发词，
+#    都会让这份集变成第二个开发集 —— 那就白做了。
+# 2. 跑之前**不写任何新触发词**。
+# 3. 报数时同时报「开发集 / holdout」两个数字，**不得只报高的那个**。
+#
+# 类别口径与开发集一致：D 直接 / P 意译 / S 短词(2~3字) / X 跨词表（不计入可达上限）。
+# 格式：query|类别|期望技能|兄弟技能(可接受，可空)|备注
+
+# ── D 直接（12）──
+用 notion 记笔记|D|notion||
+把 pdf 里的文字提取出来|D|pdf-extract|ocr-and-documents|
+生成架构图|D|architecture-diagram|mermaid-diagram|
+用 xlsx 处理表格|D|xlsx|powerpoint|
+本地跑 llama.cpp|D|llama-cpp|serving-llms-vllm|
+用 spotify 控制播放|D|spotify||
+生成 ppt|D|ppt-generator|powerpoint|
+用 obsidian 管理知识库|D|obsidian|knowledge-base|
+查 huggingface 上的模型|D|huggingface-hub|openai-docs|
+用 linear 管 issue|D|linear|gh-issues|
+把会议内容拆成待办|D|document-to-action-items|meeting-action-items|
+给网站配 let's encrypt 证书|D|certbot-ssl||
+
+# ── P 意译（10）──
+整理一下我的收件箱|P|email-inbox-triage|himalaya|
+把想法发散成方案|P|brainstorming|teach|
+给这个设计做个原型看看|P|prototype|vibe-prototype|
+把计划拆成可以开工的工单|P|to-tickets|to-spec|
+把这段流程画成时序图|P|mermaid-diagram|architecture-diagram|
+让浏览器自动帮我填表|P|agent-browser|obscura|
+查一下有什么免费接口能用|P|apis-lookup||
+在 google 全家桶里发一封邮件|P|google-workspace|himalaya|
+这个代码库结构看不懂|P|codebase-inspection|codebase-design|
+这些术语要不要收进领域词典|P|domain-modeling|knowledge-base|
+
+# ── S 短词（6）──
+证书|S|certbot-ssl||
+原型|S|prototype|vibe-prototype|
+工单|S|to-tickets|gh-issues|
+时序图|S|mermaid-diagram|architecture-diagram|
+邮件|S|himalaya|email-inbox-triage|
+表格|S|xlsx|powerpoint|
+
+# ── X 跨词表（4，不计入可达上限）──
+让电脑帮我点网页上的按钮|X|agent-browser||
+把零散的想法收成一条主线|X|brainstorming||
+帮我把申请材料写成正式文档|X|docx-cn|tencent-docs|
+看下 A 股行情|X|mx-finance-data||

@@ -1599,6 +1599,12 @@ async def skill_status(force: bool = Query(default=False)):
                     if tdai_raw.get("ok") and not tdai_items else
                     "注册表有数据" if tdai_items else "注册表这一路本次不可用，原因见 error"),
         },
+        # 2026-10-22 PT-16：jev 的**可用性**必须能在面板上看到，而不是藏在
+        # /relevant 的某次返回里。实测本机直连恒 451（区域封禁），而旧 status()
+        # 只报 `enabled:true`（key 在）—— 那是假绿。这里并列给出短路状态与原因。
+        "jev": dict(jev_client.status(),
+                    note="451=区域封禁（key 在也没用）；403=key 没生效。"
+                         "两者都不是代码问题，别去改代码"),
         "gap": {
             "disk_unique": len(unique),
             "tdai_rows": len(tdai_items),

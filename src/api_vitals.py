@@ -27,6 +27,10 @@ async def get_vitals():
     snap = vitals_mod.vitals.snapshot()
     return {"count": len(snap), "last_sweep": vitals_mod.vitals.last_sweep,
             "jev_key_present": bool(vitals_mod.profiles_jev_key()),
+            # 2026-10-22 PT-16：key 在 ≠ 可用。本机直连 api.typesafe.ai 恒 451
+            # （区域封禁），旧载荷只报 key_present ⇒ 看板永远显示「jev 就绪」。
+            # 这里并列给出短路剩余秒数：>0 就是「本轮 sweep 没走 jev，走的是规则」。
+            "jev_blocked_s": vitals_mod.jev_blocked_for(),
             "menu_min": vitals_mod.MENU_MIN, "sweep_every_sec": vitals_mod.SWEEP_EVERY,
             "detail": snap}
 

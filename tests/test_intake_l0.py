@@ -14,6 +14,7 @@
 import asyncio
 import pathlib
 import sys
+import time
 import unittest
 
 _REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -175,6 +176,31 @@ class TestRunComposition(unittest.TestCase):
         self.assertIn("日志排查", res["brief"])
         self.assertIn("a/b", res["brief"])
         self.assertIn("未配置搜索 provider", res["brief"], "联网搜索必须如实报不可用")
+
+    def test_elapsed_includes_escalation(self):
+        """`elapsed_s` 必须含外扩耗时。
+
+        判例（2026-10-22 生产实测）：thin 单外扩真实 12.4s，简报头却写「用时 0.2s」——
+        计时在 `_escalate` 之前算的；而 §3 里另有「外扩用时 12.1s」，同一屏两个数自相矛盾。
+        """
+        def slow_gh(*a, **k):
+            time.sleep(0.35)
+            return {"ok": True, "rows": [], "arms": []}
+
+        old = intake._gh_repos
+        intake._gh_repos = slow_gh
+        try:
+            res = self._run((lambda *a, **k: _mem(),
+                             lambda *a, **k: {"ok": True, "count": 0, "items": []},
+                             lambda *a, **k: asyncio.sleep(0, result={"ok": False}),
+                             lambda *a, **k: {"ok": False, "error": "x"}),
+                            intake.IntakeIn(task="解释这行日志", auto_deep=False))
+        finally:
+            intake._gh_repos = old
+        self.assertTrue(res["external"]["triggered"])
+        self.assertGreaterEqual(res["elapsed_s"], 0.3,
+                                "用时早于外扩计算 ⇒ 会低估数十倍，必须包含外扩")
+        self.assertIn(f"用时：{res['elapsed_s']}s", res["brief"], "简报头用的就是这个数")
 
     def test_ready_does_not_escalate(self):
         called = {"skill": 0}

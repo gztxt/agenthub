@@ -795,7 +795,6 @@ async def run(inp: IntakeIn) -> Dict[str, Any]:
     res = {
         "task": task, "caller": caller, "deep_reason": why,
         "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
-        "elapsed_s": round(time.monotonic() - t0, 1),
         "memory": mem, "kb": kb, "skill": skill, "ref": ref,
     }
     res["plan"] = assess(task, res)
@@ -810,6 +809,9 @@ async def run(inp: IntakeIn) -> Dict[str, Any]:
         res["external"] = {"triggered": False,
                            "reason": ("escalate=off" if inp.escalate == "off"
                                       else f"本地判定 {plan['verdict']}，未外扩")}
+    # 计时必须**含外扩**：`thin` 会自动跑技能中心/GitHub/参考库（实测 12s 级），
+    # 早算会把「用时 0.2s」写进简报头，与 §3 的「外扩用时 12.1s」自相矛盾。
+    res["elapsed_s"] = round(time.monotonic() - t0, 1)
     res["brief"] = brief_md(task, res)
     return res
 

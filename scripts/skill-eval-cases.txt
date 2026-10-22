@@ -1,0 +1,66 @@
+# 技能检索评测集 v1（2026-10-22，PT-20261022-11 第 3 项）
+#
+# 为什么要有它：A 批（触发词/噪声过滤/接受判据）的效果此前只有一份 **14 条**
+# （8 中文 + 6 英文）的临时验收集，足以证明「存在结构性缺陷且已大幅改善」，
+# **不足以给精确合格率**。本集扩到 32 条并分类，供回归复用。
+#
+# 设计约束（照抄 `scripts/eval-cases.md` 的同款纪律，逐条都有出处）：
+#   1. 标签一律取自**真实存在的技能**（2026-10-22 实盘 276 个不同技能名）；
+#      目标名写错不会报错，只会安静失败 ⇒ 由 `--verify-targets` 与语料核对。
+#   2. **查询语不得照抄技能名**。直接抄名字测的是「子串匹配」而不是「找回技能」。
+#   3. **不得按检索结果倒推标签**：先写下「读者用这句话时真正想要哪个技能」，
+#      再跑。跑出来不对时，先问「标签错了吗」，只有能证明「目标技能压根不支撑这句
+#      查询」才改标签，并把理由记在本文件末尾。
+#   4. 目标唯一：一句查询对应一个**明显最合适**的技能。两个都说得通的不入集
+#      （本机存在同能力兄弟技能：agent-dispatch ≈ dispatching-parallel-agents、
+#      grilling ≈ grill-me —— 这类只选一个作目标，另一条若排第二算作**可接受**，
+#      在指标里单列 `sibling`，不计入 rank1 错）。
+#
+# 类别：
+#   D = 直接（领域词直给，agent 大概率这么问）
+#   P = 意译（换说法，目标的名字/触发词里没有这些字 —— 考察表述差异）
+#   S = 短词（2~3 字 —— 考察 CJK 二元组与短查询的假阳性）
+#   X = 跨词表（查询与目标的可用词表**没有一个共同的实词**，如同义改写。
+#       词法检索原理上难命中，**不计入可达上限**；保留是为了测「会不会误报到别的技能」）
+#
+# 格式：query|类别|期望技能|兄弟技能(可接受，逗号分隔，可空)|备注
+
+# ── D 直接（12）──
+调试报错的根因分析|D|systematic-debugging||名字与触发词都直给
+并行派发多个子代理|D|dispatching-parallel-agents|agent-dispatch|
+代码审查看是否符合规范|D|code-review|review,sdlc-review|本机专杀 case
+怎么写一个新的技能|D|writing-skills|skill-creator|
+检索本机技术文档|D|techdocs-search||
+记忆里有没有相关结论|D|unified-memory|system-memory|
+抓取网页正文转 markdown|D|crawl4ai|markitdown|
+腾讯文档建一个在线表格|D|tencent-docs|腾讯文档Markdown|
+找一下相关论文|D|scholarly-search|arxiv|
+剪一段视频|D|video-cut|video-frames|
+github 上最近热门的项目|D|github-trending-cn|github|
+合并冲突怎么解|D|resolving-merge-conflicts|merge-reconciler|
+
+# ── P 意译（10）──
+偶发失败的东西怎么定位|P|systematic-debugging|diagnosing-bugs|「偶发」不在触发词，但语义指向同一个
+交付前怎么证明我做完了|P|verification-before-completion|aidev-00-self-audit|
+这个方案帮我挑毛病|P|grill-me|grilling|「挑毛病」是意译
+几个人同时改一个仓怎么不打架|P|using-git-worktrees||worktree 只出现在名字里
+页面内容是 js 渲染的，直接 curl 拿不到|P|obscura|crawl4ai|
+把 pdf 转成 md|P|markitdown|pdf-extract|
+公众号文章的阅读量怎么看|P|wechat-mp-cn||
+会议录音整理成待办|P|meeting-action-items|summarize|
+模型调用太贵怎么省|P|token-cost-optimization||
+内网链路时通时断|P|tailscale-offline-diagnose||
+
+# ── S 短词（6）──
+死链|S|llm-wiki||2 字
+蜂群|S|swarm||2 字
+拷问|S|grill-me|grilling|2 字
+抽帧|S|video-frames|video-cut|2 字
+云文档|S|tencent-docs||3 字
+摘要|S|summarize|handoff|2 字
+
+# ── X 跨词表（4，不计入可达上限）──
+怎么防止改完就把旧功能弄坏|X|verification-before-completion|aidev-03-verify-maintain|与目标无共同实词
+让机器自己分工把活干完|X|dispatching-parallel-agents|agent-dispatch|「分工」是触发词，但「机器自己」无对应
+把长文压短|X|summarize||「压短」不在词表
+把字写得不那么像机器生成的|X|humanizer-zh||

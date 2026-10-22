@@ -130,9 +130,15 @@ def tokenize(text: Any) -> List[str]:
         if len(run) == 1:
             out.append(run)
         else:
-            # A2：功能字参与的二元组一律丢（见 _CJK_STOP 注释：垃圾二元组 IDF 偏高）
-            out.extend(run[i:i + 2] for i in range(len(run) - 1)
-                       if run[i] not in _CJK_STOP and run[i + 1] not in _CJK_STOP)
+            # A2：功能字参与的二元组一律丢（见 _CJK_STOP 注释：垃圾二元组 IDF 偏高）。
+            kept = [run[i:i + 2] for i in range(len(run) - 1)
+                    if run[i] not in _CJK_STOP and run[i + 1] not in _CJK_STOP]
+            # ⚠ **不能把整段丢空**（2026-10-22 评测集当场抓到）：`摘要` 是 2 字且含功能字「要」，
+            # 按字面规则整段被丢 ⇒ `tokenize("摘要") == []` ⇒ `/relevant` 回「查询切词后为空」，
+            # 一个真实的短查询（且正是 `summarize` 技能的触发词）从此**永远搜不到**。
+            # 规则本意是「长串里少几个二元组无妨」，不是「让短词消失」⇒
+            # 整段被丢空时回落为未过滤版本（过滤只是在**有余量**时降噪，不是在没余量时删词）。
+            out.extend(kept or [run[i:i + 2] for i in range(len(run) - 1)])
     return out
 
 

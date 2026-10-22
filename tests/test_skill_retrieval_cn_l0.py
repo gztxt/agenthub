@@ -63,6 +63,26 @@ class TestA2StopBigrams(unittest.TestCase):
         """单字分支不受影响：`端` 这类一词查询靠它接住。"""
         self.assertEqual(sr.tokenize("端"), ["端"])
 
+    def test_stop_filter_never_empties_a_run(self):
+        """**整段被丢空时必须回落**（2026-10-22 评测集当场抓到的真 bug）。
+
+        `摘要` 是 2 个汉字、其中 `要` 在停用集里 ⇒ 按字面规则这个二元组被丢，
+        `tokenize("摘要") == []` ⇒ `/relevant` 回「查询切词后为空」，
+        而 `摘要` 正是 `summarize` 技能的触发词 —— 一个**真实短查询从此永远搜不到**。
+        规则本意是「长串里少几个二元组无妨」，不是「让短词消失」。
+        """
+        self.assertEqual(sr.tokenize("摘要"), ["摘要"])
+        # 长串仍然降噪（有余量时才过滤）
+        toks = set(sr.tokenize("检查我的改动是否符合规范"))
+        self.assertNotIn("动是", toks)
+        self.assertIn("检查", toks)
+
+    def test_short_query_is_searchable_end_to_end(self):
+        """端到端：`摘要` 必须真的能命中 `summarize`（带触发词）。"""
+        items = [_item("summarize", desc="Summarize long text", trig="摘要 总结 压缩")]
+        res = sr.rank("摘要", items, n=1)
+        self.assertEqual([x["item"]["name"] for x in res["items"]], ["summarize"])
+
 
 class TestA1Triggers(unittest.TestCase):
     def test_triggers_are_a_scored_field(self):
@@ -220,6 +240,54 @@ class TestC5CollapseByName(unittest.TestCase):
         self.assertEqual(sr.collapse_by_name(None), [])
 
 
+class TestEvalCaseFile(unittest.TestCase):
+    """评测集自身也要有闸门（2026-10-22 第 3 项）。
+
+    标签烂掉不会报错：目标名写错只表现为「怎么都搜不到」，与「系统差」长得一样。
+    本仓已因评测集出过三次错（v1 照抄文件名→虚高 0.908；v2 标签指错文档；
+    v5 十一条标签不可检），所以**评测集的完整性必须机器可判**。
+    """
+
+    PATH = _REPO / "scripts" / "skill-eval-cases.txt"
+
+    def _cases(self):
+        rows = []
+        for ln, line in enumerate(self.PATH.read_text(encoding="utf-8").splitlines(), 1):
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split("|")
+            self.assertGreaterEqual(len(parts), 3, "第 %d 行格式不对" % ln)
+            rows.append({"q": parts[0].strip(), "cat": parts[1].strip().upper(),
+                         "target": parts[2].strip(),
+                         "sib": [x.strip() for x in (parts[3] if len(parts) > 3 else "").split(",") if x.strip()]})
+        return rows
+
+    def test_at_least_30_cases(self):
+        """少于 30 条不足以给合格率（14 条时只能证明「存在结构性缺陷」）。"""
+        self.assertGreaterEqual(len(self._cases()), 30)
+
+    def test_all_categories_present(self):
+        cats = {c["cat"] for c in self._cases()}
+        self.assertEqual(cats, {"D", "P", "S", "X"}, "类别缺失或拼错：%r" % cats)
+
+    def test_no_duplicate_queries(self):
+        qs = [c["q"] for c in self._cases()]
+        self.assertEqual(len(qs), len(set(qs)), "评测集里有重复查询")
+
+    def test_every_case_has_target(self):
+        for c in self._cases():
+            self.assertTrue(c["target"], "空目标：%r" % c)
+            self.assertNotIn(c["target"], c["sib"], "目标同时被列进兄弟：%r" % c)
+
+    def test_queries_do_not_copy_target_name(self):
+        """查询不得照抄技能名（那就是在测子串匹配，v1 虚高 0.908 的根因）。"""
+        for c in self._cases():
+            t = c["target"].lower()
+            if len(t) >= 4 and not t.isascii():          # 中文技能名才可比
+                self.assertNotEqual(c["q"].lower(), t, "查询照抄了技能名：%r" % c)
+
+
 @tiers.host_only
 class TestLexiconLiveness(unittest.TestCase):
     """策展表里**不许有死条目**：名字写错不会报错，只安静失效（与分词器错误同族）。
@@ -253,6 +321,14 @@ class TestLexiconLiveness(unittest.TestCase):
         self.assertTrue(names, "未扫到任何技能：语料不可读，本用例判不了（不是通过）")
         dead = [n for n in st.known_names() if n not in names]
         self.assertEqual(dead, [], "策展表里有不存在的技能名：%r" % dead)
+
+    def test_eval_case_targets_exist_in_corpus(self):
+        """评测集的 32 个目标必须真存在于语料，否则是死标签（与死触发器同族）。"""
+        names = self._names()
+        self.assertTrue(names, "未扫到任何技能：判不了（不是通过）")
+        cases = TestEvalCaseFile()._cases()
+        missing = sorted({c["target"] for c in cases if c["target"] not in names})
+        self.assertEqual(missing, [], "评测集里有不存在的技能：%r" % missing)
 
     def test_lexicon_covers_the_eight_eval_tasks(self):
         """评测集里的 8 个目标技能必须有触发词，否则中文查询仍打不中。"""

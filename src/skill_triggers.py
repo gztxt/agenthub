@@ -37,7 +37,7 @@ from typing import Dict, List
 #: 技能名 → 中文（及少量英文别名）触发词，空格分隔。
 TRIGGERS: Dict[str, str] = {
     # ── 排障 / 调试 ──
-    "systematic-debugging": "调试 排查 报障 根因 复现 报错 异常 崩溃 失败原因 测试失败 日志 502",
+    "systematic-debugging": "调试 排查 报障 根因 复现 报错 异常 崩溃 失败原因 测试失败 日志 502 偶发 间歇 定位",
     "diagnosing-bugs": "诊断 缺陷 定位问题 疑难 日志 报错分析",
     "diagnosing-superpowers": "会话复盘 为什么慢 为什么重复",
     "python-debugpy": "python 断点 调试器",
@@ -70,7 +70,7 @@ TRIGGERS: Dict[str, str] = {
     "sdlc-review": "评审 交付评审",
     "requesting-code-review": "请求评审",
     "receiving-code-review": "评审意见 反馈处理",
-    "grill-me": "拷问 质疑 盘问 挑刺 挑战方案",
+    "grill-me": "拷问 质疑 盘问 挑刺 挑毛病 找茬 挑战方案 方案评审",
     "grilling": "拷问 质疑",
     "grill-with-docs": "拷问 决策记录 ADR",
     "brainstorming": "头脑风暴 想法 发散",
@@ -85,7 +85,7 @@ TRIGGERS: Dict[str, str] = {
     "aidev-02-implement-audit": "代码审计 对抗审计 边界值 故障注入 威胁建模",
 
     # ── 技能自身 ──
-    "writing-skills": "写技能 技能编写 技能规范",
+    "writing-skills": "写技能 技能编写 技能规范 新建技能 怎么建技能",
     "skill-creator": "创建技能 技能生成",
     "skill-installer": "安装技能",
     "using-superpowers": "技能怎么用 技能发现",
@@ -152,13 +152,13 @@ TRIGGERS: Dict[str, str] = {
     "gh-issues": "issue 工单",
     "github-trending-cn": "github趋势 热门项目 开源动态",
     "resolving-merge-conflicts": "冲突 合并 解冲突",
-    "using-git-worktrees": "worktree 隔离 并行施工",
+    "using-git-worktrees": "worktree 隔离 并行施工 多人同时改 几个人一起改 打架 同时施工",
     "finishing-a-development-branch": "分支收尾 合并",
     "simplify-code": "简化代码 精简",
     "codebase-inspection": "代码库勘察",
     "apikey-image-gen": "图片生成 api key 绘图接口",
     "apis-lookup": "免费API 接口 黄页 选型",
-    "token-cost-optimization": "token 成本 省钱 计费",
+    "token-cost-optimization": "token 成本 省钱 计费 太贵 费用 模型调用 账单",
     "agent-hub-cli-registration": "纳管 注册 agent",
     "typesafe-ai": "jev 判定 概率 分类",
     "content-risk-detector": "内容风险 合规 敏感",

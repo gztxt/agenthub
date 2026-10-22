@@ -77,6 +77,9 @@ DEEP_TRIGGERS = ("新增", "实现", "选型", "对比", "对标", "参考实现
 #: 做词面重合判定时剔除的虚词／高频字（只影响"相关度"标注，**不影响任何检索**）。
 _STOP = set("的了是在和与及或就都而这那有为对把被从到会可要我们你他她它个些没不很更最")
 
+#: XERJ 纯标题命中时正文为空，简报里用这个前缀显式标注。下游（抽约束）要按它排除。
+_TITLE_ONLY = "（仅标题命中"
+
 #: 命中即视为"开工前约束"的语气词。抽出来单列，是因为这些句子就是**执行判据**，
 #: 混在十条摘要里最容易被跳过，而跳过的代价正是"照摘要写错"。
 _RULE_WORDS = ("必须", "禁止", "不得", "不要", "一律", "只能", "先用", "先读", "先查",
@@ -135,21 +138,34 @@ def _sig(text: str) -> str:
     return re.sub(r"\W+", "", (text or ""))[:60]
 
 
+#: YAML front matter。XERJ 的 `highlight` 常整段落在文件头（`--- type: concept title: …`），
+# 既占屏又对"这条要不要读"零信息量，进简报前剥掉。
+# ⚠️ 不能用「按行」的写法：`/api/kb/search` 返回的 `content` **换行已被压成空格**
+# （实测 `--- type: concept ... --- # 标题 > 正文`），所以用 `\s` 代替换行。
+_FM_RE = re.compile(r"\A\s*---\s+.*?\s---\s+", re.S)
+_TAG_RE = re.compile(r"</?em>")
+
+
+def _body(text: str) -> str:
+    return _FM_RE.sub("", _TAG_RE.sub("", text or "")).strip()
+
+
 def _flatten(task: str, res: Dict[str, Any]) -> List[Dict[str, Any]]:
     """把四路的命中摊平成同一种行：{route, text, rel, src, path, ...}，并按指纹去重。"""
     toks = _tokens(task)
     rows: List[Dict[str, Any]] = []
     seen: Dict[str, Dict[str, Any]] = {}
     for it in (res.get("memory") or {}).get("items") or []:
-        text = it.get("content") or ""
+        text = _body(it.get("content") or "")
         rows.append({"route": "记忆", "text": text, "rel": _rel(text, toks),
                      "src": it.get("layer") or it.get("source") or "?",
-                     "path": "", "dup_of": ""})
+                     "path": "", "dup_of": "", "cov": _coverage(text, toks)})
     for it in (res.get("kb") or {}).get("items") or []:
-        text = it.get("content") or it.get("title") or ""
+        text = _body(it.get("content") or "") or (it.get("title") or "")
         rows.append({"route": "知识库", "text": text, "rel": _rel(text, toks),
                      "src": it.get("source") or "?", "path": it.get("path") or "",
-                     "title": it.get("title") or "", "dup_of": ""})
+                     "title": it.get("title") or "", "dup_of": "",
+                     "cov": _coverage(text, toks)})
     for r in rows:
         sig = _sig(r["text"])
         if not sig:
@@ -162,14 +178,23 @@ def _flatten(task: str, res: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _constraints(rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    """把带强语气的命中抽成"开工前约束"。只收 `直接/相关` —— 弱命中里的语气词多半是噪声。"""
+    """把带强语气的命中抽成"开工前约束"。只收 `直接/相关` —— 弱命中里的语气词多半是噪声。
+
+    按 `cov` 降序：同一条规则常被多份记忆分别记过（措辞不同、覆盖面不同），
+    先把"与本次任务最贴"的那条排前，读第一行就能开工；不做近似合并 ——
+    实测这几条两两 Jaccard 最高只有 0.275，硬合会误并真正不同的规则。
+    """
+    cand = [r for r in rows
+            if not r["dup_of"] and r["rel"] != "弱"
+            # 「（仅标题命中：X）」是 XERJ 无正文时的回退串，里面没有判据可抽——
+            # 硬抽会得到「约束：必须备份」这种只有标题、没有"在哪、做什么"的空规则。
+            and not r["text"].startswith(_TITLE_ONLY)
+            and any(w in r["text"] for w in _RULE_WORDS)]
+    cand.sort(key=lambda r: -float(r.get("cov") or 0))
     out: List[Dict[str, str]] = []
-    for r in rows:
-        if r["dup_of"] or r["rel"] == "弱":
-            continue
-        if any(w in r["text"] for w in _RULE_WORDS):
-            out.append({"text": r["text"][:200], "src": f'{r["route"]}/{r["src"]}',
-                        "path": r["path"]})
+    for r in cand:
+        out.append({"text": r["text"][:200], "src": f'{r["route"]}/{r["src"]}',
+                    "path": r["path"], "cov": round(float(r.get("cov") or 0), 2)})
         if len(out) >= 5:
             break
     return out
@@ -179,9 +204,9 @@ def _must_read(rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """需要回读的原文：有路径、且不是弱命中。同一路径只留第一条（命中可能多段）。"""
     out: List[Dict[str, str]] = []
     seen = set()
-    for r in rows:
-        if not r["path"] or r["dup_of"] or r["rel"] == "弱":
-            continue
+    cand = [r for r in rows if r["path"] and not r["dup_of"] and r["rel"] != "弱"]
+    cand.sort(key=lambda r: -float(r.get("cov") or 0))
+    for r in cand:
         if r["path"] in seen:
             continue
         seen.add(r["path"])
@@ -297,7 +322,7 @@ def _kb(task: str, routes: str, k: int = 6) -> Dict[str, Any]:
         title = (r.get("title") or "").strip()
         items.append({"source": r.get("source"), "path": r.get("path"), "title": title,
                       "category": r.get("category") or r.get("type"),
-                      "content": body or (f"（仅标题命中：{title}）" if title else "（无摘要）"),
+                      "content": body or (f"{_TITLE_ONLY}：{title}）" if title else "（无摘要）"),
                       "score": r.get("score")})
     return {"ok": True, "count": int(d.get("count") or 0), "items": items,
             "degraded": d.get("degraded") or [], "took_ms": d.get("took_ms")}
@@ -373,11 +398,15 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
            f"　可直接引用 {plan['useful']} 条／折叠弱命中 {plan['noise']} 条"
            f"／跨路重复 {plan['dups']} 条",
            "- ⚠️ 本简报只给**线索与出处**，不是结论；引用前回原文核对。", "",
-           "## 0. 开工前先看", ""]
+           f"## 0. 开工前先看（约束 {len(plan['constraints'])} 条／回读 {len(plan['must_read'])} 篇）", ""]
+    # 这里**列全**，后面各节不再重复同一句 —— 旧版 §0 只截前 3 条、§2 又列一遍，
+    # 同一句话在简报里出现两次，读的人反而要先去对"这两处是不是一回事"。
     step: List[str] = []
-    for c in plan["constraints"][:3]:
-        step.append(f"- **约束**（{c['src']}）：{c['text']}")
-    for x in plan["must_read"][:2]:
+    for c in plan["constraints"]:
+        # 覆盖率分母封顶 6，故数值可 >1（长任务里命中词元多于 6 个）；对外按 1.00 封顶显示，
+        # 排序仍用原始分值 —— 否则"最贴的那条"会和其它 1.00 并列，看不出优先级。
+        step.append(f"- **约束**（{c['src']}·相关 {min(float(c['cov']), 1.0):.2f}）：{c['text']}")
+    for x in plan["must_read"]:
         step.append(f"- **回读**：`{x['path']}` —— {x['why']}")
     if s.get("ok"):
         step.append(f"- **技能**：`{s.get('name')}` ⇒ {s.get('how_to_get')}")
@@ -385,18 +414,21 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
         x = r["rows"][0]
         step.append(f"- **参考实现**：[{x['repo']}](https://github.com/{x['repo']}) "
                     f"★{x['stars']}（卡 `{r['card_id']}`）")
-    out += step or ["- ⚠️ **本次没有可直接照做的线索** —— 看 §5 的缺口，换词重查或直接问用户。"]
+    if not step and plan["useful"]:
+        step.append(f"- 有 {plan['useful']} 条沾边命中，但都不构成约束、也没有可回读的路径"
+                    " —— 明细见 §2")
+    out += step or ["- ⚠️ **本次没有可直接照做的线索** —— 看 §4 的缺口，换词重查或直接问用户。"]
     out.append("")
 
     # ── §1 四路盘点：先把"哪一路是什么状态"摆清楚，再谈内容 ──
     def _cell(name: str) -> tuple:
         if name == "memory":
             st = "命中" if m.get("count") else ("不可用" if not m.get("ok") else "0 命中")
-            note = "、".join(m.get("degraded") or [])
+            note = m.get("error") or "、".join(m.get("degraded") or [])
             return st, m.get("count") or 0, note or "—"
         if name == "kb":
             st = "命中" if k.get("count") else ("不可用" if not k.get("ok") else "0 命中")
-            note = "、".join(k.get("degraded") or [])
+            note = k.get("error") or "、".join(k.get("degraded") or [])
             return st, k.get("count") or 0, note or "—"
         if name == "skill":
             st = "命中" if s.get("ok") else ("不可用" if s.get("error") else "未命中")
@@ -423,17 +455,7 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
         out.append("\n> 知识库 **0 命中**（先看备注里的降级项，再下「没有资料」的结论）。")
     out.append("")
 
-    out.append(f"## 2. 可直接照做的约束（{len(plan['constraints'])} 条）")
-    out += [f"- （{c['src']}）{c['text']}" for c in plan["constraints"]] or \
-           ["- 本次命中里没有「必须/禁止/不要…」类判据。"]
-    out.append("")
-
-    out.append(f"## 3. 需要回读的原文（{len(plan['must_read'])} 条）")
-    out += [f"- `{x['path']}` —— {x['why']}" for x in plan["must_read"]] or \
-           ["- 无（知识库里没有与任务词面沾边的路径命中）"]
-    out.append("")
-
-    out.append(f"## 4. 命中明细（按正文去重；弱相关 {plan['noise']} 条已折叠、"
+    out.append(f"## 2. 命中明细（按正文去重；弱相关 {plan['noise']} 条已折叠、"
                f"重复 {plan['dups']} 条只留计数）")
     for route, items in (("记忆", [x for x in plan["rows"] if x["route"] == "记忆"]),
                          ("知识库", [x for x in plan["rows"] if x["route"] == "知识库"])):
@@ -444,10 +466,16 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
                    f"[{x.get('src')}·{x['rel']}]"
             out.append(f"- {head}：{x['text']}")
         if not shown:
-            out.append("- （无可列条目）")
+            weak = [x for x in items if not x["dup_of"] and x["rel"] == "弱"]
+            if weak:
+                # 全折叠会让 thin 变成"看着像没查"。留一行原样标题，供判断要不要换词。
+                out.append("- 弱命中（仅列标题，供换词参考）："
+                           + "；".join((x.get("title") or x["text"])[:28] for x in weak[:6]))
+            else:
+                out.append("- （无可列条目）")
     out.append("")
 
-    out.append("## 5. 技能与参考库")
+    out.append("## 3. 技能与参考库")
     if s.get("error"):
         out.append(f"- 技能：⚠️ 检索不可用（{s['error']}）")
     elif not s.get("ok"):
@@ -471,7 +499,7 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
         out.append(f"  - 看全卡：`hub_ref_get(card_id=\"{r['card_id']}\")`")
     out.append("")
 
-    out.append("## 6. 缺口与口径")
+    out.append("## 4. 缺口与口径")
     out += [f"- {g}" for g in plan["gaps"]]
     out.append("- 定级是**词面重合**（CJK 二元组 + 拉丁词），不是语义判断；"
                "`弱` 只是「没有共同用词」，不代表无关。")

@@ -170,7 +170,57 @@ class TestAssess(unittest.TestCase):
         self.assertEqual(plan["verdict"], "thin")
         md = intake.brief_md(self.TASK, res)
         self.assertIn("折叠弱命中 1 条", md)
-        self.assertNotIn("深色主题", md, "弱命中只折叠、不逐条占屏")
+        # 弱命中**不逐条占屏**（不占「已列出」的条目位），只留一行标题索引 ——
+        # 全隐藏会让 thin 看起来像"没查"，读者无法判断该换词还是真没资料。
+        self.assertIn("记忆：1 条命中／0 条列出", md)
+        weak_lines = [ln for ln in md.splitlines() if "深色主题" in ln]
+        self.assertEqual(len(weak_lines), 1, "弱命中最多一行汇总，不得逐条列")
+        self.assertTrue(weak_lines[0].startswith("- 弱命中（仅列标题"))
+
+    def test_constraints_sorted_by_relevance(self):
+        res = self._res(mem_items=[
+            {"layer": "L1", "source": "tdai_l1", "content": "所有服务必须绑定 127.0.0.1"},
+            {"layer": "L1", "source": "tdai_l1",
+             "content": "改共享配置前必须先备份，禁止 sed -i"}])
+        plan = intake.assess(self.TASK, res)
+        self.assertIn("禁止 sed -i", plan["constraints"][0]["text"],
+                      "越贴近任务用词的约束排越前")
+
+    def test_brief_has_no_section_duplication(self):
+        res = self._res(mem_items=[{"layer": "L1", "source": "tdai_l1",
+                                    "content": "改共享配置前必须先备份，禁止 sed -i"}])
+        md = intake.brief_md(self.TASK, res)
+        self.assertEqual(md.count("禁止 sed -i"), 2,
+                         "同一句只在 §0（行动项）与 §2（明细）各出现一次，不做二次摘要")
+
+    def test_title_only_hit_is_not_a_constraint(self):
+        """「（仅标题命中：X）」里没有判据，抽成约束会得到一条只有标题的空规则。"""
+        res = self._res(kb_items=[{"source": "xerj", "path": "wiki/备份.md",
+                                   "title": "配置文件修改前必须备份",
+                                   "content": "（仅标题命中：配置文件修改前必须备份）"}])
+        plan = intake.assess(self.TASK, res)
+        self.assertEqual(plan["constraints"], [])
+        self.assertEqual(plan["must_read"][0]["path"], "wiki/备份.md",
+                         "拿不到正文的信封仍可作为「回读」指针")
+
+    def test_front_matter_stripped_from_kb_body(self):
+        """XERJ 返回的 content 换行被压成空格，front matter 仍要剥掉。"""
+        res = self._res(kb_items=[{
+            "source": "xerj", "path": "wiki/x.md", "title": "备份细则",
+            "content": '--- type: concept t<em>i</em>tle: "备份细则" created: 2026-07-30 '
+                       'status: proposed --- # 备份细则 > 改文件前必须先备份'}])
+        plan = intake.assess(self.TASK, res)
+        text = plan["rows"][-1]["text"]
+        self.assertTrue(text.startswith("# 备份细则"), text)
+        self.assertNotIn("type: concept", text)
+        self.assertNotIn("<em>", text)
+
+    def test_degraded_route_shows_error_in_table(self):
+        res = self._res(mem_items=[], mem_ok=False)
+        md = intake.brief_md(self.TASK, res)
+        self.assertIn("degraded", md)
+        self.assertIn("| 记忆 | 不可用 | 0 | 0 | timed out |", md,
+                      "表里要直接看到失败原因，别让读者去别处对")
 
     def test_constraint_extracted_from_hit(self):
         res = self._res(mem_items=[{"layer": "L1", "source": "local",

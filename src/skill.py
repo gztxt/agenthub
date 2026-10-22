@@ -48,6 +48,7 @@ import logging
 import os
 import re
 import skill_relevance
+import skill_rerank
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -1741,7 +1742,11 @@ async def skill_relevant(request: Request,
                          max_tokens: int = Query(default=0, ge=0, le=8000),
                          rerank: bool = Query(default=True),
                          caller: str = Query(default="", max_length=64),
-                         via: str = Query(default="", max_length=16)):
+                         via: str = Query(default="", max_length=16),
+                         llm_rerank: bool = Query(default=False,
+                                                  description="用免费模型（CCR openrouter/free）"
+                                                              "在 top-N 内重排（默认关，见 PT-20261022-13）"),
+                         llm_timeout: float = Query(default=2.0, ge=0.2, le=30.0)):
     """按一段自然语言任务描述，从**真实在用**的技能里排最相关的 n 条。
 
     **返回值刻意把 `bm25` 与 `jev` 分开报，不合成一个数字。**
@@ -1798,6 +1803,23 @@ async def skill_relevant(request: Request,
     elif not rerank:
         jev_block = dict(jev_client.status(), ok=False, why="调用方显式关闭精排（rerank=false）")
 
+    # ── A4 替代：免费模型重排（2026-10-22，PT-13）──
+    # 只做「把模型选中的那条提到第一」，其余相对顺序不变；失败保留 BM25 顺序并如实回 why。
+    llm_block: Optional[Dict[str, Any]] = None
+    if llm_rerank and len(rows) >= 2:
+        pick = await skill_rerank.choose(q, [r for r in rows], timeout_s=llm_timeout)
+        llm_block = dict(pick)
+        if pick.get("ok"):
+            before = [r["name"] for r in rows]
+            rows = skill_rerank.reorder(rows, pick.get("name"))
+            llm_block["reordered"] = [r["name"] for r in rows] != before
+            llm_block["before"] = before[:5]
+        else:
+            llm_block["reordered"] = False
+    elif llm_rerank:
+        llm_block = {"ok": False, "reordered": False,
+                     "error": "候选不足 2 条，未重排"}
+
     truncated = 0
     if max_tokens and rows:
         used, keep = 0, []
@@ -1820,6 +1842,7 @@ async def skill_relevant(request: Request,
                  "weights": res.get("weights"),
                  "why": res.get("why")},
         "jev": jev_block,
+        "llm_rerank": llm_block,
         "backends": backends,
         "max_tokens": max_tokens or None,
         "tokens_est": total_est,

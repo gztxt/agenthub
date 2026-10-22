@@ -78,14 +78,17 @@ def _get(url: str, timeout: float = 30.0) -> Tuple[int, Any]:
         return -1, {"error": "%s: %s" % (type(e).__name__, e)}
 
 
-def relevant(base: str, q: str, n: int = 3) -> List[str]:
-    url = base + "/api/skill/relevant?" + urllib.parse.urlencode(
-        {"q": q, "n": n, "rerank": "false", "caller": "skill-eval", "via": "query"})
-    st, d = _get(url)
+def relevant(base: str, q: str, n: int = 3, llm_rerank: bool = False,
+             llm_timeout: float = 8.0) -> Tuple[List[str], Dict[str, Any]]:
+    params = {"q": q, "n": n, "rerank": "false", "caller": "skill-eval", "via": "query"}
+    if llm_rerank:
+        params.update({"llm_rerank": "true", "llm_timeout": llm_timeout})
+    url = base + "/api/skill/relevant?" + urllib.parse.urlencode(params)
+    st, d = _get(url, timeout=60)
     if st != 200:
-        return []
+        return [], {"error": "HTTP %s" % st, "body": d}
     items = ((d.get("bm25") or {}).get("items")) or []
-    return [str(x.get("name") or "") for x in items]
+    return [str(x.get("name") or "") for x in items], (d.get("llm_rerank") or {})
 
 
 def auto_accept(base: str, q: str) -> Dict[str, Any]:
@@ -113,6 +116,9 @@ def main() -> int:
     ap.add_argument("--cases", default=CASES)
     ap.add_argument("--n", type=int, default=3)
     ap.add_argument("--auto", action="store_true", help="另测 /auto 接受率（会记账）")
+    ap.add_argument("--llm-rerank", action="store_true",
+                    help="开启免费模型重排（PT-20261022-13），并统计其延迟/成功率")
+    ap.add_argument("--llm-timeout", type=float, default=8.0)
     ap.add_argument("--verify-targets", action="store_true", help="只核对标签技能是否存在")
     ap.add_argument("--gate", action="store_true", help="rank1 低于阈值时退出码 1")
     args = ap.parse_args()
@@ -134,8 +140,24 @@ def main() -> int:
     print("%-34s %-3s %-30s %s" % ("query", "cat", "top1", "结果"))
     per_cat: Dict[str, Dict[str, Any]] = {}
     auto_stat = {"called": 0, "ok": 0, "right": 0, "wrong": 0}
+    rr_stat = {"called": 0, "ok": 0, "reordered": 0, "fixed": 0, "broke": 0, "ms": []}
     for c in cases:
-        names = relevant(args.base, c["q"], args.n)
+        names, rr = relevant(args.base, c["q"], args.n, args.llm_rerank, args.llm_timeout)
+        if args.llm_rerank:
+            base_names, _ = relevant(args.base, c["q"], args.n, False)
+            rr_stat["called"] += 1
+            if rr.get("ok"):
+                rr_stat["ok"] += 1
+                rr_stat["ms"].append(int(rr.get("ms") or 0))
+                if rr.get("reordered"):
+                    rr_stat["reordered"] += 1
+                    was = bool(base_names) and base_names[0] in (c["target"],) or (
+                        base_names and base_names[0] in c["siblings"])
+                    now = bool(names) and (names[0] == c["target"] or names[0] in c["siblings"])
+                    if now and not was:
+                        rr_stat["fixed"] += 1
+                    elif was and not now:
+                        rr_stat["broke"] += 1
         top1 = names[0] if names else "(空)"
         rank = 0
         for i, nm in enumerate(names, 1):
@@ -169,6 +191,8 @@ def main() -> int:
             s["mrr"] += 1.0 / rank
             if sibling:
                 s["sib"] += 1
+        if args.llm_rerank and rr_stat["called"]:
+            pass
         if args.auto:
             a = auto_accept(args.base, c["q"])
             auto_stat["called"] += 1
@@ -196,11 +220,22 @@ def main() -> int:
               % ("D+P+S", tot["n"], 100.0 * tot["rank1"] / tot["n"],
                  100.0 * tot["hit3"] / tot["n"], tot["mrr"] / tot["n"]))
         print("\n可达上限口径 = D+P+S（X 单列，不计入）")
+        if args.llm_rerank and rr_stat["called"]:
+            pass
         if args.auto:
             print("/auto：调用 %d，接受 %d（%.0f%%），其中选对 %d、选错 %d"
                   % (auto_stat["called"], auto_stat["ok"],
                      100.0 * auto_stat["ok"] / max(1, auto_stat["called"]),
                      auto_stat["right"], auto_stat["wrong"]))
+        if args.llm_rerank and rr_stat["called"]:
+            ms = sorted(rr_stat["ms"])
+            p50 = ms[len(ms) // 2] if ms else 0
+            p95 = ms[min(len(ms) - 1, int(len(ms) * 0.95))] if ms else 0
+            print("/llm_rerank：调用 %d，成功 %d（%.0f%%），触发重排 %d，"
+                  "修正 %d，弄坏 %d，延迟 p50 %dms / p95 %dms"
+                  % (rr_stat["called"], rr_stat["ok"],
+                     100.0 * rr_stat["ok"] / max(1, rr_stat["called"]),
+                     rr_stat["reordered"], rr_stat["fixed"], rr_stat["broke"], p50, p95))
         if args.gate:
             got = tot["rank1"] / tot["n"]
             ok = got >= GATE_RANK1

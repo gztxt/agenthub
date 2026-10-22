@@ -139,6 +139,22 @@ def _llm_breaker_key() -> str:
     return resilience.breaker_key(BASE_URL, "llm")
 
 
+def breaker_state() -> Dict[str, Any]:
+    """只读暴露 LLM 通道的熔断状态（供调用方**如实报**「现在是被熔断挡住的」）。
+
+    为什么要有它：`complete_free()` 在熔断打开时会静默返回 `("", "")` —— 那与
+    「模型返回空正文」长得一模一样。2026-10-22 实测踩到：skill 重排只看返回空串，
+    误判成「模型不给 JSON」，真相是**上游熔断中**（`CancelledError` 触发的）。
+    判据必须能分开这两件事（同族：`jev_client.status()` 的 `enabled` ≠ 可用）。
+    """
+    try:
+        key = _llm_breaker_key()
+        return {"key": key, "state": resilience.instance.state_of(key),
+                "cooldown_s": resilience.instance.cooldown_remaining_s(key)}
+    except Exception as e:  # noqa: BLE001 —— 状态查询失败不许带倒调用方
+        return {"error": "%s: %s" % (type(e).__name__, e)}
+
+
 # v0.5.4 sub-α Fix 1：Nemotron/FCC 走 Anthropic-compatible 协议时，模型把 tool_call
 # 当 text 块直出 raw XML（<tool_call><function=...><parameter>...</parameter></tool_call>）。
 # 这里把这种块整段剥掉，避免污染 answer 字段。

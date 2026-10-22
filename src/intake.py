@@ -20,12 +20,28 @@ agent 接到任务后**没有任何一个动作**要求它把这四样都过一�
    "为什么查了"（manual / trigger:<词>）。
 3. 简报只给**线索**（片段 + 出处），不是结论。引用前必须回原文 —— 本机既有判例里
    已有多次"照着摘要写错"的事故。
+
+【整理/分析/评估（2026-10-22 二次迭代）】
+四条检索原样堆在一起有两个毛病：跨路重复（记忆的 `tdai_l1` 与知识库 `tdai` 是同一批条目）、
+以及**弱命中与强命中同权呈现**。这里加一层纯词面的整理：
+
+- **去重**：按正文归一化指纹跨路合并，后面那路记 `dup_of` 只留计数；
+- **定级**：任务词元（CJK 二元组 + 拉丁词）在条目里的覆盖率 ⇒ `直接 / 相关 / 弱`，
+  弱相关折叠进「噪声 N 条」而不再占屏；
+- **提炼**：把带「必须/禁止/不要/一律/不得…」的命中抽成**开工前约束**，把知识库路径抽成
+  **需要回读的原文**，其余归入可复用资产；
+- **评估**：`verdict` 只有三档 —— `ready`（有可用线索）/ `thin`（四路都通但无线索）/
+  `degraded`（有路挂了）。三档互斥，避免把"查到了但没用"说成"没资料"。
+
+⚠️ 定级是**词面重合**，不是语义判断：`弱` 不等于"无关"，只是"没有共同用词"。
+所以弱命中只是折叠、不丢弃（总数与 `noise` 计数都留在简报里）。
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -51,10 +67,172 @@ TIMEOUT_S = 12.0
 # 接单阶段把预算烧在这里，用户看到的就是"卡了几秒然后给了一堆不相关文件"。
 FAST_KB_ROUTES = "tdai,xerj"
 
+ROUTE_LABEL = {"memory": "记忆", "kb": "知识库", "skill": "技能", "ref": "参考库"}
+
 #: 命中这些词 ⇒ 任务属于"要动手做/要比对"，参考库值一查。只做**词面**判定，
 # 不调模型：接单这一步不该再引入一个不确定延迟。
 DEEP_TRIGGERS = ("新增", "实现", "选型", "对比", "对标", "参考实现", "重构",
                  "架构", "设计", "迁移", "接入", "替换", "性能")
+
+#: 做词面重合判定时剔除的虚词／高频字（只影响"相关度"标注，**不影响任何检索**）。
+_STOP = set("的了是在和与及或就都而这那有为对把被从到会可要我们你他她它个些没不很更最")
+
+#: 命中即视为"开工前约束"的语气词。抽出来单列，是因为这些句子就是**执行判据**，
+#: 混在十条摘要里最容易被跳过，而跳过的代价正是"照摘要写错"。
+_RULE_WORDS = ("必须", "禁止", "不得", "不要", "一律", "只能", "先用", "先读", "先查",
+               "务必", "严禁", "不许", "不能", "应当", "须先")
+
+#: 覆盖率 → 定级阈值。**刻意宽松**：弱相关只折叠不丢弃，宁可多列也不假装精确。
+REL_STRONG, REL_WEAK = 0.5, 0.25
+
+
+def _tokens(text: str) -> set:
+    """任务词元：CJK 二元组 + 长度 ≥3 的拉丁词/标识符（小写）。
+
+    为什么用二元组：本机检索本身是词法的（BM25），用同一量纲估"这条命中到底沾不沾边"
+    才是可比的；换成 embedding 会把"看起来相关"和"检索命中"混成一个数。
+    """
+    t = (text or "").lower()
+    out = set(re.findall(r"[a-z0-9_][a-z0-9_.\-]{2,}", t))
+    for run in re.findall(r"[\u4e00-\u9fff]+", t):
+        for i in range(len(run) - 1):
+            bg = run[i:i + 2]
+            if bg[0] in _STOP or bg[1] in _STOP:
+                continue
+            out.add(bg)
+    return out
+
+
+def _coverage(text: str, toks: set) -> float:
+    """任务词元在条目里的覆盖率；**分母封顶 6**。
+
+    为什么封顶：长任务（十几二十个词元）会把 2~3 个真实命中稀释成 0.1，导致"明明沾边"
+    被判成弱命中后折叠掉。分母封顶等价于"超过 6 个词元就不再要求全中"，
+    与检索侧 BM25 的饱和直觉一致，且不需要语料统计。
+    """
+    if not toks:
+        return 0.0
+    low = (text or "").lower()
+    hit = sum(1 for t in toks if t in low)
+    return hit / min(len(toks), 6)
+
+
+def _rel(text: str, toks: set) -> str:
+    c = _coverage(text, toks)
+    if c >= REL_STRONG:
+        return "直接"
+    if c >= REL_WEAK:
+        return "相关"
+    return "弱"
+
+
+def _sig(text: str) -> str:
+    """去重指纹：去掉全部非文字字符后取前 60 字。
+
+    跨路重复的形态是**同一条正文**（tdai 在记忆与知识库各出一份），只是 source 不同；
+    按"来源+路径"去重抓不到它，按正文才抓得到。
+    """
+    return re.sub(r"\W+", "", (text or ""))[:60]
+
+
+def _flatten(task: str, res: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """把四路的命中摊平成同一种行：{route, text, rel, src, path, ...}，并按指纹去重。"""
+    toks = _tokens(task)
+    rows: List[Dict[str, Any]] = []
+    seen: Dict[str, Dict[str, Any]] = {}
+    for it in (res.get("memory") or {}).get("items") or []:
+        text = it.get("content") or ""
+        rows.append({"route": "记忆", "text": text, "rel": _rel(text, toks),
+                     "src": it.get("layer") or it.get("source") or "?",
+                     "path": "", "dup_of": ""})
+    for it in (res.get("kb") or {}).get("items") or []:
+        text = it.get("content") or it.get("title") or ""
+        rows.append({"route": "知识库", "text": text, "rel": _rel(text, toks),
+                     "src": it.get("source") or "?", "path": it.get("path") or "",
+                     "title": it.get("title") or "", "dup_of": ""})
+    for r in rows:
+        sig = _sig(r["text"])
+        if not sig:
+            continue
+        if sig in seen:
+            r["dup_of"] = f'{seen[sig]["route"]}:{seen[sig]["src"]}'
+        else:
+            seen[sig] = r
+    return rows
+
+
+def _constraints(rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """把带强语气的命中抽成"开工前约束"。只收 `直接/相关` —— 弱命中里的语气词多半是噪声。"""
+    out: List[Dict[str, str]] = []
+    for r in rows:
+        if r["dup_of"] or r["rel"] == "弱":
+            continue
+        if any(w in r["text"] for w in _RULE_WORDS):
+            out.append({"text": r["text"][:200], "src": f'{r["route"]}/{r["src"]}',
+                        "path": r["path"]})
+        if len(out) >= 5:
+            break
+    return out
+
+
+def _must_read(rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """需要回读的原文：有路径、且不是弱命中。同一路径只留第一条（命中可能多段）。"""
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for r in rows:
+        if not r["path"] or r["dup_of"] or r["rel"] == "弱":
+            continue
+        if r["path"] in seen:
+            continue
+        seen.add(r["path"])
+        # XERJ 的 highlight 段常常是文件头 front matter（`--- type: concept t<em>i</em>tle:`），
+        # 对"为什么要读"零信息量；有标题就用标题，没有才退回正文首段。
+        why = (r.get("title") or r["text"] or "").strip()[:100]
+        out.append({"path": r["path"], "why": why})
+        if len(out) >= 4:
+            break
+    return out
+
+
+def assess(task: str, res: Dict[str, Any]) -> Dict[str, Any]:
+    """整理 + 评估：返回 `{verdict, coverage, rows, noise, dups, constraints, must_read, gaps}`。
+
+    `verdict` 三档互斥：`degraded`（有路挂）> `thin`（四路都通但无线索）> `ready`。
+    """
+    rows = _flatten(task, res)
+    live = [r for r in rows if not r["dup_of"]]
+    useful = [r for r in live if r["rel"] in ("直接", "相关")]
+
+    m, k = res.get("memory") or {}, res.get("kb") or {}
+    s, rf = res.get("skill") or {}, res.get("ref") or {}
+    ref_state = ("skipped" if res.get("deep_reason") == "off"
+                 else "hit" if rf.get("ok") else "down")
+    route_state = {
+        "memory": "hit" if m.get("count") else ("down" if not m.get("ok") else "zero"),
+        "kb": "hit" if k.get("count") else ("down" if not k.get("ok") else "zero"),
+        "skill": "hit" if s.get("ok") else ("down" if s.get("error") else "zero"),
+        "ref": ref_state,
+    }
+    downs = [n for n, v in route_state.items() if v == "down"]
+    gaps: List[str] = []
+    if downs:
+        gaps.append("以下路**不可用**（不是 0 命中）：" + "、".join(ROUTE_LABEL[d] for d in downs))
+    for name in ("memory", "kb"):
+        if route_state[name] == "zero":
+            gaps.append(ROUTE_LABEL[name] + " 0 命中")
+    if not useful and not downs:
+        gaps.append("四路都通但**没有一条与任务词面重合** ⇒ 需要换词重查或直接问用户")
+    if not gaps:
+        gaps.append("四路均通，且至少有一条可直接引用的线索")
+    verdict = "degraded" if downs else ("ready" if useful else "thin")
+    return {
+        "task": task, "verdict": verdict, "routes": route_state,
+        "rows": rows, "useful": len(useful), "noise": len(live) - len(useful),
+        "dups": len(rows) - len(live),
+        "constraints": _constraints(live), "must_read": _must_read(live), "gaps": gaps,
+        "coverage": f'{sum(1 for v in route_state.values() if v != "skipped")}/4',
+    }
+
 
 
 class IntakeIn(BaseModel):
@@ -110,12 +288,18 @@ def _kb(task: str, routes: str, k: int = 6) -> Dict[str, Any]:
     d = _self_get("/api/kb/search", q=task, k=k, routes=routes)
     if "error" in d:
         return {"ok": False, "count": 0, "items": [], "error": d["error"]}
-    return {"ok": True, "count": int(d.get("count") or 0),
-            "items": [{"source": r.get("source"), "path": r.get("path"),
-                       "category": r.get("category") or r.get("type"),
-                       "content": (r.get("content") or r.get("preview") or "")[:280],
-                       "score": r.get("score")}
-                      for r in (d.get("results") or [])[:k]],
+    items = []
+    for r in (d.get("results") or [])[:k]:
+        # XERJ 的 content 来自 highlight：**只在正文字段命中时才有**，纯标题命中会是空串
+        # （旧版简报因此打出「wiki/x.md：」这种空行）。退回标题并显式标注，别留空。
+        body = (r.get("content") or r.get("preview") or "").strip()
+        body = re.sub(r"</?em>", "", body)   # XERJ highlight 标签，不是内容
+        title = (r.get("title") or "").strip()
+        items.append({"source": r.get("source"), "path": r.get("path"), "title": title,
+                      "category": r.get("category") or r.get("type"),
+                      "content": body or (f"（仅标题命中：{title}）" if title else "（无摘要）"),
+                      "score": r.get("score")})
+    return {"ok": True, "count": int(d.get("count") or 0), "items": items,
             "degraded": d.get("degraded") or [], "took_ms": d.get("took_ms")}
 
 
@@ -179,59 +363,119 @@ def _ref(task: str, wait_s: int, lang: str) -> Dict[str, Any]:
 
 
 def brief_md(task: str, res: Dict[str, Any]) -> str:
+    plan = res.get("plan") or assess(task, res)
+    m, k, s, r = res["memory"], res["kb"], res["skill"], res["ref"]
+    why = res["deep_reason"]
+    verdict_cn = {"ready": "可用", "thin": "线索不足", "degraded": "有路不可用"}[plan["verdict"]]
     out = [f"# 接单前置简报：{task}", "",
            f"- as of：{res['as_of']}　用时：{res['elapsed_s']}s　调用方：{res['caller'] or '—'}",
-           "- ⚠️ 本简报只给**线索与出处**，不是结论；引用前回原文核对。", ""]
-    m = res["memory"]
+           f"- 已查 {plan['coverage']} 路　判定 **{plan['verdict']}**（{verdict_cn}）"
+           f"　可直接引用 {plan['useful']} 条／折叠弱命中 {plan['noise']} 条"
+           f"／跨路重复 {plan['dups']} 条",
+           "- ⚠️ 本简报只给**线索与出处**，不是结论；引用前回原文核对。", "",
+           "## 0. 开工前先看", ""]
+    step: List[str] = []
+    for c in plan["constraints"][:3]:
+        step.append(f"- **约束**（{c['src']}）：{c['text']}")
+    for x in plan["must_read"][:2]:
+        step.append(f"- **回读**：`{x['path']}` —— {x['why']}")
+    if s.get("ok"):
+        step.append(f"- **技能**：`{s.get('name')}` ⇒ {s.get('how_to_get')}")
+    if r.get("ok") and r.get("rows"):
+        x = r["rows"][0]
+        step.append(f"- **参考实现**：[{x['repo']}](https://github.com/{x['repo']}) "
+                    f"★{x['stars']}（卡 `{r['card_id']}`）")
+    out += step or ["- ⚠️ **本次没有可直接照做的线索** —— 看 §5 的缺口，换词重查或直接问用户。"]
+    out.append("")
+
+    # ── §1 四路盘点：先把"哪一路是什么状态"摆清楚，再谈内容 ──
+    def _cell(name: str) -> tuple:
+        if name == "memory":
+            st = "命中" if m.get("count") else ("不可用" if not m.get("ok") else "0 命中")
+            note = "、".join(m.get("degraded") or [])
+            return st, m.get("count") or 0, note or "—"
+        if name == "kb":
+            st = "命中" if k.get("count") else ("不可用" if not k.get("ok") else "0 命中")
+            note = "、".join(k.get("degraded") or [])
+            return st, k.get("count") or 0, note or "—"
+        if name == "skill":
+            st = "命中" if s.get("ok") else ("不可用" if s.get("error") else "未命中")
+            return st, 1 if s.get("ok") else 0, (s.get("reason") or s.get("error") or "—")
+        if why == "off":
+            return "未查", 0, "deep=off"
+        return ("命中" if r.get("ok") else "未完成"), len(r.get("rows") or []), why
+
+    out += ["## 1. 四路盘点", "", "| 路 | 状态 | 命中 | 与任务沾边 | 备注 |",
+            "|---|---|---|---|---|"]
+    for key in ("memory", "kb", "skill", "ref"):
+        st, n, note = _cell(key)
+        useful = len([x for x in plan["rows"] if x["route"] ==
+                      {"memory": "记忆", "kb": "知识库"}.get(key) and x["rel"] != "弱"])
+        out.append(f"| {ROUTE_LABEL[key]} | {st} | {n} | {useful if key in ('memory', 'kb') else '—'} "
+                   f"| {note} |")
     if not m.get("ok"):
-        out.append(f"## 1. 记忆：⚠️ 检索不可用（{m.get('error')}）")
-    else:
-        deg = f"　降级：{'、'.join(m['degraded'])}" if m.get("degraded") else ""
-        out.append(f"## 1. 记忆：{m['count']} 条{deg}")
-        if not m["count"]:
-            out.append("- **0 命中**（不是「没有记忆」，而是这一组源里没匹配；"
-                       "要扩大范围请加 mem_sources）")
-        for it in m["items"]:
-            out.append(f"- [{it.get('layer') or '?'}/{it.get('source') or '?'}] "
-                       f"{it['content']}")
-    out.append("")
-    k = res["kb"]
+        out.append(f"\n> 记忆：检索不可用（{m.get('error')}）—— 这不等于「本机没记过」。")
     if not k.get("ok"):
-        out.append(f"## 2. 知识库：⚠️ 检索不可用（{k.get('error')}）")
-    else:
-        deg = f"　降级：{'、'.join(k['degraded'])}" if k.get("degraded") else ""
-        out.append(f"## 2. 知识库：{k['count']} 条{deg}")
-        if not k["count"]:
-            out.append("- **0 命中**（同理，先看 degraded 再下「没有资料」的结论）")
-        for it in k["items"]:
-            src = it.get("path") or it.get("source") or "?"
-            out.append(f"- {src}：{it['content']}")
+        out.append(f"\n> 知识库：检索不可用（{k.get('error')}）—— 同理。")
+    if m.get("ok") and not m.get("count"):
+        out.append("\n> 记忆 **0 命中**（不是「没有记忆」，是这一组源里没匹配；要扩源加 mem_sources）。")
+    if k.get("ok") and not k.get("count"):
+        out.append("\n> 知识库 **0 命中**（先看备注里的降级项，再下「没有资料」的结论）。")
     out.append("")
-    s = res["skill"]
+
+    out.append(f"## 2. 可直接照做的约束（{len(plan['constraints'])} 条）")
+    out += [f"- （{c['src']}）{c['text']}" for c in plan["constraints"]] or \
+           ["- 本次命中里没有「必须/禁止/不要…」类判据。"]
+    out.append("")
+
+    out.append(f"## 3. 需要回读的原文（{len(plan['must_read'])} 条）")
+    out += [f"- `{x['path']}` —— {x['why']}" for x in plan["must_read"]] or \
+           ["- 无（知识库里没有与任务词面沾边的路径命中）"]
+    out.append("")
+
+    out.append(f"## 4. 命中明细（按正文去重；弱相关 {plan['noise']} 条已折叠、"
+               f"重复 {plan['dups']} 条只留计数）")
+    for route, items in (("记忆", [x for x in plan["rows"] if x["route"] == "记忆"]),
+                         ("知识库", [x for x in plan["rows"] if x["route"] == "知识库"])):
+        shown = [x for x in items if not x["dup_of"] and x["rel"] != "弱"]
+        out.append(f"### {route}：{len(items)} 条命中／{len(shown)} 条列出")
+        for x in shown:
+            head = f"{x['path']}［{x['rel']}］" if x["path"] else \
+                   f"[{x.get('src')}·{x['rel']}]"
+            out.append(f"- {head}：{x['text']}")
+        if not shown:
+            out.append("- （无可列条目）")
+    out.append("")
+
+    out.append("## 5. 技能与参考库")
     if s.get("error"):
-        out.append(f"## 3. 技能：⚠️ 检索不可用（{s['error']}）")
+        out.append(f"- 技能：⚠️ 检索不可用（{s['error']}）")
     elif not s.get("ok"):
-        out.append(f"## 3. 技能：未命中（{s.get('reason') or s.get('error') or '—'}）")
+        out.append(f"- 技能：未命中（{s.get('reason') or '—'}）；"
+                   f"换任务描述用词，或 hub_list_skills(...) 人工挑")
     else:
-        out.append(f"## 3. 技能：`{s.get('name')}`（{s.get('route')}，"
-                   f"命中 {s.get('matched')} @ {s.get('matched_in')}）")
-        out.append(f"- 取正文：{s.get('how_to_get')}")
-    out.append("")
-    r = res["ref"]
-    why = res["deep_reason"]
+        out.append(f"- 技能：`{s.get('name')}`（{s.get('route')}，"
+                   f"命中 {s.get('matched')} @ {s.get('matched_in')}）⇒ {s.get('how_to_get')}")
     if why == "off":
-        out.append("## 4. 参考库：未查（deep=off；要查请传 deep=true）")
+        out.append("- 参考库：未查（deep=off；要查请传 deep=true）")
     elif not r.get("ok"):
-        out.append(f"## 4. 参考库：⚠️ 未完成（{why}／{r.get('error') or '无结果'}）")
+        out.append(f"- 参考库：⚠️ 未完成（{why}／{r.get('error') or '无结果'}）")
     else:
         note = "" if r.get("status") == "done" else "（未等到重排，先给词法卡）"
-        out.append(f"## 4. 参考库：卡 `{r['card_id']}`　状态 {r.get('status')}"
+        out.append(f"- 参考库：卡 `{r['card_id']}`　状态 {r.get('status')}"
                    f"　查询原因 {why}{note}")
         for x in r["rows"]:
-            out.append(f"- [{x['repo']}](https://github.com/{x['repo']}) ★{x['stars']} "
+            out.append(f"  - [{x['repo']}](https://github.com/{x['repo']}) ★{x['stars']} "
                        f"功能{x['func']}／实现{x['impl']} 判定{x.get('judge') or '—'}"
                        + (f"：{x['gist']}" if x.get("gist") else ""))
-        out.append(f"- 看全卡：`hub_ref_get(card_id=\"{r['card_id']}\")`")
+        out.append(f"  - 看全卡：`hub_ref_get(card_id=\"{r['card_id']}\")`")
+    out.append("")
+
+    out.append("## 6. 缺口与口径")
+    out += [f"- {g}" for g in plan["gaps"]]
+    out.append("- 定级是**词面重合**（CJK 二元组 + 拉丁词），不是语义判断；"
+               "`弱` 只是「没有共同用词」，不代表无关。")
+    out.append("- `count=0` 与「那一路挂了」是两件事：前者换词/扩源，后者去修服务。")
     return "\n".join(out) + "\n"
 
 
@@ -269,11 +513,16 @@ async def run(inp: IntakeIn) -> Dict[str, Any]:
         "elapsed_s": round(time.monotonic() - t0, 1),
         "memory": mem, "kb": kb, "skill": skill, "ref": ref,
     }
+    res["plan"] = assess(task, res)
     res["brief"] = brief_md(task, res)
     return res
 
 
 @router.post("/task")
 async def api_intake(body: IntakeIn):
-    """四查一简报。返回结构化四段 + `brief`（markdown，可直接贴进对话）。"""
+    """四查 + 整理 + 评估 ⇒ 一份简报。
+
+    返回 `memory/kb/skill/ref` 四段原始命中、`plan`（verdict/覆盖率/约束/回读清单/缺口）
+    与 `brief`（markdown，可直接贴进对话）。
+    """
     return await run(body)

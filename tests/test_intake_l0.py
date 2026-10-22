@@ -136,5 +136,101 @@ class TestRunComposition(unittest.TestCase):
         self.assertEqual(res["deep_reason"], "off")
 
 
+class TestAssess(unittest.TestCase):
+    """整理层：去重、定级、提炼、评估 —— 都是纯词面的，**不许调模型**。"""
+
+    TASK = "改共享配置前先备份"
+
+    def _res(self, mem_items=(), kb_items=(), mem_ok=True):
+        return {
+            "task": self.TASK, "deep_reason": "off", "caller": "", "as_of": "x",
+            "elapsed_s": 0.1,
+            "memory": {"ok": mem_ok, "count": len(mem_items),
+                       "items": list(mem_items),
+                       "error": "" if mem_ok else "timed out"},
+            "kb": {"ok": True, "count": len(kb_items), "items": list(kb_items)},
+            "skill": {"ok": False, "reason": "no local skill matched"},
+            "ref": {"ok": False, "error": "未查"},
+        }
+
+    def test_cross_route_dedup(self):
+        text = "改共享配置前必须先备份，并核对 diff"
+        res = self._res(
+            mem_items=[{"layer": "L1", "source": "tdai_l1", "content": text}],
+            kb_items=[{"source": "tdai_l1", "path": "", "content": text}])
+        plan = intake.assess(self.TASK, res)
+        self.assertEqual(plan["dups"], 1, "同一正文跨路出现必须只算一次")
+        self.assertIn("跨路重复 1 条", intake.brief_md(self.TASK, res))
+
+    def test_weak_hits_folded_but_counted(self):
+        res = self._res(mem_items=[{"layer": "L1", "source": "tdai_l1",
+                                    "content": "把周报模板换成深色主题"}])
+        plan = intake.assess(self.TASK, res)
+        self.assertEqual(plan["noise"], 1)
+        self.assertEqual(plan["verdict"], "thin")
+        md = intake.brief_md(self.TASK, res)
+        self.assertIn("折叠弱命中 1 条", md)
+        self.assertNotIn("深色主题", md, "弱命中只折叠、不逐条占屏")
+
+    def test_constraint_extracted_from_hit(self):
+        res = self._res(mem_items=[{"layer": "L1", "source": "local",
+                                    "content": "改共享配置前必须先备份，禁止 sed -i"}])
+        plan = intake.assess(self.TASK, res)
+        self.assertEqual(len(plan["constraints"]), 1)
+        self.assertIn("禁止 sed -i", plan["constraints"][0]["text"])
+        self.assertIn("## 0. 开工前先看", intake.brief_md(self.TASK, res))
+
+    def test_must_read_from_kb_path(self):
+        res = self._res(kb_items=[{"source": "xerj", "path": "wiki/备份细则.md",
+                                   "content": "改共享配置前先备份"}])
+        plan = intake.assess(self.TASK, res)
+        self.assertEqual(plan["must_read"][0]["path"], "wiki/备份细则.md")
+        self.assertIn("`wiki/备份细则.md`", intake.brief_md(self.TASK, res))
+
+    def test_verdict_degraded_beats_thin(self):
+        res = self._res(mem_ok=False)
+        plan = intake.assess(self.TASK, res)
+        self.assertEqual(plan["verdict"], "degraded")
+        self.assertTrue(any("记忆" in g and "不可用" in g for g in plan["gaps"]))
+        self.assertIn("不可用（timed out）", intake.brief_md(self.TASK, res))
+
+    def test_verdict_ready_when_useful(self):
+        res = self._res(mem_items=[{"layer": "L1", "source": "local",
+                                    "content": "改共享配置前必须先备份"}])
+        self.assertEqual(intake.assess(self.TASK, res)["verdict"], "ready")
+
+    def test_tokens_have_no_stopword_bigrams(self):
+        toks = intake._tokens("备份的配置文件")
+        self.assertIn("备份", toks)
+        self.assertFalse(any(t[0] in intake._STOP or t[1] in intake._STOP for t in toks),
+                         "虚词参与的二元组不该计入覆盖率分母")
+
+
+class TestKbEmptyContent(unittest.TestCase):
+    """XERJ 只命中标题时 highlight 为空 —— 简报不许打出「path：」空行。"""
+
+    def test_title_fallback(self):
+        old = intake._self_get
+        intake._self_get = lambda *a, **k: {"count": 1, "results": [
+            {"source": "xerj", "path": "wiki/x.md", "title": "备份细则",
+             "content": "", "score": 1.0}]}
+        try:
+            got = intake._kb("备份", "xerj")
+        finally:
+            intake._self_get = old
+        self.assertEqual(got["items"][0]["content"], "（仅标题命中：备份细则）")
+
+    def test_highlight_tags_stripped(self):
+        old = intake._self_get
+        intake._self_get = lambda *a, **k: {"count": 1, "results": [
+            {"source": "xerj", "path": "wiki/x.md", "title": "t",
+             "content": "改<em>i</em>前先备份", "score": 1.0}]}
+        try:
+            got = intake._kb("备份", "xerj")
+        finally:
+            intake._self_get = old
+        self.assertNotIn("<em>", got["items"][0]["content"])
+
+
 if __name__ == "__main__":
     unittest.main()

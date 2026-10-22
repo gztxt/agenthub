@@ -512,11 +512,13 @@ def hub_intake(task: str, deep: bool = False, auto_deep: bool = True,
     结果常见形态是「凭印象开工，出问题才回头翻」。本工具只做组合与呈现，不新增检索能力。
 
     读法（三条，缺一条就会把它误用成结论）：
-    - `memory.count=0` / `kb.count=0` **必须**同时看 `degraded`：0 命中与「那一路挂了」
+    - 先看 `verdict`：`ready`（有可用线索）/ `thin`（四路都通但无线索）/ `degraded`（有路挂了）。
+      后两者都不该直接开工：`thin` 换词重查，`degraded` 先修那一路。
+    - `counts` 只报条数，**`memory.count=0` 必须**同时看 `degraded`：0 命中与「那一路挂了」
       在简报里是两种写法，别把后者当成「本机没有相关资料」。
     - `skill` 只做**本地**匹配、不装新技能（接单阶段不该有写盘副作用）。命中后要用
       `hub_skill_invoke(name=...)` 取正文再照着做。
-    - `ref`（参考库）默认**不查**：单次 21.8~56.8s 且吃 GitHub 额度。任务命中
+    - `ref`（参考库）默认**不查**：单次 21.8~56.8s 吃 GitHub 额度。任务命中
       「新增/实现/选型/对标…」才自动升级，`deep_reason` 会写明原因；`deep=True` 强制查。
     简报只给线索与出处，**引用前回原文核对**。
 
@@ -528,9 +530,14 @@ def hub_intake(task: str, deep: bool = False, auto_deep: bool = True,
         return json.dumps(data, ensure_ascii=False)
     return json.dumps({
         "brief": data.get("brief"),
+        "verdict": (data.get("plan") or {}).get("verdict"),
+        "coverage": (data.get("plan") or {}).get("coverage"),
+        "gaps": (data.get("plan") or {}).get("gaps"),
         "counts": {"memory": (data.get("memory") or {}).get("count"),
                    "kb": (data.get("kb") or {}).get("count"),
-                   "skill": (data.get("skill") or {}).get("name") or None},
+                   "skill": (data.get("skill") or {}).get("name") or None,
+                   "useful": (data.get("plan") or {}).get("useful"),
+                   "noise": (data.get("plan") or {}).get("noise")},
         "deep_reason": data.get("deep_reason"),
         "card_id": (data.get("ref") or {}).get("card_id"),
         "elapsed_s": data.get("elapsed_s"),

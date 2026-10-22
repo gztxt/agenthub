@@ -374,6 +374,89 @@ class TestKbEmptyContent(unittest.TestCase):
             intake._self_get = old
         self.assertNotIn("<em>", got["items"][0]["content"])
 
+    def test_half_frontmatter_stripped(self):
+        """highlight 从词中截断时，`---` 之前的半截 front matter 必须剥掉。
+
+        实测样本（2026-10-22，`服务改名残留排查清单`）：
+        `ated: 2026-10-18 updated: 2026-10-18 status: proposed tags: - distilled … --- # 标题 > 正文`
+        """
+        raw = ('ated: 2026-10-18 updated: 2026-10-18 status: proposed tags: - distilled '
+               '- concept related_pending: - "agenthub.service" --- # 服务改名残留排查清单 '
+               '> 改名后需按6类位置系统排查残留')
+        body = intake._body(raw)
+        self.assertTrue(body.startswith("# 服务改名残留排查清单"), body)
+        self.assertNotIn("related_pending", body)
+        self.assertNotIn("ated:", body)
+
+    def test_body_keeps_divider_when_not_frontmatter(self):
+        """正文里的 `---` 分隔线不是 front matter，别把前半段切掉。"""
+        raw = "先备份再改 —— 这是判据 --- 下面是例子"
+        self.assertEqual(intake._body(raw), raw)
+
+    def test_provenance_footer_not_scored(self):
+        """出处尾注是**引用来源**，不参与评分（否则回声：简报→卡片→尾注里的原查询）。
+
+        实测（2026-10-22）：「解释日志里的 502」命中的 3 张卡全是讲这次检索本身的，
+        因为尾注写着 `intake/2026-10-22_101626-解释一下这次日志里的-502-来自哪里.md`。
+        """
+        footer = ("--- *提炼自会话 `intake/2026-10-22_101626-解释一下这次日志里的-502-来自哪里.md`"
+                  "（2026-10-22）*")
+        body = intake._body("四路通但无词面重合视为缺口 " + footer)
+        self.assertNotIn("提炼自", body)
+        self.assertNotIn("502", body, "尾注里的原查询不该留在正文里参与评分")
+
+        res = {"task": "解释日志里的 502", "deep_reason": "off", "caller": "", "as_of": "x",
+               "elapsed_s": 0.1,
+               "memory": {"ok": True, "count": 0, "items": []},
+               "kb": {"ok": True, "count": 1, "items": [
+                   {"source": "xerj", "path": "wiki/concepts/无检索线索时的处理流程.md",
+                    "content": "四路通但无词面重合视为缺口 " + footer}]},
+               "skill": {"ok": False, "reason": "no local skill"},
+               "ref": {"ok": False, "error": "未查"}}
+        plan = intake.assess("解释日志里的 502", res)
+        self.assertNotEqual(plan["verdict"], "ready", "只靠尾注凑上的命中不许判 ready")
+
+
+class TestGradingEdges(unittest.TestCase):
+    """定级的两处实测反例：覆盖率 >1、单条「相关」判 ready。"""
+
+    TASK = "改共享配置前先备份"
+
+    def test_coverage_capped_at_one(self):
+        task = "MCP 工具调用超时怎么排查"
+        toks = intake._tokens(task)
+        self.assertGreater(len(toks), 6, "该查询词元 >6，才可能触发分母封顶")
+        cov = intake._coverage(task, toks)      # 自己和自己比，命中率必为 100%
+        self.assertEqual(cov, 1.0, "覆盖率是比例，封顶 1.0；旧实现算出 10/6=1.67")
+
+    def test_related_only_is_thin(self):
+        res = {"task": self.TASK, "deep_reason": "off", "caller": "", "as_of": "x",
+               "elapsed_s": 0.1,
+               "memory": {"ok": True, "count": 1, "items": [
+                   {"layer": "L1", "source": "tdai_l1", "content": "备份与配置的关系说明"}]},
+               "kb": {"ok": True, "count": 0, "items": []},
+               "skill": {"ok": False, "reason": "no local skill"},
+               "ref": {"ok": False, "error": "未查"}}
+        plan = intake.assess(self.TASK, res)
+        self.assertEqual(plan["rows"][0]["rel"], "相关", "构造：只命中 2 个词元")
+        self.assertEqual(plan["verdict"], "thin", "只有相关命中不配 ready")
+        self.assertEqual(plan["strong"], 0)
+        self.assertTrue(any("无直接命中" in g for g in plan["gaps"]))
+        self.assertIn("直接 0 条／相关 1 条", intake.brief_md(self.TASK, res))
+
+    def test_ledger_doc_not_counted_as_clue(self):
+        res = {"task": self.TASK, "deep_reason": "off", "caller": "", "as_of": "x",
+               "elapsed_s": 0.1,
+               "memory": {"ok": True, "count": 0, "items": []},
+               "kb": {"ok": True, "count": 1, "items": [
+                   {"source": "xerj", "path": "项目详细清单.md",
+                    "content": "改共享配置前先备份必须核对 diff"}]},
+               "skill": {"ok": False, "reason": "no local skill"},
+               "ref": {"ok": False, "error": "未查"}}
+        plan = intake.assess(self.TASK, res)
+        self.assertEqual(plan["meta"], 1)
+        self.assertEqual(plan["verdict"], "thin", "聚合清单页不算线索，不许顶成 ready")
+
 
 if __name__ == "__main__":
     unittest.main()

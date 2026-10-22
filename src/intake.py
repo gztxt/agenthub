@@ -106,7 +106,7 @@ _RULE_WORDS = ("必须", "禁止", "不得", "不要", "一律", "只能", "先�
 # （例如「查『解释日志里的 502』时记忆全不相关」），任务一进来就会**自我命中**，
 # 把 `thin` 顶成 `ready` ⇒ 外部升级被永久关掉。它们仍在明细里列出，只是不参与定级。
 META_DOCS = {"agents.md", "claude.md", "pending-tasks.md", "会话快照.md",
-             "memory.md", "index.md", "_index.md"}
+             "memory.md", "index.md", "_index.md", "项目详细清单.md"}
 
 #: 任务陈述里的"请求动作"词：对外部检索（技能商店 / GitHub）毫无信息量，
 #: 带着它们查会稀释成 0 命中（实测同一句：整句查 0 条，去掉后查到 `日志排查` 质量 0.78）。
@@ -163,7 +163,10 @@ def _coverage(text: str, toks: set) -> float:
         return 0.0
     low = (text or "").lower()
     hit = sum(1 for t in toks if t in low)
-    return hit / min(len(toks), 6)
+    # 分母封顶会让**分子**超过分母：10 个词元全中时算成 10/6=1.67（2026-10-22 实测
+    # 「MCP 工具调用超时怎么排查」两条 wiki 就是 1.67）。覆盖率是比例，封顶 1.0，
+    # 否则「相关 1.33」这种读数与排序都对不上。
+    return min(1.0, hit / min(len(toks), 6))
 
 
 def _rel(text: str, toks: set) -> str:
@@ -191,9 +194,27 @@ def _sig(text: str) -> str:
 _FM_RE = re.compile(r"\A\s*---\s+.*?\s---\s+", re.S)
 _TAG_RE = re.compile(r"</?em>")
 
+#: front matter 字段名。用来识别**半截** front matter：XERJ 的 highlight 从**词中**开始，
+# `created:` 被切掉前三个字符变成 `ated:`，于是 `\A---` 匹配不到，
+# `ated: 2026-10-18 updated: … tags: - distilled …` 整段被当成摘要写进简报（2026-10-22 实测）。
+# 判据两条同时成立才裁：① `---` 之前出现这些字段名；② `---` 之后还有正文。
+_FM_KEY_RE = re.compile(r"(?:created|updated|status|tags|type|title|related_\w+)\s*:", re.I)
+_FM_HEAD_RE = re.compile(r".*?\s---\s+", re.S)
+
+#: 同义卡的出处尾注（`*提炼自会话 \`intake/2026-10-22_101626-解释一下这次日志里的-502-来自哪里.md\`*`）。
+# 全站 4,413 张 wiki 卡都有，正文评分必须剔掉：它是**引用来源**，不是卡片内容。
+# 不剔会形成回声——简报被蒸馏成卡片，卡片尾注又写着当时那句查询，
+# 于是「解释日志里的 502」命中的全是**讲这次检索本身**的卡（2026-10-22 实测 3 条 cov=0.80）。
+_PROV_RE = re.compile(r"\*\s*提炼自[^*]*\*", re.S)
+
 
 def _body(text: str) -> str:
-    return _FM_RE.sub("", _TAG_RE.sub("", text or "")).strip()
+    t = _TAG_RE.sub("", text or "").strip()
+    t = _FM_RE.sub("", t)
+    m = _FM_HEAD_RE.match(t)
+    if m and _FM_KEY_RE.search(m.group(0)) and len(t) > m.end():
+        t = t[m.end():]
+    return _PROV_RE.sub("", t).strip()
 
 
 def _flatten(task: str, res: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -271,13 +292,16 @@ def _must_read(rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
 def assess(task: str, res: Dict[str, Any]) -> Dict[str, Any]:
     """整理 + 评估：返回 `{verdict, coverage, rows, noise, dups, constraints, must_read, gaps}`。
 
-    `verdict` 三档互斥：`degraded`（有路挂）> `thin`（四路都通但无线索）> `ready`。
+    `verdict` 三档互斥：`degraded`（有路挂）> `thin`（无**直接**命中）> `ready`。
+    注意 `thin` 的判据是「没有直接命中」而不是「没有相关命中」：0.25~0.5 的相关命中
+    噪声率太高（实测把「手机上怎么装 APP」判成过 ready），只能算线索偏弱。
     """
     rows = _flatten(task, res)
     live = [r for r in rows if not r["dup_of"]]
     # 规程/台账不算线索，但也不当噪声：它们单独计数并在明细里标出来（见 META_DOCS）。
     meta = [r for r in live if r.get("meta")]
     useful = [r for r in live if r["rel"] in ("直接", "相关") and not r.get("meta")]
+    strong = [r for r in useful if r["rel"] == "直接"]
 
     m, k = res.get("memory") or {}, res.get("kb") or {}
     s, rf = res.get("skill") or {}, res.get("ref") or {}
@@ -298,12 +322,18 @@ def assess(task: str, res: Dict[str, Any]) -> Dict[str, Any]:
             gaps.append(ROUTE_LABEL[name] + " 0 命中")
     if not useful and not downs:
         gaps.append("四路都通但**没有一条与任务词面重合** ⇒ 需要换词重查或直接问用户")
+    elif useful and not strong and not downs:
+        # 只有 0.25~0.5 的「相关」命中就判 ready，会把噪声当资料（2026-10-22 实测：
+        # 「解释日志里的 502」唯一命中是「无检索线索时的处理流程」0.33，「手机上怎么装 APP」
+        # 命中一条 0.33 的排队卡，都判了 ready）。ready 必须有一条**直接**命中撑住。
+        gaps.append("只有**相关**命中（无直接命中）⇒ 线索偏弱，先回原文确认，别据此认定「有资料」")
     if not gaps:
         gaps.append("四路均通，且至少有一条可直接引用的线索")
-    verdict = "degraded" if downs else ("ready" if useful else "thin")
+    verdict = "degraded" if downs else ("ready" if strong else "thin")
     return {
         "task": task, "verdict": verdict, "routes": route_state,
-        "rows": rows, "useful": len(useful), "noise": len(live) - len(useful) - len(meta),
+        "rows": rows, "useful": len(useful), "strong": len(strong),
+        "noise": len(live) - len(useful) - len(meta),
         "meta": len(meta), "dups": len(rows) - len(live),
         "constraints": _constraints(live), "must_read": _must_read(live), "gaps": gaps,
         "coverage": f'{sum(1 for v in route_state.values() if v != "skipped")}/4',
@@ -639,7 +669,8 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
     out = [f"# 接单前置简报：{task}", "",
            f"- as of：{res['as_of']}　用时：{res['elapsed_s']}s　调用方：{res['caller'] or '—'}",
            f"- 已查 {plan['coverage']} 路　判定 **{plan['verdict']}**（{verdict_cn}）"
-           f"　可直接引用 {plan['useful']} 条／折叠弱命中 {plan['noise']} 条"
+           f"　直接 {plan.get('strong', 0)} 条／相关 {plan['useful'] - plan.get('strong', 0)} 条"
+           f"／折叠弱命中 {plan['noise']} 条"
            f"／跨路重复 {plan['dups']} 条"
            + (f"／规程台账 {plan['meta']} 条（不计入线索）" if plan.get("meta") else ""),
            "- ⚠️ 本简报只给**线索与出处**，不是结论；引用前回原文核对。", "",

@@ -303,6 +303,9 @@ QUESTIONS = {
 #: 判据：451 之后在 `JEV_BLOCKED_COOLDOWN_S` 内**不再发请求**，并让 vitals 载荷
 #: 报出 `jev_blocked_s`（自证端点必须能说清「这一轮为什么没用 jev」）。
 JEV_BLOCKED_COOLDOWN_S = float(os.getenv("JEV_BLOCKED_COOLDOWN_S", "900"))
+#: 缓存里的 jev 结论多久算「还是本轮依据」。超时即降级显示为 rule（见 judge 的缓存分支）。
+#: 取 6h：vitals 的 sweep 周期是 900s，同一天内换证据就该重问；跨天必然过期。
+JEV_CACHE_FRESH_H = float(os.getenv("VITALS_JEV_CACHE_FRESH_H", "6"))
 _JEV_BLOCK = {"until": 0.0, "reason": ""}
 
 
@@ -553,6 +556,22 @@ class Vitals:
         if cached and not do_roundtrip:
             rec = dict(cached)
             rec.update(verdict=verdict, rule_verdict=verdict)
+            # 2026-10-22（用户问「jev 是否参与链路」时查出来的展示层假绿）：
+            # `by_sha` 缓存让同一份证据**永不重问 jev**，于是 30 天前的 `source=jev`
+            # 一直显示成「本轮 jev 判的」。实测 `data/vitals.json` 270 条里有
+            # jev 78 + jev-lowconf 99，最老 checked_at 是 2026-09-22（30.3 天前），
+            # 而 jev 自那时起已被区域封禁（HTTP 451）。
+            # 口径：**source 表示「本轮判定依据」**，不是「历史上曾用过什么」。
+            # 故缓存里的 jev 结论超过 `JEV_CACHE_FRESH_H` 小时就降级显示为 rule，
+            # 并把原值留在 `source_cached` / `cached_age_h` 供复核（不隐藏证据）。
+            if str(rec.get("source") or "").startswith("jev"):
+                age_h = (time.time() - float(rec.get("checked_at") or 0)) / 3600.0
+                if age_h > JEV_CACHE_FRESH_H:
+                    rec["source_cached"] = rec.get("source")
+                    rec["cached_age_h"] = round(age_h, 1)
+                    rec["source"] = "rule"
+                    rec["note"] = ("jev 结论来自 %.1f 天前缓存（本行判定依据是代码规则）"
+                                   % (age_h / 24.0))
         else:
             ans = ask_jev(ev) or {}
             err = ans.get("_error") if isinstance(ans, dict) else None

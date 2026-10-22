@@ -36,10 +36,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from typing import Any, Dict, List, Optional
 
+import judge_cache
 import llm
 
 #: 单次重排的候选上限。再多既没必要（recall@3 已 85%+）也更慢。
@@ -47,6 +49,11 @@ MAX_CANDIDATES = 5
 #: 默认超时（秒）。**不能用 2s**：实测免费池单次 2.5s 左右，2s 必然超时。
 #: 更严重的是「超时怎么实现」——见 `choose()` 里对 `asyncio.shield` 的注释。
 DEFAULT_TIMEOUT_S = 8.0
+#: 判定缓存的 TTL（秒）。默认 7 天：判定结论很稳，而**候选集指纹变了会自动失配**
+#: （改技能描述/增删技能 ⇒ 键变 ⇒ 重新判定），所以不需要靠短 TTL 保正确性。
+#: 这条缓存是为「同样问题不重复消耗」而加的：免费池 p50 3.2~3.7s、成功率 34~44%，
+#: 命中一次就把一次 3 秒且有 56~66% 概率失败的网络调用换成 0ms 必然成功。
+CACHE_TTL_S = float(os.getenv("SKILL_RERANK_CACHE_TTL", str(7 * 86400)))
 #: 摘要进 prompt 的截断长度：只给「这条技能是干什么的」，不给全文。
 _DESC_CHARS = 120
 
@@ -56,6 +63,7 @@ _DESC_CHARS = 120
 _STATS: Dict[str, Any] = {
     "calls": 0, "ok": 0, "timeout": 0, "breaker_open": 0, "bad_output": 0,
     "other_fail": 0, "reordered": 0, "ms_sum": 0, "ms_max": 0, "last_error": None,
+    "cache_hit": 0, "cache_miss": 0,
 }
 
 
@@ -74,6 +82,8 @@ def stats() -> Dict[str, Any]:
     attempted = max(0, int(st.get("calls") or 0))
     st["attempted"] = attempted
     st["ok_rate"] = round((st.get("ok") or 0) / attempted, 4) if attempted else None
+    # 缓存命中不计入「模型成功率」分母：命中是**没有调用模型**，混进去会把成功率虚高。
+    st["cache_hit_rate"] = round((st.get("cache_hit") or 0) / attempted, 4) if attempted else None
     st["ms_avg"] = int((st.get("ms_sum") or 0) / attempted) if attempted else None
     st["default_timeout_s"] = DEFAULT_TIMEOUT_S
     st["enabled_by_default"] = False
@@ -125,10 +135,14 @@ def _parse(text: str, candidates: List[Dict[str, Any]]) -> Optional[Dict[str, An
         pick = int(pick.strip())
     if not isinstance(pick, int):
         return None
-    if pick < 1 or pick > len(candidates):
+    # `0` 是**合法结论**（「都不适合」），不是解析失败：
+    # 首版把它当非法值 ⇒ 「都不适合」既不缓存也报成 bad_output，
+    # 同一问题每次都要再花 3 秒去得到同一句「不适合」。
+    if not isinstance(pick, int) or pick < 0 or pick > len(candidates):
         return None
     why = str(d.get("why") or "")[:80]
-    return {"pick": pick, "why": why, "name": candidates[pick - 1].get("name")}
+    return {"pick": pick, "why": why,
+            "name": (candidates[pick - 1].get("name") if pick >= 1 else None)}
 
 
 async def choose(query: str, candidates: List[Dict[str, Any]],
@@ -146,6 +160,15 @@ async def choose(query: str, candidates: List[Dict[str, Any]],
         out.update(error="候选不足 2 条，无需重排", ms=int((time.monotonic() - t0) * 1000))
         return out
     _bump("calls")
+    ck = judge_cache.key("skill_rerank", query, judge_cache.fingerprint(cands))
+    hit = judge_cache.get(ck)
+    if hit is not None:
+        out.update(ok=bool(hit.get("ok")), name=hit.get("name"), pick=hit.get("pick"),
+                   why=hit.get("why") or "", ms=0, model=str(hit.get("model") or ""),
+                   cached=True, cache_hits=int(hit.get("_cache_hits") or 0))
+        _bump("cache_hit")
+        return out
+    _bump("cache_miss")
     # 【2026-10-22 实测踩到的坑，必须写在这里】超时**不能直接 cancel 在途调用**：
     # `asyncio.wait_for(coro, 2.0)` 会取消协程，而 llm 侧的 `resilience` 把
     # `CancelledError` 记成一次失败 ⇒ 连续 3 次就把 **整条 LLM 通道的熔断器打开 30s**
@@ -191,10 +214,19 @@ async def choose(query: str, candidates: List[Dict[str, Any]],
     if parsed["pick"] == 0:
         out.update(error="模型判定「都不适合」", ms=int((time.monotonic() - t0) * 1000))
         _bump("bad_output", out["ms"], out["error"])
+        # 「都不适合」是**有结论**的判断（不是故障），同样缓存：
+        # 否则同一个问题每次都要再花 3 秒去得到同一个「不适合」。
+        judge_cache.put(ck, {"ok": False, "name": None, "pick": 0,
+                             "why": parsed.get("why") or "", "model": out["model"],
+                             "reason": "none_suitable"}, CACHE_TTL_S)
         return out
     out.update(ok=True, name=parsed["name"], pick=parsed["pick"], why=parsed["why"],
                ms=int((time.monotonic() - t0) * 1000))
     _bump("ok", out["ms"])
+    # 只缓存**有结论**的结果（含「都不适合」=pick 0）；失败一律不缓存 ——
+    # 缓存一次超时/审核标签，等于把这个瞬时故障固化成 7 天的「事实」。
+    judge_cache.put(ck, {"ok": True, "name": parsed["name"], "pick": parsed["pick"],
+                         "why": parsed["why"], "model": out["model"]}, CACHE_TTL_S)
     return out
 
 

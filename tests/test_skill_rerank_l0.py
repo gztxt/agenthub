@@ -22,13 +22,16 @@ A4 原计划用 jev `choice`，实测两条路都断：CLI **HTTP 451（区域�
 ⚠ 全部用 stub 替换 `llm.complete_free`，零网络、零宿主依赖 ⇒ L0。
 """
 import asyncio
+import os
 import pathlib
 import sys
+import tempfile
 import unittest
 
 _REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
 
+import judge_cache    # noqa: E402
 import llm            # noqa: E402
 import skill_rerank   # noqa: E402
 
@@ -46,11 +49,24 @@ def _stub(reply, model="stub-model"):
 
 
 class _Base(unittest.TestCase):
+    """**判定缓存必须隔离**：否则前一个用例存下的判定会被后一个用例命中
+    （实测：8 个用例集体假红/假绿，只因为共享 `data/judge_cache.json`）。"""
+
     def setUp(self):
         self._orig = llm.complete_free
+        self._tmp = tempfile.mkdtemp(prefix="jc-")
+        self._env = os.environ.get("JUDGE_CACHE_PATH")
+        os.environ["JUDGE_CACHE_PATH"] = os.path.join(self._tmp, "jc.json")
+        judge_cache.clear()
+        judge_cache.reset_stats()
+        skill_rerank.reset_stats()        # 计数也是模块级全局，不清会跨用例累加
 
     def tearDown(self):
         llm.complete_free = self._orig
+        if self._env is None:
+            os.environ.pop("JUDGE_CACHE_PATH", None)
+        else:
+            os.environ["JUDGE_CACHE_PATH"] = self._env
 
     def run_choose(self, reply, timeout=2.0):
         llm.complete_free = _stub(reply)
@@ -178,8 +194,8 @@ class TestStatsAreObservable(_Base):
 
     def test_ok_rate_counts_only_attempts(self):
         llm.complete_free = _stub('{"pick": 1, "why": "x"}')
-        asyncio.run(skill_rerank.choose("q", CANDS))
-        asyncio.run(skill_rerank.choose("q", CANDS))
+        asyncio.run(skill_rerank.choose("q1", CANDS))
+        asyncio.run(skill_rerank.choose("q2", CANDS))   # 不同问题 ⇒ 不命中缓存
         st = skill_rerank.stats()
         self.assertEqual(st["calls"], 2)
         self.assertEqual(st["ok"], 2)
@@ -232,6 +248,81 @@ class TestReorderKeepsRestStable(unittest.TestCase):
         rows = [{"name": "a"}]
         self.assertEqual(skill_rerank.reorder(rows, None), rows)
         self.assertEqual(skill_rerank.reorder([], "a"), [])
+
+
+class TestJudgeCacheReuse(_Base):
+    """「同样问题不重复消耗」（2026-10-22 用户要求）。
+
+    改造前：`skill_rerank` **完全没有缓存** —— 同一个问题每次都重新调免费池
+    （p50 3.2~3.7s，成功率 34~44%）。缓存把「3 秒且有 56~66% 概率失败」
+    换成「0ms 必然成功」。
+    """
+
+    def test_second_identical_call_is_a_cache_hit(self):
+        calls = {"n": 0}
+
+        async def stub(system, user, call=None):
+            calls["n"] += 1
+            return ('{"pick": 2, "why": "x"}', "m")
+
+        llm.complete_free = stub
+        r1 = asyncio.run(skill_rerank.choose("同一个问题", CANDS))
+        r2 = asyncio.run(skill_rerank.choose("同一个问题", CANDS))
+        self.assertEqual(calls["n"], 1, "第二次仍然调了模型 —— 缓存没生效")
+        self.assertTrue(r1["ok"])
+        self.assertTrue(r2["ok"])
+        self.assertTrue(r2.get("cached"), "命中必须在返回值里标出来（不许静默复用）")
+        self.assertEqual(r2["ms"], 0)
+        self.assertEqual(r2["name"], "test-driven-development")
+
+    def test_candidate_change_invalidates(self):
+        calls = {"n": 0}
+
+        async def stub(system, user, call=None):
+            calls["n"] += 1
+            return ('{"pick": 1, "why": "x"}', "m")
+
+        llm.complete_free = stub
+        asyncio.run(skill_rerank.choose("同一个问题", CANDS))
+        changed = [dict(c) for c in CANDS]
+        changed[0]["description"] = "改过的描述"      # 世界变了
+        asyncio.run(skill_rerank.choose("同一个问题", changed))
+        self.assertEqual(calls["n"], 2, "候选集变了却仍命中旧判定 —— 键太粗")
+
+    def test_failures_are_not_cached(self):
+        calls = {"n": 0}
+
+        async def stub(system, user, call=None):
+            calls["n"] += 1
+            return ("", "m")            # 空输出（审核模型/故障）
+
+        llm.complete_free = stub
+        asyncio.run(skill_rerank.choose("q", CANDS))
+        asyncio.run(skill_rerank.choose("q", CANDS))
+        self.assertEqual(calls["n"], 2, "故障被缓存了 —— 会把瞬时故障固化成 7 天的事实")
+
+    def test_no_suitable_is_cached(self):
+        """「都不适合」是**有结论**的判定，值得缓存（同样是 3 秒换一句同样的话）。"""
+        calls = {"n": 0}
+
+        async def stub(system, user, call=None):
+            calls["n"] += 1
+            return ('{"pick": 0, "why": "都不适合"}', "m")
+
+        llm.complete_free = stub
+        asyncio.run(skill_rerank.choose("q", CANDS))
+        asyncio.run(skill_rerank.choose("q", CANDS))
+        self.assertEqual(calls["n"], 1)
+
+    def test_cache_stats_visible(self):
+        llm.complete_free = _stub('{"pick": 1, "why": "x"}')
+        asyncio.run(skill_rerank.choose("q", CANDS))
+        asyncio.run(skill_rerank.choose("q", CANDS))
+        st = skill_rerank.stats()
+        self.assertEqual(st["cache_hit"], 1)
+        self.assertEqual(st["cache_miss"], 1)
+        self.assertEqual(st["cache_hit_rate"], 0.5)
+        self.assertEqual(judge_cache.stats()["entries"], 1)
 
 
 class TestNoPaidRouting(unittest.TestCase):

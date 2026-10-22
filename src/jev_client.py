@@ -22,6 +22,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+import judge_cache
 import tdai_client
 
 log = logging.getLogger("hub.jev")
@@ -106,6 +107,7 @@ def status() -> Dict[str, Any]:
         "last_ok_ts": _S["last_ok_ts"],
         "timeout_s": DEFAULT_TIMEOUT_S,
         "cache_ttl_s": CACHE_TTL_S,
+        "disk_cache": judge_cache.stats().get("entries"),
         "model": JEV_MODEL,
         # 2026-10-22：区域封禁必须**可分辨**。只报 `enabled:true` 是假绿
         # （key 在、但每个请求都 451）；这三个字段让调用方一眼看出「不是 key 的问题」。
@@ -210,10 +212,20 @@ async def score_candidates(query: str, candidates: List[Dict[str, Any]],
     if not cand:
         raise JevUnavailable("没有候选技能")
 
-    key = _cache_key(query, [str(c.get("name") or "") for c in cand])
+    name_list = [str(c.get("name") or "") for c in cand]
+    key = _cache_key(query, name_list)
     hit = _S["cache"].get(key)
     if hit and (time.time() - hit[0]) < CACHE_TTL_S:
         return dict(hit[1], cached=True)
+    # 2026-10-22：**磁盘层**。内存层重启即丢（实测：进程一重启同一问题就重算），
+    # 而 jev 判定结论很稳 ⇒ 按 `(query, 候选集指纹)` 落盘，TTL 24h 可调。
+    # 注意：这里**不缓存失败**（451/超时/403）—— 缓存可用性问题会把「现在问不了」
+    # 固化成「永远别问」，那是比重复花钱严重得多的错。
+    dk = judge_cache.key("jev", query, judge_cache.fingerprint(cand, ("name", "description")))
+    disk = judge_cache.get(dk)
+    if disk is not None and isinstance(disk.get("scores"), dict):
+        _S["cache"][key] = (time.time(), dict(disk["scores"]))
+        return dict(disk["scores"], cached=True, cached_disk=True)
 
     import aiohttp  # 局部导入：本模块被 L0 导入时不该拖起 aiohttp 的 import 副作用
 

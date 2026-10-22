@@ -1329,6 +1329,9 @@ async def health():
         try:
             import skill_rerank
             out["rerank"] = skill_rerank.stats()
+            # 2026-10-22：判定缓存必须可观测 —— 否则「有缓存」与「缓存从没命中」长得一样。
+            import judge_cache
+            out["judge_cache"] = judge_cache.stats()
         except Exception as e:  # noqa: BLE001 — 自证端点不许被情报字段打挂
             out["rerank"] = {"error": "%s: %s" % (type(e).__name__, str(e)[:120])}
     except Exception as e:  # noqa: BLE001  # 情报字段不得把 /health 打挂

@@ -121,9 +121,12 @@ def main() -> int:
     ap.add_argument("--llm-timeout", type=float, default=8.0)
     ap.add_argument("--verify-targets", action="store_true", help="只核对标签技能是否存在")
     ap.add_argument("--gate", action="store_true", help="rank1 低于阈值时退出码 1")
+    ap.add_argument("--limit", type=int, default=0, help="只跑前 N 条（测冷/热缓存用）")
     args = ap.parse_args()
 
     cases = load_cases(args.cases)
+    if args.limit:
+        cases = cases[:args.limit]
 
     if args.verify_targets:
         st, d = _get(args.base + "/api/skill/list?limit=1000")

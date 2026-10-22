@@ -410,6 +410,32 @@ def deep_reason(task: str, deep: bool, auto_deep: bool) -> str:
     return "off"
 
 
+def interpret(task: str, why: str, escalate: str = "auto") -> Dict[str, Any]:
+    """任务解读：把这句话读成了什么、因此查什么。**纯本地、0 成本、不新增调用**。
+
+    为什么单独成段：简报原先直接从「开工前先看」开始，读的人看不出系统怎么理解任务，
+    也看不出这单为什么不查参考库（`deep_reason` 只存在于 JSON 里）。用户 2026-10-22 定的
+    链路是「收到任务 → 解读任务 → 检索记忆/知识库/技能 → 参考库」，解读这一步此前是缺的。
+
+    只做可核对的事实：检索词、命中的触发词、四路查法。**不做语义猜测**——猜错的解读
+    比没有解读更糟，会被当成结论引用。
+    """
+    toks = _keywords(task)
+    trig = next((w for w in DEEP_TRIGGERS if w in (task or "")), "")
+    if why == "manual":
+        ref_cn = "查（手动 deep）"
+    elif why.startswith("trigger:"):
+        ref_cn = f"查（触发词「{why.split(':', 1)[1]}」）"
+    else:
+        ref_cn = "不查（未命中触发词，单次 20~90s 且吃 GitHub 额度）"
+    esc_cn = {"always": "无条件外扩",
+              "off": "不外扩（escalate=off）",
+              "auto": "本地判 thin 才外扩"}.get(escalate, escalate)
+    return {"tokens": toks, "trigger": trig, "deep_reason": why,
+            "ref": ref_cn, "escalate": esc_cn,
+            "local": "记忆 / 知识库 / 技能 三路并行（只查本地）"}
+
+
 def _self_get(path: str, **params) -> Dict[str, Any]:
     """GET 本进程 REST；失败返回 {'error':...} 而不抛（与 hubmcp._get 同口径）。"""
     qs = urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "")})
@@ -770,8 +796,12 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
            f"／折叠弱命中 {plan['noise']} 条"
            f"／跨路重复 {plan['dups']} 条"
            + (f"／规程台账 {plan['meta']} 条（不计入线索）" if plan.get("meta") else ""),
-           "- ⚠️ 本简报只给**线索与出处**，不是结论；引用前回原文核对。", "",
-           f"## 0. 开工前先看（约束 {len(plan['constraints'])} 条／回读 {len(plan['must_read'])} 篇）", ""]
+           "- ⚠️ 本简报只给**线索与出处**，不是结论；引用前回原文核对。", ""]
+    # 解读放最前：先让人看出「系统把这句话读成了什么」，再谈查到了什么（用户 2026-10-22 链路）。
+    it = res.get("intent") or interpret(task, why)
+    out += [f"- **任务解读（本地，0 成本）**：检索词 `{it['tokens']}`",
+            f"  - 查法：{it['local']}｜参考库{it['ref']}｜{it['escalate']}", "",
+            f"## 0. 开工前先看（约束 {len(plan['constraints'])} 条／回读 {len(plan['must_read'])} 篇）", ""]
     # 这里**列全**，后面各节不再重复同一句 —— 旧版 §0 只截前 3 条、§2 又列一遍，
     # 同一句话在简报里出现两次，读的人反而要先去对"这两处是不是一回事"。
     step: List[str] = []
@@ -899,6 +929,7 @@ async def run(inp: IntakeIn) -> Dict[str, Any]:
     task = inp.task.strip()
     why = deep_reason(task, inp.deep, inp.auto_deep)
     caller = (inp.caller or "").strip()
+    intent = interpret(task, why, inp.escalate)
 
     async def guard(name: str, factory) -> Dict[str, Any]:
         """任何一路抛异常 ⇒ 降级成该路的 error 段，**不许整份简报 500**。
@@ -923,7 +954,7 @@ async def run(inp: IntakeIn) -> Dict[str, Any]:
         ref = await guard("ref", lambda: asyncio.to_thread(
             _ref, task, inp.ref_wait_s, inp.lang))
     res = {
-        "task": task, "caller": caller, "deep_reason": why,
+        "task": task, "caller": caller, "deep_reason": why, "intent": intent,
         "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
         "memory": mem, "kb": kb, "skill": skill, "ref": ref,
     }

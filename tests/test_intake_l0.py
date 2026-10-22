@@ -61,6 +61,38 @@ class TestDeepReason(unittest.TestCase):
         self.assertEqual(intake.deep_reason("解释这行日志", False, True), "off")
 
 
+class TestInterpret(unittest.TestCase):
+    """任务解读：链路里「解读任务」这一步，必须可核对、0 成本、不做语义猜测。"""
+
+    def test_plain_task_says_ref_off_and_why(self):
+        it = intake.interpret("看下日志里的 502 来自哪里", "off")
+        self.assertTrue(it["tokens"])
+        self.assertIn("不查", it["ref"])
+        self.assertIn("额度", it["ref"], "只说「不查」等于没解释，必须带成本理由")
+
+    def test_trigger_reports_word(self):
+        it = intake.interpret("新增导出按钮", "trigger:新增")
+        self.assertEqual(it["trigger"], "新增")
+        self.assertIn("新增", it["ref"])
+
+    def test_manual_is_distinguishable(self):
+        self.assertIn("手动", intake.interpret("x", "manual")["ref"])
+
+    def test_escalate_wording(self):
+        self.assertIn("thin", intake.interpret("x", "off", "auto")["escalate"])
+        self.assertIn("无条件", intake.interpret("x", "off", "always")["escalate"])
+
+    def test_brief_leads_with_intent(self):
+        """解读必须在 §0 之前 —— 否则读者先看结论、后看系统怎么理解任务。"""
+        res = {"task": "t", "caller": "", "deep_reason": "off",
+               "as_of": "2026-10-22T00:00:00+00:00", "elapsed_s": 0.1,
+               "memory": _mem(), "kb": _kb(), "skill": _skill(),
+               "ref": {"ok": False, "error": "未查"}}
+        md = intake.brief_md("看下日志里的 502", res)
+        self.assertIn("任务解读", md)
+        self.assertLess(md.index("任务解读"), md.index("## 0. 开工前先看"))
+
+
 class TestBriefWording(unittest.TestCase):
     def _res(self, **over):
         res = {"task": "t", "caller": "cb", "deep_reason": "off",

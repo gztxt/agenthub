@@ -6,7 +6,8 @@
 #   ③ 用 -F 定点扫本机已知 token 值
 #   ④ 确认 .env / *.bak-* 未被跟踪
 #   ⑤ 推后核 .git/config 里 token 命中数必须为 0
-# 外加一条：测试闸门（L0 零跳过必过；本机再加跑 L1）。
+# 外加两条：测试闸门（L0 零跳过必过；本机再加跑 L1）；
+# 本模块自检（真调 /api/intake/task，杜绝「改完只看代码」的假绿，见 selfcheck_intake.sh）。
 #
 #   bash scripts/prepush.sh              # 只闸门，不推送（默认，安全）
 #   bash scripts/prepush.sh --push       # 闸门全绿后 git push
@@ -123,6 +124,19 @@ else
   else
     bad "本机全量未过（详见 $ALLLOG 末尾）"
     tail -12 "$ALLLOG" | sed 's/^/          /'
+  fi
+fi
+
+echo "=== ⑦ 本模块自检（真调用 /api/intake/task，不只看代码） ==="
+# 改过本模块（本脚本会自动判）⇒ 连参考库一起验；无关改动只验快路。
+# 口径见 scripts/selfcheck_intake.sh 头部；这是「模块被真的调用过」的唯一证据。
+if [ "${HUB_SKIP_SELFCHECK:-0}" = "1" ]; then
+  info "HUB_SKIP_SELFCHECK=1，跳过（接单前置/参考库记为未验证，不是通过）"
+else
+  if bash scripts/selfcheck_intake.sh 2>&1 | sed 's/^/          /'; then
+    ok "自检通过：服务真被调用且结果回来了"
+  else
+    bad "自检未过（上面逐项见原因）——本模块当前不满足「能被自动调用」"
   fi
 fi
 

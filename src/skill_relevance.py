@@ -31,8 +31,42 @@ B = 0.75
 W_NAME = 2.5
 W_DESC = 1.0
 
-#: 名称命中权重与描述命中权重，供端点回显，避免「权重写死在别处、这里改了没人知道」
-FIELD_WEIGHTS = {"name": W_NAME, "desc": W_DESC}
+#: 2026-10-22 批 A1：第三字段「触发词」。
+#:
+#: 【为什么必须有】实测（10-22，8 条真实中文任务）：`/relevant` rank1 正确 **1/8**，
+#: 而同样 6 条英文任务 rank1 正确 **5/6**。根因不是排序算法，是**分词与语料不同语言**:
+#: 查询是中文（切出二元组），技能名与绝大多数描述是英文 ⇒ 中文查询**永远打不中 name 字段**
+#: （`matched_in` 恒空），只能靠少数几条中文描述里的泛词（测试/检查）碰运气，
+#: 于是 `aidev-02-implement-audit` 在「调试一个偶发失败的测试」和「给这个新功能写测试」
+#: 两条不同查询上**得到完全相同的 4.7677 分** —— 说明只有「测试」这一个词在贡献。
+#:
+#: 触发词是**检索词表**（技能名 → 中文触发词），不是技能内容副本：SKILL.md 仍是唯一权威，
+#: 这里只补「中文用户会怎么说这件事」。技能可自己在 frontmatter 写 `triggers:`（优先），
+#: 没有则由 `skill_triggers.py` 的策展表补（见那里的 provenance 说明）。
+#: 权重取 2.2：接近 name(2.5) 而非 desc(1.0)。
+#: 2026-10-22 实测标定（不是拍脑袋）：
+#:  · W_TRIG=1.5 时「检查我的改动是否符合规范」top1 是 `web-ui-cdp-verify`（15.15，
+#:    仅凭描述里的「改动/动是/是否」三个词）而 `code-review` 10.45 排第二——
+#:    它的三个命中词（检查/改动/规范）**全部来自触发词**，却因为权重低反而输给描述噪声。
+#:  · 提到 2.2 后 code-review 反超（×2.2/1.5=1.67 ⇒ 17.4 > 15.15），且英文侧不变
+#:    （英文名本身命中 name 字段，不靠 trig）。
+#: 仍低于 name：名字是作者给的唯一标识，触发词只是「中文用户会怎么说」。
+W_TRIG = 2.2
+
+#: 名称/触发词/描述命中权重，供端点回显，避免「权重写死在别处、这里改了没人知道」
+FIELD_WEIGHTS = {"name": W_NAME, "trig": W_TRIG, "desc": W_DESC}
+
+#: 2026-10-22 批 A2：**覆盖度系数**（惩罚「单泛词支配」）。
+#:
+#: 纯 BM25 只奖励词频，不区分「命中 1 个词 10 次」与「命中 4 个不同词」。
+#: 实测病态：一条长中文描述含「测试」二字，就能对所有含「测试」的查询拿第一，
+#: 无论查询还想表达什么（调试/写测试/跑测试 全被吞成一个词）。
+#: 故在总分上乘 `1 + ALPHA * (命中的不同查询词数 / 查询词总数)`：
+#:   · 单词查询：cov=1 ⇒ 全体同乘 2，**次序不变**（不影响既有单测与短查询）；
+#:   · 多词查询：只命中 1 个词的条目被压到 (1+1/n)，命中多个的条目接近 ×2。
+#: ALPHA=1.0 时「命中 1/5 词」= ×1.2，「命中 5/5 词」= ×2.0，比值 1.67 —— 足以翻转
+#: 单泛词的支配，又不会把真正的强命中埋掉。
+COVERAGE_ALPHA = 1.0
 
 #: CJK 字符类。用 \uXXXX 转义而不是直接写「㐀-䶿」这类字面量：
 #: 字面量在源码里会因编辑器/终端/复制粘贴而丢字或变码位，而正则悄悄少一段区间不会报错，
@@ -47,6 +81,15 @@ _CJK_CLASS = (
 _LATIN_RE = re.compile(r"[a-z0-9][a-z0-9_.+-]*")
 _SEP_RE = re.compile(r"[._+-]+")
 _CJK_RE = re.compile("[" + _CJK_CLASS + "]+")
+
+#: 2026-10-22 批 A2：**功能字二元组噪声过滤**。
+#:
+#: 实测病态（真实语料）：「检查我的改动是否符合规范」的命中词里出现了 `动是`、`是否`、`我的`
+#: —— 它们跨词边界拼出来的**垃圾二元组**。更糟的是垃圾二元组 IDF **很高**（只在 1~2 篇
+#: 文档里出现），于是拿到的分比真词还多，把 `web-ui-cdp-verify` 抬到 `code-review` 前面。
+#: 规则：只要二元组**任一字**是功能字，整条丢。代价是少数真词会被误伤（含「不/可/要」的），
+#: 与 `intake._tokens()` 的选择一致：宁可少召回也不能让噪声拿到高 IDF。
+_CJK_STOP = set("的了是在和与及或就都而这那有为对把被从到会可要我们你他她它个些没不很更最是否")
 
 #: query 分词后少于此数 ⇒ 结果不可信，端点要回 short_query=true 让调用方自己决定要不要用
 #: （与 `memindex.py` 的 `is_short_query()`、`short_query_fallback` 同一口径）
@@ -87,7 +130,9 @@ def tokenize(text: Any) -> List[str]:
         if len(run) == 1:
             out.append(run)
         else:
-            out.extend(run[i:i + 2] for i in range(len(run) - 1))
+            # A2：功能字参与的二元组一律丢（见 _CJK_STOP 注释：垃圾二元组 IDF 偏高）
+            out.extend(run[i:i + 2] for i in range(len(run) - 1)
+                       if run[i] not in _CJK_STOP and run[i + 1] not in _CJK_STOP)
     return out
 
 
@@ -99,17 +144,19 @@ def build_index(items: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict
     docs: List[Dict[str, Any]] = []
     for it in items:
         nt = tokenize(it.get("name"))
+        tt = tokenize(it.get("triggers"))
         dt = tokenize(it.get("description"))
         docs.append({"item": it,
-                     "tf": {"name": Counter(nt), "desc": Counter(dt)},
-                     "len": {"name": len(nt), "desc": len(dt)}})
+                     "tf": {"name": Counter(nt), "trig": Counter(tt), "desc": Counter(dt)},
+                     "len": {"name": len(nt), "trig": len(tt), "desc": len(dt)}})
     n = len(docs)
     df: Counter = Counter()
     for d in docs:
-        for f in ("name", "desc"):
+        for f in ("name", "trig", "desc"):
             df.update(set(d["tf"][f].keys()))
     idf = {t: math.log(1.0 + (n - c + 0.5) / (c + 0.5)) for t, c in df.items()} if n else {}
-    avg = {f: (sum(d["len"][f] for d in docs) / n if n else 0.0) for f in ("name", "desc")}
+    avg = {f: (sum(d["len"][f] for d in docs) / n if n else 0.0)
+           for f in ("name", "trig", "desc")}
     return docs, idf, avg
 
 
@@ -121,15 +168,17 @@ def score(docs: List[Dict[str, Any]], idf: Dict[str, float],
     面板要能回答「为什么这条排第一」，只给一个分数就答不上来。
     """
     out: List[Dict[str, Any]] = []
+    qn = len(q_tokens) or 1
     for d in docs:
         total = 0.0
         matched: List[str] = []
         in_name: List[str] = []
+        trig_hit = False
         for t in q_tokens:
             w = idf.get(t)
             if not w:
                 continue
-            for f in ("name", "desc"):
+            for f in ("name", "trig", "desc"):
                 tf = d["tf"][f].get(t, 0)
                 if not tf:
                     continue
@@ -140,8 +189,51 @@ def score(docs: List[Dict[str, Any]], idf: Dict[str, float],
                     matched.append(t)
                 if f == "name" and t not in in_name:
                     in_name.append(t)
+                if f == "trig":
+                    trig_hit = True
+        # A2：覆盖度系数（见 COVERAGE_ALPHA 注释）。matches=0 时不乘，保持 0 分语义。
+        if total:
+            total *= 1.0 + COVERAGE_ALPHA * (len(matched) / qn)
         out.append({"item": d["item"], "score": round(total, 4),
-                    "matched": matched, "matched_in": in_name})
+                    "matched": matched, "matched_in": in_name,
+                    "trig_hit": trig_hit,
+                    "coverage": round(len(matched) / qn, 4)})
+    return out
+
+
+def collapse_by_name(rows: List[Dict[str, Any]], keep: int = 1) -> List[Dict[str, Any]]:
+    """把**同名多副本**折叠成一行（2026-10-22 批 C5）。
+
+    【实测病根】380 行条目只有 **276 个不同技能名**：85 个名字重复、多出 104 行
+    （hermes / hermes-agent / hermes-web 是**真实不同文件**，realpath 去重压不下去）。
+    这些副本内容相同 ⇒ 在 top-3 里占 2 个名额。实测「debug flaky test failure」的
+    top-3 是 `['systematic-debugging','test-driven-development','test-driven-development']`，
+    「decompose task into parallel subtasks」是 `[…,'simplify-code','simplify-code']`
+    —— 注入链预算 600 tok 买到的其实只有 2 个技能。
+
+    折叠是**排序后**做的（`rows` 已按 score 降序）：保留第一条（分最高/最靠前），
+    把其余副本的 route 收进 `same_name_routes` 并给出 `same_name_count`，
+    **不静默丢弃**（审计要看得出「还有 3 份副本」）。
+
+    `keep>1` 保留前若干条同名（默认 1）。
+    """
+    out: List[Dict[str, Any]] = []
+    idx: Dict[str, int] = {}
+    for r in rows or []:
+        name = str(((r.get("item") or r).get("name") or "")).strip().lower()
+        if not name:
+            out.append(r)
+            continue
+        if name not in idx:
+            idx[name] = len(out)
+            out.append(dict(r, same_name_routes=[], same_name_count=1))
+            continue
+        slot = out[idx[name]]
+        if slot["same_name_count"] <= keep:
+            slot["same_name_count"] += 1
+            rt = (r.get("item") or r).get("route")
+            if rt and rt not in slot["same_name_routes"]:
+                slot["same_name_routes"].append(rt)
     return out
 
 

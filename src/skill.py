@@ -19,6 +19,9 @@
 ③ **3 个文件没有 frontmatter**：`claude/agent-ecosystem`、`claude/system-memory`、
    `claude/system-rules`（都是 800~930B 的裸正文）。⇒ 解析器必须容错：`fm=false`、
    `name` 回退成目录名，**绝不因为解析不出 frontmatter 就把整条丢掉**（丢条目＝另一种静默）。
+   ⚠ **2026-10-22 复测与改判**：这三条已于 **10-19 20:14 补上 frontmatter**（fm=True，
+   1194/1193/1267B），全库 `fm=false` 现只剩 **2** 条。上面「3 个」保留作 09-24 的历史读数；
+   引用时必须带时点 —— 把旧读数当现值，正是本仓反复禁的「判据量错对象」。
 ④ **值形态不统一**：`claude/caveman` 写的是 `name: "caveman"`（带引号），最大文件
    `superpowers/subagent-driven-development` 28077B。⇒ 去引号 + 读取上限保护。
 
@@ -54,6 +57,7 @@ from pydantic import BaseModel
 
 import db
 import runlog
+import skill_triggers
 import skill_usage
 import skill_weights
 import tdai_client
@@ -612,9 +616,18 @@ def _scan_one(route: str, root) -> Dict[str, Any]:
             # C8：**整包**摘要。只算 SKILL.md 会漏脚本变化 ⇒ 资产变更准入那道闸门虚设。
             pkg = package_digest(cur)
             _desc = tdai_client.scrub((fm or {}).get("description") or "")
+            _name = tdai_client.scrub((fm or {}).get("name") or dirname)
+            # A1（2026-10-22）：触发词作为 BM25F 第三字段。技能自述优先（frontmatter
+            # `triggers:`），没写才用 `skill_triggers` 的策展表兜底。
+            # 为什么在扫描层统一注入而不是打分时临时查：**条目形状必须一致**——
+            # 否则 `/list` 回的对象没有 triggers、`/relevant` 却算进去了，
+            # 「同一技能两个字段集」正是本仓反复禁的第二真相。
+            _trig = tdai_client.scrub(skill_triggers.merge(
+                _name, str((fm or {}).get("triggers") or "")))
             items.append({
-                "name": tdai_client.scrub((fm or {}).get("name") or dirname),
+                "name": _name,
                 "description": _desc,
+                "triggers": _trig,
                 # C17：描述质量三态（判据量的是描述文本本身，不是本条有多少键）。
                 "description_quality": tooldesc.quality(_desc),
                 "route": route,
@@ -1001,6 +1014,13 @@ def _find_disk(name: str, route: Optional[str]) -> List[Dict[str, Any]]:
        ⇒ 旧实现把这些路的技能全部漏掉（/list 列得出、/read 按名找不到）；
     ② 含 `local` 项目本地路 —— 它不在 SKILL_DIRS 里，但不含它则「仓内技能
        列表可见、正文读不到」。
+
+    2026-10-22 批 C4：**改走缓存**。旧实现直接调 `_scan_one`，绕过了 `_scan_async` 的
+    30s TTL 与 single-flight ⇒ 每次 /read、/invoke 都全盘重走 22 路。实测代价：
+    `?route=` 命中 14.7ms，而**未命中（404）537ms**；并发时还与列表请求各开一份
+    `os.walk`（正是 `_scan_async` 注释里「打爆线程池」的成因）。
+    改法：把该路的 `roots` 整组交给 `_scan_one`（它已支持 list ⇒ `_scan_many`），
+    缓存键与 `_scan_async` 同为 route ⇒ 两条链路共享同一份扫描结果。
     """
     cands: List[Dict[str, Any]] = []
     if route:
@@ -1010,14 +1030,58 @@ def _find_disk(name: str, route: Optional[str]) -> List[Dict[str, Any]]:
         targets = [(r, route_roots(r)) for r in SKILL_DIRS]
         targets.append((_LOCAL_ROUTE, local_roots()))
     for r, roots in targets:
-        for root in roots:
-            if not root or not os.path.isdir(root):
-                continue
-            scan = _scan_one(r, root)
-            for it in scan.get("items") or []:
-                if (it.get("name") or "").lower() == name.strip().lower():
-                    cands.append(it)
+        roots_list = [roots] if isinstance(roots, str) else list(roots or [])
+        if not any(x and os.path.isdir(x) for x in roots_list):
+            continue
+        scan = _scan_sync_cached(r, roots)
+        for it in scan.get("items") or []:
+            if (it.get("name") or "").lower() == name.strip().lower():
+                cands.append(it)
     return cands
+
+
+def _roots_sig(roots: Any) -> tuple:
+    """根目录的**廉价指纹**：`(路径, mtime_ns)`。目录下增删条目会变更 mtime。
+
+    为什么需要：缓存键只写 route 时，「根目录里的内容变了」不可见 ⇒ 新建的技能
+    最长 30s 内 `/read` 报 404（`/list` 已有的 TTL 语义，但查询类端点一旦沾上
+    就会变成「刚装的怎么找不到」）。实测触发场景就写在
+    `tests/test_skill_weights.py::test_limit_truncation_is_attributed_not_silent`：
+    它逐个创建 aa/bb/cc 并立即 invoke ⇒ 无指纹时第二个起全 404。
+
+    局限（说清楚，不假装完备）：只 stat **根**目录。修改子目录里的 SKILL.md 正文
+    不会变更根 mtime ⇒ 正文变更仍受 TTL 约束（与 `/list` 一致）。
+    判据是「代价与收益对齐」：一次 stat 换掉 22 路 os.walk，而「新增技能立即可见」
+    是 `_invalidate_scan_cache` 已显式处理的主路径。
+    """
+    out = []
+    for r in ([roots] if isinstance(roots, str) else list(roots or [])):
+        try:
+            out.append((r, os.stat(r).st_mtime_ns))
+        except OSError:
+            out.append((r, -1))
+    return tuple(out)
+
+
+def _scan_sync_cached(route: str, roots: Any) -> Dict[str, Any]:
+    """同步版扫描缓存（与 `_scan_async` 共用 `_scan_cache` / `_SCAN_TTL_S`）。
+
+    ⚠ 只缓存**成功**结果：失败/超时不写缓存，否则一次磁盘抖动会被缓存成
+    「这一路没有技能」并持续 30s（与 `_scan_async` 同一条纪律）。
+    ⚠ 命中前比 `_roots_sig`：根目录增删条目会让指纹变 ⇒ 重扫（见 `_roots_sig`）。
+    `_scan_async` 写入的条目没有 sig（它自己就是全量扫），按 TTL 信任。
+    并发安全：dict 的 get/set 在 GIL 下是原子的，最坏是多个线程各扫一次并互相覆盖同值。
+    """
+    sig = _roots_sig(roots)
+    hit = _scan_cache.get(route)
+    if hit is not None and (time.monotonic() - hit["ts"]) < _SCAN_TTL_S:
+        old = hit.get("sig")
+        if old is None or old == sig:
+            return hit["data"]
+    data = _scan_one(route, roots)
+    if data.get("ok"):
+        _scan_cache[route] = {"ts": time.monotonic(), "data": data, "sig": sig}
+    return data
 
 
 def _guard_inside_whitelist(path: str) -> str:
@@ -1703,8 +1767,16 @@ async def skill_relevant(request: Request,
         backends.append(_backend(r, s))
     unique, _aliases = _dedup(items)
 
-    res = skill_relevance.rank(q, unique, n=n)
-    rows = [_rel_row(x) for x in res["items"]]
+    # 2026-10-22 批 C5：先多取几倍，再按 name 折叠，最后截 n。
+    # 不直接 rank(n) 再折叠的原因：折叠后会不足 n 条（380 行→276 名）。
+    res = skill_relevance.rank(q, unique, n=max(n, min(20, n * 5)))
+    xrows = skill_relevance.collapse_by_name(res.get("items") or [], keep=1)[:n]
+    rows = [_rel_row(x) for x in xrows]
+    for r, x in zip(rows, xrows):
+        if int(x.get("same_name_count") or 1) > 1:
+            # 副本数如实上报：折叠≠假装只有一份（审计要看得出「还有 3 份在别的路」）
+            r["same_name_count"] = x["same_name_count"]
+            r["same_name_routes"] = x.get("same_name_routes") or []
     for r in rows:
         r["tokens_est"] = int(len("%s: %s" % (r["name"], r["description"] or "")) / _CHARS_PER_TOKEN) + 1
 

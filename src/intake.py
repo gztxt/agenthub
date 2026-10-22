@@ -318,8 +318,25 @@ def assess(task: str, res: Dict[str, Any]) -> Dict[str, Any]:
     live = [r for r in rows if not r["dup_of"]]
     # 规程/台账不算线索，但也不当噪声：它们单独计数并在明细里标出来（见 META_DOCS）。
     meta = [r for r in live if r.get("meta")]
-    useful = [r for r in live if r["rel"] in ("直接", "相关") and not r.get("meta")]
+    useful = [r for r in live if r["rel"] in ("直接", "相关") and not r.get("meta")
+              # C1（2026-10-22）：**「仅标题命中」不是线索**。
+              # 它是 XERJ 纯标题命中时 `_kb()` 的回退串（「（仅标题命中：X）」），**没有正文**。
+              # 实测：「调试一个偶发失败的测试用例」唯一的「直接」命中就是
+              # 「（仅标题命中：API提炼偶发失败自愈）」⇒ 旧实现判成 ready，
+              # 报「四路均通，且至少有一条可直接引用的线索」—— 而那条线索根本没有内容。
+              # `_constraints()` 早就排除了这个前缀，此处漏排是口径不统一（不是新判断）。
+              and not str(r.get("text") or "").startswith(_TITLE_ONLY)]
     strong = [r for r in useful if r["rel"] == "直接"]
+    # C2（2026-10-22）：**技能命中也是强线索**。
+    # 旧口径只拿 memory/kb 两路算 strong ⇒ 两个方向的错判（均实测）：
+    #   ① 英文「debug a flaky test failure」准确命中 systematic-debugging，却判 thin
+    #      ⇒ 触发外扩，白烧 GitHub 额度；
+    #   ② 中文任务命中 5 条无关记忆（cov=0.33）+ 技能未命中，却判 ready ⇒ 假的「有资料」。
+    # 技能是否「算命中」**不在本模块重新实现**：`skill_store.acquire` 已经跑过接受判据
+    # （绝对分或「相对分+领先度+name/trig 命中」三条件）⇒ 这里只认它的 `ok`，
+    # 避免两套门槛漂移（本仓反复禁的第二真相）。
+    _sk = res.get("skill") or {}
+    skill_strong = bool(_sk.get("ok"))
 
     m, k = res.get("memory") or {}, res.get("kb") or {}
     s, rf = res.get("skill") or {}, res.get("ref") or {}
@@ -347,16 +364,24 @@ def assess(task: str, res: Dict[str, Any]) -> Dict[str, Any]:
         gaps.append("只有**相关**命中（无直接命中）⇒ 线索偏弱，先回原文确认，别据此认定「有资料」")
     if not gaps:
         gaps.append("四路均通，且至少有一条可直接引用的线索")
+    if skill_strong and not strong and not downs:
+        # 让「ready 是因为技能命中」可被看出来：这两件事的下一步动作不同
+        # （前者去 hub_skill_auto 取正文，后者去回读原文）。
+        gaps.append(f"记忆/知识库无直接命中，但技能已命中 `{_sk.get('name')}`"
+                    f"（{_sk.get('route') or '?'}）⇒ 用 hub_skill_auto 取正文")
     tok_n = len(_tokens(task))
     if tok_n < 3 and not downs:
         # 单词/双词任务里覆盖率天然接近 1.0（分母下限 3 已压住「直接」，但相关性判断仍粗糙）。
         # 宁可写明这句话，也不要让调用方把「命中了 10 条」当成「有资料」。
         gaps.append(f"任务只有 {tok_n} 个检索词元（<3）：词面判级分辨不出强弱，"
                     "别把宽匹配当「有资料」，建议补一句任务描述再查")
-    verdict = "degraded" if downs else ("ready" if strong else "thin")
+    verdict = "degraded" if downs else ("ready" if (strong or skill_strong) else "thin")
     return {
         "task": task, "verdict": verdict, "routes": route_state,
         "rows": rows, "useful": len(useful), "strong": len(strong),
+        # 技能命中单列：`strong` 保持「记忆/知识库的直接命中数」口径不变
+        # （brief、前端与既有用例都按这个读数），新的腿走独立字段。
+        "skill_strong": skill_strong,
         "noise": len(live) - len(useful) - len(meta),
         "meta": len(meta), "dups": len(rows) - len(live),
         "constraints": _constraints(live), "must_read": _must_read(live), "gaps": gaps,
@@ -836,7 +861,8 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
            f"　直接 {plan.get('strong', 0)} 条／相关 {plan['useful'] - plan.get('strong', 0)} 条"
            f"／折叠弱命中 {plan['noise']} 条"
            f"／跨路重复 {plan['dups']} 条"
-           + (f"／规程台账 {plan['meta']} 条（不计入线索）" if plan.get("meta") else ""),
+           + (f"／规程台账 {plan['meta']} 条（不计入线索）" if plan.get("meta") else "")
+           + ("／技能命中" if plan.get("skill_strong") else ""),
            "- ⚠️ 本简报只给**线索与出处**，不是结论；引用前回原文核对。", ""]
     # 解读放最前：先让人看出「系统把这句话读成了什么」，再谈查到了什么（用户 2026-10-22 链路）。
     it = res.get("intent") or interpret(task, why)
@@ -1019,10 +1045,17 @@ async def run(inp: IntakeIn) -> Dict[str, Any]:
 
 
 @router.post("/task")
+@runlog.track("intake.run")
 async def api_intake(body: IntakeIn):
     """四查 + 整理 + 评估 ⇒ 一份简报。
 
     返回 `memory/kb/skill/ref` 四段原始命中、`plan`（verdict/覆盖率/约束/回读清单/缺口）
     与 `brief`（markdown，可直接贴进对话）。
+
+    C6（2026-10-22）：**补埋点**。此前 intake 自身**零事件**（`profile_events` 里
+    查不到任何 `intake.*`），于是「接单前置到底有没有被执行」只能靠数磁盘简报文件
+    （当时 16 份）来猜。现在每调一次落一条 `intake.run`，detail 带 verdict/覆盖率/调用方。
+    注：本端点签名只有 `body`（无 `request`），`runlog._channel_of(None)` 的异常分支
+    会回落 "web" —— 埋点模块明确允许桩请求（「埋点不许抛」），不是 bug。
     """
     return await run(body)

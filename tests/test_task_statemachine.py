@@ -46,14 +46,25 @@ class _Base(unittest.TestCase):
         tasks.set_context(chat_fn=None)
 
     def _insert(self, run_id, tid, deps=(), *, verify_kind="nonempty",
-                budget_ms=None, budget_tokens=None, prompt=None):
+                budget_ms=None, budget_tokens=None, prompt=None,
+                attempts=None):
+        """`attempts` 默认 = `MAX_AUTO_RETRY`（重试额度已用完）。
+
+        2026-10-22 批 B3 起，「可修复的验证失败」会先自动重试一次（`status` 停在
+        `pending` + `attempts=1`），再失败才落 `failed`。本文件的既有用例断言的是
+        **最终态**（failed / insufficient 不放行），不是「第一次尝试的中间态」，
+        所以默认把额度设成已用完，保持它们原意不变；
+        「第一次失败应当先重试」由 `test_repairable_failure_schedules_one_retry` 单独钉。
+        """
         now = tasks._now()
+        att = tasks.MAX_AUTO_RETRY if attempts is None else int(attempts)
         db.execute(
             "INSERT INTO tasks(run_id,task_id,trace_id,goal,prompt,agent_id,deps,status,"
-            "verify_kind,budget_ms,budget_tokens,created_at,updated_at)"
-            " VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?)",
+            "verify_kind,budget_ms,budget_tokens,attempts,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?,?)",
             (run_id, tid, run_id, "g", prompt or ("do " + tid), "claude",
-             tasks.json.dumps(list(deps)), verify_kind, budget_ms, budget_tokens, now, now))
+             tasks.json.dumps(list(deps)), verify_kind, budget_ms, budget_tokens,
+             att, now, now))
 
     def _status(self, tid):
         return db.query("SELECT status,error,output FROM tasks WHERE task_id=?", (tid,))[0]
@@ -146,6 +157,20 @@ class TestVerifierGate(_Base):
         self.assertEqual(row["status"], "failed",
                          "执行者自称 success 但产物为空 ⇒ 不得置 success")
         self.assertIn("empty_output", row["error"])
+
+    def test_repairable_failure_schedules_one_retry(self):
+        """B3：可修复的验证失败**先重试一次**，而不是直接判死。
+
+        反例边界同样在这里钉住：重试后 `status` 是 `pending`（会被 runner 重新派发），
+        **绝不是 `success`** —— 「自动重试」不许被读成「自动放行」。
+        """
+        self._insert("r6", "t1", attempts=0)
+        self._set_chat({"do t1": {"success": True, "response": "   "}})
+        self._run_task_once("t1")
+        row = db.query("SELECT status,attempts,error FROM tasks WHERE task_id='t1'")[0]
+        self.assertEqual(row["status"], "pending", "可修复失败应先排队重试")
+        self.assertEqual(row["attempts"], 1)
+        self.assertIn("自动重试 1/%d" % tasks.MAX_AUTO_RETRY, row["error"])
 
     def test_runner_success_with_valid_output_is_success(self):
         self._insert("r2", "t1")

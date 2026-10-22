@@ -250,6 +250,25 @@ AUTO_MAX_PER_HOUR = max(1, int(os.getenv("SKILL_STORE_AUTO_MAX", "6") or 6))
 #: 语料量级明显变化时须重标（`work/store-cal/` 有标定脚本）。
 LOCAL_NORM_MIN = 0.40
 
+#: 2026-10-22 批 A3：**相对路径**接受判据（与绝对门槛是 OR 关系）。
+#:
+#: 【为什么单靠绝对值不够】实测（8 中文 + 6 英文真实任务）：中文任务里
+#: `norm` 集中在 0.07~0.36、英文在 0.69~1.02。同一条 `LOCAL_NORM_MIN=0.40`
+#: 对英文是宽松门槛、对中文是**实质封死** ⇒ `/auto` 中文接受率只有 1/8，
+#: 与「中文查询打不中英文技能名」叠加后，自动取用对中文基本不可用。
+#:
+#: 【为什么不直接把 0.40 降到 0.2】那会把噪声也放进来（全局门槛一降，
+#: 所有任务的 top1 都会过线），把一个「阈值偏严」问题换成一个「不分好坏」问题。
+#: 所以补一条**结构判据**：绝对分可以低，但必须同时满足
+#:   ① norm ≥ 0.18（硬下限：再低就不像任何具体技能）
+#:   ② top1 / top2 ≥ 1.8（第一名明显领先：不是一堆技能并列沾边）
+#:   ③ 命中必须在 name 或 triggers 上（不能只靠一段长描述的某个泛词）
+#: 置信度概念上比纯绝对门槛高：它回答的是「这一条是否明显脱颖而出」，
+#: 而不是「它的绝对分数在这个语料里算不算高」（后者随语料变）。
+#: 三条阈值均为实测后定值（见 tests/test_skill_retrieval_cn_l0.py 的夹具）。
+LOCAL_NORM_FLOOR = 0.18
+LOCAL_GAP_MIN = 1.8
+
 #: 商店接受门槛（两条任一成立）：
 #:   ① ASCII 关键词在**候选名称**里的占比 ≥0.5；
 #:   ② 原始查询词在候选名称+描述里的覆盖率 ≥0.5。
@@ -282,6 +301,9 @@ async def _local_rank(query: str, n: int = 3) -> Tuple[Dict[str, Any], int]:
     归一化分母取**查询词 IDF 之和**（绝对值之和，避免 2 条语料的测试盘里 IDF 为负
     把分母抵成 0）；未知词按语料最大 IDF 计——查询里出现语料从未见过的词，
     不该因为「分母算不到它」而显得更相关。
+
+    2026-10-22 批 C5：`n` 内部放大后按技能名折叠，再截到 `n` ——
+    同名多副本（实测 380 行只有 276 名）否则会把 top-3 变成「2 个技能 + 1 个副本」。
     """
     routes = skill.disk_routes()
     scans = await asyncio.gather(*[skill._scan_async(r, skill.route_roots(r)) for r in routes])
@@ -289,7 +311,8 @@ async def _local_rank(query: str, n: int = 3) -> Tuple[Dict[str, Any], int]:
     for s in scans:
         items.extend(s.get("items") or [])
     unique, _aliases = skill._dedup(items)
-    res = skill_relevance.rank(query, unique, n=n)
+    res = skill_relevance.rank(query, unique, n=max(n, min(20, n * 5)))
+    res["items"] = skill_relevance.collapse_by_name(res.get("items") or [], keep=1)[:max(n, 1)]
     try:
         _docs, idf, _avg = skill_relevance.build_index(unique)
         dmax = max(idf.values()) if idf else 1.0
@@ -306,8 +329,12 @@ async def _local_rank(query: str, n: int = 3) -> Tuple[Dict[str, Any], int]:
 def _local_verdict(res: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], float, bool]:
     """`(top, coverage, accepted)`。没有命中时 top=None、accepted=False，**不编造**。
 
-    接受判据只有一条归一化分数；`coverage` 仍回传给调用方做解释，
-    但它**不单独决定**接受（纯中文长查询的覆盖率天然被虚词拉低）。
+    接受判据两条路取 OR（阈值与理由见 `LOCAL_NORM_FLOOR` / `LOCAL_GAP_MIN` 注释）：
+      A) 绝对：`norm ≥ LOCAL_NORM_MIN`（英文场景一直走这条，行为不变）
+      B) 相对：`norm ≥ LOCAL_NORM_FLOOR` 且 `top1/top2 ≥ LOCAL_GAP_MIN`
+         且**命中在 name 或 triggers 上**（不能只靠描述里的泛词）。
+    B 是为了让中文查询（因分词与语料不同语言而绝对分天然偏低）有路可走，
+    同时不给「一堆技能并列沾边」的噪声开口子。
     """
     items = res.get("items") or []
     if not items:
@@ -316,7 +343,16 @@ def _local_verdict(res: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], float
     qt = {t for t in (res.get("query_tokens") or []) if t}
     matched = {t for t in (top.get("matched") or []) if t}
     cov = (len(matched & qt) / len(qt)) if qt else 0.0
-    accepted = float(res.get("norm") or 0.0) >= LOCAL_NORM_MIN
+    norm = float(res.get("norm") or 0.0)
+    top_score = float(top.get("score") or 0.0)
+    second = float((items[1].get("score") if len(items) > 1 else 0.0) or 0.0)
+    gap = (top_score / second) if second > 0 else (999.0 if top_score > 0 else 0.0)
+    strong_field = bool(top.get("matched_in")) or bool(top.get("trig_hit"))
+    accepted = norm >= LOCAL_NORM_MIN or (
+        norm >= LOCAL_NORM_FLOOR and gap >= LOCAL_GAP_MIN and strong_field)
+    # 把判据里的两个量回传：调用方要能回答「为什么没接受」，而不是只看到一个 bool。
+    res["gap"] = round(gap, 3)
+    res["strong_field"] = strong_field
     return top, round(cov, 3), accepted
 
 

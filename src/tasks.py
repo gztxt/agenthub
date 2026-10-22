@@ -55,6 +55,19 @@ SUBMITTED_STATUSES = ("submitted",)
 #: 做成**模块级常量**（不是每次读 env）：与 MAX_CONCURRENCY/LOOP_SLEEP_S 同口径，测试可整体替换。
 AUTO_ACCEPT = os.getenv("TASK_AUTO_ACCEPT", "1").strip().lower() not in ("0", "false", "no", "off")
 
+#: B1（2026-10-22）：子任务派发前是否跑一次接单前置检索，把线索拼进 prompt。
+#: 默认开；`TASK_RETRIEVAL=0` 关掉（回归对比 / 离线跑测用）。
+TASK_RETRIEVAL = os.getenv("TASK_RETRIEVAL", "1").strip().lower() not in ("0", "false", "no", "off")
+#: 检索块的正文预算（字符）。与 UPSTREAM_TRIM 同一口径：超了要带**显式省略标记**，
+#: 不能让下游分不清「上游只给了这么多」与「被砍掉了」。
+RETRIEVAL_TRIM = int(os.getenv("TASK_RETRIEVAL_TRIM", "1200"))
+#: 检索自身的超时（秒）。检索只是增强，**绝不能拖死一个子任务**：
+#: 超时就当「本次无线索」进 prompt（并显式写出来），子任务照跑。
+RETRIEVAL_TIMEOUT_S = float(os.getenv("TASK_RETRIEVAL_TIMEOUT_S", "8"))
+#: B3：验证失败且**可修复**时自动重试的最大次数。默认 1（= 最多跑两遍）。
+#: 不做无限重试：验证失败如果每次原因相同，重跑只是烧钱（本仓铁律：失败即止损）。
+MAX_AUTO_RETRY = int(os.getenv("TASK_AUTO_RETRY", "1"))
+
 _ctx: Dict[str, Any] = {}
 _runners: Dict[str, asyncio.Task] = {}
 
@@ -100,6 +113,13 @@ _TASK_COLUMNS = (
     ("submitted_at", "TEXT"),
     ("accepted_at", "TEXT"),
     ("accepted_by", "TEXT"),
+    # 2026-10-22 批 B1/B2：把「子任务执行前检索到了什么」落库。
+    # 为什么必须落库：拆解→检索→验证 三段此前**根本没串起来**（tasks.py 零引用
+    # skill/relevant/intake/memory），而一旦串起来，「这个子任务拿到的线索是什么」
+    # 就变成了复盘的唯一入口 —— 不存下来，出错只能重跑。
+    ("retrieval_json", "TEXT"),
+    # B3：自动重试计数（上限 MAX_AUTO_RETRY，防验证失败→重跑→再失败→无限循环）。
+    ("attempts", "INTEGER"),
 )
 
 
@@ -187,6 +207,98 @@ def can_accept(status: str) -> bool:
     `success` 已经接受过（重复接受应是 no-op，不该被算成一次接受）；
     其余状态（pending/running/failed/…）根本没有可接受的候选产物。"""
     return status in SUBMITTED_STATUSES
+
+
+def should_retry(verdict_status: str, repairable: bool, attempts: Any) -> bool:
+    """B3 纯函数：这次验证失败该不该自动重试一次（可单测，避免把判据埋进 400 行协程）。
+
+    三条同时成立才重试：
+      ① `repairable` —— 产物**明确不合格**（缺内容/非法 JSON）。`insufficient`
+         （未知 kind / 没有产物 / 判据缺失）重跑一次不会变好，重试只是烧钱；
+      ② `attempts < MAX_AUTO_RETRY` —— 有界，防「失败→重跑→再失败」无限循环；
+      ③ 状态是 fail（passthrough 保险：调用方传错也不重试）。
+
+    为什么不在 `insufficient` 上重试：那是**判不了**，不是**做错了**。判不了时重跑同一
+    执行者、同一判据，结果只会再来一次判不了 —— 这正是「无限等待」禁令的同族。
+    """
+    try:
+        n = int(attempts or 0)
+    except (TypeError, ValueError):
+        n = MAX_AUTO_RETRY          # 读不出来就当已用完（保守：不重试）
+    return bool(repairable) and verdict_status == verifier.STATUS_FAIL and n < MAX_AUTO_RETRY
+
+
+def retrieval_block(rep: Dict[str, Any], limit: int = RETRIEVAL_TRIM) -> str:
+    """把一份 intake 结果压成**给执行者看的**线索块（B1，纯函数，可单测）。
+
+    只取三类有动作价值的东西：
+      · 约束：带「必须/禁止/不得…」的命中 ⇒ 开工前要知道的红线；
+      · 回读：有路径的原文 ⇒ 需要细节时去读而不是凭空发挥；
+      · 技能：命中时给 `hub_skill_auto(task=...)` 调用式 ⇒ 拿到说明书。
+
+    **截断必须显式**（与 `format_upstream` 同一条纪律）：超预算时尾部写
+    「已省略 N 字符」而不是默默截掉 —— 否则下游无法区分「本来就这么少」与「被砍了」。
+    空结果返回空串（调用方据此**不加块**，不制造一个空标题占位）。
+    """
+    plan = rep.get("plan") or {}
+    lines: List[str] = []
+    for c in (plan.get("constraints") or [])[:3]:
+        lines.append("- 约束（%s）：%s" % (c.get("src") or "?", str(c.get("text") or "")[:160]))
+    for x in (plan.get("must_read") or [])[:2]:
+        lines.append("- 回读：%s —— %s" % (x.get("path") or "?", str(x.get("why") or "")[:100]))
+    sk = rep.get("skill") or {}
+    if sk.get("ok"):
+        lines.append("- 技能：%s ⇒ 需要步骤时调 hub_skill_auto(task=\"…\")" % (sk.get("name"),))
+    if not lines:
+        return ""
+    head = ("—— 检索线索（hub intake·%s 路·判定 %s；**只是线索不是结论**）——\n"
+            % (plan.get("coverage") or "?", plan.get("verdict") or "?"))
+    body = head + "\n".join(lines)
+    if len(body) <= limit:
+        return body
+    keep = max(0, limit - len(head))
+    return body[:len(head) + keep] + "\n……（检索线索已省略 %d 字符）……" % (len(body) - len(head) - keep)
+
+
+async def _retrieval_for(goal: str, prompt: str, agent_id: str) -> tuple:
+    """跑一次接单前置检索，返回 `(块文本, 落库用的 dict)`。**任何失败都不阻塞子任务**。
+
+    为什么要串这一层（B1 的全部理由）：本轮实测发现「自动拆解→检索→验证」三段
+    各自存在但**从未串联**（`grep -E 'skill|relevant|intake|memory|kb' src/tasks.py` = 0 命中），
+    生产 `tasks` 表也只有 1 个 run（2026-09-06）。拆出来的子任务直接进 LLM，
+    拿不到任何记忆/文档/技能线索 ⇒ 同一个任务，人在对话里做会先查旧账，
+    流水线做则凭空重写一遍。
+
+    ⚠ 边界：`deep=False` + `escalate="off"` —— 派发阶段**不准联网、不准查 GitHub**
+    （那是 20~90s 且吃额度），只走本地三路；且整段有 `RETRIEVAL_TIMEOUT_S` 超时，
+    超时/异常一律降级为空块，**在返回里写明原因**（不许静默当作「没有线索」）。
+    """
+    import intake as intake_mod          # 局部导入：intake 依赖 skill_store/refscout，
+                                        # 顶层导入会把启动依赖面拉爆（且可能成环）
+    t0 = asyncio.get_event_loop().time()
+    try:
+        rep = await asyncio.wait_for(
+            intake_mod.run(intake_mod.IntakeIn(
+                task=(goal + " :: " + prompt)[:2000], caller="task:%s" % (agent_id or "?"),
+                deep=False, auto_deep=False, escalate="off")),
+            timeout=RETRIEVAL_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return "", {"ok": False, "error": "检索超时 %.1fs" % RETRIEVAL_TIMEOUT_S}
+    except Exception as e:  # noqa: BLE001 — 检索是增强，不许带倒任务
+        return "", {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+    plan = rep.get("plan") or {}
+    meta = {
+        "ok": True,
+        "verdict": plan.get("verdict"),
+        "coverage": plan.get("coverage"),
+        "strong": plan.get("strong"),
+        "skill_strong": plan.get("skill_strong"),
+        "skill": (rep.get("skill") or {}).get("name"),
+        "constraints": len(plan.get("constraints") or []),
+        "must_read": [x.get("path") for x in (plan.get("must_read") or [])][:4],
+        "ms": int((asyncio.get_event_loop().time() - t0) * 1000),
+    }
+    return retrieval_block(rep), meta
 
 
 SCHEMA_TASKS = """
@@ -583,6 +695,28 @@ async def _run_task(run_id: str, row: dict):
             dep_outputs.append(format_upstream(d, upstream[d]))
     if dep_outputs:
         prompt = f"总目标：{row['goal']}\n\n你的子任务：{prompt}\n\n" + "\n\n".join(dep_outputs)
+
+    # ── B3：上一次验证失败的提示（自动重试时带上，否则重跑就是原样再赌一次）──
+    attempts_done = int(row.get("attempts") or 0)
+    if attempts_done:
+        prompt = ("—— 上一次验证未通过（自动重试 %d/%d）：%s ——\n\n"
+                  % (attempts_done, MAX_AUTO_RETRY,
+                     str(row.get("verify_reason") or "")[:300])) + prompt
+
+    # ── B1：接单前置检索（记忆/知识库/技能），把线索拼进 prompt ──
+    # 失败/超时一律降级（不阻塞），但**必须留下痕迹**（retrieval_json 里的 error）。
+    if TASK_RETRIEVAL:
+        block, rmeta = await _retrieval_for(row.get("goal") or "", prompt,
+                                            row.get("agent_id") or "")
+        if block:
+            prompt = block + "\n\n" + prompt
+        try:
+            db.execute("UPDATE tasks SET retrieval_json=?,updated_at=? "
+                       "WHERE run_id=? AND task_id=?",
+                       (json.dumps(rmeta, ensure_ascii=False)[:4000], _now(),
+                        run_id, row["task_id"]))
+        except Exception:  # noqa: BLE001 — 落库失败不得带倒子任务（检索是增强）
+            pass
     t0 = asyncio.get_event_loop().time()
     try:
         result = await asyncio.wait_for(
@@ -699,6 +833,25 @@ async def _run_task(run_id: str, row: dict):
         else:
             gaps = "; ".join("%s: %s" % (g["id"], g["detail"]) for g in verdict["gaps"])
             err = ("verifier %s (%s): %s" % (verdict["status"], kind, gaps))[:500]
+            # ── B3：可修复的验证失败，自动重试 MAX_AUTO_RETRY 次（默认 1）──
+            # 只对 `repairable` 重试：`insufficient`（未知 kind / 无产物）重跑也不会变好。
+            # 次数写进 `attempts` 列并在重跑时把上次的 verify_reason 接进 prompt（否则就是原样再赌）。
+            if should_retry(verdict["status"], verdict.get("repairable"), attempts_done):
+                db.execute("UPDATE tasks SET status='pending',attempts=?,error=?,verify_reason=?,"
+                           "verdict=?,verify_ms=?,spent_ms=?,spent_tokens=?,model=?,"
+                           "finished_at=NULL,updated_at=?"
+                           " WHERE run_id=? AND task_id=?",
+                           (attempts_done + 1,
+                            ("%s（自动重试 %d/%d）" % (err, attempts_done + 1, MAX_AUTO_RETRY))[:500],
+                            gaps[:500], verdict["status"], verify_ms, dur, spent_tokens,
+                            used_model, _now(), run_id, row["task_id"]))
+                db.log_profile_event("task_exec", row["agent_id"], "retry", dur,
+                                     trace_id=row["trace_id"],
+                                     detail={"task": row["task_id"], "verify": kind,
+                                             "verify_status": verdict["status"],
+                                             "attempt": attempts_done + 1,
+                                             "model": used_model})
+                return
             db.execute("UPDATE tasks SET status='failed',error=?,duration_ms=?,spent_ms=?,"
                        "spent_tokens=?,model=?,verdict=?,verify_reason=?,"
                        "finished_at=?,updated_at=?"

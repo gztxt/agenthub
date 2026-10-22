@@ -58,15 +58,22 @@ class _Base(unittest.TestCase):
         tasks.set_context(chat_fn=None)
 
     def _insert(self, run_id, tid, *, verify_kind="nonempty", budget_ms=None,
-                budget_tokens=None, prompt=None, expect=None):
+                budget_tokens=None, prompt=None, expect=None, attempts=None):
+        """`attempts` 默认 = `MAX_AUTO_RETRY`（重试额度已用完）。
+
+        2026-10-22 批 B3：「可修复的验证失败」会先自动重试一次（`status=pending`）。
+        本文件断言的是**最终裁决落库**（model / verdict / verify_reason），
+        不是第一次尝试的中间态 ⇒ 默认把额度设为已用完，语义与改动前一致。
+        """
         now = tasks._now()
+        att = tasks.MAX_AUTO_RETRY if attempts is None else int(attempts)
         db.execute(
             "INSERT INTO tasks(run_id,task_id,trace_id,goal,prompt,agent_id,deps,status,"
-            "verify_kind,verify_expect,budget_ms,budget_tokens,created_at,updated_at)"
-            " VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?,?)",
+            "verify_kind,verify_expect,budget_ms,budget_tokens,attempts,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?,?,?)",
             (run_id, tid, run_id, "g", prompt or ("do " + tid), "claude",
              tasks.json.dumps([]), verify_kind, expect, budget_ms, budget_tokens,
-             now, now))
+             att, now, now))
 
     def _row(self, tid):
         return db.query(

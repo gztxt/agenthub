@@ -20,6 +20,8 @@
           / hub_ref_scout / hub_ref_get（PT-20261021-04：功能模块 → GitHub 借鉴源情报卡。
           scout 是异步任务，先回 job_id；get 读任务进度或整张卡。**只读采集**：
           不克隆、不改项目、不自动加依赖）
+          / hub_intake（PT-20261022-01：接单前置四查一简报。只做组合与呈现，
+          记忆/知识库走本进程端点、技能只查本地、参考库按需深查）
 """
 import json
 import os
@@ -78,7 +80,7 @@ def _get(path: str, **params) -> dict:
         return {"error": f"{type(e).__name__}: {e}", "path": path}
 
 
-def _post(path: str, body: dict, **params) -> dict:
+def _post(path: str, body: dict, _timeout: float = 0, **params) -> dict:
     """转发 POST 到 hub 自身 REST（v0.13.127 PT-20261019-01：`hub_skill_invoke` 用）。
 
     与 `_get` 的两处差别，都是有原因的：
@@ -104,7 +106,7 @@ def _post(path: str, body: dict, **params) -> dict:
                                           "x-hub-token": token,
                                           "x-hub-channel": "mcp"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=_timeout or TIMEOUT_S) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         # 409 的 candidates / 400 的可用值清单都在上游正文里——剥掉它等于在 MCP 层
@@ -497,6 +499,43 @@ def hub_ref_get(card_id: str = "", job_id: str = "", q: str = "",
                    "candidates": i.get("candidates"), "top": (i.get("top") or {}).get("repo")}
                   for i in data.get("items", [])],
         "note": "传 card_id 取整张卡；传 job_id 看任务进度",
+    }, ensure_ascii=False)
+
+
+@server.tool()
+def hub_intake(task: str, deep: bool = False, auto_deep: bool = True,
+               caller: str = "") -> str:
+    """**接单前置**：拿到任务后先调它，一次把「记忆 / 知识库 / 技能 / 参考库」四查做完，
+    返回一份可复核简报（`brief` 是 markdown，可直接贴进对话）。
+
+    为什么要有这个工具：这四类资料各有入口，但**没有任何一步要求 agent 都过一遍**，
+    结果常见形态是「凭印象开工，出问题才回头翻」。本工具只做组合与呈现，不新增检索能力。
+
+    读法（三条，缺一条就会把它误用成结论）：
+    - `memory.count=0` / `kb.count=0` **必须**同时看 `degraded`：0 命中与「那一路挂了」
+      在简报里是两种写法，别把后者当成「本机没有相关资料」。
+    - `skill` 只做**本地**匹配、不装新技能（接单阶段不该有写盘副作用）。命中后要用
+      `hub_skill_invoke(name=...)` 取正文再照着做。
+    - `ref`（参考库）默认**不查**：单次 21.8~56.8s 且吃 GitHub 额度。任务命中
+      「新增/实现/选型/对标…」才自动升级，`deep_reason` 会写明原因；`deep=True` 强制查。
+    简报只给线索与出处，**引用前回原文核对**。
+
+    非 MCP 工具链用 `scripts/intake.sh "<任务>"` 取同一份简报（同一端点，无第二套口径）。"""
+    body = {"task": task, "deep": deep, "auto_deep": auto_deep, "caller": caller}
+    # 参考库深查默认等 90s，外层超时必须放宽，否则 MCP 层先超时、上游还在跑。
+    data = _post("/api/intake/task", body, _timeout=(200 if deep else 120))
+    if "error" in data:
+        return json.dumps(data, ensure_ascii=False)
+    return json.dumps({
+        "brief": data.get("brief"),
+        "counts": {"memory": (data.get("memory") or {}).get("count"),
+                   "kb": (data.get("kb") or {}).get("count"),
+                   "skill": (data.get("skill") or {}).get("name") or None},
+        "deep_reason": data.get("deep_reason"),
+        "card_id": (data.get("ref") or {}).get("card_id"),
+        "elapsed_s": data.get("elapsed_s"),
+        "degraded": {"memory": (data.get("memory") or {}).get("degraded"),
+                     "kb": (data.get("kb") or {}).get("degraded")},
     }, ensure_ascii=False)
 
 

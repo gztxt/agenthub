@@ -76,6 +76,7 @@ import models_cache                   # 模型清单的成功路径缓存（同�
 import writeauth                    # 导出端点按写端点同等鉴权（复用 decide 的 fail-closed）
 import audit as audit_mod           # 资产变更审计的只读查询门面（GET /api/audit/list）
 import refscout as refscout_mod     # PT-20261021-04：参考情报（GitHub 借鉴源采集 + 三轴打分）
+import intake as intake_mod         # PT-20261022-01：接单前置（四查一简报）
 import runlog as runlog_mod         # 运行日志：三中心检索留痕 + GET /api/runlog 查询门面
 import cloudcli as cloudcli_mod     # CloudCLI 项目直达：项目清单（直读 auth.db）+ 会话启动代理
 import localprojects as localprojects_mod  # 本机项目清单（多根 git 扫描 + cloudcli 合并）
@@ -1236,6 +1237,7 @@ app.include_router(actionplane_mod.router)       # P2 A10：/api/actions（行�
 app.include_router(admission_mod.router)        # P2 C7：/api/admission（外部资产准入六阶段）
 app.include_router(hublog_mod.router)
 app.include_router(refscout_mod.router)          # PT-20261021-04：/api/ref/*（情报卡）
+app.include_router(intake_mod.router)            # PT-20261022-01：/api/intake/task（四查一简报）
 
 # D2：Hub MCP Server —— 把本机事实源以 MCP 暴露给 Hermes 等外部 Agent。
 # 端点为 /hub-mcp/mcp（streamable_http_app 自带 /mcp 子路由，故挂在 /hub-mcp 下，避免与 mcpgw 的 /mcp/* REST 冲突）。

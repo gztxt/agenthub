@@ -1746,7 +1746,10 @@ async def skill_relevant(request: Request,
                          llm_rerank: bool = Query(default=False,
                                                   description="用免费模型（CCR openrouter/free）"
                                                               "在 top-N 内重排（默认关，见 PT-20261022-13）"),
-                         llm_timeout: float = Query(default=2.0, ge=0.2, le=30.0)):
+                         llm_timeout: float = Query(
+                             default=skill_rerank.DEFAULT_TIMEOUT_S, ge=0.2, le=30.0,
+                             description="重排超时；默认取模块常量（实测免费池 p50 2.5s，"
+                                         "给 2s 必然超时）")):
     """按一段自然语言任务描述，从**真实在用**的技能里排最相关的 n 条。
 
     **返回值刻意把 `bm25` 与 `jev` 分开报，不合成一个数字。**

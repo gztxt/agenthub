@@ -205,6 +205,17 @@ class TestWiringInRelevant(unittest.TestCase):
         self.assertIn("llm_block", src)
         self.assertIn('"llm_rerank": llm_block', src, "响应里没把重排结果回传（不可复盘）")
 
+    def test_endpoint_default_timeout_follows_module_constant(self):
+        """端点默认值必须**引用**模块常量而不是写字面量。
+
+        实测踩过：`skill_rerank.DEFAULT_TIMEOUT_S` 改成 8s 了，端点 Query 还写死
+        `default=2.0` ⇒ 显式 `llm_rerank=true` 仍必然超时（两处默认值漂移，
+        正是本仓反复禁的「同一件事两个真相」）。
+        """
+        src = (_REPO / "src" / "skill.py").read_text(encoding="utf-8")
+        self.assertIn("default=skill_rerank.DEFAULT_TIMEOUT_S", src,
+                      "端点 llm_timeout 默认值没有引用模块常量（会与模块默认漂移）")
+
     def test_default_off_because_injection_budget(self):
         """默认必须关：注入链预算 500ms，而免费池 p50 就超了（实测见 PT-13）。"""
         src = (_REPO / "src" / "skill.py").read_text(encoding="utf-8")

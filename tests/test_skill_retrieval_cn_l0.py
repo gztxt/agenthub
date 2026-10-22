@@ -240,6 +240,51 @@ class TestC5CollapseByName(unittest.TestCase):
         self.assertEqual(sr.collapse_by_name(None), [])
 
 
+class TestDerivedTriggers(unittest.TestCase):
+    """派生词表（PT-20261022-14）：覆盖 106→270/276。
+
+    holdout 实测暴露：`证书`/`邮件` 这类 2 字查询对未覆盖技能**零召回**。
+    派生把英文名按词元查 `_EN_ZH`，兜住手写策展表够不到的 164 个技能。
+    """
+
+    def test_common_tokens_derive(self):
+        cases = {
+            "certbot-ssl": "证书",
+            "apple-notes": "笔记",
+            "IMAP 邮件分类器": "邮件",
+            "himalaya": "邮件",
+            "xlsx": "excel 表格",
+            "linear": "工单",
+            "airtable": "表格 数据库",
+            "1password": "密码 保险库",
+        }
+        for name, want in cases.items():
+            self.assertIn(want.split()[0], st.derive(name),
+                          "%s 派生失败（want⊇%r）：%r" % (name, want, st.derive(name)))
+
+    def test_derive_dedups_and_caps(self):
+        d = st.derive("video-cut-video-frames-video")
+        self.assertLessEqual(len(d.split()), st._DERIVE_MAX, "派生词数没有上限")
+        self.assertEqual(len(d.split()), len(set(d.split())), "派生重复词未去重")
+
+    def test_derive_drops_unknown_tokens(self):
+        """查不到的英文词元**丢弃**，不硬造译文（宁可少一个词）。"""
+        self.assertEqual(st.derive("zzzqqq-wwwvvv"), "")
+
+    def test_priority_own_gt_curated_gt_derived(self):
+        # 自述 > 策展 > 派生
+        self.assertEqual(st.source_of("systematic-debugging", "自述词"), "own")
+        self.assertEqual(st.source_of("systematic-debugging"), "curated")
+        self.assertEqual(st.source_of("certbot-ssl"), "derived")
+        self.assertEqual(st.source_of("__nope__"), "none")
+        self.assertEqual(st.merge("certbot-ssl", "自述"), "自述")
+
+    def test_curated_is_not_shadowed_by_derived(self):
+        """策展词不得被派生词覆盖（wechat-mp-cn 派生只有「微信」，策展是公众号/阅读量/舆情）。"""
+        self.assertEqual(st.source_of("wechat-mp-cn"), "curated")
+        self.assertIn("公众号", st.merge("wechat-mp-cn"))
+
+
 class TestEvalCaseFile(unittest.TestCase):
     """评测集自身也要有闸门（2026-10-22 第 3 项）。
 

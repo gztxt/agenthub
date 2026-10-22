@@ -296,11 +296,29 @@ QUESTIONS = {
 }
 
 
+#: 2026-10-22：区域封禁（451）短路。实测本机直连 api.typesafe.ai **恒 451**
+#: （`{"title":"Typesafe is not available in your region.","status":451}`），
+#: 而 `ask_jev` 每轮 sweep 都白等一次请求（1.1s 级）并把 source 记成 `rule`——
+#: 看似「规则优先」，实际是「远程永远失败」。
+#: 判据：451 之后在 `JEV_BLOCKED_COOLDOWN_S` 内**不再发请求**，并让 vitals 载荷
+#: 报出 `jev_blocked_s`（自证端点必须能说清「这一轮为什么没用 jev」）。
+JEV_BLOCKED_COOLDOWN_S = float(os.getenv("JEV_BLOCKED_COOLDOWN_S", "900"))
+_JEV_BLOCK = {"until": 0.0, "reason": ""}
+
+
+def jev_blocked_for() -> float:
+    """451 短路剩余秒数（0 = 未短路）。"""
+    import time
+    return max(0.0, round(float(_JEV_BLOCK.get("until") or 0.0) - time.monotonic(), 1))
+
+
 def ask_jev(state: dict, key: Optional[List[str]] = None, timeout: float = 25.0) -> Optional[dict]:
     """一次请求问多个独立判断（并行、互不可见）。失败返回 None，由调用方退回硬规则。"""
     key = key or list(QUESTIONS)
     if not (JEV_ENABLED and profiles_jev_key()):
         return None
+    if jev_blocked_for() > 0:
+        return {"_error": "451 区域封禁短路中，剩 %.0fs" % jev_blocked_for()}
     body = json.dumps({"state": state, "model": JEV_MODEL,
                        "questions": {k: QUESTIONS[k] for k in key}}).encode()
     req = urllib.request.Request(JEV_URL, data=body, method="POST", headers={
@@ -309,6 +327,13 @@ def ask_jev(state: dict, key: Optional[List[str]] = None, timeout: float = 25.0)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode()).get("answers")
+    except urllib.error.HTTPError as e:
+        if e.code == 451:
+            import time
+            _JEV_BLOCK["until"] = time.monotonic() + JEV_BLOCKED_COOLDOWN_S
+            _JEV_BLOCK["reason"] = "HTTP 451 区域封禁"
+            return {"_error": "区域封禁（HTTP 451），%.0fs 内不再尝试" % JEV_BLOCKED_COOLDOWN_S}
+        return {"_error": "HTTP %s: %s" % (e.code, str(e)[:120])}
     except Exception as e:  # noqa: BLE001  网络/鉴权/超时都退回规则判定
         return {"_error": "%s: %s" % (type(e).__name__, str(e)[:140])}
 

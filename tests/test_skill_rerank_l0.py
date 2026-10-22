@@ -166,6 +166,58 @@ class TestTimeoutDoesNotPoisonSharedBreaker(_Base):
         self.assertGreaterEqual(skill_rerank.DEFAULT_TIMEOUT_S, 5.0)
 
 
+class TestStatsAreObservable(_Base):
+    """PT-20261022-13 观察项：重排成功率必须可观测（免费池只有 34~44%）。
+
+    不报出来，"重排偶尔没生效"只能靠人工复现 —— 那是盲区。
+    """
+
+    def setUp(self):
+        super().setUp()
+        skill_rerank.reset_stats()
+
+    def test_ok_rate_counts_only_attempts(self):
+        llm.complete_free = _stub('{"pick": 1, "why": "x"}')
+        asyncio.run(skill_rerank.choose("q", CANDS))
+        asyncio.run(skill_rerank.choose("q", CANDS))
+        st = skill_rerank.stats()
+        self.assertEqual(st["calls"], 2)
+        self.assertEqual(st["ok"], 2)
+        self.assertEqual(st["ok_rate"], 1.0)
+
+    def test_timeout_and_breaker_are_separate_buckets(self):
+        async def slow(system, user, call=None):
+            await asyncio.sleep(0.3)
+            return ('{"pick": 1}', "m")
+        llm.complete_free = slow
+        asyncio.run(skill_rerank.choose("q", CANDS, timeout_s=0.01))
+        self.assertEqual(skill_rerank.stats()["timeout"], 1)
+        self.assertEqual(skill_rerank.stats()["ok"], 0)
+
+    def test_breaker_open_counted(self):
+        orig = llm.breaker_state
+        try:
+            llm.breaker_state = lambda: {"state": "open", "cooldown_s": 5.0}
+            asyncio.run(skill_rerank.choose("q", CANDS))
+            self.assertEqual(skill_rerank.stats()["breaker_open"], 1)
+        finally:
+            llm.breaker_state = orig
+
+    def test_single_candidate_not_in_denominator(self):
+        asyncio.run(skill_rerank.choose("q", CANDS[:1]))
+        st = skill_rerank.stats()
+        self.assertEqual(st["calls"], 0, "候选不足不该计入分母（会虚低成功率）")
+        self.assertIsNone(st["ok_rate"])
+
+    def test_stats_shape_for_health(self):
+        st = skill_rerank.stats()
+        for k in ("calls", "ok", "timeout", "breaker_open", "bad_output",
+                  "reordered", "ms_avg", "ok_rate", "default_timeout_s",
+                  "enabled_by_default"):
+            self.assertIn(k, st)
+        self.assertFalse(st["enabled_by_default"], "默认必须是关（注入链预算 500ms）")
+
+
 class TestReorderKeepsRestStable(unittest.TestCase):
     def test_moves_pick_to_front_only(self):
         rows = [{"name": "a"}, {"name": "b"}, {"name": "c"}]

@@ -1324,6 +1324,13 @@ async def health():
     # 纯读、不改 status（熔断 ≠ hub 坏了），异常不得把 /health 打挂。
     try:
         out["breakers"] = resilience.instance.snapshot()
+        # 2026-10-22 PT-13：免费模型重排的成功率必须可观测。
+        # 免费池实测成功率 34~44%（会把请求路由到审核模型），不报出来就只能靠人工复现。
+        try:
+            import skill_rerank
+            out["rerank"] = skill_rerank.stats()
+        except Exception as e:  # noqa: BLE001 — 自证端点不许被情报字段打挂
+            out["rerank"] = {"error": "%s: %s" % (type(e).__name__, str(e)[:120])}
     except Exception as e:  # noqa: BLE001  # 情报字段不得把 /health 打挂
         out["breakers"] = {"error": "%s: %s" % (type(e).__name__, str(e)[:120])}
     # 画像最近检测时间（同属「health 增强」的另一半：CCR 连通性 + 画像检测时间 + DB 状态）。

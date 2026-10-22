@@ -50,6 +50,42 @@ DEFAULT_TIMEOUT_S = 8.0
 #: 摘要进 prompt 的截断长度：只给「这条技能是干什么的」，不给全文。
 _DESC_CHARS = 120
 
+#: 进程内统计（2026-10-22 PT-20261022-13 观察项：**重排成功率必须可观测**）。
+#: 为什么要暴露：免费池成功率只有 34~44%（会把请求路由到审核模型），
+#: 若不在 /health 报出来，"重排偶尔没生效"永远只能靠人工复现——那是盲区。
+_STATS: Dict[str, Any] = {
+    "calls": 0, "ok": 0, "timeout": 0, "breaker_open": 0, "bad_output": 0,
+    "other_fail": 0, "reordered": 0, "ms_sum": 0, "ms_max": 0, "last_error": None,
+}
+
+
+def _bump(k: str, ms: int = 0, err: Optional[str] = None) -> None:
+    _STATS[k] = int(_STATS.get(k) or 0) + 1
+    if ms:
+        _STATS["ms_sum"] = int(_STATS.get("ms_sum") or 0) + int(ms)
+        _STATS["ms_max"] = max(int(_STATS.get("ms_max") or 0), int(ms))
+    if err:
+        _STATS["last_error"] = str(err)[:200]
+
+
+def stats() -> Dict[str, Any]:
+    """只读统计（给 /health）。**成功率用 `attempted` 做分母**（不含「候选不足」）。"""
+    st = dict(_STATS)
+    attempted = max(0, int(st.get("calls") or 0))
+    st["attempted"] = attempted
+    st["ok_rate"] = round((st.get("ok") or 0) / attempted, 4) if attempted else None
+    st["ms_avg"] = int((st.get("ms_sum") or 0) / attempted) if attempted else None
+    st["default_timeout_s"] = DEFAULT_TIMEOUT_S
+    st["enabled_by_default"] = False
+    return st
+
+
+def reset_stats() -> None:
+    """清零（测试用）。生产不需要——统计是累计量，重启即自然清零。"""
+    for k in _STATS:
+        _STATS[k] = 0 if k != "last_error" else None
+
+
 _PROMPT_SYS = (
     "你是技能路由器。给定一个任务描述和若干候选技能，选出**最适合完成该任务的那一个**。\n"
     "只输出 JSON：{\"pick\": <候选编号整数>, \"why\": \"<20字以内理由>\"}\n"
@@ -106,9 +142,10 @@ async def choose(query: str, candidates: List[Dict[str, Any]],
     out: Dict[str, Any] = {"ok": False, "name": None, "pick": None, "why": "",
                            "ms": 0, "model": "", "timeout_s": timeout_s, "error": None}
     if len(cands) < 2:
-        # 0/1 个候选没有重排的意义，直接如实说不适用（不是失败）
+        # 0/1 个候选没有重排的意义，直接如实说不适用（不是失败，也不进分母）
         out.update(error="候选不足 2 条，无需重排", ms=int((time.monotonic() - t0) * 1000))
         return out
+    _bump("calls")
     # 【2026-10-22 实测踩到的坑，必须写在这里】超时**不能直接 cancel 在途调用**：
     # `asyncio.wait_for(coro, 2.0)` 会取消协程，而 llm 侧的 `resilience` 把
     # `CancelledError` 记成一次失败 ⇒ 连续 3 次就把 **整条 LLM 通道的熔断器打开 30s**
@@ -118,9 +155,9 @@ async def choose(query: str, candidates: List[Dict[str, Any]],
     # 我们这边如实回 `ok=false`，BM25 顺序保留。
     st = llm.breaker_state()
     if st.get("state") == "open":
-        out.update(error="LLM 通道熔断中（冷却 %.1fs），本次不重排"
-                         % float(st.get("cooldown_s") or 0),
-                   ms=int((time.monotonic() - t0) * 1000))
+        msg = "LLM 通道熔断中（冷却 %.1fs），本次不重排" % float(st.get("cooldown_s") or 0)
+        out.update(error=msg, ms=int((time.monotonic() - t0) * 1000))
+        _bump("breaker_open", out["ms"], msg)
         return out
     task = asyncio.ensure_future(
         llm.complete_free(_PROMPT_SYS, _build_user(query, cands)))
@@ -137,22 +174,27 @@ async def choose(query: str, candidates: List[Dict[str, Any]],
     except asyncio.TimeoutError:
         out.update(error="超时 %.1fs（不取消底层调用，保留 BM25 顺序）" % timeout_s,
                    ms=int((time.monotonic() - t0) * 1000))
+        _bump("timeout", out["ms"], out["error"])
         return out
     except Exception as e:  # noqa: BLE001 — 重排是增强，不许带倒检索
         out.update(error="%s: %s" % (type(e).__name__, e),
                    ms=int((time.monotonic() - t0) * 1000))
+        _bump("other_fail", out["ms"], out["error"])
         return out
     out["model"] = model or ""
     parsed = _parse(text, cands)
     if not parsed:
         out.update(error="模型输出无法解析为候选编号（原文 %r）" % (text or "")[:120],
                    ms=int((time.monotonic() - t0) * 1000))
+        _bump("bad_output", out["ms"], out["error"])
         return out
     if parsed["pick"] == 0:
         out.update(error="模型判定「都不适合」", ms=int((time.monotonic() - t0) * 1000))
+        _bump("bad_output", out["ms"], out["error"])
         return out
     out.update(ok=True, name=parsed["name"], pick=parsed["pick"], why=parsed["why"],
                ms=int((time.monotonic() - t0) * 1000))
+    _bump("ok", out["ms"])
     return out
 
 

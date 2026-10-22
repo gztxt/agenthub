@@ -69,6 +69,25 @@ def reset_circuit() -> None:
     _S["cache"] = {}
 
 
+#: 区域封禁（HTTP 451）的短路窗口。实测 2026-10-22：本机直连 api.typesafe.ai 恒 451
+#:（`{"title":"Typesafe is not available in your region.","status":451}`）。
+#: 每次探活白等 1.1s，且 `status()` 只检查 key 是否存在 ⇒ 报 `enabled:true`（假绿）。
+#: 所以：451 之后**在一段时间内直接短路**，并把原因写进 status。
+BLOCKED_COOLDOWN_S = float(os.environ.get("JEV_BLOCKED_COOLDOWN_S", "900"))
+_S_BLOCK: Dict[str, Any] = {"until": 0.0, "reason": ""}
+
+
+def blocked_remaining_s() -> float:
+    """451 短路剩余秒数（0 = 未短路）。"""
+    left = float(_S_BLOCK.get("until") or 0.0) - time.monotonic()
+    return max(0.0, round(left, 1))
+
+
+def _mark_blocked(reason: str) -> None:
+    _S_BLOCK["until"] = time.monotonic() + BLOCKED_COOLDOWN_S
+    _S_BLOCK["reason"] = str(reason)[:160]
+
+
 def status() -> Dict[str, Any]:
     """健康与熔断状态，供 `/api/skill/status` 回显。字段与 `kb.py:_backend` 同形。"""
     key = os.environ.get("TYPESAFE_API_KEY")
@@ -88,6 +107,11 @@ def status() -> Dict[str, Any]:
         "timeout_s": DEFAULT_TIMEOUT_S,
         "cache_ttl_s": CACHE_TTL_S,
         "model": JEV_MODEL,
+        # 2026-10-22：区域封禁必须**可分辨**。只报 `enabled:true` 是假绿
+        # （key 在、但每个请求都 451）；这三个字段让调用方一眼看出「不是 key 的问题」。
+        "region_blocked": blocked_remaining_s() > 0,
+        "blocked_remaining_s": blocked_remaining_s(),
+        "blocked_reason": _S_BLOCK.get("reason") or None,
     }
 
 
@@ -178,6 +202,8 @@ async def score_candidates(query: str, candidates: List[Dict[str, Any]],
     """
     if not os.environ.get("TYPESAFE_API_KEY"):
         raise JevUnavailable("未设置 TYPESAFE_API_KEY")
+    if blocked_remaining_s() > 0:
+        raise JevUnavailable("区域封禁（HTTP 451）短路中，剩 %.0fs" % blocked_remaining_s())
     if _S["down"]:
         raise JevUnavailable("已熔断：%s" % (_S["down_reason"] or "连续失败"))
     cand = list(candidates)[:MAX_CANDIDATES]
@@ -198,6 +224,13 @@ async def score_candidates(query: str, candidates: List[Dict[str, Any]],
         async with aiohttp.ClientSession() as sess:
             async with sess.post(url, json=body, headers=hdr,
                                  timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
+                if r.status == 451:
+                    # 区域封禁：与 403（key 没生效）**不是同一件事**，不能混报
+                    body = (await r.text())[:200]
+                    _mark_blocked("HTTP 451 区域封禁：%s" % body)
+                    _record_failure("451 区域封禁")
+                    raise JevUnavailable("区域封禁（HTTP 451），%d 秒内不再尝试"
+                                         % int(BLOCKED_COOLDOWN_S))
                 if r.status == 403:
                     # 与 scripts/jev.py:158-160 同口径：403 是 key 没生效，不是代码问题
                     raise JevUnavailable("HTTP 403 —— key 没生效，检查 TYPESAFE_API_KEY 是否已 source")

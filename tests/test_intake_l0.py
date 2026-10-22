@@ -393,6 +393,46 @@ class TestKbEmptyContent(unittest.TestCase):
         raw = "先备份再改 —— 这是判据 --- 下面是例子"
         self.assertEqual(intake._body(raw), raw)
 
+    def test_frontmatter_only_fragment_dropped(self):
+        r"""整段只有 front matter（闭合符后直接接 `...`）⇒ 无正文可摘，返回空。
+
+        实测样本（2026-10-22，`wiki 索引重建 build-v3`，`raw[218]`）：
+        `--- type: entity title: "…" … related_pending: - "技术文档索引器" ---...`
+        `---` 后接的是 `...` 不是空白，两条归正（`\s---\s+`）都不匹配 ⇒ 旧实现原样返回。
+        4/40 条查询的简报就是这么带上 front matter 的。
+        """
+        raw = ('--- type: entity title: "turbovec 索引重建的授权窗口与可搜索性判据" '
+               'created: 2026-10-16 updated: 2026-10-16 status: proposed tags: - distilled '
+               '- entity related: - "[[GitHub-直连超时时的API备用取证]]" '
+               'related_pending: - "技术文档索引器" ---...')
+        self.assertEqual(intake._body(raw), "", "整段 FM 不能当摘要")
+
+    def test_half_frontmatter_bare_related(self):
+        """从 FM 中间起算、只剩裸 `related:` 可见时，也要剥到正文。
+
+        实测样本（2026-10-22，`备份脚本 命名 时间戳`）：
+        `...oncept related: - "[[git commit]]" - "[[破坏性操作]]" --- # 文件修改备份命名规范 > …`
+        `type:` 被切成 `oncept`，只有 `related:` 完整 ⇒ 旧 `related_\\w+` 不匹配。
+        """
+        raw = ('...oncept related: - "[[git commit]]" - "[[破坏性操作]]" --- '
+               '# 文件修改备份命名规范 > 修改已有文件前必须备份')
+        body = intake._body(raw)
+        self.assertTrue(body.startswith("# 文件修改备份命名规范"), body)
+
+    def test_frontmatter_only_falls_back_to_title(self):
+        """`_body()` 交出空串后，明细行要回退标题，而不是留空行。"""
+        old = intake._self_get
+        intake._self_get = lambda *a, **k: {"count": 1, "results": [
+            {"source": "xerj", "path": "wiki/x.md", "title": "索引重建工具与写入防护",
+             "content": '--- type: concept title: "索引重建工具与写入防护" created: 2026-10-13 ---...',
+             "score": 1.0}]}
+        try:
+            rows = intake._flatten("索引重建", {"kb": intake._kb("索引重建", "xerj")})
+        finally:
+            intake._self_get = old
+        self.assertEqual(rows[0]["text"], "索引重建工具与写入防护")
+        self.assertNotIn("type:", rows[0]["text"])
+
     def test_provenance_footer_not_scored(self):
         """出处尾注是**引用来源**，不参与评分（否则回声：简报→卡片→尾注里的原查询）。
 

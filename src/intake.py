@@ -198,8 +198,16 @@ _TAG_RE = re.compile(r"</?em>")
 # `created:` 被切掉前三个字符变成 `ated:`，于是 `\A---` 匹配不到，
 # `ated: 2026-10-18 updated: … tags: - distilled …` 整段被当成摘要写进简报（2026-10-22 实测）。
 # 判据两条同时成立才裁：① `---` 之前出现这些字段名；② `---` 之后还有正文。
-_FM_KEY_RE = re.compile(r"(?:created|updated|status|tags|type|title|related_\w+)\s*:", re.I)
+#: 裸 `related:` 也要认——highlight 从 FM 中间起算时，`type:` 可能被切成 `oncept`，
+#: 只有 `related:` 这几个字符是完整的（2026-10-22 实测 `...oncept related: - "[[git commit]]" --- # 标题`）。
+_FM_KEY_RE = re.compile(r"(?:created|updated|status|tags|type|title|related(?:_\w+)?)\s*:", re.I)
 _FM_HEAD_RE = re.compile(r".*?\s---\s+", re.S)
+
+#: **整段只有 front matter**：highlight 截断时会在闭合 `---` 后面直接接 `...`（没有空白），
+# 上面两条正则都要求 `---` 后跟 `\s`，于是整段 FM 被当成摘要（实测「turbovec 索引重建…」卡
+# `raw[218]` 以 `related_pending: - "…" ---...` 结尾，`_body()` 原样返回，4/40 条简报中招）。
+# 判据：以 `---` 开头 + 前 400 字里出现 FM 字段名 ⇒ 不论有没有闭合符，这段都不是正文。
+_LEAD_FM_RE = re.compile(r"\A\s*---(?:\s|$)")
 
 #: 同义卡的出处尾注（`*提炼自会话 \`intake/2026-10-22_101626-解释一下这次日志里的-502-来自哪里.md\`*`）。
 # 全站 4,413 张 wiki 卡都有，正文评分必须剔掉：它是**引用来源**，不是卡片内容。
@@ -214,6 +222,10 @@ def _body(text: str) -> str:
     m = _FM_HEAD_RE.match(t)
     if m and _FM_KEY_RE.search(m.group(0)) and len(t) > m.end():
         t = t[m.end():]
+    elif _LEAD_FM_RE.match(t) and _FM_KEY_RE.search(t[:400]):
+        # 整段只有 front matter（闭合符后直接接 `...` 或被截断）⇒ 没有正文可摘，
+        # 交给调用方回退标题，别把字段名当摘要。
+        return ""
     return _PROV_RE.sub("", t).strip()
 
 

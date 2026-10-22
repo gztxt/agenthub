@@ -479,43 +479,79 @@ async def _skill(task: str, caller: str) -> Dict[str, Any]:
                            '未命中时换任务描述用词，或 hub_list_skills(...) 人工挑')}
 
 
-def _ref(task: str, wait_s: int, lang: str) -> Dict[str, Any]:
-    """提交参考库检索并按需等待；超时就把已有词法卡的结果交出去并**写明没等到重排**。"""
+#: 卡片**只在 expand 阶段结束才落库**：实测两单 +25.2s / +59.2s，而升级触发的预算只有 8s
+#: ⇒ 旧实现在截止时 `card_view` 必然 404（被 `except: pass` 吞成"没有候选"）。
+#: 不延长等待（接单阶段不该卡 1 分钟），但必须把"卡还没建"与"真故障"分开写。
+REF_PENDING_HINT = ("卡片尚未落库（实测 25~70s，取决于 expand 阶段）——"
+                    "现在按卡号取会 404，约 1 分钟后再取")
+
+
+def _ref(task: str, wait_s: int, lang: str, early_card: bool = False) -> Dict[str, Any]:
+    """提交参考库检索并按需等待。
+
+    `early_card=True`（升级触发）：卡一落库就返回**词法卡**，不等重排 —— 实测卡一出现就带
+    `impl` 桶，继续等只是白等；`False`（deep）：等到 `done/failed` 或超时，要判词分。
+
+    `job_view` 自带 `card`（卡未落库时为 `None`），所以"卡还没生成"**不是异常**；
+    只有任务行查不到才是真故障。`state` 三档：`ok` / `pending` / `empty` / `failed` / `unavailable`。
+    """
     if not refscout.token():
-        return {"ok": False, "error": "GitHub token 不可用（设置页 / GITHUB_TOKEN / github.txt）"}
+        return {"ok": False, "state": "unavailable",
+                "error": "GitHub token 不可用（设置页 / GITHUB_TOKEN / github.txt）"}
     try:
         job = refscout.submit(refscout.ScoutIn(module=task[:200], lang=lang,
                                                allow_paid=False, trigger="manual"))
     except Exception as e:  # noqa: BLE001 —— 含 HTTPException(503)
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-    job_id, card_id = job.get("job_id"), job.get("card_id")
-    deadline = time.monotonic() + max(0, wait_s)
-    status = "queued"
-    while time.monotonic() < deadline:
+        return {"ok": False, "state": "unavailable", "error": f"{type(e).__name__}: {e}"}
+    job_id = job.get("job_id")
+    # ⚠️ 去重分支只回 `{job_id, deduped}`，**不带 card_id**（见 refscout.submit）⇒ 必须补。
+    card_id = job.get("card_id")
+    t0 = time.monotonic()
+    deadline = t0 + max(0, wait_s)
+    status, card, err = "queued", None, None
+    while True:
         try:
             v = refscout.job_view(job_id)
-        except Exception:  # noqa: BLE001
-            break
+        except Exception as e:  # noqa: BLE001 —— 任务行查不到才是真故障
+            return {"ok": False, "state": "unavailable", "job_id": job_id,
+                    "card_id": card_id, "error": f"{type(e).__name__}: {e}"}
+        card_id = card_id or v.get("card_id")
         status = str(v.get("status") or "")
-        if status in ("done", "failed"):
+        card, err = v.get("card"), v.get("error")
+        if status in ("done", "failed") or (early_card and card) \
+                or time.monotonic() >= deadline:
             break
         time.sleep(1.0)
     rows: List[Dict[str, Any]] = []
-    try:
-        card = refscout.card_view(card_id)
-        for c in (card.get("candidates") or []):
-            if c.get("bucket") != "impl":
-                continue
-            rows.append({"repo": c.get("repo"), "stars": c.get("stars"),
-                         "func": c.get("func"), "impl": c.get("impl"),
-                         "judge": c.get("judge"),
-                         "gist": (c.get("readme_gist") or "")[:120]})
-            if len(rows) >= 5:
-                break
-    except Exception:  # noqa: BLE001
-        pass
-    return {"ok": bool(rows), "job_id": job_id, "card_id": card_id, "status": status,
-            "waited_s": wait_s, "rows": rows}
+    for c in ((card or {}).get("candidates") or []):
+        if c.get("bucket") != "impl":
+            continue
+        rows.append({"repo": c.get("repo"), "stars": c.get("stars"),
+                     "func": c.get("func"), "impl": c.get("impl"),
+                     "judge": c.get("judge"),
+                     "gist": (c.get("readme_gist") or "")[:120]})
+        if len(rows) >= 5:
+            break
+    if rows:
+        state = "ok"
+    elif card:
+        state = "empty"
+    elif status == "failed":
+        state = "failed"
+    else:
+        state = "pending"
+    out: Dict[str, Any] = {"ok": bool(rows), "state": state, "job_id": job_id,
+                           "card_id": card_id, "status": status,
+                           "waited_s": round(time.monotonic() - t0, 1), "rows": rows}
+    if not rows:
+        out["reason"] = {
+            "pending": REF_PENDING_HINT,
+            "empty": "卡已落库，但没有 `impl` 桶候选（可能只匹配到清单类仓库）",
+            "failed": f"任务失败（{err or '无错误信息'}）",
+        }.get(state, "")
+        if state == "failed" and err:
+            out["error"] = str(err)
+    return out
 
 
 async def _skill_store(task: str, caller: str) -> Dict[str, Any]:
@@ -628,12 +664,14 @@ async def _escalate(task: str, why: str, inp: "IntakeIn") -> Dict[str, Any]:
 
     if why == "off":
         try:
-            ref = await asyncio.to_thread(_ref, task, ESCALATE_REF_WAIT, inp.lang)
+            # 升级触发：卡一落库就拿词法卡（实测卡一出现即带 impl 桶），不为重排再等 1 分钟。
+            ref = await asyncio.to_thread(_ref, task, ESCALATE_REF_WAIT, inp.lang, True)
         except Exception as e:  # noqa: BLE001
-            ref = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            ref = {"ok": False, "state": "unavailable", "error": f"{type(e).__name__}: {e}"}
         out["ref"] = ref
         out["steps"].append({"step": "参考库", "ok": bool(ref.get("ok")),
-                             "n": len(ref.get("rows") or []), "error": ref.get("error")})
+                             "n": len(ref.get("rows") or []), "error": ref.get("error"),
+                             "state": ref.get("state"), "note": ref.get("reason")})
     else:
         # 已由 `deep` 触发查过，这里不重复打 GitHub 额度
         out["ref"] = None
@@ -694,12 +732,24 @@ def _external_lines(ext: Dict[str, Any]) -> List[str]:
 
     ref = ext.get("ref")
     if ref and not ref.get("card_id"):
-        out.append(f"- 参考库：⚠️ 未完成（{ref.get('error') or '无卡 id'}）")
+        out.append(f"- 参考库：⚠️ 未完成（{ref.get('error') or ref.get('reason') or '无卡 id'}）")
     elif ref:
-        note = "" if ref.get("status") == "done" else \
-            f"（{ESCALATE_REF_WAIT}s 未等到重排，词法结果稍后用卡取）"
-        out.append(f"- 参考库：卡 `{ref.get('card_id')}`　状态 {ref.get('status')}{note}")
-        if ref.get("card_id"):
+        st, state = ref.get("status"), ref.get("state")
+        if ref.get("ok"):
+            out.append(f"- 参考库：卡 `{ref['card_id']}`　状态 {st}（词法卡，未等重排）")
+            for x in ref["rows"]:
+                out.append(f"  - [{x['repo']}](https://github.com/{x['repo']}) ★{x['stars']} "
+                           f"功能{x['func']}／实现{x['impl']} 判定{x.get('judge') or '—'}")
+        elif state == "pending":
+            # 卡号已分配但卡还没落库 —— 写成"稍后取"会让人立刻去取、拿到 404。
+            out.append(f"- 参考库：卡 `{ref['card_id']}` 已分配、**尚未落库**——{REF_PENDING_HINT}")
+            out.append(f"  - 约 1 分钟后取：`hub_ref_get(card_id=\"{ref['card_id']}\")`")
+        elif state == "empty":
+            out.append(f"- 参考库：卡 `{ref['card_id']}` 已落库（状态 {st}），"
+                       f"但{ref.get('reason') or '没有 impl 候选'}")
+        else:
+            out.append(f"- 参考库：⚠️ 未完成（{ref.get('error') or ref.get('reason') or st}）")
+        if ref.get("card_id") and state in ("ok", "empty"):
             out.append(f"  - 取全卡：`hub_ref_get(card_id=\"{ref['card_id']}\")`")
 
     web = ext.get("web") or {}
@@ -822,7 +872,9 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
     elif why == "off" and ext.get("triggered"):
         pass          # 参考库结果已在「外部升级」里列过
     elif not r.get("ok"):
-        out.append(f"- 参考库：⚠️ 未完成（{why}／{r.get('error') or '无结果'}）")
+        out.append(f"- 参考库：⚠️ 未完成（{why}／"
+                   f"{r.get('error') or r.get('reason') or '无结果'}）"
+                   + (f"　卡号 `{r['card_id']}` 已分配" if r.get("card_id") else ""))
     else:
         note = "" if r.get("status") == "done" else "（未等到重排，先给词法卡）"
         out.append(f"- 参考库：卡 `{r['card_id']}`　状态 {r.get('status')}"

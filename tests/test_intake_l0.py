@@ -102,6 +102,101 @@ class TestBriefWording(unittest.TestCase):
     def test_caveat_present(self):
         self.assertIn("引用前回原文核对", intake.brief_md("t", self._res()))
 
+    def test_pending_ref_does_not_promise_instant_fetch(self):
+        """卡还没落库时不能只写「稍后用卡取」—— 那时取必 404。"""
+        ref = {"ok": False, "state": "pending", "card_id": "abc123",
+               "status": "running", "waited_s": 8, "rows": [],
+               "reason": intake.REF_PENDING_HINT}
+        md = intake.brief_md("t", self._res(ref=ref, deep_reason="trigger:选型"))
+        self.assertIn("abc123", md)
+        self.assertIn("尚未落库", md)
+        self.assertIn("404", md)
+
+
+class TestRefJob(unittest.TestCase):
+    """参考库：卡片落库地板实测 25~70s，远大于升级的 8s 预算。
+
+    旧实现两处踩空：① 截止时 `card_view` 404 被 `except: pass` 吞成"没有候选"；
+    ② `submit` 去重分支不回 card_id，`_ref` 拿 submit 的值 ⇒ 卡号丢成 null。
+    """
+
+    def setUp(self):
+        self._old = (intake.refscout.submit, intake.refscout.job_view,
+                     intake.refscout.token, intake.time.sleep)
+        intake.refscout.token = lambda: "tok"
+        intake.time.sleep = lambda s: None
+
+    def tearDown(self):
+        (intake.refscout.submit, intake.refscout.job_view,
+         intake.refscout.token, intake.time.sleep) = self._old
+
+    @staticmethod
+    def _card():
+        return {"candidates": [
+            {"repo": "a/b", "stars": 9, "func": 0.5, "impl": 0.6, "judge": None,
+             "readme_gist": "g", "bucket": "impl"},
+            {"repo": "c/d", "bucket": "list"},
+        ]}
+
+    def test_pending_when_card_not_created(self):
+        intake.refscout.submit = lambda body: {"job_id": "j1", "card_id": "c1"}
+        intake.refscout.job_view = lambda jid: {"job_id": jid, "card_id": "c1",
+                                                "status": "running", "card": None}
+        r = intake._ref("tt", 0, "", True)
+        self.assertEqual(r["state"], "pending")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["card_id"], "c1", "卡号必须带出，供调用方稍后取")
+        self.assertIn("落库", r["reason"])
+        self.assertNotIn("error", r, "卡还没建不是故障，不许写成 error")
+
+    def test_deduped_submit_card_id_from_job_view(self):
+        intake.refscout.submit = lambda body: {"job_id": "j1", "deduped": True}
+        intake.refscout.job_view = lambda jid: {"card_id": "c0", "status": "running",
+                                                "card": self._card()}
+        r = intake._ref("tt", 0, "", True)
+        self.assertEqual(r["card_id"], "c0", "去重分支必须从 job_view 补卡号")
+        self.assertTrue(r["ok"])
+        self.assertEqual([x["repo"] for x in r["rows"]], ["a/b"], "只收 impl 桶")
+
+    def test_early_card_returns_without_waiting_rerank(self):
+        calls = {"n": 0}
+
+        def jv(jid):
+            calls["n"] += 1
+            return {"card_id": "c0", "status": "lexical", "card": self._card()}
+
+        intake.refscout.submit = lambda body: {"job_id": "j1", "card_id": "c0"}
+        intake.refscout.job_view = jv
+
+        def no_sleep(_s):
+            raise AssertionError("卡已落库就该立刻返回，不该再睡")
+
+        intake.time.sleep = no_sleep
+        r = intake._ref("tt", 8, "", True)
+        self.assertTrue(r["ok"])
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(r["state"], "ok")
+
+    def test_deep_still_waits_for_done(self):
+        """deep 要判词分：卡已落库也不能提前返回词法卡。"""
+        states = [{"status": "lexical", "card": self._card()},
+                  {"status": "rerank", "card": self._card()},
+                  {"status": "done", "card": self._card()}]
+        seq = iter(states)
+
+        def jv(jid):
+            try:
+                st = next(seq)
+            except StopIteration:
+                st = states[-1]
+            return dict(st, card_id="c0")
+
+        intake.refscout.submit = lambda body: {"job_id": "j1", "card_id": "c0"}
+        intake.refscout.job_view = jv
+        r = intake._ref("tt", 8, "", False)
+        self.assertEqual(r["status"], "done")
+        self.assertTrue(r["ok"])
+
 
 class TestRunComposition(unittest.TestCase):
     """`run()` 只做组合：任何一路失败都必须仍在简报里出现，而不是整份 500。"""

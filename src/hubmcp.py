@@ -552,6 +552,10 @@ def hub_intake(task: str, deep: bool = False, auto_deep: bool = True,
                      "repos": [x.get("repo") for x in
                                ((ext.get("gh") or {}).get("rows") or [])],
                      "ref_card": (ext.get("ref") or {}).get("card_id"),
+                     # 卡还没落库（实测 25~70s）时 `ref_card` 有值但取必 404：
+                     # 状态与原因必须一起给，否则调用方只能从空 rows 猜。
+                     "ref_state": (ext.get("ref") or {}).get("state"),
+                     "ref_note": (ext.get("ref") or {}).get("reason"),
                      "web": (ext.get("web") or {}).get("error"),
                      "took_s": ext.get("took_s")},
         "deep_reason": data.get("deep_reason"),

@@ -57,6 +57,29 @@ class TestStaleJevDowngrade(unittest.TestCase):
         self.assertEqual(decide("rule", 1000), ("rule", None))
 
 
+class TestSnapshotAlsoDowngrades(unittest.TestCase):
+    """降级不能只做在 `judge()` 的缓存分支 —— `_latest` 是另一份字典。
+
+    实测：`aider`/`cline`/`dsh` 已不在扫描面 ⇒ 它们的记录**永不被覆盖**，
+    30 天前的 `source=jev-lowconf` 一直出现在面板上。修完 judge 分支后仍有 3/16 是假的，
+    把降级加到 `snapshot()` 才归零（生产实测 16/16 变 rule，10 条留 source_cached）。
+    """
+
+    def test_snapshot_applies_downgrade(self):
+        src = (_REPO / "src" / "vitals.py").read_text(encoding="utf-8")
+        i = src.index("def snapshot(self)")
+        body = src[i:i + 1600]
+        self.assertIn("JEV_CACHE_FRESH_H", body, "snapshot 没做陈旧降级（_latest 会漏）")
+        self.assertIn('rec["source"] = "rule"', body)
+        self.assertIn('rec["source_cached"]', body, "原值必须留档（不隐藏证据）")
+
+    def test_latest_and_by_sha_both_covered(self):
+        """两处都要覆盖：只改一处 ⇒ 面板与缓存结论不一致（同一屏两份真相）。"""
+        src = (_REPO / "src" / "vitals.py").read_text(encoding="utf-8")
+        self.assertGreaterEqual(src.count('rec["source_cached"] ='), 2,
+                                "by_sha 与 _latest 只改了一处")
+
+
 class TestBlockedShortCircuitStillWorks(unittest.TestCase):
     """降级不得与 451 短路冲突：短路只影响「要不要发请求」，降级只影响「怎么显示」。"""
 

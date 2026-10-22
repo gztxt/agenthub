@@ -649,8 +649,27 @@ class Vitals:
         return self._latest[aid]
 
     def snapshot(self) -> Dict[str, dict]:
+        """当前快照。**返回前统一做「jev 结论陈旧降级」**。
+
+        为什么放在这里而不是只放在 `judge()` 的缓存分支：`_latest` 是另一份字典，
+        已经不在扫描面的 agent（实测 aider/cline/dsh）**永远不会被覆盖** ⇒ 它们 30 天前
+        的 `source=jev-lowconf` 会一直出现在面板上。同一个判据只在一处实现必然漏。
+        """
         with self._lock:
-            return json.loads(json.dumps(self._latest))
+            out = json.loads(json.dumps(self._latest))
+        now = time.time()
+        for aid, rec in out.items():
+            src = str(rec.get("source") or "")
+            if not src.startswith("jev"):
+                continue
+            age_h = (now - float(rec.get("checked_at") or 0)) / 3600.0
+            if age_h > JEV_CACHE_FRESH_H:
+                rec["source_cached"] = src
+                rec["cached_age_h"] = round(age_h, 1)
+                rec["source"] = "rule"
+                rec["note"] = ("jev 结论来自 %.1f 天前（该 agent 已不在本轮扫描面）；"
+                               "本行判定依据是代码规则" % (age_h / 24.0))
+        return out
 
     def get(self, agent_id: str) -> Optional[dict]:
         with self._lock:

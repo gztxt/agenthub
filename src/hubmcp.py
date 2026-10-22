@@ -504,14 +504,14 @@ def hub_ref_get(card_id: str = "", job_id: str = "", q: str = "",
 
 @server.tool()
 def hub_intake(task: str, deep: bool = False, auto_deep: bool = True,
-               caller: str = "") -> str:
+               caller: str = "", escalate: str = "auto") -> str:
     """**接单前置**：拿到任务后先调它，一次把「记忆 / 知识库 / 技能 / 参考库」四查做完，
     返回一份可复核简报（`brief` 是 markdown，可直接贴进对话）。
 
     为什么要有这个工具：这四类资料各有入口，但**没有任何一步要求 agent 都过一遍**，
     结果常见形态是「凭印象开工，出问题才回头翻」。本工具只做组合与呈现，不新增检索能力。
 
-    读法（三条，缺一条就会把它误用成结论）：
+    读法（四条，缺一条就会把它误用成结论）：
     - 先看 `verdict`：`ready`（有可用线索）/ `thin`（四路都通但无线索）/ `degraded`（有路挂了）。
       后两者都不该直接开工：`thin` 换词重查，`degraded` 先修那一路。
     - `counts` 只报条数，**`memory.count=0` 必须**同时看 `degraded`：0 命中与「那一路挂了」
@@ -522,12 +522,18 @@ def hub_intake(task: str, deep: bool = False, auto_deep: bool = True,
       「新增/实现/选型/对标…」才自动升级，`deep_reason` 会写明原因；`deep=True` 强制查。
     简报只给线索与出处，**引用前回原文核对**。
 
+    **本地没线索时会外扩**（`escalate=auto` 且判定 `thin`）：技能中心（只查不装）→
+    GitHub 仓库搜索 → 参考库卡片；联网搜索本机无可用 provider，简报里会如实写「不可用」。
+    外扩结果看 `external`，**不是本机结论**，用前自己核。`escalate="off"` 可只查本地。
+
     非 MCP 工具链用 `scripts/intake.sh "<任务>"` 取同一份简报（同一端点，无第二套口径）。"""
-    body = {"task": task, "deep": deep, "auto_deep": auto_deep, "caller": caller}
+    body = {"task": task, "deep": deep, "auto_deep": auto_deep, "caller": caller,
+            "escalate": escalate}
     # 参考库深查默认等 90s，外层超时必须放宽，否则 MCP 层先超时、上游还在跑。
     data = _post("/api/intake/task", body, _timeout=(200 if deep else 120))
     if "error" in data:
         return json.dumps(data, ensure_ascii=False)
+    ext = data.get("external") or {}
     return json.dumps({
         "brief": data.get("brief"),
         "verdict": (data.get("plan") or {}).get("verdict"),
@@ -537,7 +543,17 @@ def hub_intake(task: str, deep: bool = False, auto_deep: bool = True,
                    "kb": (data.get("kb") or {}).get("count"),
                    "skill": (data.get("skill") or {}).get("name") or None,
                    "useful": (data.get("plan") or {}).get("useful"),
-                   "noise": (data.get("plan") or {}).get("noise")},
+                   "noise": (data.get("plan") or {}).get("noise"),
+                   "meta": (data.get("plan") or {}).get("meta")},
+        "external": {"triggered": ext.get("triggered"),
+                     "status": ext.get("status"),
+                     "reason": ext.get("reason"),
+                     "skill": (ext.get("skill_store") or {}).get("picked"),
+                     "repos": [x.get("repo") for x in
+                               ((ext.get("gh") or {}).get("rows") or [])],
+                     "ref_card": (ext.get("ref") or {}).get("card_id"),
+                     "web": (ext.get("web") or {}).get("error"),
+                     "took_s": ext.get("took_s")},
         "deep_reason": data.get("deep_reason"),
         "card_id": (data.get("ref") or {}).get("card_id"),
         "elapsed_s": data.get("elapsed_s"),

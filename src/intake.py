@@ -63,9 +63,10 @@ router = APIRouter(prefix="/api/intake", tags=["intake"])
 SELF_URL = "http://127.0.0.1:%d" % _cfg.port
 TIMEOUT_S = 12.0
 
-#: 默认只查快路：`workspace`/`archived` 是逐文件 rg 全扫（实测 1.9~2.5s/路），
-# 接单阶段把预算烧在这里，用户看到的就是"卡了几秒然后给了一堆不相关文件"。
-FAST_KB_ROUTES = "tdai,xerj"
+#: 默认只查快路。**只走 xerj（文档索引）**：实测 `tdai` 路由返回的是 `m_…` 开头的
+# **记忆条目**（不是文档），三条查询各占 kb 6 条里的 3 条，与「记忆」段逐条重复；
+# 砍掉后同样耗时下 `xerj` 仍返回 5 篇文档，纯噪声减半。
+FAST_KB_ROUTES = "xerj"
 
 ROUTE_LABEL = {"memory": "记忆", "kb": "知识库", "skill": "技能", "ref": "参考库"}
 
@@ -73,6 +74,22 @@ ROUTE_LABEL = {"memory": "记忆", "kb": "知识库", "skill": "技能", "ref": 
 # 不调模型：接单这一步不该再引入一个不确定延迟。
 DEEP_TRIGGERS = ("新增", "实现", "选型", "对比", "对标", "参考实现", "重构",
                  "架构", "设计", "迁移", "接入", "替换", "性能")
+
+#: 本地四路都拿不到可用线索（`thin`）时按「技能中心 → GitHub 仓库 → 参考库」外扩
+#: （2026-10-22 用户裁定）。**每级都必须报「查到了什么 / 为什么没查」**：
+#: 外扩最容易变成"看起来查过"，所以宁可写明"不可用"也不静默跳过。
+ESCALATE_SKILL_S = 10.0     # 技能商店检索（实测 0.9~2.5s，超时视为该级降级）
+ESCALATE_GH_ARMS = 2        # GitHub 仓库搜索只发 2 条臂：够用且不吃配额
+ESCALATE_REF_WAIT = 8       # 升级触发的参考库只等 8s：重排通常等不到，交回卡 id 异步取
+#: 技能商店的 `quality` 混了下载量与新鲜度，会把人尽皆知的通用技能顶上来
+#: （实测 `日志 502` 的第一名是「编程大神.Skill」，quality 0.661 但 rel 只有 0.175）。
+#: 所以命中判据加一道**相关性下限**：`rel` 是词面贴合度，才是"这技能是不是干这事的"。
+SKILL_REL_MIN = 0.5
+
+#: 联网搜索：本机**没有任何可用 provider**（实测见 `_WEB_UNAVAILABLE`），
+#: 因此这一级永远是"如实报不可用"，不做静默降级、也不假装查过。
+_WEB_UNAVAILABLE = ("未配置搜索 provider；本机实测：DuckDuckGo 8s 超时、"
+                    "cn.bing.com 返回与查询无关的结果、百度返回「安全验证」页")
 
 #: 做词面重合判定时剔除的虚词／高频字（只影响"相关度"标注，**不影响任何检索**）。
 _STOP = set("的了是在和与及或就都而这那有为对把被从到会可要我们你他她它个些没不很更最")
@@ -84,6 +101,35 @@ _TITLE_ONLY = "（仅标题命中"
 #: 混在十条摘要里最容易被跳过，而跳过的代价正是"照摘要写错"。
 _RULE_WORDS = ("必须", "禁止", "不得", "不要", "一律", "只能", "先用", "先读", "先查",
                "务必", "严禁", "不许", "不能", "应当", "须先")
+
+#: 规程/台账类文件。命中它们**不算"有参考资料"**：这些文件里记着过往查询例句
+# （例如「查『解释日志里的 502』时记忆全不相关」），任务一进来就会**自我命中**，
+# 把 `thin` 顶成 `ready` ⇒ 外部升级被永久关掉。它们仍在明细里列出，只是不参与定级。
+META_DOCS = {"agents.md", "claude.md", "pending-tasks.md", "会话快照.md",
+             "memory.md", "index.md", "_index.md"}
+
+#: 任务陈述里的"请求动作"词：对外部检索（技能商店 / GitHub）毫无信息量，
+#: 带着它们查会稀释成 0 命中（实测同一句：整句查 0 条，去掉后查到 `日志排查` 质量 0.78）。
+_QUERY_STOP = ("解释", "说明", "分析", "帮我", "帮忙", "请问", "麻烦", "一下", "这个",
+               "这次", "这些", "那个", "怎么", "如何", "为什么", "哪里", "来自", "是否",
+               "可以", "需要", "有没有", "什么", "哪些", "应该", "建议", "看看", "查一下")
+
+
+def _keywords(task: str, limit: int = 6) -> str:
+    """把自然语言任务压成检索词。**只给外部检索用**，本地检索仍用原句
+    （XERJ 的分词器自己会处理，改写反而丢上下文）。"""
+    t = task or ""
+    for w in _QUERY_STOP:
+        t = t.replace(w, " ")
+    t = re.sub(r"[的了呢吧吗啊呀，。？！,.?!、；;：:\"'（）()\[\]{}]+", " ", t)
+    toks: List[str] = []
+    for x in t.split():
+        if len(x) > 2 and x[-1] in "里中上下内":   # 「日志里」→「日志」，检索词不该带方位后缀
+            x = x[:-1]
+        if len(x) >= 2:
+            toks.append(x)
+    return " ".join(toks[:limit]) or (task or "")[:40]
+
 
 #: 覆盖率 → 定级阈值。**刻意宽松**：弱相关只折叠不丢弃，宁可多列也不假装精确。
 REL_STRONG, REL_WEAK = 0.5, 0.25
@@ -162,9 +208,11 @@ def _flatten(task: str, res: Dict[str, Any]) -> List[Dict[str, Any]]:
                      "path": "", "dup_of": "", "cov": _coverage(text, toks)})
     for it in (res.get("kb") or {}).get("items") or []:
         text = _body(it.get("content") or "") or (it.get("title") or "")
+        path = it.get("path") or ""
         rows.append({"route": "知识库", "text": text, "rel": _rel(text, toks),
-                     "src": it.get("source") or "?", "path": it.get("path") or "",
+                     "src": it.get("source") or "?", "path": path,
                      "title": it.get("title") or "", "dup_of": "",
+                     "meta": path.split("/")[-1].lower() in META_DOCS,
                      "cov": _coverage(text, toks)})
     for r in rows:
         sig = _sig(r["text"])
@@ -185,7 +233,7 @@ def _constraints(rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     实测这几条两两 Jaccard 最高只有 0.275，硬合会误并真正不同的规则。
     """
     cand = [r for r in rows
-            if not r["dup_of"] and r["rel"] != "弱"
+            if not r["dup_of"] and r["rel"] != "弱" and not r.get("meta")
             # 「（仅标题命中：X）」是 XERJ 无正文时的回退串，里面没有判据可抽——
             # 硬抽会得到「约束：必须备份」这种只有标题、没有"在哪、做什么"的空规则。
             and not r["text"].startswith(_TITLE_ONLY)
@@ -204,7 +252,8 @@ def _must_read(rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """需要回读的原文：有路径、且不是弱命中。同一路径只留第一条（命中可能多段）。"""
     out: List[Dict[str, str]] = []
     seen = set()
-    cand = [r for r in rows if r["path"] and not r["dup_of"] and r["rel"] != "弱"]
+    cand = [r for r in rows
+            if r["path"] and not r["dup_of"] and r["rel"] != "弱" and not r.get("meta")]
     cand.sort(key=lambda r: -float(r.get("cov") or 0))
     for r in cand:
         if r["path"] in seen:
@@ -226,7 +275,9 @@ def assess(task: str, res: Dict[str, Any]) -> Dict[str, Any]:
     """
     rows = _flatten(task, res)
     live = [r for r in rows if not r["dup_of"]]
-    useful = [r for r in live if r["rel"] in ("直接", "相关")]
+    # 规程/台账不算线索，但也不当噪声：它们单独计数并在明细里标出来（见 META_DOCS）。
+    meta = [r for r in live if r.get("meta")]
+    useful = [r for r in live if r["rel"] in ("直接", "相关") and not r.get("meta")]
 
     m, k = res.get("memory") or {}, res.get("kb") or {}
     s, rf = res.get("skill") or {}, res.get("ref") or {}
@@ -252,8 +303,8 @@ def assess(task: str, res: Dict[str, Any]) -> Dict[str, Any]:
     verdict = "degraded" if downs else ("ready" if useful else "thin")
     return {
         "task": task, "verdict": verdict, "routes": route_state,
-        "rows": rows, "useful": len(useful), "noise": len(live) - len(useful),
-        "dups": len(rows) - len(live),
+        "rows": rows, "useful": len(useful), "noise": len(live) - len(useful) - len(meta),
+        "meta": len(meta), "dups": len(rows) - len(live),
         "constraints": _constraints(live), "must_read": _must_read(live), "gaps": gaps,
         "coverage": f'{sum(1 for v in route_state.values() if v != "skipped")}/4',
     }
@@ -269,6 +320,9 @@ class IntakeIn(BaseModel):
     kb_routes: str = Field(default=FAST_KB_ROUTES, max_length=200)
     ref_wait_s: int = Field(default=90, ge=0, le=180)
     lang: str = Field(default="", max_length=20)
+    #: 本地四路都没线索时是否外扩。`auto`＝只在 `thin` 时扩；`always`＝无论如何都扩；
+    #: `off`＝只查本地（要复现旧行为/省配额时用）。
+    escalate: str = Field(default="auto", pattern="^(auto|always|off)$")
 
 
 def deep_reason(task: str, deep: bool, auto_deep: bool) -> str:
@@ -309,7 +363,7 @@ def _mem(task: str, sources: str, limit: int = 5) -> Dict[str, Any]:
             "degraded": d.get("degraded") or [], "took_ms": d.get("took_ms")}
 
 
-def _kb(task: str, routes: str, k: int = 6) -> Dict[str, Any]:
+def _kb(task: str, routes: str, k: int = 8) -> Dict[str, Any]:
     d = _self_get("/api/kb/search", q=task, k=k, routes=routes)
     if "error" in d:
         return {"ok": False, "count": 0, "items": [], "error": d["error"]}
@@ -387,6 +441,196 @@ def _ref(task: str, wait_s: int, lang: str) -> Dict[str, Any]:
             "waited_s": wait_s, "rows": rows}
 
 
+async def _skill_store(task: str, caller: str) -> Dict[str, Any]:
+    """技能中心检索：**只查不装**（`allow_install=False`）。
+
+    接单阶段装包是写盘副作用，该由调用方在决定要用时自己做（`hub_skill_auto`）。
+    这里回「候选技能 + 质量分 + 是否需要 key + 安全判定 + 怎么取正文」。
+    """
+    got = await skill_store.acquire(_keywords(task), caller=caller or "intake",
+                                    task=task, allow_install=False, local_only=False)
+    store = got.get("store") or {}
+    rank = store.get("ranking") or []
+    top = rank[0] if rank else {}
+    # ⚠️ 不能拿 `store.picked` 当命中：实测它会把**被否决**的候选也放进来
+    # （`日志 502` → `编程大神.Skill`，veto=「整句覆盖 0.08 未达门槛」）。
+    # 命中判据三条缺一不可：排行第一、**无 veto**、**rel ≥ 0.5**（quality 会被下载量带偏）。
+    top = rank[0] if rank else {}
+    rel = float((top.get("dims") or {}).get("rel") or 0.0)
+    ok = bool(top.get("name")) and not top.get("veto") and rel >= SKILL_REL_MIN
+    picked = {}
+    if ok:
+        rich = store.get("picked") or {}
+        picked = {"name": top.get("name"),
+                  "slug": rich.get("public_slug") or rich.get("slug") or top.get("slug") or "",
+                  "quality": top.get("quality"),
+                  "downloads": top.get("downloads"),
+                  "needs_key": bool(top.get("needs_key")),
+                  "security": (store.get("security") or {}).get("verdict"),
+                  "description": (rich.get("description") or "")[:160]}
+    ranked = [{"name": x.get("name"), "quality": x.get("quality"),
+               "rel": (x.get("dims") or {}).get("rel"),
+               "downloads": x.get("downloads"), "needs_key": bool(x.get("needs_key")),
+               "veto": x.get("veto") or ""}
+              for x in rank[1:4]]
+    reject = "" if ok or not top else (
+        top.get("veto") or f"最高候选「{top.get('name')}」rel {rel:.2f} < {SKILL_REL_MIN}")
+    return {
+        "ok": ok,
+        "picked": picked,
+        "ranked": ranked,
+        "reject": reject,
+        "top": ({"name": top.get("name"), "quality": top.get("quality"), "rel": rel}
+                if top else {}),
+        "searched": store.get("searched"),
+        "took_ms": got.get("took_ms"),
+        "how_to_get": (f'决定要用就调 hub_skill_auto(task="{task[:60]}") —— 会装机并回正文'
+                       if ok else ""),
+    }
+
+
+def _gh_repos(task: str, limit: int = 5) -> Dict[str, Any]:
+    """GitHub 仓库搜索（快路径）：复用 refscout 的臂构造，**不跑重排**。
+
+    与参考库（卡片）分开：卡片要 20~90s 且要 LLM 判词；这一级只回答
+    「有没有现成仓库」，实测 0.3~1s，升级时先给这个，再决定要不要深挖。
+    """
+    if not refscout.token():
+        return {"ok": False, "error": "GitHub token 不可用（设置页 / GITHUB_TOKEN / github.txt）"}
+    # 只把 ASCII 标识符当关键词：`tokens_of` 会把整段中文当一个词元，拿去 `in:name`
+    # 搜必然 0 命中（实测），所以纯中文任务只发 `cn` 臂，由它按描述原文碰。
+    kws = re.findall(r"[A-Za-z][A-Za-z0-9_.+\-]{2,}", task)[:6]
+    arms = refscout.build_queries(kws, _keywords(task, 4), 0, 365)[:ESCALATE_GH_ARMS]
+    pool: Dict[str, Dict[str, Any]] = {}
+    log_rows: List[Dict[str, Any]] = []
+    for name, q, sort in arms:
+        url = ("https://api.github.com/search/repositories?q=%s&sort=%s&order=desc&per_page=5"
+               % (urllib.parse.quote(q), sort))
+        try:
+            data, meta = refscout.gh_get(url, ttl_s=3600)
+        except Exception as e:  # noqa: BLE001
+            data, meta = None, {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        items = (data or {}).get("items") or []
+        log_rows.append({"arm": name, "ok": bool(meta.get("ok")), "count": len(items),
+                         "ms": meta.get("ms"), "error": meta.get("error")})
+        for it in items:
+            key = (it.get("full_name") or "").lower()
+            if key and key not in pool:
+                pool[key] = it
+    rows = sorted(pool.values(), key=lambda x: -(x.get("stargazers_count") or 0))[:limit]
+    return {"ok": bool(rows), "arms": log_rows,
+            "rows": [{"repo": r.get("full_name"), "stars": r.get("stargazers_count"),
+                      "lang": r.get("language"),
+                      "desc": (r.get("description") or "")[:120],
+                      "pushed": (r.get("pushed_at") or "")[:10]} for r in rows]}
+
+
+async def _escalate(task: str, why: str, inp: "IntakeIn") -> Dict[str, Any]:
+    """本地无线索时的外扩：技能中心 → GitHub 仓库 → 参考库；联网搜索如实报不可用。
+
+    任何一级失败只降级该级（`error` 原样带出），**不整份失败**。
+    """
+    t0 = time.monotonic()
+    out: Dict[str, Any] = {"triggered": True, "steps": []}
+
+    try:
+        sk = await asyncio.wait_for(_skill_store(task, inp.caller), timeout=ESCALATE_SKILL_S)
+    except Exception as e:  # noqa: BLE001
+        sk = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    out["skill_store"] = sk
+    out["steps"].append({"step": "技能中心", "ok": bool(sk.get("ok")),
+                         "n": 1 if sk.get("ok") else 0, "error": sk.get("error")})
+
+    try:
+        gh = await asyncio.to_thread(_gh_repos, task)
+    except Exception as e:  # noqa: BLE001
+        gh = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    out["gh"] = gh
+    out["steps"].append({"step": "GitHub 仓库", "ok": bool(gh.get("ok")),
+                         "n": len(gh.get("rows") or []), "error": gh.get("error")})
+
+    if why == "off":
+        try:
+            ref = await asyncio.to_thread(_ref, task, ESCALATE_REF_WAIT, inp.lang)
+        except Exception as e:  # noqa: BLE001
+            ref = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        out["ref"] = ref
+        out["steps"].append({"step": "参考库", "ok": bool(ref.get("ok")),
+                             "n": len(ref.get("rows") or []), "error": ref.get("error")})
+    else:
+        # 已由 `deep` 触发查过，这里不重复打 GitHub 额度
+        out["ref"] = None
+
+    out["web"] = {"ok": False, "provider": None, "error": _WEB_UNAVAILABLE}
+    found = bool(sk.get("ok") or gh.get("ok") or (out.get("ref") or {}).get("ok"))
+    out["status"] = "found" if found else "empty"
+    out["took_s"] = round(time.monotonic() - t0, 1)
+    return out
+
+
+def _external_lines(ext: Dict[str, Any]) -> List[str]:
+    """渲染「外部升级」四行。每条都带**来源与可信度**，不让它看起来像本机结论。"""
+    out: List[str] = []
+    sk = ext.get("skill_store") or {}
+    if sk.get("error"):
+        out.append(f"- 技能中心：⚠️ 检索不可用（{sk['error']}）")
+    elif not sk.get("ok"):
+        n = sk.get("searched")
+        out.append(f"- 技能中心：0 命中（搜了 {n if n is not None else '?'} 条）")
+        top = sk.get("top") or {}
+        if top.get("name"):
+            out.append(f"  - 最高候选 `{top['name']}`（质量 "
+                       f"{float(top.get('quality') or 0):.2f}／rel {float(top.get('rel') or 0):.2f}）"
+                       f"未采纳：{sk.get('reject') or '—'}")
+    else:
+        p = sk.get("picked") or {}
+        bits = [f"质量 {float(p.get('quality') or 0):.2f}"]
+        if p.get("downloads") is not None:
+            bits.append(f"下载 {p['downloads']}")
+        bits.append("需 key" if p.get("needs_key") else "免 key")
+        if p.get("security"):
+            bits.append(f"安全 {p['security']}")
+        out.append(f"- 技能中心：命中 `{p.get('name')}`（{'、'.join(bits)}）—— **未安装**")
+        if p.get("description"):
+            out.append(f"  - 能力：{p['description']}")
+        if sk.get("how_to_get"):
+            out.append(f"  - 取用：{sk['how_to_get']}")
+        others = [x for x in (sk.get("ranked") or []) if not x.get("veto")
+                  and x.get("name") != p.get("name")]
+        if others:
+            out.append("  - 其余候选：" + "、".join(
+                f"{x['name']}({float(x.get('quality') or 0):.2f})" for x in others[:2]))
+
+    gh = ext.get("gh") or {}
+    if gh.get("error"):
+        out.append(f"- GitHub 仓库：⚠️ 检索不可用（{gh['error']}）")
+    elif not gh.get("rows"):
+        arms = "、".join(f"{a['arm']}:{a.get('count')}" for a in (gh.get("arms") or []))
+        out.append(f"- GitHub 仓库：0 命中（臂 {arms or '—'}）")
+    else:
+        out.append(f"- GitHub 仓库：{len(gh['rows'])} 个（按 star 排，未判词）")
+        for x in gh["rows"]:
+            stars = x.get("stars") or 0
+            out.append(f"  - [{x['repo']}](https://github.com/{x['repo']}) ★{stars}"
+                       + (f" · {x['lang']}" if x.get("lang") else "")
+                       + (f" · {x['desc']}" if x.get("desc") else ""))
+
+    ref = ext.get("ref")
+    if ref and not ref.get("card_id"):
+        out.append(f"- 参考库：⚠️ 未完成（{ref.get('error') or '无卡 id'}）")
+    elif ref:
+        note = "" if ref.get("status") == "done" else \
+            f"（{ESCALATE_REF_WAIT}s 未等到重排，词法结果稍后用卡取）"
+        out.append(f"- 参考库：卡 `{ref.get('card_id')}`　状态 {ref.get('status')}{note}")
+        if ref.get("card_id"):
+            out.append(f"  - 取全卡：`hub_ref_get(card_id=\"{ref['card_id']}\")`")
+
+    web = ext.get("web") or {}
+    out.append(f"- 联网搜索：⚠️ 不可用（{web.get('error') or '未配置 provider'}）")
+    out.append(f"- 外扩用时 {ext.get('took_s')}s；外部资料**不是本机结论**，用前自己核。")
+    return out
+
+
 def brief_md(task: str, res: Dict[str, Any]) -> str:
     plan = res.get("plan") or assess(task, res)
     m, k, s, r = res["memory"], res["kb"], res["skill"], res["ref"]
@@ -396,7 +640,8 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
            f"- as of：{res['as_of']}　用时：{res['elapsed_s']}s　调用方：{res['caller'] or '—'}",
            f"- 已查 {plan['coverage']} 路　判定 **{plan['verdict']}**（{verdict_cn}）"
            f"　可直接引用 {plan['useful']} 条／折叠弱命中 {plan['noise']} 条"
-           f"／跨路重复 {plan['dups']} 条",
+           f"／跨路重复 {plan['dups']} 条"
+           + (f"／规程台账 {plan['meta']} 条（不计入线索）" if plan.get("meta") else ""),
            "- ⚠️ 本简报只给**线索与出处**，不是结论；引用前回原文核对。", "",
            f"## 0. 开工前先看（约束 {len(plan['constraints'])} 条／回读 {len(plan['must_read'])} 篇）", ""]
     # 这里**列全**，后面各节不再重复同一句 —— 旧版 §0 只截前 3 条、§2 又列一遍，
@@ -414,6 +659,10 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
         x = r["rows"][0]
         step.append(f"- **参考实现**：[{x['repo']}](https://github.com/{x['repo']}) "
                     f"★{x['stars']}（卡 `{r['card_id']}`）")
+    ext = res.get("external") or {}
+    if ext.get("status") == "found":
+        # 本地没线索但外扩有货：§0 不能继续写"没有可直接照做的线索"，否则没人会翻到 §3。
+        step.append("- **外部线索**：本地无命中，已外扩出可用线索 ⇒ 见 §3（外部资料需自行核验）")
     if not step and plan["useful"]:
         step.append(f"- 有 {plan['useful']} 条沾边命中，但都不构成约束、也没有可回读的路径"
                     " —— 明细见 §2")
@@ -460,10 +709,13 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
     for route, items in (("记忆", [x for x in plan["rows"] if x["route"] == "记忆"]),
                          ("知识库", [x for x in plan["rows"] if x["route"] == "知识库"])):
         shown = [x for x in items if not x["dup_of"] and x["rel"] != "弱"]
+        shown.sort(key=lambda x: -float(x.get("cov") or 0))   # 明细也按贴合度排，别让次要的占前两行
         out.append(f"### {route}：{len(items)} 条命中／{len(shown)} 条列出")
         for x in shown:
             head = f"{x['path']}［{x['rel']}］" if x["path"] else \
                    f"[{x.get('src')}·{x['rel']}]"
+            if x.get("meta"):
+                head += "［规程/台账·不计入线索］"
             out.append(f"- {head}：{x['text']}")
         if not shown:
             weak = [x for x in items if not x["dup_of"] and x["rel"] == "弱"]
@@ -474,18 +726,23 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
             else:
                 out.append("- （无可列条目）")
     out.append("")
-
-    out.append("## 3. 技能与参考库")
+    out.append("## 3. 技能与参考库" + ("（本地无线索，已外扩）" if ext.get("triggered") else ""))
     if s.get("error"):
-        out.append(f"- 技能：⚠️ 检索不可用（{s['error']}）")
+        out.append(f"- 本地技能：⚠️ 检索不可用（{s['error']}）")
     elif not s.get("ok"):
-        out.append(f"- 技能：未命中（{s.get('reason') or '—'}）；"
+        out.append(f"- 本地技能：未命中（{s.get('reason') or '—'}）；"
                    f"换任务描述用词，或 hub_list_skills(...) 人工挑")
     else:
-        out.append(f"- 技能：`{s.get('name')}`（{s.get('route')}，"
+        out.append(f"- 本地技能：`{s.get('name')}`（{s.get('route')}，"
                    f"命中 {s.get('matched')} @ {s.get('matched_in')}）⇒ {s.get('how_to_get')}")
-    if why == "off":
-        out.append("- 参考库：未查（deep=off；要查请传 deep=true）")
+    if ext.get("triggered"):
+        out += _external_lines(ext)
+    elif ext and not ext.get("triggered"):
+        out.append(f"- 外部升级：未触发（{ext.get('reason') or '—'}）")
+    if why == "off" and not ext.get("triggered"):
+        out.append("- 参考库：未查（deep=off；要查请传 deep=true 或 escalate=always）")
+    elif why == "off" and ext.get("triggered"):
+        pass          # 参考库结果已在「外部升级」里列过
     elif not r.get("ok"):
         out.append(f"- 参考库：⚠️ 未完成（{why}／{r.get('error') or '无结果'}）")
     else:
@@ -542,6 +799,17 @@ async def run(inp: IntakeIn) -> Dict[str, Any]:
         "memory": mem, "kb": kb, "skill": skill, "ref": ref,
     }
     res["plan"] = assess(task, res)
+    plan = res["plan"]
+    # 本地四路都拿不到可用线索 ⇒ 往外找（用户 2026-10-22 裁定）。
+    # `degraded` 不触发：那是"某一路挂了"，先修那一路，别拿外部资料掩盖故障。
+    want_ext = (inp.escalate == "always"
+                or (inp.escalate == "auto" and plan["verdict"] == "thin"))
+    if want_ext:
+        res["external"] = await guard("escalate", lambda: _escalate(task, why, inp))
+    else:
+        res["external"] = {"triggered": False,
+                           "reason": ("escalate=off" if inp.escalate == "off"
+                                      else f"本地判定 {plan['verdict']}，未外扩")}
     res["brief"] = brief_md(task, res)
     return res
 

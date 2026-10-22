@@ -118,11 +118,12 @@ class TestRunComposition(unittest.TestCase):
             raise RuntimeError("boom")
 
         res = self._run((bad, lambda *a, **k: _kb(), bad, bad),
-                        intake.IntakeIn(task="解释这行日志", auto_deep=False))
+                        intake.IntakeIn(task="解释这行日志", auto_deep=False,
+                                        escalate="off"))
         self.assertIn("brief", res)
         self.assertIn("boom", res["brief"])
 
-    def test_ref_not_called_when_off(self):
+    def test_ref_not_called_when_escalate_off(self):
         called = {"ref": 0}
 
         def ref(*a, **k):
@@ -131,8 +132,74 @@ class TestRunComposition(unittest.TestCase):
 
         res = self._run((lambda *a, **k: _mem(), lambda *a, **k: _kb(),
                          lambda *a, **k: asyncio.sleep(0, result=_skill()), ref),
-                        intake.IntakeIn(task="解释这行日志", auto_deep=False))
-        self.assertEqual(called["ref"], 0, "deep=off 时不许摸参考库")
+                        intake.IntakeIn(task="解释这行日志", auto_deep=False,
+                                        escalate="off"))
+        self.assertEqual(called["ref"], 0, "escalate=off 时不许摸参考库")
+        self.assertFalse(res["external"]["triggered"])
+        self.assertIn("escalate=off", res["external"]["reason"])
+
+    def test_thin_escalates_to_store_github_and_ref(self):
+        """本地四路都没沾边 ⇒ 外扩（2026-10-22 用户裁定）。"""
+        called = {"skill": 0, "gh": 0, "ref": 0}
+
+        async def store(*a, **k):
+            called["skill"] += 1
+            return {"ok": True, "picked": {"name": "日志排查", "quality": 0.78},
+                    "how_to_get": "hub_skill_auto(...)"}
+
+        def gh(*a, **k):
+            called["gh"] += 1
+            return {"ok": True, "rows": [{"repo": "a/b", "stars": 9, "lang": "Go",
+                                          "desc": "d", "pushed": "2026-10-01"}],
+                    "arms": [{"arm": "core", "count": 1}]}
+
+        def ref(*a, **k):
+            called["ref"] += 1
+            return {"ok": False, "card_id": "c1", "status": "running"}
+
+        old = (intake._skill_store, intake._gh_repos)
+        intake._skill_store, intake._gh_repos = store, gh
+        try:
+            res = self._run((lambda *a, **k: _mem(),
+                             lambda *a, **k: {"ok": True, "count": 0, "items": []},
+                             lambda *a, **k: asyncio.sleep(0, result={
+                                 "ok": False, "reason": "no local skill"}),
+                             ref),
+                            intake.IntakeIn(task="解释这行日志", auto_deep=False))
+        finally:
+            intake._skill_store, intake._gh_repos = old
+        self.assertEqual(res["plan"]["verdict"], "thin")
+        self.assertTrue(res["external"]["triggered"])
+        self.assertEqual(called, {"skill": 1, "gh": 1, "ref": 1})
+        self.assertEqual(res["external"]["status"], "found")
+        self.assertIn("日志排查", res["brief"])
+        self.assertIn("a/b", res["brief"])
+        self.assertIn("未配置搜索 provider", res["brief"], "联网搜索必须如实报不可用")
+
+    def test_ready_does_not_escalate(self):
+        called = {"skill": 0}
+
+        async def store(*a, **k):
+            called["skill"] += 1
+            return {"ok": False}
+
+        old = intake._skill_store
+        intake._skill_store = store
+        try:
+            res = self._run((lambda *a, **k: {
+                                 "ok": True, "count": 1,
+                                 "items": [{"layer": "L1", "source": "tdai_l1",
+                                            "content": "解释日志时先看 502 的上游"}]},
+                lambda *a, **k: {"ok": True, "count": 0, "items": []},
+                lambda *a, **k: asyncio.sleep(0, result=_skill()),
+                lambda *a, **k: {"ok": False}),
+                intake.IntakeIn(task="解释日志里的 502", auto_deep=False))
+        finally:
+            intake._skill_store = old
+        self.assertEqual(res["plan"]["verdict"], "ready")
+        self.assertEqual(called["skill"], 0, "有可用线索就不该花外部配额")
+        self.assertIn("未触发", res["brief"])
+
         self.assertEqual(res["deep_reason"], "off")
 
 

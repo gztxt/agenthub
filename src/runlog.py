@@ -279,6 +279,22 @@ def _fire(subject: str, status: str, duration_ms: int, detail: Dict[str, Any]) -
         print(f"[runlog] 埋点失败(不影响业务)：{subject} {type(e).__name__}: {e}", flush=True)
 
 
+def note(subject: str, detail: Dict[str, Any], status: str = "success",
+         duration_ms: int = 0) -> None:
+    """**进程内**埋点：给不经 HTTP 的调用方（intake 直接调 Python 实现）。
+
+    为什么需要另一个出口：`track()` 是**端点装饰器**，只包 REST 请求。同一份能力被
+    进程内直接调用时（`intake._skill` → `skill_store.acquire`）装饰器根本不执行 ⇒
+    动作发生了、账上什么都没有。2026-10-22 实测：接单简报当天 13 份、其中命中
+    `tailscale-offline-diagnose` 并回给调用方，而 `skill.invoke` 计数恒 41、
+    最近一条停在 10-20 —— 不是查询坏，是**这条链路没有埋点**。
+
+    口径与 `track()` 一致：`detail` 必须自带 `mode`（`skill_weights.classify` 按它
+    分桶），落库仍走 `_fire`（唯一出口，失败只打印不抛）。
+    """
+    _fire(subject, status, int(duration_ms), detail)
+
+
 def track(subject: str, skip_when=None, mode: str = ""):
     """装饰器：包住三中心只读检索端点，记 q/limit/routes/channel/逐路健康/耗时。
 

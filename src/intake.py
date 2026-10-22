@@ -52,6 +52,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 import refscout
+import runlog
 import skill_store
 import memory as memory_mod
 from config import config as _cfg
@@ -485,23 +486,63 @@ def _kb(task: str, routes: str, k: int = 8) -> Dict[str, Any]:
             "degraded": d.get("degraded") or [], "took_ms": d.get("took_ms")}
 
 
+def _auto_call(task: str) -> str:
+    """按任务取技能的调用式（**不点名**）。引号/换行会把 markdown 代码截断，先抹平。"""
+    t = re.sub(r"[\"\n\r]+", " ", str(task or "")).strip()[:80]
+    return f'hub_skill_auto(task="{t}")'
+
+
+def _note_exposure(caller: str, task: str, got: Dict[str, Any], ms: int) -> None:
+    """接单命中记一条**曝光**（`skill.relevant` + `mode=auto_inject`）。
+
+    为什么不是 `skill.invoke`：这里只回了技能**名字**，正文还没交付。按点名调用
+    记账会让权重榜把"被推荐过一次"当成"被用了一次"（`use=2` 的档位），
+    而权重公式的整个前提是曝光只进分母（`src/skill_weights.py:105`）。
+    为什么必须记：此前这条链路**零埋点**，命中与未命中在账上一样 —— 2026-10-22
+    实测当天 13 份简报里有命中，而调用记录恒 41 条、最近一条停在 10-20。
+    """
+    local = got.get("local") or {}
+    runlog.note("skill.relevant", {
+        "name": got.get("name") or "",
+        "route": got.get("route") or "",
+        "caller": caller,
+        "task": str(got.get("task") or task)[:500],
+        "via": "intake",            # 发起方是接单前置，不是注入钩子
+        "mode": "auto_inject",      # 机器按任务选的候选，未激活
+        "source": got.get("source") or "",
+        "matched": got.get("matched"),
+        "matched_in": got.get("matched_in"),
+        "norm": local.get("norm"),
+    }, duration_ms=ms)
+
+
 async def _skill(task: str, caller: str) -> Dict[str, Any]:
     """本地优先、**不装新技能**（`allow_install=False`）。
 
     接单阶段自动装包会把"查一下有没有现成技能"变成"往盘里写东西"，
     那是 `/auto` 的默认行为、不是接单该有的副作用。
+
+    **取正文不点名**：回的是 `hub_skill_auto(task=...)`，agents 只报任务，
+    由服务端按任务选中并激活（落 `auto_use` 桶），而不是让调用方抄一个技能名去
+    `hub_skill_invoke(name=...)`——那正是「手动指定」，与"agent 按任务自动调用"相反。
     """
+    t0 = time.monotonic()
+    who = caller or "intake"
     try:
-        got = await skill_store.acquire(task, caller=caller or "intake", task=task,
+        got = await skill_store.acquire(task, caller=who, task=task,
                                         allow_install=False, local_only=True)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-    return {"ok": bool(got.get("ok")), "name": got.get("name"),
+    ok = bool(got.get("ok"))
+    if ok:
+        _note_exposure(who, task, got, int((time.monotonic() - t0) * 1000))
+    return {"ok": ok, "name": got.get("name"),
             "route": got.get("route"), "reason": got.get("reason"),
             "matched": got.get("matched"), "matched_in": got.get("matched_in"),
             "took_ms": got.get("took_ms"),
-            "how_to_get": (f'hub_skill_invoke(name="{got.get("name")}")'
-                           if got.get("ok") else
+            "how_to_get": (_auto_call(task)
+                           + "（按任务自动命中并回正文，不必先知道技能名）"
+                           if ok else
                            '未命中时换任务描述用词，或 hub_list_skills(...) 人工挑')}
 
 

@@ -43,7 +43,7 @@ def _skill(ok=True):
             "route": "local" if ok else "",
             "reason": "bm25" if ok else "no local skill matched",
             "matched": 0.62, "matched_in": "description",
-            "how_to_get": ('hub_skill_invoke(name="backup-before-edit")'
+            "how_to_get": ('hub_skill_auto(task="改共享配置前先备份")'
                            if ok else "换词重试")}
 
 
@@ -117,7 +117,9 @@ class TestBriefWording(unittest.TestCase):
     def test_skill_how_to_get(self):
         md = intake.brief_md("t", self._res())
         self.assertIn("backup-before-edit", md)
-        self.assertIn("hub_skill_invoke", md)
+        self.assertIn("hub_skill_auto", md)
+        self.assertNotIn("hub_skill_invoke", md,
+                         "取正文不得要求调用方点名技能（应报任务让服务端自选）")
 
     def test_ref_off_is_explicit(self):
         self.assertIn("未查", intake.brief_md("t", self._res()))
@@ -683,6 +685,65 @@ class TestGradingEdges(unittest.TestCase):
         plan = intake.assess(self.TASK, res)
         self.assertEqual(plan["meta"], 1)
         self.assertEqual(plan["verdict"], "thin", "聚合清单页不算线索，不许顶成 ready")
+
+
+class TestSkillAutoAndAccount(unittest.TestCase):
+    """技能路两条口径（2026-10-22 用户裁定）。
+
+    ① **取正文按任务自动选**，不点名：简报里给的是 `hub_skill_auto(task=...)`，
+       不再是 `hub_skill_invoke(name=...)`——后者要调用方先知道技能名，就是手动指定。
+    ② **命中记曝光，不记使用**：`skill.relevant` + `mode=auto_inject` + `via=intake`。
+       只回名字没交付正文，记成 `skill.invoke` 会让权重榜把"被推荐"算成"被使用"。
+    ③ **未命中不记账**：没有候选就没有可曝光的对象，不许留空名流水。
+    """
+
+    GOT = {"ok": True, "name": "tailscale-offline-diagnose", "route": "workbuddy",
+           "matched": ["tailscale"], "matched_in": ["tailscale"], "source": "local",
+           "local": {"norm": 0.71}, "task": "tailscale 链路延迟排查"}
+
+    def _run(self, got):
+        old_acq, old_note = intake.skill_store.acquire, intake.runlog.note
+        seen = []
+
+        async def fake_acq(*a, **k):
+            return got
+
+        intake.skill_store.acquire = fake_acq
+        intake.runlog.note = lambda subject, detail, **kw: seen.append(
+            (subject, detail, kw))
+        try:
+            out = asyncio.run(intake._skill("tailscale 链路延迟排查", "cb"))
+        finally:
+            intake.skill_store.acquire, intake.runlog.note = old_acq, old_note
+        return out, seen
+
+    def test_hit_points_at_auto_by_task(self):
+        out, _ = self._run(self.GOT)
+        self.assertIn("hub_skill_auto(task=", out["how_to_get"])
+        self.assertNotIn("hub_skill_invoke", out["how_to_get"])
+        self.assertIn("tailscale 链路延迟排查", out["how_to_get"])
+
+    def test_quote_in_task_does_not_break_call(self):
+        got = dict(self.GOT, task='说 "hello" 的技能')
+        out, _ = self._run(got)
+        self.assertEqual(out["how_to_get"].count('"'), 2,
+                         "任务里的引号必须先抹平，否则调用式被截断")
+
+    def test_hit_records_exposure_not_use(self):
+        _, seen = self._run(self.GOT)
+        self.assertEqual(len(seen), 1)
+        subject, detail, kw = seen[0]
+        self.assertEqual(subject, "skill.relevant")
+        self.assertEqual(detail["mode"], "auto_inject")
+        self.assertEqual(detail["via"], "intake")
+        self.assertEqual(detail["name"], "tailscale-offline-diagnose")
+        self.assertEqual(detail["caller"], "cb")
+        self.assertNotEqual(subject, "skill.invoke")
+        self.assertGreaterEqual(kw.get("duration_ms", 0), 0)
+
+    def test_miss_records_nothing(self):
+        _, seen = self._run({"ok": False, "reason": "norm 0.092 < 0.40"})
+        self.assertEqual(seen, [], "没有候选就没有曝光，不许留空名流水")
 
 
 if __name__ == "__main__":

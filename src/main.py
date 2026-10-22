@@ -28,6 +28,8 @@ if env_path.exists():
 
 import aiohttp
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -1100,6 +1102,21 @@ def _spawn(coro) -> asyncio.Task:
 
 
 app = FastAPI(title="Agent Hub", version=VERSION)
+
+
+@app.exception_handler(RequestValidationError)
+async def _intake_validation_hint(request: Request, exc: RequestValidationError):
+    """422 原文是 pydantic 的 `{"type": "string_too_short", "min_length": 2}`，
+    MCP / 非 MCP 消费方拿到它只知道"参数错了"，不知道"该怎么办"（2026-10-22 实测：
+    `hub_intake(task="")` 把 pydantic 错误体原样透给调用方）。
+
+    只给 `/api/intake*` 补一句人话（`ok`/`error`），`detail` 原样保留 ⇒ 既有按
+    `detail` 解析的调用方不受影响；其它端点的 422 形状一个字不动（避免面太大）。
+    口径与文案在 `intake.validation_body()`（可单测，不必拉起整个 app）。
+    """
+    content = intake_mod.validation_body(request.url.path, jsonable_encoder(exc.errors()))
+    return JSONResponse(status_code=422, content=content)
+
 
 #: `/api/models` 的成功缓存，按 adapter 分桶（claude / jcode / …）。
 #: 模块级 = 跨请求存活，这是缓存的本意；不随 app 重启清空是刻意的

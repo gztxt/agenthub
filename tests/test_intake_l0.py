@@ -484,6 +484,66 @@ class TestGradingEdges(unittest.TestCase):
         self.assertTrue(any("无直接命中" in g for g in plan["gaps"]))
         self.assertIn("直接 0 条／相关 1 条", intake.brief_md(self.TASK, res))
 
+    def test_single_token_coverage_cannot_be_direct(self):
+        """单词任务词元数=1 ⇒ 旧实现 cov 恒 1.0，任何含该词的条目都算「直接」。
+
+        2026-10-22 实测：「备份」10 条命中里多条是 `准备修复 StatisticsService…｜备份`
+        这类噪声，判 ready 且永不 thin（外扩永不触发）。分母给下限 3 后最多 0.33。
+        """
+        toks = intake._tokens("备份")
+        self.assertEqual(len(toks), 1, "夹具前提：单词任务的词元数就是 1")
+        cov = intake._coverage("准备修复 StatisticsService｜备份 StatisticsService.ja", toks)
+        self.assertLess(cov, intake.REL_STRONG, "1 词元不许判「直接」")
+        self.assertGreaterEqual(cov, intake.REL_WEAK, "仍要算「相关」，别把命中丢掉")
+
+    def test_two_token_coverage_can_still_be_direct(self):
+        """下限 3 不能把双词任务也打死：2 个词元全中仍是 0.67 ≥ 0.5。"""
+        cov = intake._coverage("备份 网关", {"备份", "网关"})
+        self.assertAlmostEqual(cov, 2 / 3, places=4)
+        self.assertGreaterEqual(cov, intake.REL_STRONG)
+
+    def test_single_word_task_is_thin_and_says_why(self):
+        res = {"task": "备份", "deep_reason": "off", "caller": "", "as_of": "x",
+               "elapsed_s": 0.1,
+               "memory": {"ok": True, "count": 1, "items": [
+                   {"layer": "L1", "source": "tdai_l1",
+                    "content": "准备修复 StatisticsService｜备份 StatisticsService.ja"}]},
+               "kb": {"ok": True, "count": 0, "items": []},
+               "skill": {"ok": False, "reason": "no local skill"},
+               "ref": {"ok": False, "error": "未查"}}
+        plan = intake.assess("备份", res)
+        self.assertEqual(plan["strong"], 0, "单词任务不许产生「直接」命中")
+        self.assertEqual(plan["verdict"], "thin")
+        self.assertTrue(any("检索词元" in g for g in plan["gaps"]),
+                        f"必须写明任务过短，别让调用方把宽匹配当有资料：{plan['gaps']}")
+
+    def test_validation_body_hint_is_intake_only(self):
+        errs = [{"loc": ["body", "task"], "msg": "String should have at least 2 characters",
+                 "type": "string_too_short"}]
+        got = intake.validation_body("/api/intake/task", errs)
+        self.assertFalse(got["ok"])
+        self.assertIn("完整描述", got["error"])
+        self.assertEqual(got["detail"], errs, "detail 原样保留，别动既有契约")
+        other = intake.validation_body("/api/skill/list", errs)
+        self.assertNotIn("error", other, "非 intake 端点的 422 形状一个字不动")
+        self.assertEqual(other, {"detail": errs})
+
+    def test_kb_json_exposes_cleaned_content(self):
+        """`content` 保留检索原文，另给 `content_clean` 供直接读 JSON 的消费方。"""
+        saved = intake._self_get
+        intake._self_get = lambda path, **kw: {"count": 1, "results": [{
+            "source": "xerj", "path": "wiki/x.md", "title": "备份细则",
+            "content": '--- type: concept title: "备份细则" created: 2026-10-13 ---...',
+            "score": 1.0}]}
+        try:
+            got = intake._kb("备份", "xerj")
+        finally:
+            intake._self_get = saved
+        it = got["items"][0]
+        self.assertIn("type: concept", it["content"], "原文保留（既有调用方兼容）")
+        self.assertEqual(it["content_clean"], "（仅标题命中：备份细则）",
+                         "整段只有 front matter ⇒ 清洗后回退标题，别把字段名当摘要")
+
     def test_ledger_doc_not_counted_as_clue(self):
         res = {"task": self.TASK, "deep_reason": "off", "caller": "", "as_of": "x",
                "elapsed_s": 0.1,

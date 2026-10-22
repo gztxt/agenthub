@@ -166,7 +166,12 @@ def _coverage(text: str, toks: set) -> float:
     # 分母封顶会让**分子**超过分母：10 个词元全中时算成 10/6=1.67（2026-10-22 实测
     # 「MCP 工具调用超时怎么排查」两条 wiki 就是 1.67）。覆盖率是比例，封顶 1.0，
     # 否则「相关 1.33」这种读数与排序都对不上。
-    return min(1.0, hit / min(len(toks), 6))
+    # 分母同时给**下限 3**：词元过少时覆盖率没有分辨力——单词任务（`备份`/`网关`/`重启`）
+    # 词元数=1，任何含该词的条目都算 1.0「直接」，于是恒 ready、永不 thin、外扩永不触发
+    # （2026-10-22 第三轮补测：`备份` 10 条里多条是 `准备修复 StatisticsService…｜备份` 这类噪声）。
+    # 1 词元最多 0.33（只到「相关」），2 词元全中仍有 0.67（可判「直接」）。
+    denom = max(3, min(len(toks), 6))
+    return min(1.0, hit / denom)
 
 
 def _rel(text: str, toks: set) -> str:
@@ -341,6 +346,12 @@ def assess(task: str, res: Dict[str, Any]) -> Dict[str, Any]:
         gaps.append("只有**相关**命中（无直接命中）⇒ 线索偏弱，先回原文确认，别据此认定「有资料」")
     if not gaps:
         gaps.append("四路均通，且至少有一条可直接引用的线索")
+    tok_n = len(_tokens(task))
+    if tok_n < 3 and not downs:
+        # 单词/双词任务里覆盖率天然接近 1.0（分母下限 3 已压住「直接」，但相关性判断仍粗糙）。
+        # 宁可写明这句话，也不要让调用方把「命中了 10 条」当成「有资料」。
+        gaps.append(f"任务只有 {tok_n} 个检索词元（<3）：词面判级分辨不出强弱，"
+                    "别把宽匹配当「有资料」，建议补一句任务描述再查")
     verdict = "degraded" if downs else ("ready" if strong else "thin")
     return {
         "task": task, "verdict": verdict, "routes": route_state,
@@ -365,6 +376,24 @@ class IntakeIn(BaseModel):
     #: 本地四路都没线索时是否外扩。`auto`＝只在 `thin` 时扩；`always`＝无论如何都扩；
     #: `off`＝只查本地（要复现旧行为/省配额时用）。
     escalate: str = Field(default="auto", pattern="^(auto|always|off)$")
+
+
+#: 422 的人话提示。pydantic 原文只有 `string_too_short`，MCP / 非 MCP 消费方拿到它
+#: 只知道"参数错了"，不知道"该怎么改"（2026-10-22 实测 `hub_intake(task="")` 原样透传）。
+VALIDATION_HINT = "任务太短或格式不对：请给一句完整描述（至少 2 个字）后重试"
+
+
+def validation_body(path: str, errors) -> Dict[str, Any]:
+    """构造 422 响应体。只给 `/api/intake*` 补人话，`detail` 原样保留。
+
+    只改 payload、不改状态码与 `detail`：既有按 `detail` 解析的调用方不受影响；
+    其它端点连 `ok/error` 都不加（面越小越好）。
+    """
+    body: Dict[str, Any] = {"detail": errors}
+    if (path or "").startswith("/api/intake"):
+        body["ok"] = False
+        body["error"] = VALIDATION_HINT
+    return body
 
 
 def deep_reason(task: str, deep: bool, auto_deep: bool) -> str:
@@ -416,9 +445,15 @@ def _kb(task: str, routes: str, k: int = 8) -> Dict[str, Any]:
         body = (r.get("content") or r.get("preview") or "").strip()
         body = re.sub(r"</?em>", "", body)   # XERJ highlight 标签，不是内容
         title = (r.get("title") or "").strip()
+        fallback = (f"{_TITLE_ONLY}：{title}）" if title else "（无摘要）")
         items.append({"source": r.get("source"), "path": r.get("path"), "title": title,
                       "category": r.get("category") or r.get("type"),
-                      "content": body or (f"{_TITLE_ONLY}：{title}）" if title else "（无摘要）"),
+                      "content": body or fallback,
+                      # `content` 保持检索原文（有些调用方/测试按原文解析）；
+                      # 给人看的版本另给一份：剥 front matter、出处尾注与高亮标签。
+                      # 此前只有 `_flatten()`/简报会清洗，直接读 JSON 的消费方看到的
+                      # 是 `--- type: concept … ---...`（2026-10-22 补测残留项）。
+                      "content_clean": _body(body) or fallback,
                       "score": r.get("score")})
     return {"ok": True, "count": int(d.get("count") or 0), "items": items,
             "degraded": d.get("degraded") or [], "took_ms": d.get("took_ms")}

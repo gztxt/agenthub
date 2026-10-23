@@ -31,6 +31,9 @@ async def get_vitals():
             # 随之作废，换成本地判定后端的就绪与真调用状态——自证端点必须能说出
             # 「这一轮的语义判定为什么没跑成」（脚本缺失/Ollama 不在/超时）。
             "judge": vitals_mod.judge_status(),
+            # 2026-10-23：告警必须能被面板看到——「最近一次成功」不是健康证据，
+            # 连续失败/恢复记录才是（落盘 data/judge_alerts.jsonl，只回最近 5 条）。
+            "judge_alerts": vitals_mod.judge_alerts(5),
             "menu_min": vitals_mod.MENU_MIN, "sweep_every_sec": vitals_mod.SWEEP_EVERY,
             "detail": snap}
 

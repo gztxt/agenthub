@@ -39,16 +39,24 @@ _GOOD = textwrap.dedent("""
 
 
 class _Base(unittest.TestCase):
+    _ENV = ("JEV_DECISION_SCRIPT", "JUDGE_CACHE_PATH", "JUDGE_ALERT_PATH",
+            "JUDGE_CACHE_TTL_S", "JUDGE_ALERT_AFTER")
+
     def setUp(self):
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="l0lj-"))
-        self._saved = os.environ.get("JEV_DECISION_SCRIPT")
+        self._saved = {k: os.environ.get(k) for k in self._ENV}
+        os.environ["JUDGE_CACHE_PATH"] = str(self.tmp / "judge_cache.json")
+        os.environ["JUDGE_ALERT_PATH"] = str(self.tmp / "judge_alerts.jsonl")
+        local_judge.reset_stats()
         self.addCleanup(self._restore)
 
     def _restore(self):
-        if self._saved is None:
-            os.environ.pop("JEV_DECISION_SCRIPT", None)
-        else:
-            os.environ["JEV_DECISION_SCRIPT"] = self._saved
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        local_judge.reset_stats()
 
     def _script(self, body: str, name: str = "fake_decision.py") -> pathlib.Path:
         p = self.tmp / name
@@ -162,7 +170,8 @@ class TestStatusAndNoNetwork(_Base):
     def test_counters_move_on_real_calls(self):
         self._script(_GOOD)
         before = local_judge.status()
-        local_judge.judge({"q": {"type": "noul", "instructions": "x"}}, timeout_s=20)
+        local_judge.judge({"q": {"type": "noul", "instructions": "x"}}, timeout_s=20,
+                          use_cache=False)
         after = local_judge.status()
         # _STAT 是模块级累计量（同进程内多用例共享）⇒ 只断言增量，不断言绝对值
         self.assertEqual(after["calls"], before["calls"] + 1)
@@ -180,6 +189,93 @@ class TestStatusAndNoNetwork(_Base):
         p = local_judge.DEFAULT_SCRIPT
         self.assertTrue(str(p).endswith("jev-decision/scripts/decision.py"),
                         "默认脚本路径漂了：%s" % p)
+
+
+class TestCache(_Base):
+    """2026-10-23：同样问题直接命中磁盘缓存；失败绝不缓存。"""
+
+    def _counting_script(self):
+        counter = self.tmp / "runs.txt"
+        self._script(textwrap.dedent(f"""
+            import json, pathlib, sys
+            p = pathlib.Path({str(counter)!r})
+            p.write_text(str(int(p.read_text()) + 1) if p.exists() else "1")
+            print(json.dumps({{"answers": {{"q": {{"type": "noul", "noul": 0.5}}}},
+                               "model": "fake"}}))
+        """))
+        return counter
+
+    def test_same_question_and_state_runs_once(self):
+        counter = self._counting_script()
+        q = {"q": {"type": "noul", "instructions": "同一道题"}}
+        a = local_judge.judge(q, state="同一份证据", timeout_s=20)
+        b = local_judge.judge(q, state="同一份证据", timeout_s=20)
+        self.assertFalse(a["cache"]["hit"])
+        self.assertTrue(b["cache"]["hit"])
+        self.assertEqual(counter.read_text(encoding="utf-8"), "1",
+                         "同题同证据第二次仍跑了子进程 = 缓存没生效")
+
+    def test_different_state_is_a_different_key(self):
+        counter = self._counting_script()
+        q = {"q": {"type": "noul", "instructions": "同一道题"}}
+        local_judge.judge(q, state="证据A", timeout_s=20)
+        out = local_judge.judge(q, state="证据B", timeout_s=20)
+        self.assertFalse(out["cache"]["hit"])
+        self.assertEqual(counter.read_text(encoding="utf-8"), "2")
+
+    def test_failures_are_never_cached(self):
+        self._script("import sys; sys.stderr.write('nope\\n'); sys.exit(2)")
+        q = {"q": {"type": "noul", "instructions": "坏后端"}}
+        for _ in range(2):
+            with self.assertRaises(local_judge.LocalJudgeUnavailable):
+                local_judge.judge(q, state="s", timeout_s=5)
+        self.assertEqual(local_judge.status()["cache"]["hits"], 0)
+        self.assertEqual(local_judge.status()["fail"], 2)
+
+    def test_cache_hit_does_not_inflate_call_counters(self):
+        self._counting_script()
+        q = {"q": {"type": "noul", "instructions": "计数"}}
+        local_judge.judge(q, state="s", timeout_s=20)
+        local_judge.judge(q, state="s", timeout_s=20)
+        st = local_judge.status()
+        self.assertEqual(st["calls"], 1, "命中缓存不应算一次真调用")
+        self.assertEqual(st["cache"]["hits"], 1)
+        self.assertEqual(st["cache"]["misses"], 1)
+
+
+class TestAlerts(_Base):
+    """连续失败 → 告警 + 落盘；恢复 → 清告警并记一条 recovered。"""
+
+    def test_three_consecutive_failures_alert_then_recover(self):
+        self._script("import sys; sys.stderr.write('boom\\n'); sys.exit(4)")
+        q = {"q": {"type": "noul", "instructions": "坏"}}
+        for _ in range(3):
+            with self.assertRaises(local_judge.LocalJudgeUnavailable):
+                local_judge.judge(q, state="s", timeout_s=5)
+        st = local_judge.status()
+        self.assertTrue(st["alert"], "连续 3 次失败必须置 alert")
+        self.assertEqual(st["consecutive_fail"], 3)
+        lines = [json.loads(x) for x in
+                 pathlib.Path(st["alert_path"]).read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(any(x.get("event") == "alert" for x in lines))
+        self.assertEqual(local_judge.recent_alerts(3)[-1]["event"], "alert")
+
+        self._script(_GOOD)
+        local_judge.judge({"q": {"type": "noul", "instructions": "好"}},
+                          state="s", timeout_s=20, use_cache=False)
+        st2 = local_judge.status()
+        self.assertFalse(st2["alert"], "成功后必须清告警")
+        self.assertEqual(st2["consecutive_fail"], 0)
+        self.assertTrue(any(x.get("event") == "recovered"
+                            for x in local_judge.recent_alerts(5)))
+
+    def test_below_threshold_does_not_alert(self):
+        self._script("import sys; sys.exit(1)")
+        for _ in range(local_judge.ALERT_AFTER - 1):
+            with self.assertRaises(local_judge.LocalJudgeUnavailable):
+                local_judge.judge({"q": {"type": "noul", "instructions": "x"}},
+                                  state="s", timeout_s=5)
+        self.assertFalse(local_judge.status()["alert"])
 
 
 if __name__ == "__main__":

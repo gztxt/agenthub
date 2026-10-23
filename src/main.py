@@ -96,12 +96,25 @@ from api_agents import router as agents_router, _chat_dispatch   # 启动期 cha
 from api_sessions import router as sessions_router
 from api_models import router as models_router
 from api_vitals import router as vitals_router, agent_profs_for_vitals
+from api_summarize import router as summarize_router   # 2026-10-23：本机摘要提炼
 from api_system import router as system_router   # 系统级：前端「需重启」按钮的自重启端点
 
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.143"
+VERSION = "0.13.144"
+#   v0.13.144：**判定从「能跑」补到「可运维」**。四件事：
+#   ① 判定缓存（键=脚本指纹+题面+state，TTL 7 天，**只缓存成功**——失败固化等于
+#      把「现在不能问」变成「永远是这个答案」）；
+#   ② 失败告警（**连续 3 次失败**→ERROR + `data/judge_alerts.jsonl`，恢复记一条；
+#      `alert`/`consecutive_fail` 进 `/api/vitals`，不再只看「最近一次成功」）；
+#   ③ 摘要提炼（**分块归并**，1600 字/块，`/api/summarize` + MCP `hub_summarize`，
+#      正文超 2 万字直接报错，不静默截断）；
+#   ④ 自动调用修复（`by_sha` 以 core_sha 为键 ⇒ agent 不升级就永不重判，实测 16 条
+#      全是 rule、本地判定零调用；改 24h TTL + 每轮预算 2，历史空语义记录立即补判）。
+#   质量校正：1.5b 的 `noul` 恒返回 1.0（缺失证据、正反问同值，10/10），
+#   改为**硬证据优先**覆盖模型 + 三态具体标签；菜单闸门改用 `is_entry_shim`；
+#   安装判定实测 3/5 → 5/5，模型只在证据模糊时生效。
 #   v0.13.143：**判定附注超时 20→45s**。v0.13.142 上线后第一次真调用即超时
 #   （load=2.4，同载荷直测 10.4s/21s）——「2.3 倍余量」是按空负载算的，不能外推。
 #   附注默认关，宁可慢也不能一开就降级。
@@ -1362,6 +1375,7 @@ async def health():
 # ── 领域路由（C2：已从本文件抽成独立 module，见 src/api_*.py）──
 app.include_router(agents_router)
 app.include_router(vitals_router)
+app.include_router(summarize_router)
 app.include_router(sessions_router)
 app.include_router(models_router)
 app.include_router(system_router)

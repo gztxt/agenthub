@@ -42,9 +42,17 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-#: 默认落盘位置：与 `data/vitals.json` 同目录（同一套运维认知，不新增数据根）。
+#: 默认落盘位置：跟随 `DATA_DIR`（影子实例/测试隔离时缓存不落生产根），
+#: 未覆盖则与 `data/vitals.json` 同目录（同一套运维认知，不新增数据根）。
 #: 可用 `JUDGE_CACHE_PATH` 覆盖（L0 测试与影子实例靠它隔离）。
-DEFAULT_PATH = Path(__file__).resolve().parent.parent / "data" / "judge_cache.json"
+def _default_path() -> Path:
+    root = os.getenv("DATA_DIR")
+    if root:
+        return Path(root) / "judge_cache.json"
+    return Path(__file__).resolve().parent.parent / "data" / "judge_cache.json"
+
+
+DEFAULT_PATH = _default_path()
 
 #: 条目上限（LRU 淘汰最旧的）。判定条目很小（<1KB），500 条 ≈ 0.5MB。
 MAX_ENTRIES = int(os.getenv("JUDGE_CACHE_MAX", "500"))

@@ -37,7 +37,7 @@ class TestStaleJudgeDowngrade(unittest.TestCase):
         """源码级判据：缓存分支必须按 age 降级，并保留 source_cached。"""
         src = (_REPO / "src" / "vitals.py").read_text(encoding="utf-8")
         self.assertIn("JUDGE_CACHE_FRESH_H", src)
-        i_cache = src.index("if cached and not do_roundtrip:")
+        i_cache = src.index("reuse = bool(cached) and not do_roundtrip")
         i_guard = src.index('startswith(("jev", "local"))', i_cache)
         self.assertLess(i_cache, i_guard, "降级逻辑不在缓存分支里（会漏掉复用路径）")
         self.assertIn('rec["source_cached"]', src, "原值得留档（不隐藏证据）")

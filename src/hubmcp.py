@@ -639,6 +639,22 @@ if ALLOW_WRITE:
             return json.dumps({"error": f"{type(e).__name__}: {e}"}, ensure_ascii=False)
 
 
+@server.tool()
+def hub_summarize(text: str, points: int = 3, style: str = "") -> str:
+    """把长文提炼成 N 条要点（2026-10-23）：本机 Ollama，零外网、零 key。
+
+    什么时候用：需要把一篇文档/日志/对话压成可读要点，且**不想把正文发到外部模型**时。
+    超过 `SUMMARIZE_MAX_CHARS`（默认 2 万字）会直接报错要求先分段——不会静默截断。
+    服务端按 `SUMMARIZE_CHUNK_CHARS`（默认 1600 字）分块，再归并；同一篇正文命中缓存
+    时 `cache.hit=true`（10~30s 的 CPU 推理不必重跑）。
+
+    返回 `points`（列表）、`text`（拼好的要点）、`chunks`、`model`、`elapsed_s`、`cache`。
+    失败是 200 + `error`（正文过长/Ollama 不在），**不会返回空列表冒充成功**。
+    """
+    body = {"text": text, "points": int(points or 3), "style": style or ""}
+    return json.dumps(_post("/api/summarize", body, _timeout=300), ensure_ascii=False)
+
+
 def build_app():
     """返回可挂载到 FastAPI 的 Starlette 子应用。"""
     return server.streamable_http_app()

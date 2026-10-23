@@ -238,7 +238,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.143"
+    CURRENT_VERSION = "0.13.144"
+
+    #: v0.13.144：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「只缓存成功」「连续 3 次失败」「分块归并」「硬证据优先」。
+    VERSION_ROOT_CAUSES["0.13.144"] = (
+        "只缓存成功", "连续 3 次失败", "分块归并", "硬证据优先",
+    )
 
     #: v0.13.143：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「20s 余量是按空负载算的」「不能外推」「宁可慢也不能一开就降级」。

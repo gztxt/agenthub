@@ -101,7 +101,13 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.141"
+VERSION = "0.13.142"
+#   v0.13.142：**外部 jev 代码层彻底清除**。端点 2026-10-22 实测恒 451（区域封禁），
+#   随后整体下线；判定后端统一改本机 Ollama（技能 `jev-decision`，qwen2.5:1.5b）。
+#   新增 `src/local_judge.py`（子进程 + 失败必抛，不吞）；`ask_jev` → `ask_local`；
+#   删 `src/jev_client.py` / `tests/test_jev_451_l0.py`；`source` 词表
+#   `jev/jev-lowconf` → `local/local-lowconf`（史实记录照旧降级、不篡改）；
+#   `/api/skill/relevant` 精排块改本地判定附注且**默认关**（注入链预算 600ms）。
 #   v0.13.141：**两个「数字对不上」**——都是展示层口径，但都能让人做出错误判断。
 #   ① `/api/skill/usage`：`totals` 与把 `items` 加起来**永远不相等**，而响应里
 #      只有一个全局 `no_name`，解释不了任何一桶。实测（生产 :3102，30 天）：

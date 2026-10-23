@@ -1,3 +1,42 @@
+## v0.13.142 — 外部 jev 代码层彻底清除：判定全面切本地模型（Ollama）
+
+> 来源：PT-20261023-01。外部端点 `api.typesafe.ai` 先被区域封禁（HTTP 451，
+> 2026-10-22 实测）后整体下线；记录层清理与本地判定技能（`@user_36623aa7/jev-decision`，
+> Ollama `qwen2.5:1.5b`）已于 2026-10-23 01:1x~01:4x 落地，本版补上**代码层**。
+
+### 一、判定后端：外部 jev → 本机 Ollama
+
+- 新增 `src/local_judge.py`：以子进程跑技能 `scripts/decision.py`
+  （stdin JSON → stdout JSON），失败一律抛 `LocalJudgeUnavailable`（不吞、不返回空——
+  「没判成」与「判完了」必须可区分，这正是外部 jev `enabled:true` 假绿三年的成因）；
+  不缓存（缓存归调用方：vitals `by_sha` / skill 侧 `judge_cache`）。
+- `src/vitals.py`：`ask_jev`（urllib 直连外部端点）→ `ask_local`；`source` 词表
+  `jev / jev-lowconf` → `local / local-lowconf`；451 短路、key 回环真源、
+  `JEV_BLOCKED_COOLDOWN_S` 整套删除；`jev_key_present` / `jev_blocked_s` /
+  `jev_error` → `judge` 状态块 / `judge_error`；陈旧降级判据保留并扩展到 local
+  （`by_sha` 复用 ⇒ 旧 local 结论同样不得冒充实轮；史实 jev 记录照常降级）。
+- `src/skill.py`：`/api/skill/relevant` 的 jev 精排块 → 本地判定附注
+  （choice 原语、逐行概率、**只附注不改序**、**默认关**——注入链预算 600ms 的
+  硬要求，顺带修掉 `rerank=True` 默认值与两份注入链注释相悖的潜在不一致）；
+  `/api/skill/status` 的 `jev` 块 → `judge` 块（后端就绪 + 真调用计数）。
+- 超时按**实测**重设（不是照抄外部 jev 的 5s/60s）：本机 qwen2.5:1.5b 单题
+  6.4~8.6s，vitals 一轮 5 题空闲 37~41s；sweep `max_workers=4` 并发时 2 题
+  15~24s ⇒ 5 题会逼近 60s。故 `VITALS_JUDGE_TIMEOUT` 默认 **60→180**，
+  技能侧 `JUDGE_TIMEOUT_S` 保持 20s（它只问 1 题，≈2.3 倍余量）。
+- `src/skill_triggers.py`：删除死条目 `"typesafe-ai"`（技能已随 jev 下线删除；
+  `jev-decision` 的技能自述里已有 triggers，按本表维护纪律「只登记确实存在的技能名」）。
+
+### 二、删除与收尾
+
+- 删 `src/jev_client.py` 与 `tests/test_jev_451_l0.py`；`test_jev_stale_cache_l0.py`
+  改版为 `test_judge_stale_cache_l0.py`（覆盖史实+现值，新增「外部判据活引用清零」断言）；
+  新增 `tests/test_local_judge_l0.py`（15 例：契约/六种失败形态/零 HTTP 客户端/状态形状）。
+- UI：相关性实验室开关「用 jev 精排」→「本地判定附注」（`skillLabJev` → `skillLabJudge`，
+  出厂不勾），逐行显示判定概率与选中项置信。
+- `VITALS_JEV=0` → `VITALS_JUDGE=0`（两个 L2 探针的跑法注释同改）。
+- `hub.js` 为构建产物：只改 `static/hub/04-terminal-ws.js` 后重跑
+  `scripts/build_hubjs.sh`（`?v=` 提手内容派生，自动同步）。
+
 ## v0.13.141 — 两个「数字对不上」：口径要能在响应里自证
 
 > 来源：生产 :3102 技能中心全链路单轮探针（v0.13.140，commit `37fdd38`）。

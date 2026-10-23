@@ -5156,28 +5156,37 @@ async function loadSkillStatus() {
 }
 
 /* 相关性实验室：/api/skill/relevant。
- * **默认 rerank=false 是硬要求**：实测 rerank=true 时该端点 took_ms=1064.5ms，
- * 而 hub-facade 的 input 钩子预算是 600ms（见 src/main.py 0.13.68 版本注释）。
- * 界面上给开关，但默认关；BM25 层实测 12–53ms。 */
+ * **默认 rerank=false 是硬要求**：rerank=true 时本地判定附注（Ollama CPU 推理）
+ * 会把端点拖到数秒，而 hub-facade 的 input 钩子预算是 600ms（见 src/main.py
+ * 0.13.68 版本注释；该延迟判据 2026-10-22 用外部 jev 实测为 1064.5ms，切本地模型后更慢）。
+ * 界面上给开关，但默认关；BM25 层实测 12–53ms。
+ * 2026-10-23：外部 jev 下线 ⇒ 开关从「用 jev 精排」改为「本地判定附注」：
+ * 只附注（每候选一个 choice 概率 + 选中项置信），不改 BM25 排序。 */
 async function skillLabSearch() {
   const q = ($('skillLabQ').value || '').trim();
   const el = $('skillLab'), hint = $('skillLabHint');
   if (!el) return;
   if (!q) { if (hint) hint.textContent = '先输入一句话'; return; }
   boxBusy('skillLab');
-  const useJev = $('skillLabJev') && $('skillLabJev').checked;
+  const useJudge = $('skillLabJudge') && $('skillLabJudge').checked;
   try {
     const d = await api('/api/skill/relevant?q=' + encodeURIComponent(q) +
-      '&n=5&rerank=' + (useJev ? 'true' : 'false'));
+      '&n=5&rerank=' + (useJudge ? 'true' : 'false'));
     const b = d.bm25 || {};
     const items = b.items || [];
+    const jd = d.judge || {};
+    const judgeHint = jd.ok
+      ? (' · 判定选中 ' + escapeHtml(String(jd.picked)) + '（置信 ' +
+         escapeHtml(String(jd.confidence)) + '，' + escapeHtml(String(jd.model || '?')) + '）')
+      : (jd.why ? ' · 判定未生效：' + escapeHtml(String(jd.why)) : '');
     if (hint) hint.textContent = '命中 ' + items.length + ' / 语料 ' + (d.total || 0) +
-      ' · ' + (d.took_ms != null ? d.took_ms + 'ms' : '?') + (useJev ? '（jev 已开，会慢 ~1s）' : '');
+      ' · ' + (d.took_ms != null ? d.took_ms + 'ms' : '?') +
+      (useJudge ? '（本地判定附注已开，CPU 推理慢数秒）' : '') + judgeHint;
     el.innerHTML = items.map(x => {
-      const j = x.jev;
-      const jevTxt = j ? ' · jev ' + escapeHtml(String(j.score)) + '（置信 ' + escapeHtml(String(j.confidence)) + '）' : '';
+      const j = x.judge;
+      const judgeTxt = j ? ' · 判定概率 ' + escapeHtml(String(j.prob)) + (j.picked ? ' ✅' : '') : '';
       return '<div class="mem-item"><span class="tag agent" style="align-self:flex-start">' +
-        escapeHtml(String(x.name)) + '</span><p><b>' + escapeHtml(String(x.bm25)) + '</b> 分' + jevTxt +
+        escapeHtml(String(x.name)) + '</span><p><b>' + escapeHtml(String(x.bm25)) + '</b> 分' + judgeTxt +
         '<br><span class="hint">命中词：' + escapeHtml((x.matched || []).join(' ')) +
         (x.matched_in && x.matched_in.length ? '（' + escapeHtml(x.matched_in.join(' ')) + '）' : '') +
         ' · ' + escapeHtml((x.routes || [x.route]).join(', ')) +

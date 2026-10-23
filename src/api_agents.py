@@ -106,7 +106,7 @@ async def verify_agent(agent_id: str):
     ev = rec.get("evidence", {})
     out = {k: rec.get(k) for k in ("verdict", "source", "rule_verdict", "confidence",
                                    "menu_noul", "present_noul", "roundtrip_noul",
-                                   "block_noul", "jev_error", "rt_state", "rt_flaky")}
+                                   "block_noul", "judge_error", "rt_state", "rt_flaky")}
     # 应答态与生死判定分两栏回：前端拿 rt_state 说明模型层，拿 verdict 决定颜色
     out["evidence"] = {kk: ev.get(kk) for kk in
                        ("agent_shape", "resolved_path", "version_rc", "run_rc", "run_ok",

@@ -26,11 +26,11 @@ async def get_vitals():
     """判定台账（可审计）：每个 agent 的证据 + 裁决 + 来源 + 概率"""
     snap = vitals_mod.vitals.snapshot()
     return {"count": len(snap), "last_sweep": vitals_mod.vitals.last_sweep,
-            "jev_key_present": bool(vitals_mod.profiles_jev_key()),
-            # 2026-10-22 PT-16：key 在 ≠ 可用。本机直连 api.typesafe.ai 恒 451
-            # （区域封禁），旧载荷只报 key_present ⇒ 看板永远显示「jev 就绪」。
-            # 这里并列给出短路剩余秒数：>0 就是「本轮 sweep 没走 jev，走的是规则」。
-            "jev_blocked_s": vitals_mod.jev_blocked_for(),
+            # 2026-10-23：外部 jev（api.typesafe.ai）已下线，判定改本地模型。
+            # 旧载荷的 jev_key_present / jev_blocked_s（key 在 ≠ 可用、451 短路）
+            # 随之作废，换成本地判定后端的就绪与真调用状态——自证端点必须能说出
+            # 「这一轮的语义判定为什么没跑成」（脚本缺失/Ollama 不在/超时）。
+            "judge": vitals_mod.judge_status(),
             "menu_min": vitals_mod.MENU_MIN, "sweep_every_sec": vitals_mod.SWEEP_EVERY,
             "detail": snap}
 

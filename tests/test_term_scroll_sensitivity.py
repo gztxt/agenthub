@@ -238,7 +238,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.141"
+    CURRENT_VERSION = "0.13.142"
+
+    #: v0.13.142：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「外部 jev 恒 451 已下线」「失败必抛不吞」「精排默认关守注入预算」。
+    VERSION_ROOT_CAUSES["0.13.142"] = (
+        "外部 jev 代码层彻底清除", "恒 451", "失败必抛", "默认关",
+    )
 
     #: v0.13.141：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「totals 与 items 的差额要逐桶归因」「budget 被裁要说得清从哪断」。

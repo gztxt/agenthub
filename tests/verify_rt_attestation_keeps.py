@@ -58,11 +58,11 @@ def check(name, cond, detail=""):
 
 
 def main():
-    # 打桩：collect 走合成证据；ask_jev 不发网络（本测只验状态机，不验 Jev）
+    # 打桩：collect 走合成证据；ask_local 不跑本地模型（本测只验状态机，不验判定）
     state = {"rt": "timeout", "sha": "s0"}
     vitals.collect = lambda prof, do_roundtrip=False: fake_evidence(
         state["rt"] if do_roundtrip else "ok", state["sha"])
-    vitals.ask_jev = lambda ev: {}
+    vitals.ask_local = lambda ev, key=None: {}
     state["rt"] = "answered"
 
     print("A) 先建立 answered 凭据（1 小时前）")

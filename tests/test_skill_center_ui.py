@@ -32,7 +32,7 @@ def strip_js_comments(src: str) -> str:
     """剥掉块注释、行注释与行尾注释，只留真代码。
 
     **为什么必须有它**：本文件第一版的 rerank 断言是拿注释里的说明字去过的
-    （代码里是 `'&n=5&rerank=' + (useJev ? 'true' : 'false')`，并无 `rerank=false` 字面量）。
+    （代码里是 `'&n=5&rerank=' + (useJudge ? 'true' : 'false')`，并无 `rerank=false` 字面量）。
     「注释里写了」被当成了「代码里做了」——而这两件事在本仓里**经常不是一回事**
     （TDZ、vitals_loop 函数头丢失、跨档镜像声明，都属同一个坑）。
     """
@@ -99,7 +99,7 @@ class TestSelfCheckCard(unittest.TestCase):
 
 
 class TestRelevanceLab(unittest.TestCase):
-    """④ 相关性实验室：打 /api/skill/relevant，并显示 BM25/jev 分开 + 耗时。"""
+    """④ 相关性实验室：打 /api/skill/relevant，并显示 BM25/本地判定分开 + 耗时。"""
 
     def test_lab_container_exists_in_html(self):
         self.assertIn('id="skillLab"', HTML)
@@ -131,11 +131,12 @@ class TestRelevanceLab(unittest.TestCase):
         self.assertIn("rerank=", seg, "相关性调用没有显式传 rerank（依赖后端默认 = 隐式依赖）")
         self.assertIn("'true' : 'false'", seg, "rerank 必须是显式二选一，不是跟随后端默认")
 
-    def test_jev_toggle_ships_unchecked(self):
-        """HTML 里的 jev 开关出厂不得带 checked —— 带了就等于默认开。"""
-        m = re.search(r'<input[^>]*id="skillLabJev"[^>]*>', HTML)
-        self.assertIsNotNone(m, "缺少 jev 开关元素，无法断言其默认值")
-        self.assertNotIn("checked", m.group(0), "jev 开关出厂被勾上 = 默认重排 = 每次多等 1 秒")
+    def test_judge_toggle_ships_unchecked(self):
+        """HTML 里的本地判定开关出厂不得带 checked —— 带了就等于默认开。"""
+        m = re.search(r'<input[^>]*id="skillLabJudge"[^>]*>', HTML)
+        self.assertIsNotNone(m, "缺少本地判定开关元素，无法断言其默认值")
+        self.assertNotIn("checked", m.group(0),
+                         "判定开关出厂被勾上 = 每次多花数秒 CPU 推理（rerank=true）")
 
 
 class TestBudgetCard(unittest.TestCase):

@@ -84,8 +84,16 @@ RT_MAX_TRIES = int(os.getenv("VITALS_RT_MAX_TRIES", "2"))
 # 归为「外部条件」的态：可重试，但**计入预算**（区别于 answered / blocked_by_account）
 RT_RETRYABLE = ("timeout", "rate_limited", "model_unsupported", "no_output")
 TRANSIENT = ("unknown", "broken", "pending")
-STATE_PATH = Path(os.getenv("VITALS_STATE",
-                            str(Path(__file__).resolve().parent.parent / "data" / "vitals.json")))
+def _default_state_path() -> Path:
+    """跟随 DATA_DIR（影子实例/测试隔离）。**2026-10-23 修**：原实现直接写
+    `agenthub/data/vitals.json`，只覆盖 DATA_DIR 起影子时仍会写生产状态文件——
+    实测沙箱 sweep 把生产台账覆盖成 2 条。"""
+    root = os.getenv("DATA_DIR")
+    base = Path(root) if root else (Path(__file__).resolve().parent.parent / "data")
+    return base / "vitals.json"
+
+
+STATE_PATH = Path(os.getenv("VITALS_STATE") or str(_default_state_path()))
 
 # 入口壳的**无歧义**特征：壳自己声明目标命令不存在（fcc-* 家族实测原文）
 SHIM_RE = re.compile(r"could not find\b.{0,48}\bcommand\b", re.I)
@@ -312,10 +320,64 @@ QUESTIONS = {
 #: 历史数据里的 `jev` / `jev-lowconf` 也仍按本条降级（不因端点下线就篡改旧记录）。
 JUDGE_CACHE_FRESH_H = float(os.getenv("VITALS_JUDGE_CACHE_FRESH_H", "6"))
 
+#: 判定结论多久强制重判一次。`by_sha` 以 core_sha 为键（路径/类型/版本），
+#: agent 不升级就永远命中 ⇒ 本地判定会一直休眠。24h 是「每天至少真跑一次」的兜底，
+#: 不是精度要求：证据变了键就变，会立刻重判。
+JUDGE_REFRESH_H = float(os.getenv("VITALS_JUDGE_REFRESH_H", "24"))
+#: 每轮 sweep 最多重判几个（首轮回填 12 个 agent × 5 题会把 CPU 打满，分 6 轮摊开）。
+JUDGE_REFRESH_BUDGET = int(os.getenv("VITALS_JUDGE_BUDGET", "2"))
+#: 每轮最多补几次 L4 真请求。判定上线后单轮 2 个 agent 实测 100s（L1+L4 共 4 次推理），
+#: 不设上限时 12 个 agent 一起到点会跑 10 分钟、与 900s 周期重叠。
+RT_BUDGET = int(os.getenv("VITALS_RT_BUDGET", "2"))
+
+
+def present_from_evidence(ev: dict, model_noul=None):
+    """安装状态：**硬证据优先，模型只在证据模糊时生效**。
+
+    2026-10-23 实测：同一份“路径缺失 + file_kind=missing”证据，模型三态问法仍答
+    「已安装」（置信 1.0）；换 JSON/散文/标签都复现。既然证据本身已能判定，
+    就不该让模型推翻它——这正是「判定必须可复核」的最低要求。
+    返回 `(noul, source)`；source ∈ rule|local|unknown。
+    """
+    kind = str(ev.get("file_kind") or ev.get("kind") or "")
+    if ev.get("is_entry_shim"):
+        return 0.0, "rule"
+    resolved = ev.get("resolved")
+    if resolved is False or kind in ("missing", "unreadable"):
+        return 0.0, "rule"
+    if resolved is True:
+        return 1.0, "rule"
+    if kind and kind not in ("missing", "unreadable"):
+        return 1.0, "rule"
+    if model_noul is not None:
+        return model_noul, "local"
+    return None, "unknown"
+
+
+def menu_from_evidence(ev: dict):
+    """菜单闸门：**确定性证据优先，模型不参与**。
+
+    2026-10-23 实测：1.5b 对「是否应出现在菜单」恒定答「应显示」（置信 0.9），
+    连证据写「未安装」时也如此；同一份证据正反问都返回 1.0。把它当门禁等于没有门禁。
+    证据里本来就有 `is_entry_shim`（入口壳：launcher 存在但目标程序缺失），
+    直接用它判定，模型只保留在 truly 语义题（应答态/封锁原因）上。
+    """
+    if ev.get("is_entry_shim"):
+        return 0.0
+    noul, _ = present_from_evidence(ev)
+    if noul is not None:
+        return noul
+    return None
+
 
 def judge_status() -> Dict[str, Any]:
     """本地判定后端状态（薄封装：api_vitals / sweep 日志用，逻辑只在 local_judge）。"""
     return local_judge.status()
+
+
+def judge_alerts(n: int = 5) -> list:
+    """最近 n 条判定告警/恢复记录（面板用）。"""
+    return local_judge.recent_alerts(n)
 
 
 def ask_local(state: dict, key: Optional[List[str]] = None,
@@ -328,12 +390,46 @@ def ask_local(state: dict, key: Optional[List[str]] = None,
     """
     if not JUDGE_ENABLED:
         return None
-    key = key or list(QUESTIONS)
+    key = [k for k in (key or list(QUESTIONS)) if k != "list_in_agents_menu"]
+    # 没有真请求（L2 轮）时，应答态/封锁原因只能得到 `skipped`：问了也是白花 3 次推理。
+    # 实测 2 个 agent 一轮从 159s 降到 ~10s，且不影响判定字段（rt_code 本来就是 skipped）。
+    if state.get("run_rc") is None:
+        key = [k for k in key if k == "underlying_program_present"]
+    if not key:
+        return {}
+    # 缓存键要剔掉每轮都会变的字段，否则 state 每次都不同 ⇒ 缓存永不命中。
+    _VOLATILE = ("checked_at", "evidence_sha", "core_sha", "run_note", "probe_rejected")
+    model_state = {k: v for k, v in state.items() if k not in _VOLATILE}
+    payload = {}
+    for k in key:
+        q = QUESTIONS[k]
+        if k == "underlying_program_present":
+            # 2026-10-23 实测：`noul` 形态（"p 是多少"）对本机 1.5b 恒返回 1.0，
+            # 连「路径缺失、command not found」也判 1.0；正反问同值。改成**三态具体
+            # 标签**后 2/2 正确（已安装/未安装/无法判断）。这里只换问法，对外契约不变：
+            # 仍回 `noul`（1.0/0.0/None），judge() 不必改。
+            payload[k] = {
+                "type": "choice",
+                "instructions": ("根据证据判断该 CLI 的安装状态。证据含 path/file_kind/"
+                                 "version/run_rc/run_output；只看事实，不要猜。"),
+                "criteria": {"已安装": "可执行文件存在且能出版本或运行成功",
+                             "未安装": "路径缺失或命令不存在",
+                             "无法判断": "证据不足以判断"},
+            }
+        else:
+            payload[k] = q
     try:
-        r = local_judge.judge({k: QUESTIONS[k] for k in key},
-                              state=json.dumps(state, ensure_ascii=False, default=str),
+        r = local_judge.judge(payload,
+                              state=json.dumps(model_state, ensure_ascii=False, default=str),
                               timeout_s=timeout)
-        return r.get("answers") or {}
+        answers = dict(r.get("answers") or {})
+        present = answers.get("underlying_program_present")
+        if isinstance(present, dict) and present.get("type") == "choice":
+            label = present.get("choice")
+            noul = (1.0 if label == "已安装" else 0.0 if label == "未安装" else None)
+            # 硬证据优先：模型与“路径/类型/版本”冲突时以证据为准（判例 245 §4）
+            present["noul"], present["source"] = present_from_evidence(state, noul)
+        return answers
     except Exception as e:  # noqa: BLE001 —— 判定是增强，任何失败都退回硬规则
         return {"_error": "%s: %s" % (type(e).__name__, str(e)[:140])}
 
@@ -481,6 +577,7 @@ class Vitals:
         self._by_sha: Dict[str, dict] = {}     # core_sha -> 裁决
         self._latest: Dict[str, dict] = {}     # agent_id -> {evidence, verdict}
         self._rt: Dict[str, dict] = {}         # agent_id -> 最近一次 L4 真实应答结果
+        self._judge_budget = 0                 # 本轮 sweep 还能重判几个（防 CPU 打满）
         self.last_sweep = 0.0
         self._load()
 
@@ -512,7 +609,8 @@ class Vitals:
             pass
 
     # ── 单实体：取证 → （sha 命中则复用）→ 裁决
-    def judge(self, prof: dict, do_roundtrip: bool = False) -> dict:
+    def judge(self, prof: dict, do_roundtrip: bool = False,
+              refresh: bool = False) -> dict:
         ev = collect(prof, do_roundtrip)
         core = ev.get("core_sha") or ev["evidence_sha"]
         aid = ev["agent_id"]
@@ -523,7 +621,29 @@ class Vitals:
         verdict = rule_verdict(ev)
         rt_code = (classify_rt(ev.get("run_rc"), ev.get("run_output") or "")
                    if ev.get("run_rc") is not None else "skipped")
-        if cached and not do_roundtrip:
+        reuse = bool(cached) and not do_roundtrip
+        # 2026-10-23（用户问「本地判定是否自动调用」时查出来的休眠）：`by_sha` 以
+        # `core_sha`（只含路径/类型/版本）为键，agent 二进制不变就**永不重判** ——
+        # 16 条记录全是 jev 时代的 `rule`，本地判定一次都没跑过。判据改成两层：
+        # ① 超过 `JUDGE_REFRESH_H`（默认 24h）视为陈旧，sweep 里按预算重判；
+        # ② 语义字段为空（menu_noul / present_noul 都没有）也算陈旧，补一次历史欠账。
+        # 预算存在是为了让首轮回填不把 CPU 打满：每轮最多 N 个，其余下轮继续。
+        stale = False
+        if reuse:
+            age_h = (time.time() - float(cached.get("checked_at") or 0)) / 3600.0
+            missing_semantics = (cached.get("menu_noul") is None
+                                 and cached.get("present_noul") is None
+                                 and cached.get("source") in (None, "rule"))
+            stale = age_h > JUDGE_REFRESH_H or missing_semantics
+            if stale and refresh:
+                with self._lock:
+                    if self._judge_budget > 0:
+                        self._judge_budget -= 1
+                    else:
+                        stale = False        # 预算用完：保留旧结论，下一轮再来
+            if stale:
+                reuse = False
+        if reuse:
             rec = dict(cached)
             rec.update(verdict=verdict, rule_verdict=verdict)
             # 2026-10-22（用户问「jev 是否参与链路」时查出来的展示层假绿）：
@@ -546,7 +666,7 @@ class Vitals:
             err = ans.get("_error") if isinstance(ans, dict) else None
             jrt = (ans.get("roundtrip_state") or {}).get("choice")
             conf = (ans.get("roundtrip_state") or {}).get("confidence")
-            menu = (ans.get("list_in_agents_menu") or {}).get("noul")
+            menu = menu_from_evidence(ev)
             # 应答态：本地判定读文案、代码兜底；两者都只出情报，不动 verdict
             if jrt in RT_STATES and rt_code != "skipped" and (conf is None or conf >= 0.45):
                 rt_state, source = jrt, "local"
@@ -554,7 +674,8 @@ class Vitals:
                 rt_state, source = rt_code, ("local-lowconf" if jrt else "rule")
             rec = {"verdict": verdict, "rule_verdict": verdict, "rt_state": rt_state,
                    "source": source, "judge_error": err, "confidence": conf,
-                   "menu_noul": menu,
+                   "menu_noul": menu, "is_entry_shim": bool(ev.get("is_entry_shim")),
+                   "present_source": (ans.get("underlying_program_present") or {}).get("source"),
                    "present_noul": (ans.get("underlying_program_present") or {}).get("noul"),
                    "roundtrip_noul": (ans.get("model_round_trip_ok") or {}).get("noul"),
                    "block_noul": (ans.get("external_block_only") or {}).get("noul"),
@@ -673,20 +794,30 @@ class Vitals:
     def sweep(self, profs: List[dict]) -> dict:
         t0 = time.time()
         from concurrent.futures import ThreadPoolExecutor
+        st0 = judge_status()
+        with self._lock:
+            self._judge_budget = max(0, JUDGE_REFRESH_BUDGET)
         with ThreadPoolExecutor(max_workers=4) as ex:
-            recs = list(ex.map(lambda p: self.judge(p, False), profs))
+            recs = list(ex.map(lambda p: self.judge(p, False, refresh=True), profs))
         rt_jobs = [p for p, r in zip(profs, recs) if self.needs_rt(p, r.get("evidence", {}))]
+        if RT_BUDGET > 0:
+            rt_jobs = rt_jobs[:RT_BUDGET]
         rt_done = 0
         if rt_jobs:
             with ThreadPoolExecutor(max_workers=2) as ex:   # L4 串行度更低，免得挤垮 CCR
                 list(ex.map(lambda p: self.judge(p, True), rt_jobs))
             rt_done = len(rt_jobs)
+        st1 = judge_status()
+        judged = int(st1.get("calls") or 0) - int(st0.get("calls") or 0)
+        hits = int((st1.get("cache") or {}).get("hits") or 0) - \
+               int((st0.get("cache") or {}).get("hits") or 0)
         self.last_sweep = time.time()
         self._save()
         return {"agents": len(profs), "rt_runs": rt_done, "secs": round(time.time() - t0, 2),
-                "judge": {"ready": judge_status().get("ready"),
-                          "backend": judge_status().get("backend"),
-                          "model": judge_status().get("model")}}
+                "judged": max(0, judged), "cache_hits": max(0, hits),
+                "judge": {"ready": st1.get("ready"), "backend": st1.get("backend"),
+                          "model": st1.get("model"), "alert": st1.get("alert"),
+                          "consecutive_fail": st1.get("consecutive_fail")}}
 
     def verify(self, prof: dict) -> dict:
         """L4：一次性真实请求（用户点「体检」时才跑）"""
@@ -735,6 +866,10 @@ class Vitals:
         if not rec:
             return True
         if rec["verdict"] == "not_installed":
+            return False
+        # 2026-10-23：入口壳（launcher 在、目标程序缺失）由证据直接判，不再问模型。
+        # 实测 1.5b 对菜单题恒答「应显示」，模型闸门等于没有闸门（判例 245 §4）。
+        if rec.get("is_entry_shim"):
             return False
         m = rec.get("menu_noul")
         # 2026-09-23 修复：原条件额外要求 source == "jev"，但 source 取 "jev" 需

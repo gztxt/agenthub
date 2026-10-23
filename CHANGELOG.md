@@ -1,3 +1,66 @@
+## v0.13.144 — 判定从「能跑」补到「可运维」：缓存 / 告警 / 摘要 / 自动调用 / 质量校正
+
+> 来源：2026-10-23 用户四问后的裁定——「增加判定失败告警和日志、添加判定缓存便于下次
+> 同样问题直接判定、添加摘要提炼模块、修复自动调用、优化判定质量」。核查报告见
+> `work/judge-quality-20261023/REPORT.md`。
+
+### ① 判定缓存（`src/local_judge.py`）
+
+- 键 = **脚本指纹（mtime+size）+ 题面 JSON + state**，落 `judge_cache`（原子写、LRU、
+  损坏当空缓存），TTL 7 天。脚本一改（提示词/模型都在脚本里）键就变，不会把旧模型的
+  答案套到新提示词上。
+- **只缓存成功**：超时/脚本缺失/输出不可解析都是瞬时故障，缓存它等于把「现在不能问」
+  固化成「永远是这个答案」。
+- `status().cache` 回 hits/misses/hit_rate/entries/path——「有缓存」与「从没命中」
+  在外部必须能区分。命中不计入 `calls`（真调用才计）。
+
+### ② 失败告警与日志（同日用户令）
+
+- 每次失败：`hub.judge` WARNING，一行 key=value（kind/ms/consecutive/alert/err），
+  `journalctl --user -u agenthub | grep judge_fail` 可直接过滤。
+- **连续 3 次失败**（`JUDGE_ALERT_AFTER`）⇒ ERROR + `data/judge_alerts.jsonl` 追加一条
+  alert；恢复时记一条 recovered。`alert`/`consecutive_fail`/`last_fail_ts` 进
+  `/api/vitals` 与 `/api/skill/status`，`/api/vitals` 另回 `judge_alerts`（最近 5 条）。
+- 影子实例跟随 `DATA_DIR`，测试用 `JUDGE_ALERT_PATH` 隔离，不会写进生产。
+
+### ③ 摘要提炼（新增 `src/summarize.py` + `/api/summarize` + MCP `hub_summarize`）
+
+- 走本机 Ollama，**分块归并**：1600 字/块，逐块提炼后合并；超过 2 万字直接报错要求
+  分段（**不静默截断**——截断会产出「看起来完整、其实只读了开头」的假摘要）。
+- 返回 `points/text/chunks/chars/model/elapsed_s/cache`；失败抛
+  `SummarizeUnavailable` → 503，**不返回空列表冒充成功**。
+- 实测：700 字 11.4s / 3 条；2200 字 28.0s / 4 条；同一正文第二次命中缓存（0 推理）。
+
+### ④ 自动调用修复（`src/vitals.py`）
+
+- 根因：`by_sha` 以 `core_sha`（路径/类型/版本）为键，agent 二进制不变就永远命中 ⇒
+  实测 16 条记录全是 `rule`，本地判定自重启后**零调用**。
+- 改为 24h TTL（`VITALS_JUDGE_REFRESH_H`）+ 每轮预算 2 个（`VITALS_JUDGE_BUDGET`），
+  历史「无语义字段」的 rule 记录立即补判；`sweep` 日志新增 `judged` / `cache_hits` /
+  `alert`，自动调用是否真发生可从日志自证。
+
+### ⑤ 判定质量校正（同批实测）
+
+- **noul 恒真**：10/10 返回 `noul=1.0, conf=1.0`，缺失证据也 1.0；同一证据正反问同值，
+  reasoning 却写「命令不存在」。YES/NO 标签则恒为 NO，是模型级极性失效，不是解析 bug。
+- 处置：安装判定改**三态具体标签** + **硬证据优先**（路径缺失/`file_kind=missing`
+  ⇒ 0.0，有版本/运行成功 ⇒ 1.0，只有证据模糊才采信模型）；菜单闸门改用
+  `is_entry_shim`，模型不再参与。同集实测 **3/5 → 5/5**，菜单 3/3 确定性。
+- `present_source`（rule/local）随记录落库：读的人能知道这一格是规则还是模型给的。
+
+### 测试
+
+- 新增 `tests/test_summarize_l0.py`（分块不丢内容/归并/缓存/失败语义）、
+  `tests/test_vitals_judge_refresh_l0.py`（TTL/预算/遗留补判/手动 verify）。
+- `tests/test_local_judge_l0.py` 增缓存与告警用例（同题只跑一次、失败不缓存、
+  连续 3 次告警、恢复清告警）。
+- 本次相关测试 211 例全绿（`test_local_judge_l0` / `test_summarize_l0` /
+  `test_vitals_judge_refresh_l0` / `test_judge_stale_cache_l0` / `test_vitals_retry` /
+  `test_skill_relevance` / `test_skill_center_ui` / `test_judge_cache_l0` /
+  `test_skill_rerank_l0`）。
+
+---
+
 ## v0.13.143 — 判定附注超时按**生产负载**校正：20s → 45s
 
 > 来源：v0.13.142 上线后第一次真调用。`/api/skill/relevant?rerank=true` 返回

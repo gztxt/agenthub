@@ -9,16 +9,18 @@
   · 附带一条端口判定缺陷：qwenpaw 2.2.1 起只监听 IPv6（127.0.0.1:8088 拒连、[::1]:8088 通），
     单栈探测把它误报成「没活」。
 
-分层取证（代码只负责取证 + 硬规则，语义判断交 Jev）：
+分层取证（代码只负责取证 + 硬规则，语义判断交本地模型）：
   L1 身份  which 解析到的路径 + 文件头（ELF / 脚本 / 入口壳特征）
   L2 自述  `<cli> --version`（超时 8s）→ 拿不出版本号或疑似入口壳时递升 `<cli> --help`
   L4 应答  一次性真实请求（烧 token，只在显式 verify / 慢周期跑）
   EP 端点  双栈（127.0.0.1 与 ::1）+ HTTP 状态 —— 服务型 agent 的存在性证据
 
 裁决落 `verdict ∈ usable|blocked_by_account|not_installed|broken|stopped|pending|unknown`。
-Jev 不可用（无 key / 网络失败 / 超时）时退回硬规则，并把来源标成 rule，
+本地判定不可用（脚本缺失 / Ollama 不在 / 超时）时退回硬规则，并把来源标成 rule，
 **规则只在证据无歧义时才摘卡**（关键字误伤是上一版的病，见 hermes「Install method:」）。
-菜单闸门取自 Jev `list_in_agents_menu`：本机实测假卡 0.07~0.12、真卡 0.64~0.86，取 0.5。
+菜单闸门取自 `list_in_agents_menu`：**假卡 0.07~0.12、真卡 0.64~0.86、取 0.5 这条刻度是
+外部 jev 时代实测的**（2026-09-22）；2026-10-23 切本地模型后题面未改、阈值未重校，
+复测前保持 0.5（宁严勿宽），判据见判例 244 §5.3。
 
 实测踩过的坑（都是本轮修的）：
   · 看返码会被骗：入口壳 rc=0；
@@ -38,14 +40,21 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
+import local_judge
 import profiles
 
 # ── 开关与阈值（env 可覆写，默认对现有部署零影响）────────────────
-JEV_ENABLED = os.getenv("VITALS_JEV", "1") == "1"          # 0 = 只用硬规则
-JEV_URL = os.getenv("TYPESAFE_API_URL", "https://api.typesafe.ai/v1/systemone")
-JEV_MODEL = os.getenv("TYPESAFE_MODEL", "jev-latest")
+#: 语义判定开关：本地模型（local_judge → Ollama qwen2.5:1.5b）。0 = 只用硬规则。
+#: 2026-10-23：外部 jev（api.typesafe.ai）已下线，原 VITALS_JEV/TYPESAFE_* 一并作废。
+JUDGE_ENABLED = os.getenv("VITALS_JUDGE", "1") == "1"
+#: 单轮判定的硬超时（秒）。一次 5 题 = 5 次 CPU 推理。实测（2026-10-23，本机
+#: qwen2.5:1.5b）：空闲时 5 题 37~41s（≈7.5s/题，冷启动含加载 9s）；sweep 用
+#: `max_workers=4` 并发打同一台 Ollama，2 题并发实测 15~24s ⇒ 5 题会逼近 60s。
+#: 取 180 而不是 60：超时后 `judge()` 会把这一轮记成 rule（判定降级），若 60s
+#: 在并发下必然踩线，等于「本地判定永远不生效」。硬超时只用来防挂死，不承担限流。
+JUDGE_TIMEOUT_S = float(os.getenv("VITALS_JUDGE_TIMEOUT", "180"))
 MENU_MIN = float(os.getenv("VITALS_MENU_MIN", "0.5"))       # 菜单闸门概率下限
 PROBE_T = float(os.getenv("VITALS_PROBE_TIMEOUT", "8"))     # L2 单次探针硬超时
 SWEEP_EVERY = float(os.getenv("VITALS_SWEEP_SEC", "900"))   # 慢周期（15min）
@@ -221,7 +230,7 @@ def file_identity(path: str) -> dict:
     return out
 
 
-# ── Jev 问题集（本机 13 条实测校准：与硬规则 13/13 一致）─────────
+# ── 判定问题集（本地模型；题面契约同外部 jev 时代，语义未改）─────────
 QUESTIONS = {
     "underlying_program_present": {
         "type": "noul",
@@ -296,76 +305,37 @@ QUESTIONS = {
 }
 
 
-#: 2026-10-22：区域封禁（451）短路。实测本机直连 api.typesafe.ai **恒 451**
-#: （`{"title":"Typesafe is not available in your region.","status":451}`），
-#: 而 `ask_jev` 每轮 sweep 都白等一次请求（1.1s 级）并把 source 记成 `rule`——
-#: 看似「规则优先」，实际是「远程永远失败」。
-#: 判据：451 之后在 `JEV_BLOCKED_COOLDOWN_S` 内**不再发请求**，并让 vitals 载荷
-#: 报出 `jev_blocked_s`（自证端点必须能说清「这一轮为什么没用 jev」）。
-JEV_BLOCKED_COOLDOWN_S = float(os.getenv("JEV_BLOCKED_COOLDOWN_S", "900"))
-#: 缓存里的 jev 结论多久算「还是本轮依据」。超时即降级显示为 rule（见 judge 的缓存分支）。
+#: 缓存里的语义结论多久算「还是本轮依据」。超时即降级显示为 rule（见 judge 的缓存分支）。
 #: 取 6h：vitals 的 sweep 周期是 900s，同一天内换证据就该重问；跨天必然过期。
-JEV_CACHE_FRESH_H = float(os.getenv("VITALS_JEV_CACHE_FRESH_H", "6"))
-_JEV_BLOCK = {"until": 0.0, "reason": ""}
+#: 2026-10-23：外部 jev 下线后该判据原样保留并**扩展到本地判定**——`by_sha` 复用意味着
+#: 30 天前的 `source=local` 同样会被显示成「本轮判的」，与当年 jev 假绿同构；
+#: 历史数据里的 `jev` / `jev-lowconf` 也仍按本条降级（不因端点下线就篡改旧记录）。
+JUDGE_CACHE_FRESH_H = float(os.getenv("VITALS_JUDGE_CACHE_FRESH_H", "6"))
 
 
-def jev_blocked_for() -> float:
-    """451 短路剩余秒数（0 = 未短路）。"""
-    import time
-    return max(0.0, round(float(_JEV_BLOCK.get("until") or 0.0) - time.monotonic(), 1))
+def judge_status() -> Dict[str, Any]:
+    """本地判定后端状态（薄封装：api_vitals / sweep 日志用，逻辑只在 local_judge）。"""
+    return local_judge.status()
 
 
-def ask_jev(state: dict, key: Optional[List[str]] = None, timeout: float = 25.0) -> Optional[dict]:
-    """一次请求问多个独立判断（并行、互不可见）。失败返回 None，由调用方退回硬规则。"""
-    key = key or list(QUESTIONS)
-    if not (JEV_ENABLED and profiles_jev_key()):
+def ask_local(state: dict, key: Optional[List[str]] = None,
+              timeout: float = JUDGE_TIMEOUT_S) -> Optional[dict]:
+    """一次调用问多个独立判断（本地模型，子进程内串行执行）。
+
+    与外部 jev 时代的 `ask_jev` 同构：失败返回 `{"_error": ...}`（judge() 会把它
+    如实记进载荷），调用方退回硬规则。区别只在失败原因——从「451 / 超时 / key 没
+    生效」变成「脚本缺失 / Ollama 不在 / 超时 / 输出不可解析」，且零 key、零外网。
+    """
+    if not JUDGE_ENABLED:
         return None
-    if jev_blocked_for() > 0:
-        return {"_error": "451 区域封禁短路中，剩 %.0fs" % jev_blocked_for()}
-    body = json.dumps({"state": state, "model": JEV_MODEL,
-                       "questions": {k: QUESTIONS[k] for k in key}}).encode()
-    req = urllib.request.Request(JEV_URL, data=body, method="POST", headers={
-        "Content-Type": "application/json",
-        "Authorization": "Bearer %s" % profiles_jev_key()})
+    key = key or list(QUESTIONS)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode()).get("answers")
-    except urllib.error.HTTPError as e:
-        if e.code == 451:
-            import time
-            _JEV_BLOCK["until"] = time.monotonic() + JEV_BLOCKED_COOLDOWN_S
-            _JEV_BLOCK["reason"] = "HTTP 451 区域封禁"
-            return {"_error": "区域封禁（HTTP 451），%.0fs 内不再尝试" % JEV_BLOCKED_COOLDOWN_S}
-        return {"_error": "HTTP %s: %s" % (e.code, str(e)[:120])}
-    except Exception as e:  # noqa: BLE001  网络/鉴权/超时都退回规则判定
+        r = local_judge.judge({k: QUESTIONS[k] for k in key},
+                              state=json.dumps(state, ensure_ascii=False, default=str),
+                              timeout_s=timeout)
+        return r.get("answers") or {}
+    except Exception as e:  # noqa: BLE001 —— 判定是增强，任何失败都退回硬规则
         return {"_error": "%s: %s" % (type(e).__name__, str(e)[:140])}
-
-
-_KEY_CACHE = {"t": 0.0, "v": ""}
-# 真源：只读不写，且可关（VITALS_KEY_FILE=0 则只认自己进程的环境变量，
-# 那就须给 unit 加 EnvironmentFile=%h/.pi/agent/env.typesafe）。
-KEY_FILE_OK = os.getenv("VITALS_KEY_FILE", "1") == "1"
-
-
-def profiles_jev_key() -> str:
-    """key 真源唯一：环境变量优先；默认还允许只读回环到 ~/.pi/agent/env.typesafe
-    （pi-web 注入时定的真源），以免为读一个 key 去改 systemd unit。"""
-    import time
-    now = time.monotonic()
-    if now - _KEY_CACHE["t"] < 60:
-        return _KEY_CACHE["v"]
-    v = os.environ.get("TYPESAFE_API_KEY", "").strip()
-    if not v and KEY_FILE_OK:
-        f = Path.home() / ".pi" / "agent" / "env.typesafe"
-        try:                                   # 兜底：直接读真源文件（unit 未注入时仍可判）
-            for ln in f.read_text().splitlines():
-                if ln.startswith("TYPESAFE_API_KEY="):
-                    v = ln.split("=", 1)[1].strip()
-                    break
-        except OSError:
-            pass
-    _KEY_CACHE.update(t=now, v=v)
-    return v
 
 
 # ── 存在性闸门（只用 L1/L2 自检证据；真请求结果一律不进这里）────────
@@ -549,7 +519,7 @@ class Vitals:
         with self._lock:
             cached = self._by_sha.get(core)
             rt = dict(self._rt.get(aid) or {})
-        # 生死闸门只认自检（L1/L2）。Jev 与真请求都不许改它（2026-09-22 用户口径）。
+        # 生死闸门只认自检（L1/L2）。语义判定与真请求都不许改它（2026-09-22 用户口径）。
         verdict = rule_verdict(ev)
         rt_code = (classify_rt(ev.get("run_rc"), ev.get("run_output") or "")
                    if ev.get("run_rc") is not None else "skipped")
@@ -557,34 +527,33 @@ class Vitals:
             rec = dict(cached)
             rec.update(verdict=verdict, rule_verdict=verdict)
             # 2026-10-22（用户问「jev 是否参与链路」时查出来的展示层假绿）：
-            # `by_sha` 缓存让同一份证据**永不重问 jev**，于是 30 天前的 `source=jev`
-            # 一直显示成「本轮 jev 判的」。实测 `data/vitals.json` 270 条里有
-            # jev 78 + jev-lowconf 99，最老 checked_at 是 2026-09-22（30.3 天前），
-            # 而 jev 自那时起已被区域封禁（HTTP 451）。
+            # `by_sha` 缓存让同一份证据**永不重问判定**，于是 30 天前的 `source=jev`
+            # 一直显示成「本轮判的」。实测 `data/vitals.json` 270 条里有
+            # jev 78 + jev-lowconf 99，最老 checked_at 是 2026-09-22（30.3 天前）。
             # 口径：**source 表示「本轮判定依据」**，不是「历史上曾用过什么」。
-            # 故缓存里的 jev 结论超过 `JEV_CACHE_FRESH_H` 小时就降级显示为 rule，
-            # 并把原值留在 `source_cached` / `cached_age_h` 供复核（不隐藏证据）。
-            if str(rec.get("source") or "").startswith("jev"):
+            # 故缓存里的语义结论（jev 史实 + local 现值）超过 `JUDGE_CACHE_FRESH_H`
+            # 小时就降级显示为 rule，原值留在 `source_cached` / `cached_age_h` 供复核。
+            if str(rec.get("source") or "").startswith(("jev", "local")):
                 age_h = (time.time() - float(rec.get("checked_at") or 0)) / 3600.0
-                if age_h > JEV_CACHE_FRESH_H:
+                if age_h > JUDGE_CACHE_FRESH_H:
                     rec["source_cached"] = rec.get("source")
                     rec["cached_age_h"] = round(age_h, 1)
                     rec["source"] = "rule"
-                    rec["note"] = ("jev 结论来自 %.1f 天前缓存（本行判定依据是代码规则）"
-                                   % (age_h / 24.0))
+                    rec["note"] = ("%s 结论来自 %.1f 天前缓存（本行判定依据是代码规则）"
+                                   % (rec["source_cached"], age_h / 24.0))
         else:
-            ans = ask_jev(ev) or {}
+            ans = ask_local(ev) or {}
             err = ans.get("_error") if isinstance(ans, dict) else None
             jrt = (ans.get("roundtrip_state") or {}).get("choice")
             conf = (ans.get("roundtrip_state") or {}).get("confidence")
             menu = (ans.get("list_in_agents_menu") or {}).get("noul")
-            # 应答态：Jev 读文案、代码兜底；两者都只出情报，不动 verdict
+            # 应答态：本地判定读文案、代码兜底；两者都只出情报，不动 verdict
             if jrt in RT_STATES and rt_code != "skipped" and (conf is None or conf >= 0.45):
-                rt_state, source = jrt, "jev"
+                rt_state, source = jrt, "local"
             else:
-                rt_state, source = rt_code, ("jev-lowconf" if jrt else "rule")
+                rt_state, source = rt_code, ("local-lowconf" if jrt else "rule")
             rec = {"verdict": verdict, "rule_verdict": verdict, "rt_state": rt_state,
-                   "source": source, "jev_error": err, "confidence": conf,
+                   "source": source, "judge_error": err, "confidence": conf,
                    "menu_noul": menu,
                    "present_noul": (ans.get("underlying_program_present") or {}).get("noul"),
                    "roundtrip_noul": (ans.get("model_round_trip_ok") or {}).get("noul"),
@@ -649,26 +618,27 @@ class Vitals:
         return self._latest[aid]
 
     def snapshot(self) -> Dict[str, dict]:
-        """当前快照。**返回前统一做「jev 结论陈旧降级」**。
+        """当前快照。**返回前统一做「语义结论陈旧降级」**。
 
         为什么放在这里而不是只放在 `judge()` 的缓存分支：`_latest` 是另一份字典，
         已经不在扫描面的 agent（实测 aider/cline/dsh）**永远不会被覆盖** ⇒ 它们 30 天前
-        的 `source=jev-lowconf` 会一直出现在面板上。同一个判据只在一处实现必然漏。
+        的 `source=jev-lowconf` / `source=local-lowconf` 会一直出现在面板上。
+        同一个判据只在一处实现必然漏。
         """
         with self._lock:
             out = json.loads(json.dumps(self._latest))
         now = time.time()
         for aid, rec in out.items():
             src = str(rec.get("source") or "")
-            if not src.startswith("jev"):
+            if not src.startswith(("jev", "local")):
                 continue
             age_h = (now - float(rec.get("checked_at") or 0)) / 3600.0
-            if age_h > JEV_CACHE_FRESH_H:
+            if age_h > JUDGE_CACHE_FRESH_H:
                 rec["source_cached"] = src
                 rec["cached_age_h"] = round(age_h, 1)
                 rec["source"] = "rule"
-                rec["note"] = ("jev 结论来自 %.1f 天前（该 agent 已不在本轮扫描面）；"
-                               "本行判定依据是代码规则" % (age_h / 24.0))
+                rec["note"] = ("%s 结论来自 %.1f 天前（该 agent 已不在本轮扫描面）；"
+                               "本行判定依据是代码规则" % (src, age_h / 24.0))
         return out
 
     def get(self, agent_id: str) -> Optional[dict]:
@@ -714,7 +684,9 @@ class Vitals:
         self.last_sweep = time.time()
         self._save()
         return {"agents": len(profs), "rt_runs": rt_done, "secs": round(time.time() - t0, 2),
-                "jev_key_present": bool(profiles_jev_key())}
+                "judge": {"ready": judge_status().get("ready"),
+                          "backend": judge_status().get("backend"),
+                          "model": judge_status().get("model")}}
 
     def verify(self, prof: dict) -> dict:
         """L4：一次性真实请求（用户点「体检」时才跑）"""
@@ -768,6 +740,7 @@ class Vitals:
         # 2026-09-23 修复：原条件额外要求 source == "jev"，但 source 取 "jev" 需
         # rt_code != "skipped"，而默认不跑 L4 真请求 → rt_code 恒为 skipped →
         # source 永远只能是 rule/jev-lowconf，menu_noul 被无条件忽略（门禁形同虚设）。
+        # （2026-10-23 起 source 词表为 local/local-lowconf，判据同理：只看 Noul 本身。）
         # Noul 与 roundtrip 是两条独立判定，此处只看 Noul 本身；判不出来(m=None)仍保留。
         if m is not None:
             return m >= MENU_MIN

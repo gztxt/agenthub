@@ -6,7 +6,7 @@
 
 | 位置 | 缓存 | 落盘 |
 |---|---|---|
-| `jev_client` | 内存 600s，键=query+候选名 | **否**（重启即丢） |
+| `jev_client`（外部端点已下线，2026-10-23 删除） | 内存 600s，键=query+候选名 | **否**（重启即丢） |
 | `vitals` | 按证据 sha 复用 | 是（`data/vitals.json` 270 条） |
 | `skill_rerank` | **无** | — |
 
@@ -77,7 +77,7 @@ class TestKeyAndFingerprint(_Base):
         fp = judge_cache.fingerprint(self.ITEMS)
         a = judge_cache.key("skill_rerank", "q", fp, "m1")
         b = judge_cache.key("skill_rerank", "q", fp, "m2")
-        c = judge_cache.key("jev", "q", fp, "m1")
+        c = judge_cache.key("local_judge", "q", fp, "m1")
         self.assertEqual(len({a, b, c}), 3, "类型/模型没进键 ⇒ 不同判官的结果互相污染")
 
 

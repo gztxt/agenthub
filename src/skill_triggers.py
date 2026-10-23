@@ -161,7 +161,6 @@ TRIGGERS: Dict[str, str] = {
     "apis-lookup": "免费API 接口 黄页 选型",
     "token-cost-optimization": "token 成本 省钱 计费 太贵 费用 模型调用 账单",
     "agent-hub-cli-registration": "纳管 注册 agent",
-    "typesafe-ai": "jev 判定 概率 分类",
     "content-risk-detector": "内容风险 合规 敏感",
 }
 

@@ -2293,8 +2293,8 @@
                             <input id="skillLabQ" placeholder="用一句话描述这个任务…" style="max-width:340px"
                                    onkeydown="if(event.key==='Enter')skillLabSearch()" value="">
                             <button class="btn sm" onclick="skillLabSearch()">检索</button>
-                            <label class="chip pick" title="jev 实测 rerank=true 时该端点 took_ms=1064.5ms，而注入通道预算 600ms；默认关闭。需要看附加信号时再开。">
-                                <input type="checkbox" id="skillLabJev" style="margin:0 4px 0 0">用 jev 精排</label>
+                            <label class="chip pick" title="rerank=true 时本地模型判定附注会把端点拖到数秒（Ollama CPU 推理），而注入通道预算 600ms；默认关闭。开了也只附注（每候选一个概率），不改 BM25 排序。">
+                                <input type="checkbox" id="skillLabJudge" style="margin:0 4px 0 0">本地判定附注</label>
                             <span class="hint" id="skillLabHint"></span>
                         </div>
                         <div class="sp-bd box flush" style="border-top:1px solid var(--divider)">
@@ -2877,6 +2877,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=0eaa8984"></script>
+    <script src="/static/hub.js?v=e13844be"></script>
 </body>
 </html>

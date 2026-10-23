@@ -6,7 +6,7 @@
 单 claude 一家连烧 68 次，单次峰值 RSS 270MB，而本机 swap 已用 90%。
 
 跑法：cd ~/agent-hub && venv/bin/python -m unittest tests.test_vitals_retry -v
-全 mock，不起子进程、不打 CCR、不打 typesafe、不碰生产 data/vitals.json。
+全 mock，不起子进程、不打 CCR、不打外部判定端点、不碰生产 data/vitals.json。
 """
 import sys
 import tempfile
@@ -128,7 +128,7 @@ class RetryCountingInJudge(unittest.TestCase):
                   run_output="boom" if state != "answered" else "好",
                   run_note="note", run_model="m")
         with mock.patch.object(V, "collect", lambda p, d=False: dict(ev)), \
-                mock.patch.object(V, "ask_jev", lambda s, key=None: {}), \
+                mock.patch.object(V, "ask_local", lambda s, key=None: {}), \
                 mock.patch.object(V, "classify_rt", lambda rc, out: state):
             return self.v.verify(prof)
 

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""L0 hermetic 测试：D2 技能相关性检索（`src/skill_relevance.py` + `src/jev_client.py`）。
+"""L0 hermetic 测试：D2 技能相关性检索（`src/skill_relevance.py` + `/api/skill/relevant`）。
 
 分层口径（见 `tests/README.md`）：
 - 本文件属 **L0**：不发任何网络请求、不读任何真实技能目录、不 import `src.main`、**不允许 SKIP**。
-  `jev_client` 的测试全部停在「发请求之前」的那一步（缺 key / 已熔断 / 缓存命中），
-  或直接测纯函数（`_build_payload` / `_parse` / `_record_failure`）——
-  真发请求意味着花钱、依赖外网、且失败会变成偶发红。
+  外部判定的契约测试曾在本文件（2026-10-23 前的 jev 客户端）；端点下线后那部分搬到
+  `tests/test_local_judge_l0.py`（本地判定，同样零网络）。
 - 端点级用例用 tmp 技能根 + 只挂 `skill.router` 的裸 app（照 `tests/test_kb_federation.py`
   的做法），因此仍然不碰真盘。
 
@@ -24,7 +23,6 @@ _REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
 sys.path.insert(0, str(_REPO))
 
-import jev_client                                          # noqa: E402
 import skill                                               # noqa: E402
 import skill_relevance as sr                               # noqa: E402
 from fastapi import FastAPI                                # noqa: E402
@@ -73,8 +71,8 @@ class TestTokenize(unittest.TestCase):
         self.assertEqual(sr.tokenize("端"), ["端"])
 
     def test_mixed_script_keeps_both(self):
-        toks = sr.tokenize("用 jev 精排")
-        self.assertIn("jev", toks)
+        toks = sr.tokenize("用 rerank 精排")
+        self.assertIn("rerank", toks)
         self.assertIn("精排", toks)
 
 
@@ -133,140 +131,6 @@ class TestRank(unittest.TestCase):
         self.assertGreater(avg["name"], 0)
 
 
-class TestJevPayload(unittest.TestCase):
-    """契约照抄 `技术文档/scripts/jev.py`，改错了在这里就会红。"""
-
-    def setUp(self):
-        jev_client.reset_circuit()
-
-    def test_payload_top_level_shape(self):
-        p = jev_client._build_payload("排障", CORPUS[:2])
-        self.assertEqual(set(p), {"state", "model", "questions"})
-        self.assertEqual(p["model"], jev_client.JEV_MODEL)
-
-    def test_one_question_per_candidate_keyed_s0_upwards(self):
-        p = jev_client._build_payload("排障", CORPUS[:3])
-        self.assertEqual(sorted(p["questions"]), ["s0", "s1", "s2"])
-        for q in p["questions"].values():
-            self.assertEqual(q["type"], "score")
-
-    def test_score_criteria_must_be_a_list_not_a_dict(self):
-        """实测：criteria 传 dict 会被 422 拒（`Input should be a valid list`）。"""
-        q = jev_client._build_payload("x", CORPUS[:1])["questions"]["s0"]
-        self.assertIsInstance(q["criteria"], list)
-        self.assertEqual(q["criteria"], jev_client.SCALE)
-
-    def test_instructions_carry_full_meaning(self):
-        """题面必须自带任务描述与候选名，否则模型无从判断（题面不写代词指谁）。"""
-        q = jev_client._build_payload("排查内存泄漏", CORPUS[:1])["questions"]["s0"]
-        self.assertIn("排查内存泄漏", q["instructions"])
-        self.assertIn(CORPUS[0]["name"], q["instructions"])
-
-
-class TestJevParse(unittest.TestCase):
-    def _resp(self, names, scores):
-        return {"answers": {"s%d" % i: {"type": "score", "score": s, "confidence": 0.3}
-                            for i, (n, s) in enumerate(zip(names, scores))}}
-
-    def test_maps_by_key_not_by_order(self):
-        """服务端没承诺返回顺序；按顺序取会静默串位。"""
-        cands = [_skill("a", ""), _skill("b", "")]
-        out = jev_client._parse(self._resp(["a", "b"], [0.1, 0.9]), cands)
-        self.assertAlmostEqual(out["a"]["score"], 0.1)
-        self.assertAlmostEqual(out["b"]["score"], 0.9)
-
-    def test_confidence_and_legend_are_carried_through(self):
-        payload = {"answers": {"s0": {"type": "score", "score": 0.5, "confidence": 0.31,
-                                      "legend": {"0": "高度相关", "1": "不相关"}}}}
-        out = jev_client._parse(payload, [_skill("a", "")])
-        self.assertAlmostEqual(out["a"]["confidence"], 0.31)
-        self.assertIn("legend", out["a"])
-
-    def test_skips_malformed_entries_but_keeps_good_ones(self):
-        payload = {"answers": {"s0": {"type": "score", "score": 0.7},
-                               "s1": {"type": "choice", "choice": "a"},
-                               "s2": {"type": "score", "score": "not-a-number"}}}
-        out = jev_client._parse(payload, [_skill("a", ""), _skill("b", ""), _skill("c", "")])
-        self.assertEqual(list(out), ["a"])
-
-    def test_missing_answers_dict_raises(self):
-        with self.assertRaises(jev_client.JevUnavailable):
-            jev_client._parse({"foo": 1}, [_skill("a", "")])
-
-    def test_no_usable_score_raises_rather_than_returning_empty(self):
-        """返回 {} 会让调用方分不清「都不相关」与「jev 挂了」——那是要消灭的形态。"""
-        with self.assertRaises(jev_client.JevUnavailable):
-            jev_client._parse({"answers": {"s0": {"type": "score", "score": None}}},
-                              [_skill("a", "")])
-
-
-class TestJevCircuitAndCache(unittest.TestCase):
-    def setUp(self):
-        jev_client.reset_circuit()
-        self._saved = os.environ.get("TYPESAFE_API_KEY")
-
-    def tearDown(self):
-        if self._saved is None:
-            os.environ.pop("TYPESAFE_API_KEY", None)
-        else:
-            os.environ["TYPESAFE_API_KEY"] = self._saved
-
-    def test_status_reports_disabled_without_key_and_names_the_variable(self):
-        os.environ.pop("TYPESAFE_API_KEY", None)
-        st = jev_client.status()
-        self.assertFalse(st["ok"])
-        self.assertFalse(st["enabled"])
-        self.assertIn("TYPESAFE_API_KEY", st["why"])
-
-    def test_status_ok_when_key_present_and_not_down(self):
-        os.environ["TYPESAFE_API_KEY"] = "fake-key-for-l0"
-        self.assertTrue(jev_client.status()["ok"])
-
-    def test_circuit_opens_after_max_consec_fail(self):
-        # 2026-10-08 修：本例原先隐式依赖**外部**环境已有 TYPESAFE_API_KEY 才能走到
-        # 「已熔断」分支（同组其余 4 例都显式设了假 key，只有这例漏了）。
-        # 后果：无 key 的 shell 里 status()["why"] 恒返回「未设置环境变量」那条早退分支，
-        # 断言 `boom` 必假红——而 L0 号称hermetic，正是要消除这种对宿主环境的隐性依赖。
-        os.environ["TYPESAFE_API_KEY"] = "fake-key-for-l0"
-        for _ in range(jev_client.MAX_CONSEC_FAIL):
-            jev_client._record_failure("boom")
-        self.assertTrue(jev_client._S["down"])
-        self.assertIn("boom", jev_client.status()["why"])
-
-    def test_success_resets_the_failure_counter(self):
-        jev_client._record_failure("boom")
-        jev_client._record_failure("boom")   # 已达阈值、已熔断
-        jev_client._S["down"] = False        # 人工重新合闸，模拟“尚未熔断时又成功了一次”
-        jev_client._record_success()
-        self.assertEqual(jev_client._S["consec_fail"], 0)
-        self.assertIsNone(jev_client._S["last_error"])
-
-    def test_no_key_short_circuits_before_any_request(self):
-        import asyncio
-        os.environ.pop("TYPESAFE_API_KEY", None)
-        with self.assertRaises(jev_client.JevUnavailable):
-            asyncio.run(jev_client.score_candidates("q", [_skill("a", "")]))
-
-    def test_open_circuit_short_circuits_before_any_request(self):
-        import asyncio
-        os.environ["TYPESAFE_API_KEY"] = "fake-key-for-l0"
-        for _ in range(jev_client.MAX_CONSEC_FAIL):
-            jev_client._record_failure("boom")
-        with self.assertRaises(jev_client.JevUnavailable):
-            asyncio.run(jev_client.score_candidates("q", [_skill("a", "")]))
-
-    def test_cache_hit_returns_without_network(self):
-        import asyncio
-        os.environ["TYPESAFE_API_KEY"] = "fake-key-for-l0"
-        cands = [_skill("a", "")]
-        key = jev_client._cache_key("q", ["a"])
-        jev_client._S["cache"][key] = (1e18, {"a": {"score": 0.42, "confidence": 0.3,
-                                                    "legend": None}})
-        out = asyncio.run(jev_client.score_candidates("q", cands))
-        self.assertTrue(out["cached"])
-        self.assertAlmostEqual(out["a"]["score"], 0.42)
-
-
 class TestRelevantEndpoint(unittest.TestCase):
     """端点级：tmp 技能根 + 只挂 skill.router 的裸 app ⇒ 仍然不碰真盘、不联网。"""
 
@@ -294,8 +158,8 @@ class TestRelevantEndpoint(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         d = r.json()
         self.assertTrue(d["bm25"]["items"])
-        self.assertFalse(d["jev"]["ok"])
-        self.assertIn("rerank=false", d["jev"]["why"])
+        self.assertFalse(d["judge"]["ok"])
+        self.assertIn("rerank=false", d["judge"]["why"])
 
     def test_rows_carry_score_and_match_evidence(self):
         d = self.client.get("/api/skill/relevant",

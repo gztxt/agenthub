@@ -145,7 +145,8 @@ def breaker_state() -> Dict[str, Any]:
     为什么要有它：`complete_free()` 在熔断打开时会静默返回 `("", "")` —— 那与
     「模型返回空正文」长得一模一样。2026-10-22 实测踩到：skill 重排只看返回空串，
     误判成「模型不给 JSON」，真相是**上游熔断中**（`CancelledError` 触发的）。
-    判据必须能分开这两件事（同族：`jev_client.status()` 的 `enabled` ≠ 可用）。
+    判据必须能分开这两件事（同族旧例：外部 jev 的 `enabled` ≠ 可用——
+    端点已 2026-10-23 下线删除，判据保留）。
     """
     try:
         key = _llm_breaker_key()

@@ -92,7 +92,7 @@ class AgentInfo:
     usable: Optional[bool] = None
     verdict: str = ""
     verdict_reason: str = ""
-    verdict_source: str = ""      # jev | jev-lowconf | rule | pending
+    verdict_source: str = ""      # local | local-lowconf | rule | pending（史实数据还可能有 jev/jev-lowconf）
     verdict_confidence: Optional[float] = None
     verdict_at: Optional[str] = None
     # attested：这条「可用」是有实测凭据支撑的（真应答 / 自有端点应声）。

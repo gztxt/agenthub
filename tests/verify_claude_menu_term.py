@@ -5,7 +5,7 @@
     cd ~/agent-hub-wt-<会话短ID>
     mkdir -p work/probe/data
     ( DATA_DIR=$PWD/work/probe/data PORT=3199 HOST=127.0.0.1 \
-      TERM_TOKEN=probe-term-token VITALS_RT_SWEEP=0 VITALS_JEV=0 \
+      TERM_TOKEN=probe-term-token VITALS_RT_SWEEP=0 VITALS_JUDGE=0 \
       VITALS_STATE=$PWD/work/probe/vitals.json \
       ../agent-hub/venv/bin/python -m uvicorn src.main:app --host 127.0.0.1 --port 3199 & )
     sleep 4

@@ -4,7 +4,7 @@
 跑法（影子实例，与生产 DATA_DIR 隔离）：
     cd ~/agent-hub-wt-<会话短ID> && mkdir -p work/probe/data
     ( DATA_DIR=$PWD/work/probe/data PORT=3199 HOST=127.0.0.1 TERM_TOKEN=probe-term-token \
-      VITALS_RT_SWEEP=0 VITALS_JEV=0 VITALS_STATE=$PWD/work/probe/vitals.json \
+      VITALS_RT_SWEEP=0 VITALS_JUDGE=0 VITALS_STATE=$PWD/work/probe/vitals.json \
       ../agent-hub/venv/bin/python -m uvicorn src.main:app --host 127.0.0.1 --port 3199 & )
     sleep 4
     HUB_PROBE_TERM_TOKEN=probe-term-token ../agent-hub/venv/bin/python tests/verify_term_key_relay.py

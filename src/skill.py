@@ -43,7 +43,7 @@ import asyncio
 import glob
 import hashlib
 import json
-import jev_client
+import local_judge
 import logging
 import os
 import re
@@ -1599,12 +1599,12 @@ async def skill_status(force: bool = Query(default=False)):
                     if tdai_raw.get("ok") and not tdai_items else
                     "注册表有数据" if tdai_items else "注册表这一路本次不可用，原因见 error"),
         },
-        # 2026-10-22 PT-16：jev 的**可用性**必须能在面板上看到，而不是藏在
-        # /relevant 的某次返回里。实测本机直连恒 451（区域封禁），而旧 status()
-        # 只报 `enabled:true`（key 在）—— 那是假绿。这里并列给出短路状态与原因。
-        "jev": dict(jev_client.status(),
-                    note="451=区域封禁（key 在也没用）；403=key 没生效。"
-                         "两者都不是代码问题，别去改代码"),
+        # 2026-10-23：外部 jev（api.typesafe.ai）已下线 ⇒ 技能判定改本地模型。
+        # 这里只报本地判定的就绪状态（脚本在不在、真调用过几次、上次错误），
+        # 不再报 key / 区域封禁——那套判据随端点一起作废（判例 244 §5.3）。
+        "judge": dict(local_judge.status(),
+                      note="判定后端=本机 Ollama（jev-decision 技能，qwen2.5:1.5b）；"
+                           "ready=false = 技能脚本不在，/relevant 的判定附注整体降级"),
         "gap": {
             "disk_unique": len(unique),
             "tdai_rows": len(tdai_items),
@@ -1706,9 +1706,12 @@ async def skill_remove(name: str = Query(min_length=1, max_length=100),
 
 
 # ── 相关性检索（D2）──────────────────────────────────────────────────
-#: jev 精排在请求路径上的**上限秒数**。BM25 已经能出结果，jev 只是增强，
+#: 本地判定在请求路径上的**上限秒数**。BM25 已经能出结果，判定只是附注信号，
 #: 而本端点会被注入通道调用（那条链路有自己的预算），所以宁可超时降级也不能拖住它。
-JEV_RERANK_TIMEOUT_S = 5.0
+#: 2026-10-23：原值是给外部 jev 的 5s；本地模型是 CPU 推理（单题实测 6.4~8.6s，
+#: 见 v0.13.142 冒烟记录），取 20s（≈2.3 倍余量；只一题，不像 vitals 那样 5 题串行），
+#: 且该信号**默认关闭**（见下方 rerank 参数）——开了就是实验室场景，慢一点可接受。
+JUDGE_TIMEOUT_S = 20.0
 
 
 def _rel_row(x: Dict[str, Any]) -> Dict[str, Any]:
@@ -1718,7 +1721,7 @@ def _rel_row(x: Dict[str, Any]) -> Dict[str, Any]:
     return {"name": it.get("name"), "description": it.get("description"),
             "route": it.get("route"), "routes": it.get("routes"),
             "bm25": x["score"], "matched": x["matched"], "matched_in": x["matched_in"],
-            "jev": None, "tokens_est": 0}
+            "judge": None, "tokens_est": 0}
 
 
 @router.get("/zombies")
@@ -1746,7 +1749,11 @@ async def skill_relevant(request: Request,
                          q: str = Query(min_length=1, max_length=2000),
                          n: int = Query(default=5, ge=1, le=20),
                          max_tokens: int = Query(default=0, ge=0, le=8000),
-                         rerank: bool = Query(default=True),
+                         rerank: bool = Query(
+                             default=False,
+                             description="附注一路本地模型判定信号（choice 原语、"
+                                         "不改 BM25 排序）。默认关：实测开启时该端点"
+                                         "多花数秒（CPU 推理），而注入通道预算 600ms"),
                          caller: str = Query(default="", max_length=64),
                          via: str = Query(default="", max_length=16),
                          llm_rerank: bool = Query(default=False,
@@ -1758,14 +1765,16 @@ async def skill_relevant(request: Request,
                                          "给 2s 必然超时）")):
     """按一段自然语言任务描述，从**真实在用**的技能里排最相关的 n 条。
 
-    **返回值刻意把 `bm25` 与 `jev` 分开报，不合成一个数字。**
+    **返回值刻意把 `bm25` 与 `judge` 分开报，不合成一个数字。**
     - `bm25.items[]` 永远有值：同步内存打分，不依赖任何外部服务、不联网；
-    - `jev` 为 null = 没调；为 `{"ok": false, ...}` = 调了但用不了，`why` 说明原因。
+    - `judge` 为 null = 没调；为 `{"ok": false, ...}` = 调了但没判成，`why` 说明原因。
 
-    **jev 只做增强，不改写排序。** 依据 `typesafe-ai` 技能的实测：choice 在中文上
-    置信常 1.00，而 score 用于主观刻度时置信会掉到 0.3 左右。「技能对某个任务的相关
-    程度」正是主观刻度，用一个 0.3 置信的分数去改写排序不成立。所以本端点把 jev 的
-    分数与置信度逐行回传，**排序权威仍是 BM25**，等拿到可比数据再决定是否换权。
+    **判定只做附注，不改写排序。** 外部 jev 时代的实测依据（2026-10-22）仍然成立：
+    choice 在中文上置信常 1.00，而 score 用于主观刻度时置信会掉到 0.3 左右——
+    「技能对某个任务的相关程度」正是主观刻度。2026-10-23 外部端点下线后，
+    附注信号改由**本地模型**（`local_judge` → Ollama）以 choice 原语给出：
+    每个候选一个概率 + 选中项与置信度，逐行回传，**排序权威仍是 BM25**。
+    要真改排序有 `llm_rerank`（显式开启、把选中项提第一），不在这里夹带。
 
     `caller` / `via` 只进埋点，不参与检索：`via=hook` 表示这是 agent 输入钩子
     自动打的（机器选候选），其它值/缺省表示人在查。两者在 `profile_events` 里
@@ -1794,23 +1803,50 @@ async def skill_relevant(request: Request,
     for r in rows:
         r["tokens_est"] = int(len("%s: %s" % (r["name"], r["description"] or "")) / _CHARS_PER_TOKEN) + 1
 
-    jev_block: Optional[Dict[str, Any]] = None
-    if rerank and rows:
+    # ── 本地判定附注信号（2026-10-23，替代已下线外部 jev）──
+    # 纪律与 jev 时代相同：**只附注、不改序**。choice 原语给 top-N 各一个概率，
+    # 模型选中谁、置信多少，逐行回传供人判断；BM25 仍是排序权威。
+    # 失败（脚本缺失 / Ollama 不在 / 超时 / 输出不可解析）如实回 ok=false + why，
+    # 原序保留——不静默当成「模型认为原序就对」。
+    judge_block: Optional[Dict[str, Any]] = None
+    if rerank and len(rows) >= 2:
+        cands = rows[:skill_rerank.MAX_CANDIDATES]
+        t_j = time.monotonic()
         try:
-            async with asyncio.timeout(JEV_RERANK_TIMEOUT_S):
-                scored = await jev_client.score_candidates(q, [x["item"] for x in res["items"]])
+            ans = await asyncio.to_thread(
+                local_judge.judge_one,
+                {"type": "choice",
+                 "instructions": "任务描述：%s\n哪个候选技能最适合完成该任务？"
+                                 % (q or "").strip()[:400],
+                 "criteria": {r["name"]: str(r.get("description") or "")[:120]
+                              for r in cands}},
+                state="候选技能已按 BM25 相关分排序：%s"
+                      % "; ".join("%s(%.2f)" % (r["name"], r["bm25"]) for r in cands),
+                timeout_s=JUDGE_TIMEOUT_S)
+            a = (ans.get("answers") or {}).get("q") or {}
+            probs = a.get("probabilities") or {}
+            picked = a.get("choice")
             for r in rows:
-                hit = scored.get(r["name"] or "")
-                if hit:
-                    r["jev"] = hit
-            jev_block = dict(jev_client.status(), ok=True)
-        except jev_client.JevUnavailable as e:
-            jev_block = dict(jev_client.status(), ok=False, why=str(e))
-        except asyncio.TimeoutError:
-            jev_block = dict(jev_client.status(), ok=False,
-                             why="超过 %.1fs 上限，已放弃精排（BM25 结果仍完整）" % JEV_RERANK_TIMEOUT_S)
-    elif not rerank:
-        jev_block = dict(jev_client.status(), ok=False, why="调用方显式关闭精排（rerank=false）")
+                if r["name"] in probs:
+                    r["judge"] = {"prob": probs[r["name"]],
+                                  "picked": bool(picked) and r["name"] == picked}
+            judge_block = {"ok": True, "picked": picked,
+                           "confidence": a.get("confidence"),
+                           "model": ans.get("model"),
+                           "ms": int((time.monotonic() - t_j) * 1000),
+                           "why": "本地模型 choice 附注（不改 BM25 排序）"}
+        except local_judge.LocalJudgeUnavailable as e:
+            judge_block = {"ok": False, "picked": None, "why": str(e),
+                           "ms": int((time.monotonic() - t_j) * 1000)}
+        except Exception as e:  # noqa: BLE001 — 附注信号不许带倒检索
+            judge_block = {"ok": False, "picked": None,
+                           "why": "%s: %s" % (type(e).__name__, str(e)[:120]),
+                           "ms": int((time.monotonic() - t_j) * 1000)}
+    elif rerank:
+        judge_block = {"ok": False, "picked": None, "why": "候选不足 2 条，未判定"}
+    else:
+        judge_block = {"ok": False, "picked": None,
+                       "why": "调用方显式关闭判定附注（rerank=false）"}
 
     # ── A4 替代：免费模型重排（2026-10-22，PT-13）──
     # 只做「把模型选中的那条提到第一」，其余相对顺序不变；失败保留 BM25 顺序并如实回 why。
@@ -1850,7 +1886,7 @@ async def skill_relevant(request: Request,
                  "total_hits": res.get("total_hits"),
                  "weights": res.get("weights"),
                  "why": res.get("why")},
-        "jev": jev_block,
+        "judge": judge_block,
         "llm_rerank": llm_block,
         "backends": backends,
         "max_tokens": max_tokens or None,

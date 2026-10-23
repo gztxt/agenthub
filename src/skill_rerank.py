@@ -5,8 +5,9 @@
 
 A 批计划里的 A4 是「用 jev `choice` 对 top-5 重排」。实测两条路都断了：
 1. `jev` CLI 打上去是 **HTTP 451（区域封禁）**；
-2. 服务进程**没有 `TYPESAFE_API_KEY`**（`jev_client.status()` 当时报
-   `enabled:true` 只因为它**从未真调过** —— `last_ok_ts:null`）。
+2. 服务进程**没有 `TYPESAFE_API_KEY`**（外部 jev 客户端当时报
+   `enabled:true` 只因为它**从未真调过** —— `last_ok_ts:null`；该客户端已于
+   2026-10-23 随端点下线删除）。
    教训：「enabled」不等于「可用」，可用性判据必须真打一次。
 
 于是改用本机已有的**免费模型通道**（`llm.complete_free` → CCR `openrouter/free`，

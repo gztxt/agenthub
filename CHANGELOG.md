@@ -1665,7 +1665,7 @@ shadow allow 不留证 / **enforce deny 不得因 shadow allow 变放行** / 旧
 ```
 $ bash agent-hubctl.sh token
 来源：运行中进程（pid=15178）的环境变量
-HkYBhZepQIsZuP7Er2uHtR0ubQ9RgO_CxXVVe2z66sA
+<redacted：2026-10-23 脱敏，原为实弹记录误贴的真值>
 实弹验证：带此 token GET /api/term/sessions → 200（有效）
    对照：不带 token 时 GET /api/term/sessions → 401（401=鉴权闸在生效）
 ```

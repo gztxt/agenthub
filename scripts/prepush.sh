@@ -93,6 +93,25 @@ else
   info "无凭据可扫（.env 缺失或无长值），此步视为通过但不等于已验证"
 fi
 
+echo "=== ③b 全树扫：已提交的内容里也不许有真凭据（非仅待推差异） ==="
+# 2026-10-23 新增：③ 只看 `$RANGE`（待推的提交），已推送的历史不在扫描面内。
+# 实测踩坑：CHANGELOG.md 从 a49ef8b 起就把真 TERM_TOKEN 当"命令回显"贴在代码块里，
+# 而该提交早已推上**公开仓**；③ 一直是绿的，因为它根本不在待推范围里。
+# 判据改为扫 HEAD 全树：只要当前提交里还有真值，就红——脱敏后才能推。
+if [ "$nkeys" -gt 0 ]; then
+  head_hits=$(git grep -I -l -F -f "$SECRETS" HEAD -- 2>/dev/null | sort -u | head -20 || true)
+  if [ -n "$head_hits" ]; then
+    bad "本机已知凭据仍在 HEAD 全树里（不是仅历史）："
+    printf '%s\n' "$head_hits" | sed 's/^/          /'
+    info "处置：先按 .bak 备份 → 用占位符替换真值 → 提交；仅脱敏当前树不解历史，见 ③ 的轮换提示。"
+  else
+    ok "HEAD 全树零命中（已提交文件里没有真凭据）"
+  fi
+  info "注意：本步只扫当前树；历史提交是否含真值需 git log -S 单独取证"
+else
+  info "无凭据可扫，此步跳过（不等于已验证）"
+fi
+
 echo "=== ④ .env / *.bak-* 必须未被跟踪 ==="
 tracked_env=$(git ls-files -- .env '*.env' | tr '\n' ' ')
 tracked_bak=$(git ls-files -- '*.bak-*' | tr '\n' ' ')

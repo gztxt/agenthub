@@ -13,6 +13,13 @@ dsh 原来只在 `CLI_ALIASES` 里（B 档动态发现），而动态卡硬编�
 ② 动态发现不得再出一张 dsh 卡（`_dynamic_cli_agents` 的 covered 集合含静态 id）；
 ③ token 不得写进画像 —— 它是进程级随机（browser-auth.ts 的 randomBytes(32)），
    写死既是「凭据落配置」，也会在每次 restart 后立刻失效。
+
+2026-10-24 追加第四条（口径反转，见判例 253）
+---------------------------------------------
+原先是「加了 Web UI 也不能丢终端」，现在**必须没有终端**：
+dsh 没有 CLI 交互会话（`~/.dsh/profiles` 只有 web/headless，裸 `dsh` 经启动器
+`case "${1:-web}"` 直接变 `dsh web`）⇒ 每次"新会话"都在后台多起一个 Web 服务器、
+抢端口并争写 `~/.dsh`。用户两轮报障后裁定去掉终端入口。前端 `NO_TERM` 同批收口。
 """
 import os
 import sys
@@ -43,12 +50,24 @@ class DshProfileTest(unittest.TestCase):
         dyn = [p["id"] for p in profiles._dynamic_cli_agents(gate=False)]
         self.assertNotIn("dsh", dyn, "动态发现必须跳过已收录的 dsh（否则菜单两张卡）")
 
-    def test_entries_expose_web_and_term(self):
+    def test_entries_expose_web_only(self):
+        """只出 Web 入口：term 必须**不在**（2026-10-24 改判，见文件头第四条）。
+
+        旧断言 `assertIn("term", …)` 的理由是"加了 Web UI 不能丢终端"；
+        但那条终端命令起的是 `dsh web` 而不是会话，留着就是在后台多起实例。
+        """
         p = profiles.get_profile("dsh")
         types = [e["type"] for e in profiles.entries_for(p, "running")]
         self.assertIn("embed", types, "应给出嵌入会话入口")
         self.assertIn("open", types, "应给出新窗口入口")
-        self.assertIn("term", types, "终端入口不能因为加了 Web UI 而丢掉")
+        self.assertNotIn("term", types, "dsh 没有 CLI 会话，不得再出终端入口")
+
+    def test_no_terminal_entry(self):
+        """画像层面直接收口：terminal 为空 ⇒ POST /api/term/sessions 会 400。"""
+        p = profiles.get_profile("dsh")
+        self.assertFalse(p.get("terminal"), "dsh 的 terminal 必须为空（无 CLI 交互会话）")
+        # cli 仍留着：detect / vitals 靠它判活，去掉会让卡片降级成 unknown
+        self.assertTrue(p.get("cli"), "cli 不能一起删——判活要用")
 
     def test_token_failure_degrades_to_bare_url(self):
         """取不到 token 时退回裸地址：不抛异常、url 不为空（打开会 401，属明确降级）。"""

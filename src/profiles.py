@@ -201,13 +201,20 @@ PROFILES: List[dict] = [
     # 用户要"原生界面"又只能在嵌入式终端里手敲 `dsh web`，两次会撞 3080。
     # 现改为静态卡：ui 走 loopback，entries 里再用 _dsh_web_url() 换成带 token 的实时地址。
     # 动态发现那边不会重复出卡 —— _dynamic_cli_agents 的 covered 含本卡 id。
+    # 2026-10-24（用户两轮报障「新建会话还是没有输入框」后裁定）：**去掉 terminal**。
+    # dsh 没有 CLI 交互会话：`~/.dsh/profiles` 只有 web/headless，裸 `dsh` 经启动器
+    # `case "${1:-web}"` 直接变成 `dsh web` ⇒ 所谓"新会话"等于再起一个 Web 服务器，
+    # 抢 3080 之后的端口并争写 `~/.dsh`（判例 252 §四.2）。前端早已不给这个形态
+    # （NO_TERM，判例 253），这里把后端也收口：entries_for 不再出 term，
+    # `POST /api/term/sessions{agent_id:'dsh'}` 直接 400「无终端入口」。
     {"id": "dsh", "name": "DSH", "kind": "agent",
      "detect": {"systemd": ["dsh"], "proc": [r"(^|/)dsh( |$)"]},
      "cli": "dsh", "port": 3080, "ui": "http://192.168.5.102:3080",
-     "terminal": {"cmd": "dsh", "cwd": "/fs/1000/ftp/技术文档"},
+     "terminal": None,
      "chat": None,
      "desc": "DeepSeek Harness 自带 Web UI（dsh.service 常驻 :3080）；"
-             "访问 token 每次启动随机生成，卡片实时从 journal 取，重启即换"},
+             "访问 token 每次启动随机生成，卡片实时从 journal 取，重启即换；"
+             "无 CLI 交互会话，交互全在原生界面"},
     {"id": "jcode", "name": "JCode", "kind": "agent",
      "detect": {"proc": [r"(^|/)jcode( |$)"]},
      "cli": "jcode", "port": None, "ui": None,

@@ -254,7 +254,10 @@ function lpRenderAgents() {
   const sel = $('lpAgent');
   if (!sel) return;
   const cur = sel.value;
-  const items = AGENTS.filter(a => a.kind === 'agent' && (a.entries || []).some(e => e.type === 'term'));
+  /* NO_TERM 的实体（dsh）虽有 term entry，但那条命令起的是 Web 服务器不是会话 ——
+     在这里被选中就会在后台多起一个实例（判例 252 §四.2 / 253），故排除。 */
+  const items = AGENTS.filter(a => a.kind === 'agent' && !NO_TERM.has(a.id)
+    && (a.entries || []).some(e => e.type === 'term'));
   /* v0.13.103：AGENTS 异步来（loadAgents），本函数在 loadLocalProjects 数据一到
      就同步跑 —— 清单未到时**早退保占位**，不把 innerHTML 清成 0 个 option
      （清空会让 select 塌成 46px 空白，且此后无人重画：2026-10-11 报障）。

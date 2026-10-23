@@ -80,12 +80,23 @@ function bindCloudcliDelegation() {
    有原生终端的 Agent 先给终端：它的独立 Web 宿主（claude←cloudcli :3010）自带一套登录，
    嵌进 hub 就是一张要重新登录的白页，而终端页里的 TUI 与本机命令行完全一致。
    宿主界面保留为可切换的第二形态（终端页头部「原生界面」按钮）。
-   cloudcli 独立子菜单：无终端卡（纯服务型），默认形态 = embed（原生界面）+ 项目直达面板。 */
+   cloudcli 独立子菜单：无终端卡（纯服务型），默认形态 = embed（原生界面）+ 项目直达面板。
+   dsh 同理走 embed 优先（2026-10-24 用户报障「新建会话还是没有输入框」）：
+   上游 CLI 只有 web/headless 两种 profile（`apps/cli/src/args.ts` + `~/.dsh/profiles`），
+   裸 `dsh` 经启动器 `case "${1:-web}"` 直接变成 `dsh web` ⇒ 终端页里只有服务横幅，
+   没有可打字的位置；它的输入框只在自带 Web UI 里（:3080，token 由画像卡实时注入）。
+   用户 2026-10-24 二次裁定：「点击新会话还是没有正常运行，使用原生界面正常」⇒ 对它
+   **不再只是默认 embed，而是不给终端形态**：NO_TERM 里的实体一律不出「终端」按钮、
+   stored 偏好里的 term 也当无效，否则那个按钮每点一次就在后台多起一个 dsh web
+   （实测 3080 之外又冒出 3081/3082，两个实例争写 `~/.dsh`，判例 252 §四.2）。 */
+const EMBED_FIRST = new Set(['cloudcli', 'dsh']);
+/* 没有 CLI 交互会话的实体 —— 「终端」形态对它们必然是死屏（不是"不好用"，是"没有这个东西"） */
+const NO_TERM = new Set(['dsh']);
 function defaultModeOf(a) {
   const es = (a && a.entries) || [];
   const has = t => es.some(e => e.type === t);
-  if (a && a.id === 'cloudcli') return 'embed';
-  if (a && a.kind === 'agent' && has('term')) return 'term';
+  if (a && EMBED_FIRST.has(a.id)) return 'embed';
+  if (a && !NO_TERM.has(a.id) && a.kind === 'agent' && has('term')) return 'term';
   if (has('embed')) return 'embed';
   if (has('term')) return 'term';
   return 'chat';
@@ -133,10 +144,13 @@ function applyChatMode() {
   // 形态对该实体不可用（没选过、或 entry 被删/改）：回落默认形态。
   // 这是**推导**，绝不写盘 —— 一写就把默认固化成偏好，改默认也救不回来。
   if (!es.some(e => e.type === chatMode)) chatMode = defaultModeOf(a) || 'chat';
+  // NO_TERM 的实体即便本地存着 'term' 偏好也当无效：那个形态本身就是死屏（见 NO_TERM 注释），
+  // 尊重它就等于每次点开都在后台多起一个 dsh web —— 偏好不该能把用户带进已知坏形态。
+  if (NO_TERM.has(chatPick) && chatMode === 'term') chatMode = defaultModeOf(a) || 'embed';
   // 面板头互切按钮：菜单行内的动作图标自 v0.12.3 起 display:none、模式 tab 也已停用，
   // 站内不留这条出口，embed 与 term 就互相锁死（点进哪个就再也切不到另一个）。
   const toTerm = $('embedToTerm'), toEmbed = $('termToEmbed');
-  if (toTerm) toTerm.style.display = es.some(e => e.type === 'term') ? '' : 'none';
+  if (toTerm) toTerm.style.display = (!NO_TERM.has(chatPick) && es.some(e => e.type === 'term')) ? '' : 'none';
   if (toEmbed) toEmbed.style.display = es.some(e => e.type === 'embed') ? '' : 'none';
   $('embedPane').classList.toggle('on', chatMode === 'embed');
   $('termPane').classList.toggle('on', chatMode === 'term');
@@ -180,6 +194,12 @@ function renderModeBar(a) {
   syncOpBar();
 }
 function switchMode(m) {
+  /* NO_TERM 实体：终端形态不存在。回落到原生界面前先把话说清楚，
+     否则点了没反应的按钮比没有按钮更耗人（2026-10-24 报障同款）。 */
+  if (m === 'term' && NO_TERM.has(chatPick)) {
+    toast('这个 Agent 没有命令行会话，交互都在「原生界面」');
+    m = 'embed';
+  }
   chatMode = m;
   lsSet(MODE_KEY + chatPick, m);  // T9：按实体记忆模式（这里是用户点名切换 ⇒ 算真偏好）
   applyChatMode();

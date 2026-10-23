@@ -1198,6 +1198,14 @@ function termConnect(sid, agent, opts) {
 }
 
 async function termNew() {
+  /* NO_TERM 实体（dsh）没有 CLI 交互会话：这里每放行一次，就多起一个 dsh web
+     抢 3080 之后的端口并争写 ~/.dsh（判例 252 §四.2 / 253）。按钮在 UI 上已不给，
+     这条是兜底 —— 别让"点在别处的入口"仍然能把它拉起来。 */
+  if (NO_TERM.has(chatPick)) {
+    toast(chatPick + ' 没有命令行会话，交互在「原生界面」');
+    switchMode('embed');
+    return;
+  }
   try {
     const d = await api('/api/term/sessions', { method: 'POST', headers: termHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ agent_id: chatPick }) });
     toast('已拉起 ' + chatPick + ' 终端会话', 'ok');

@@ -256,7 +256,9 @@ function ghRenderAgents() {
   const sel = $('ghAgent');
   if (!sel) return;
   const cur = sel.value;
-  const items = AGENTS.filter(a => a.kind === 'agent' && (a.entries || []).some(e => e.type === 'term'));
+  /* 同 09 分片：NO_TERM 实体排除（它的 term entry 起的是 Web 服务器，不是会话）。 */
+  const items = AGENTS.filter(a => a.kind === 'agent' && !NO_TERM.has(a.id)
+    && (a.entries || []).some(e => e.type === 'term'));
   /* v0.13.103：同 09 分片lpRenderAgents——AGENTS 未到时早退保占位，不清空 option。 */
   if (!items.length) return;
   sel.innerHTML = items.map(a =>

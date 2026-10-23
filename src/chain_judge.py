@@ -27,6 +27,14 @@
    - 运行时**两序各问一次并要求一致**；不一致（=偏置回来了）就当没判成，不改序。
      这是自证：不靠「相信模型」，靠「两次独立提问能不能对齐」。
 
+## 后端（2026-10-23 晚变更）
+
+本机 Ollama 已删除，`_gen` 改为跟随 `local_judge.BACKEND`：默认 **remote**
+（`deepseek/deepseek-flash`）。上面那张 1.5b 的表是**换后端之前**的实测，保留作
+「为什么不用 choice 原语」的依据；换成 flash 后位置偏置**没有重测**，所以
+`pick_candidate` 仍然跑「正序/倒序各一次、一致才采信」，不靠模型自觉。
+`CHAIN_JUDGE` 默认仍为 0：这条链没有做质量对照，开关只作预备。
+
 ## 纪律
 
 1. **永不抛**：调用点在主链上，`tasks.py` 外层 `except` 会把任何异常记成 `failed`。
@@ -44,6 +52,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 
 import local_judge
+import remote_judge
 
 #: 主链判定总开关。默认开——否则又回到「接了但从不调用」的休眠态。
 ENABLED = os.getenv("CHAIN_JUDGE", "0").strip().lower() not in ("0", "false", "off", "no")
@@ -77,7 +86,16 @@ def _fail(why: str, ms: int = 0, skipped: bool = False) -> Dict[str, Any]:
 
 
 def _gen(prompt: str, timeout_s: Optional[float] = None) -> str:
-    """打一次本机 Ollama。异常交给 `_call` 统一处理（主链上必须自包）。"""
+    """一次文本生成。后端跟随 `local_judge.BACKEND`（默认 remote=deepseek-flash）。
+
+    异常交给 `_call` 统一处理（主链上必须自包）。Ollama 分支保留但已无服务可用：
+    走它必然抛 URLError ⇒ `_fail` ⇒ 调用方按「没判成」走旧行为。
+    """
+    if local_judge.BACKEND == "remote":
+        txt, _usage = remote_judge.generate(
+            prompt, timeout_s or TIMEOUT_S,
+            max_tokens=int(os.getenv("CHAIN_JUDGE_MAX_TOKENS", "1200")))
+        return txt
     body = json.dumps({
         "model": MODEL, "stream": False, "prompt": prompt,
         "options": {"temperature": 0.1, "num_ctx": 4096},

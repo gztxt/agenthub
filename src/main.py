@@ -102,7 +102,18 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.145"
+VERSION = "0.13.146"
+#   v0.13.146：**接 deepseek-flash 判定后端**。本机 Ollama 与 jev-decision 技能删除后
+#   判定归零，对照实测（`agent-knowledge/250`）：远端三档质量已饱和（noul CN/EN 4/4、
+#   choice 两序 4/4），差别只在延迟 ⇒ 钉死 `deepseek/deepseek-flash`（3.3s，5 题≈17s），
+#   不用路由器（实测 8 次有 2 次被换成审核模型）。
+#   ① 新增 `src/remote_judge.py`：三原语 prompt 照抄已测版本，只换 HTTP 出口；
+#   ② `local_judge` 按 `JUDGE_BACKEND` 分派（remote 默认，ollama 保留但已无服务），
+#      缓存键带后端+模型，`status()` 报真实后端；`LOCAL_JUDGE=0` 仍是一键关；
+#   ③ **截断即失败**：`finish_reason=length` 单独判失败——「解析出半个对象」会被
+#      clamp 补成 0，读起来像「模型判 0」而不是「这次没判成」；
+#   ④ 判定与生成分预算（1200 / 4000）：共用 1200 时中文摘要被截断，关键项命中掉到 0/5。
+#   `CHAIN_JUDGE` / `VITALS_JUDGE` 仍默认 0：这两条链没有做质量对照，只作预备。
 #   v0.13.145：**判定进主链**（此前只有 vitals sweep 与默认关的 `/relevant?rerank=true`，
 #   即「接了但从不调用」）。新增 `src/chain_judge.py`。**关键实测**：技能自带的 `choice`
 #   原语是**位置偏置**——同一段无关文本，completed 放首位就选 completed（conf 1.0），

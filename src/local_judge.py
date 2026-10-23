@@ -1,5 +1,16 @@
 # -*- coding: utf-8 -*-
-"""本地模型判定（2026-10-23，替代已下线的外部 jev）。
+"""判定后端统一入口（2026-10-23；2026-10-23 晚接 DeepSeek-Flash）。
+
+【当前形态 · 先读这段】
+`JUDGE_BACKEND` 决定真后端，默认 **remote**（`src/remote_judge.py`，钉死
+`deepseek/deepseek-flash`）。本机 Ollama 与 `jev-decision` 技能已在 2026-10-23 删除，
+`ollama` 分支只是保留给「某天真的把本机推理装回来」——它现在跑起来必然报
+`script_missing`，这是如实失败，不是配置错。
+
+选择后端的依据是实测（`agent-knowledge/250`）：远端三档质量全饱和，差别只在延迟
+（flash 3.3s vs 免费 11.5s），而 5 题要装进 `/relevant` 的 45s 超时。
+缓存 / 计数 / 连续失败告警 / `status()` **仍是本模块唯一真相**，`remote_judge`
+只负责「把一个 prompt 变成一段文字」。
 
 【来由】
 外部端点 `api.typesafe.ai` 先被区域封禁（HTTP 451，2026-10-22 实测），随后整体下线。
@@ -52,6 +63,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import judge_cache
+import remote_judge
 
 log = logging.getLogger("hub.judge")
 
@@ -74,11 +86,16 @@ ALERT_AFTER = int(os.getenv("JUDGE_ALERT_AFTER", "3"))
 DEFAULT_SCRIPT = (Path(__file__).resolve().parents[2] / "skills" / "@user_36623aa7"
                   / "jev-decision" / "scripts" / "decision.py")
 
-#: 本地推理总开关（2026-10-23 用户裁定：本地模型对判定/摘要无收益，已整体下线）。
-#: 默认 0 ⇒ judge() 立即抛 LocalJudgeUnavailable，调用方按「没判成」降级；
-#: 不发起子进程、不连 11434、不写缓存。要复活本地模型须同时恢复 ollama 服务与
-#: jev-decision 技能，并显式设 LOCAL_JUDGE=1。
-ENABLED = os.getenv("LOCAL_JUDGE", "0").strip().lower() in ("1", "true", "on", "yes")
+#: 判定后端：`remote`（CCR deepseek-flash，默认）/ `ollama`（本机技能，已删除）。
+#: 切换后**必须**重启 hub：模块常量在导入时定型（与其它开关一致）。
+BACKEND = os.getenv("JUDGE_BACKEND", "remote").strip().lower()
+
+#: 判定总开关。默认值按后端给：remote 默认开（用户 2026-10-23 裁定「接 deepseek
+#: flash」），ollama 默认关（技能已删，开着只会每轮刷 script_missing 告警）。
+#: `LOCAL_JUDGE=0` 仍是**一键关**——关掉后 judge() 立即抛 Unavailable，不起请求、
+#: 不计失败、不写缓存，运维看到的是「按设计关闭」而不是「判定一直坏」。
+ENABLED = os.getenv("LOCAL_JUDGE", "1" if BACKEND == "remote" else "0").strip().lower() in (
+    "1", "true", "on", "yes")
 
 _LOCK = threading.Lock()
 _STAT: Dict[str, Any] = {
@@ -115,6 +132,17 @@ def _script_sig() -> str:
     return "%d:%d" % (st.st_mtime_ns, st.st_size)
 
 
+def _backend_sig() -> str:
+    """缓存指纹：后端 + 模型/脚本。换模型或改提示词后旧结论自动失配。
+
+    remote 用**模型 ID**（prompt 在代码里，随部署更新）；ollama 用脚本指纹
+    （提示词住在技能脚本里）。两者都进同一把键，切后端不会读到对方的缓存。
+    """
+    if BACKEND == "remote":
+        return "remote:%s:%s" % (remote_judge.MODEL, remote_judge.MAX_TOKENS)
+    return "ollama:%s" % _script_sig()
+
+
 def _cache_key(questions: Dict[str, Any], state: str) -> Optional[str]:
     if CACHE_TTL_S <= 0:
         return None
@@ -122,8 +150,8 @@ def _cache_key(questions: Dict[str, Any], state: str) -> Optional[str]:
     st = state or ""
     if len(blob) > CACHE_MAX_STATE or len(st) > CACHE_MAX_STATE:
         return None
-    return judge_cache.key("local_judge:v1", st + "\x00" + blob,
-                           _script_sig(), os.getenv("JUDGE_MODEL_TAG", ""))
+    return judge_cache.key("local_judge:v2", st + "\x00" + blob,
+                           _backend_sig(), os.getenv("JUDGE_MODEL_TAG", ""))
 
 
 def _append_alert(rec: Dict[str, Any]) -> None:
@@ -221,12 +249,17 @@ def status() -> Dict[str, Any]:
     hits, misses = int(st.get("cache_hits") or 0), int(st.get("cache_misses") or 0)
     lookup = hits + misses
     cs = judge_cache.stats()
+    remote = BACKEND == "remote"
     return {
-        "backend": "ollama-local",
+        "backend": "deepseek-flash" if remote else "ollama-local",
+        "backend_id": BACKEND,
         "enabled": ENABLED,
-        "ready": p.is_file(),
-        "script": str(p),
-        "model": st.get("last_model"),
+        # ready 只判「配置在位」：remote 看网关地址，ollama 看脚本在不在。
+        # **不表示模型能答** —— 那要看 last_ok_ts / last_error / alert。
+        "ready": remote_judge.configured() if remote else p.is_file(),
+        "script": None if remote else str(p),
+        "model": st.get("last_model") or (remote_judge.MODEL if remote else None),
+        "remote": remote_judge.status() if remote else None,
         "calls": calls,
         "ok": ok,
         "fail": int(st.get("fail") or 0),
@@ -254,8 +287,9 @@ def status() -> Dict[str, Any]:
         "last_fail_ts": st.get("last_fail_ts"),
         "last_fail_kind": st.get("last_fail_kind"),
         "alert_path": str(alert_path()),
-        "note": ("判定后端=本机 Ollama（jev-decision 技能）；外部 jev 端点已于 2026-10-23 "
-                 "下线删除，key/区域封禁那套判据随之作废"),
+        "note": ("判定后端=%s；外部 jev 端点已于 2026-10-23 下线删除，本机 Ollama 与"
+                 " jev-decision 技能同批删除。remote 后端钉死 %s（不用路由器：路由会把"
+                 "请求换成审核模型）" % (BACKEND, remote_judge.MODEL)),
     }
 
 
@@ -286,6 +320,32 @@ def recent_alerts(n: int = 5) -> list:
     return out
 
 
+def _judge_remote(questions: Dict[str, Any], state: str, timeout_s: float,
+                  ck: Optional[str]) -> Dict[str, Any]:
+    """远端后端（DeepSeek-Flash）的一轮判定。失败与子进程路径同口径：记账 + 抛。"""
+    t0 = time.monotonic()
+    try:
+        out = remote_judge.judge(questions, state=state, timeout_s=timeout_s)
+    except remote_judge.RemoteJudgeUnavailable as e:
+        ms = int((time.monotonic() - t0) * 1000)
+        _fail(getattr(e, "kind", "remote") or "remote", ms, str(e))
+        raise LocalJudgeUnavailable("远端判定失败：%s" % str(e)[:200])
+    ms = int((time.monotonic() - t0) * 1000)
+    answers = out.get("answers")
+    if not isinstance(answers, dict) or not answers:
+        _fail("empty", ms, "answers 缺失/为空")
+        raise LocalJudgeUnavailable("远端判定输出缺少 answers")
+    recovered = _record(True, ms, model=out.get("model"), kind="ok")
+    if recovered:
+        _log_recovered("ok")
+    result = {"answers": answers, "model": out.get("model"), "usage": out.get("usage"),
+              "elapsed_ms": ms}
+    if ck:
+        judge_cache.put(ck, result, CACHE_TTL_S)
+    result["cache"] = {"hit": False, "hits": 0, "cached_at": None, "age_s": None}
+    return result
+
+
 def judge(questions: Dict[str, Any], state: str = "",
           timeout_s: float = DEFAULT_TIMEOUT_S,
           use_cache: bool = True) -> Dict[str, Any]:
@@ -300,12 +360,12 @@ def judge(questions: Dict[str, Any], state: str = "",
     if not isinstance(questions, dict) or not questions:
         raise LocalJudgeUnavailable("没有问题可判（questions 为空）")
     if not ENABLED:
-        # 不计失败、不告警：这是「按设计下线」，不是故障。记录会污染连续失败计数。
+        # 不计失败、不告警：这是「按设计关闭」，不是故障。记录会污染连续失败计数。
         raise LocalJudgeUnavailable(
-            "本地推理已下线（2026-10-23）：Ollama 与 jev-decision 技能已删除；"
-            "要复活须先恢复二者并设 LOCAL_JUDGE=1")
+            "判定已关闭（LOCAL_JUDGE=0）；当前后端=%s。要恢复设 LOCAL_JUDGE=1 并重启"
+            % BACKEND)
     script = script_path()
-    if not script.is_file():
+    if BACKEND != "remote" and not script.is_file():
         _fail("script_missing", 0, "脚本不在：%s" % script)
         raise LocalJudgeUnavailable("判定脚本不在：%s（jev-decision 技能未安装？）" % script)
 
@@ -325,6 +385,9 @@ def judge(questions: Dict[str, Any], state: str = "",
             return ans
     with _LOCK:
         _STAT["cache_misses"] += 1 if ck else 0
+
+    if BACKEND == "remote":
+        return _judge_remote(questions, state, timeout_s, ck)
 
     payload = json.dumps({"state": state, "questions": questions}, ensure_ascii=False)
     t0 = time.monotonic()

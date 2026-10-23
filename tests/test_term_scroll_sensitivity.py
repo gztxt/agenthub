@@ -238,7 +238,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.145"
+    CURRENT_VERSION = "0.13.146"
+
+    #: v0.13.146：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「接 deepseek-flash」「质量已饱和」「截断即失败」「LOCAL_JUDGE=0 一键关」。
+    VERSION_ROOT_CAUSES["0.13.146"] = (
+        "接 deepseek-flash", "质量已饱和", "截断即失败", "LOCAL_JUDGE=0",
+    )
 
     #: v0.13.145：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「判定进主链」「只在判成 off_topic 时降级」「同桶首位」「CHAIN_JUDGE=0 回滚」。

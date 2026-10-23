@@ -22,6 +22,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 _REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
@@ -51,6 +52,10 @@ class _Base(unittest.TestCase):
         # 的契约，故用例内强制打开；下线态另由 TestDisabled 覆盖，不改生产默认值。
         self._enabled_saved = local_judge.ENABLED
         local_judge.ENABLED = True
+        # 本组是**子进程契约**用例：钉死 ollama 后端，绝不因为默认后端是 remote
+        # 就去打真网关（L0 必须 hermetic，也避免测试烧 token）。
+        self._backend_saved = local_judge.BACKEND
+        local_judge.BACKEND = "ollama"
         local_judge.reset_stats()
         self.addCleanup(self._restore)
 
@@ -61,6 +66,7 @@ class _Base(unittest.TestCase):
             else:
                 os.environ[k] = v
         local_judge.ENABLED = self._enabled_saved
+        local_judge.BACKEND = self._backend_saved
         local_judge.reset_stats()
 
     def _script(self, body: str, name: str = "fake_decision.py") -> pathlib.Path:
@@ -284,17 +290,17 @@ class TestAlerts(_Base):
 
 
 class TestDisabled(_Base):
-    """2026-10-23 用户裁定：本机 Ollama 与 jev-decision 技能已删除，判定默认下线。
+    """`LOCAL_JUDGE=0` 仍是一键关（2026-10-23 晚接 remote 后端后保留）。
 
-    下线态必须是**显式不可用**：不静默返空答案、不起子进程、不计失败/告警
+    关闭态必须是**显式不可用**：不静默返空答案、不起请求/子进程、不计失败/告警
     （否则运维指标里会出现「判定一直坏」的假象）。
     """
 
-    def test_default_is_off(self):
-        """模块默认值必须是关——生产靠这个默认值，不靠 env。"""
+    def test_default_follows_backend(self):
+        """remote 默认开、ollama 默认关——默认值必须按后端给，不能一律写死 0/1。"""
         src = (_REPO / "src" / "local_judge.py").read_text(encoding="utf-8")
-        self.assertIn('os.getenv("LOCAL_JUDGE", "0")', src,
-                      "默认值被改回开：Ollama 已删，开了就是每次调用都失败")
+        self.assertIn('os.getenv("LOCAL_JUDGE", "1" if BACKEND == "remote" else "0")', src,
+                      "默认值不对：remote 关了等于判定没接；ollama 开了等于每轮必失败")
 
     def test_off_raises_explicitly_and_counts_nothing(self):
         local_judge.ENABLED = False
@@ -302,7 +308,7 @@ class TestDisabled(_Base):
         with self.assertRaises(local_judge.LocalJudgeUnavailable) as cm:
             local_judge.judge({"q": {"type": "noul", "instructions": "x"}}, timeout_s=5)
         msg = str(cm.exception)
-        self.assertIn("下线", msg)
+        self.assertIn("判定已关闭", msg)
         self.assertIn("LOCAL_JUDGE=1", msg, "必须告诉运维怎么复活")
         after = local_judge.status()
         self.assertEqual(after["calls"], before["calls"], "下线态不是一次调用")
@@ -323,6 +329,55 @@ class TestDisabled(_Base):
         self.assertFalse(local_judge.status()["enabled"])
         local_judge.ENABLED = True
         self.assertTrue(local_judge.status()["enabled"])
+
+
+class TestRemoteDispatch(_Base):
+    """remote 后端分派：只验证「接线与失败语义」，不发真请求（真质量见 work/ 报告）。"""
+
+    def setUp(self):
+        super().setUp()
+        local_judge.BACKEND = "remote"
+
+    def test_dispatch_returns_answers_and_counts_ok(self):
+        fake = {"answers": {"q": {"type": "noul", "noul": 1.0}},
+                "model": "deepseek/deepseek-flash",
+                "usage": {"prompt_tokens": 11, "completion_tokens": 7, "calls": 1}}
+        with mock.patch.object(local_judge.remote_judge, "judge", return_value=fake) as m:
+            out = local_judge.judge({"q": {"type": "noul", "instructions": "在不在？"}},
+                                    state="s", timeout_s=9, use_cache=False)
+        m.assert_called_once()
+        self.assertEqual(out["answers"]["q"]["noul"], 1.0)
+        self.assertEqual(out["model"], "deepseek/deepseek-flash")
+        st = local_judge.status()
+        self.assertEqual(st["ok"], 1)
+        self.assertEqual(st["backend"], "deepseek-flash")
+        self.assertEqual(st["model"], "deepseek/deepseek-flash")
+
+    def test_remote_failure_maps_to_unavailable_with_kind(self):
+        err = local_judge.remote_judge.RemoteJudgeUnavailable("网关超时", kind="timeout")
+        with mock.patch.object(local_judge.remote_judge, "judge", side_effect=err):
+            with self.assertRaises(local_judge.LocalJudgeUnavailable):
+                local_judge.judge({"q": {"type": "noul", "instructions": "x"}},
+                                  state="s", timeout_s=5, use_cache=False)
+        st = local_judge.status()
+        self.assertEqual(st["fail"], 1)
+        self.assertEqual(st["last_fail_kind"], "timeout")
+
+    def test_cache_hit_does_not_call_remote_twice(self):
+        fake = {"answers": {"q": {"type": "noul", "noul": 0.5}},
+                "model": "m", "usage": {}}
+        with mock.patch.object(local_judge.remote_judge, "judge", return_value=fake) as m:
+            local_judge.judge({"q": {"type": "noul", "instructions": "x"}}, state="s")
+            second = local_judge.judge({"q": {"type": "noul", "instructions": "x"}}, state="s")
+        self.assertEqual(m.call_count, 1, "第二次必须命中磁盘缓存")
+        self.assertTrue(second["cache"]["hit"])
+
+    def test_status_reports_remote_config_without_network(self):
+        st = local_judge.status()
+        self.assertEqual(st["backend_id"], "remote")
+        self.assertTrue(st["ready"], "网关地址非空即配置在位")
+        self.assertEqual(st["remote"]["model"], local_judge.remote_judge.MODEL)
+        self.assertIsNone(st["script"], "remote 后端不该再报技能脚本路径")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,53 @@
+## v0.13.146 — 接 deepseek-flash 判定后端
+
+> 来源：2026-10-23 用户令「接 deepseek flash 判定后端 测试判定质量 对比验证结果」。
+> 前置：`agent-knowledge/249`（本地判定下线）、`250`（免费 vs 付费对照，PT-08）。
+
+### ① 为什么钉死具体模型，而不是路由器
+
+PT-08 同一批 20 题实测：远端三档**质量已饱和**（noul 中英各 4/4、choice 两序 4/4），
+差别只在延迟 —— `deepseek-flash` 3.3s/次、整轮 60s；免费 `nemotron-3-ultra:free`
+同质量但 11.5s/次、整轮 225s；`v4-pro` 7.3s。且免费**路由档** 8 次里有 2 次被换成
+`nemotron-3.5-content-safety`（200 但正文是审核结论）。
+
+⇒ 取 `deepseek/deepseek-flash`；会话/门禁用具体模型是既有军规，路由只用于非会话后台。
+
+### ② 代码：三处接线，一套统计
+
+- `src/remote_judge.py`（新增）：`noul`/`score`/`choice` 三原语的 prompt **照抄已测版本**
+  （`zerocost_jev._ask`），只把出口换成 CCR `/v1/chat/completions`。改 prompt 会让对照表作废。
+- `src/local_judge.py`：`JUDGE_BACKEND` 分派（`remote` 默认 / `ollama` 保留但已无服务）；
+  缓存键改 `local_judge:v2` 并带「后端+模型」；`status()` 报真实后端（原来写死 `ollama-local`，
+  接上后会同时显示「没接」和「坏了」）；`LOCAL_JUDGE=0` 仍是一键关。
+- `src/chain_judge.py`：`_gen` 跟随同一后端（原来直连已删的 Ollama）；`CHAIN_JUDGE` 仍默认 0。
+
+### ③ 三处「不报错但答案变假」的坑（都已修 + 单测）
+
+1. **预算不分**：判定与摘要共用 `max_tokens=1200` ⇒ 中文摘要被截断，关键项 3/5 → 0/5，
+   看起来像「模型摘要能力差」。改为判定 1200 / 生成 4000。
+2. **截断不判失败**：半个 JSON 会被 `clamp01` 补成 0，读起来是「模型判 0」而不是
+   「这次没判成」。`finish_reason=length` 现在单独失败。
+3. **合批证据不对齐**：把 4 份不同证据合成一批并统一传 `state="evidence"`，4 题概率
+   全落 0.4~0.5，像是模型退化；喂对证据后 3 题全对（4.7s）。
+
+### ④ 实测（生产入口 `remote_judge.judge`，20 题）
+
+| 维度 | 结果 |
+|---|---|
+| noul 中文 4 + 英文 4 | 8/8 |
+| choice 正反两序 | 4/4 一致且双序命中 |
+| score 有序 | 低=0.0 → 高=1.0 |
+| 解析/调用失败 | 0 |
+| 单题延迟 | 中位 1.62s（n=18） |
+| 与 PT-08 基线逐题对账 | 0 差异 |
+
+全量 L0：2977 passed。详见 `work/judge-remote-20261023/REPORT.md`、卡片 251。
+
+### ⑤ 边界（故意没做）
+
+`VITALS_JUDGE` / `CHAIN_JUDGE` 仍为 0：前者是持续成本（16 agent × 每 15min × 5 题），
+后者换后端后**没做质量对照**。CCR 不返 `cost`，只能报 token。
+
 ## v0.13.145 — 判定进主链：任务验收降级 + 参考候选提位
 
 > 来源：2026-10-23 用户令「判定进主链」。此前本地判定只有两处调用：vitals sweep（被 sha

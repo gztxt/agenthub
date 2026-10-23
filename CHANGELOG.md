@@ -20,9 +20,10 @@
   硬要求，顺带修掉 `rerank=True` 默认值与两份注入链注释相悖的潜在不一致）；
   `/api/skill/status` 的 `jev` 块 → `judge` 块（后端就绪 + 真调用计数）。
 - 超时按**实测**重设（不是照抄外部 jev 的 5s/60s）：本机 qwen2.5:1.5b 单题
-  6.4~8.6s，vitals 一轮 5 题空闲 37~41s；sweep `max_workers=4` 并发时 2 题
-  15~24s ⇒ 5 题会逼近 60s。故 `VITALS_JUDGE_TIMEOUT` 默认 **60→180**，
-  技能侧 `JUDGE_TIMEOUT_S` 保持 20s（它只问 1 题，≈2.3 倍余量）。
+  6.4~8.6s、4 候选 10.4s；vitals 一轮 5 题空闲 37~41s；sweep `max_workers=4`
+  并发时 2 题 15~24s ⇒ 5 题会逼近 60s。故 `VITALS_JUDGE_TIMEOUT` 默认 **60→180**。
+  技能侧 `JUDGE_TIMEOUT_S` **20→45**：上线后生产同载荷在 load=2.4 时实测 20s
+  踩线超时（`fail:1`），20s 在真实负载下等于「附注功能不存在」。
 - `src/skill_triggers.py`：删除死条目 `"typesafe-ai"`（技能已随 jev 下线删除；
   `jev-decision` 的技能自述里已有 triggers，按本表维护纪律「只登记确实存在的技能名」）。
 

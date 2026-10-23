@@ -63,12 +63,13 @@ class TestMask(unittest.TestCase):
 class TestTable(unittest.TestCase):
     def test_agent_set(self):
         """v0.13.93：codebuddy 接入（原为 8 个，测试名 test_only_seven_agents）。
+           2026-10-24：dsh 接入（终端前端是外置 TUI 插件，见判例 254）。
            加一张卡要同时动后端这张表**与**前端 TERM_HIST_AGENTS —— 漏一边的表现是
            「菜单里有这张卡、点开却没有历史下拉」（cursor 就是这个症状，
            因为前端白名单不含它 ⇒ 根本不发历史请求）。"""
         self.assertEqual(set(ss.SESSION_STORES),
                          {"grok", "claude", "qoder", "jcode", "hermes", "codex", "opencode",
-                          "cursor", "codebuddy"})
+                          "cursor", "codebuddy", "dsh"})
 
     def test_hist_agents_front_back_same_set(self):
         """hub.js 的 TERM_HIST_AGENTS 与后端 SESSION_STORES 必须同集合——
@@ -104,6 +105,12 @@ class TestTable(unittest.TestCase):
         self.assertEqual(st["codebuddy"]["resume"][1:], ["--resume", "{id}"])
         self.assertTrue(st["codebuddy"]["resume"][0].startswith("/"),
                         "codebuddy CLI 必须在 PATH 之外 ⇒ resume argv 必须写绝对路径")
+        # 2026-10-24 dsh：id 是**裸 uuid**（TUI 退出提示 `--resume <uuid>`，不带 session- 前缀）。
+        # 命令必须带 `--profile tui`：裸 dsh 会变成 `dsh web`（判例 252 §四.2 / 254）。
+        self.assertTrue(st["dsh"]["id_re"].match("d76224bf-cad5-44ff-8a9d-4a69e563feb3"))
+        self.assertFalse(st["dsh"]["id_re"].match("session-d76224bf-cad5-44ff-8a9d-4a69e563feb3"),
+                         "带 session- 前缀的是仓库文件名，不是 resume id")
+        self.assertEqual(st["dsh"]["resume"], ["dsh", "--profile", "tui", "--resume", "{id}"])
 
     def test_compress_path_matches_codebuddy_bucket(self):
         """`_compress_path` 是 dist 里 PathUtils.compressPath 的 Python 等价：
@@ -136,6 +143,73 @@ class TestTable(unittest.TestCase):
              {"type": "message", "role": "user",
               "content": [{"type": "input_text", "text": "<user_query>真问题</user_query>"}]}]),
             "真问题")
+
+
+class TestDshStore(unittest.TestCase):
+    """DSH 历史（2026-10-24，判例 254）：投影缓存格式 / 空会话过滤 / 裸 uuid / resume 模板。
+
+    全部 hermetic：把 ss.DSH_SESSIONS 指到临时目录，不碰本机 ~/.dsh。
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self._orig = ss.DSH_SESSIONS
+        ss.DSH_SESSIONS = self.root
+        ss._CACHE.clear()
+
+    def tearDown(self):
+        ss.DSH_SESSIONS = self._orig
+        ss._CACHE.clear()
+        self._tmp.cleanup()
+
+    def _write(self, sid, *, title=None, first=None, cwd="/fs/1000/ftp/技术文档", age=0.0):
+        import json as _json
+        import os
+        import time as _time
+        rows = {"title": {"val": title}}
+        if first is not None:
+            rows["titleInput"] = {"val": {"first": {"text": first}}}
+        doc = {"version": 7, "record": {"identity": {"createdAt": 1, "cwd": cwd}, "rows": rows}}
+        p = self.root / f"session-{sid}.json"
+        p.write_text(_json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        if age:
+            t = _time.time() - age
+            os.utime(p, (t, t))
+        return p
+
+    def test_items_bare_uuid_title_and_cwd(self):
+        a = "11111111-1111-1111-1111-111111111111"
+        b = "22222222-2222-2222-2222-222222222222"
+        self._write(a, title="正式标题", cwd="/fs/1000/ftp/技术文档")
+        self._write(b, title=None, first="第一条用户输入", cwd="/fs/1000/ftp/技术文档/dsh-src")
+        d = ss.list_history("dsh", "/fallback", 8)
+        self.assertEqual([i["id"] for i in d["items"]], [b, a], "裸 uuid + 按缓存 mtime 倒序")
+        self.assertEqual(d["items"][0]["title"], "第一条用户输入", "无 title 时退首条用户输入")
+        self.assertEqual(d["items"][0]["cwd"], "/fs/1000/ftp/技术文档/dsh-src")
+
+    def test_empty_session_is_skipped(self):
+        a = "11111111-1111-1111-1111-111111111111"
+        self._write(a, title=None, first=None)      # 只起界面没提问
+        d = ss.list_history("dsh", "/fallback", 8)
+        self.assertEqual(d["items"], [])
+        self.assertEqual(d["note"], "")
+
+    def test_limit_and_resume_argv(self):
+        sid = "33333333-3333-3333-3333-333333333333"
+        for n in range(3):
+            self._write(f"4444444{n}-4444-4444-4444-444444444444", title=f"会话{n}", age=10 - n)
+        self._write(sid, title="要续的那条", age=1)
+        d = ss.list_history("dsh", "/fallback", 2)
+        self.assertEqual(len(d["items"]), 2)
+        argv = ss.resume_argv("dsh", sid, "/fallback")
+        self.assertEqual(argv, ["dsh", "--profile", "tui", "--resume", sid])
+        self.assertEqual(ss.title_for("dsh", sid), "要续的那条")
+
+    def test_unknown_id_rejected(self):
+        with self.assertRaises(ValueError):
+            ss.resume_argv("dsh", "session-33333333-3333-3333-3333-333333333333", "/fallback")
 
 
 class TestResumeArgv(unittest.TestCase):

@@ -365,6 +365,58 @@ def _t_jcode(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
     return items, ""
 
 
+#: DSH（DeepSeek Harness）会话仓库（2026-10-24 接入，判例 254）。
+#: 真事件日志：`~/.dsh/sessions/<压缩cwd>/session-<uuid>/session.v4.jsonl.zstd`（zstd，需解压）。
+#: 列表读它的**投影缓存** `~/.dsh/storages/session_projcache/sessions/session-<uuid>.json`：
+#:   `{record:{identity:{createdAt,cwd}, rows:{title:{val}, titleInput:{val:{first:{text}}}}}}`
+#: ⇒ 毫秒级、不用解压；续聊时 TUI 自己按 id 找回事件日志。
+#: ⚠️ resume 的 id 是**裸 uuid**：TUI 退出提示实测为 `dsh --profile tui --resume <uuid>`
+#: （不带 `session-` 前缀）；仓库文件名/目录名才带前缀。
+DSH_SESSIONS = HOME / ".dsh" / "storages" / "session_projcache" / "sessions"
+
+
+def _dsh_title_and_cwd(p: Path) -> Tuple[str, str]:
+    """从一条投影缓存里取 (标题, cwd)。标题优先 rows.title.val，
+       没有就退 titleInput.val.first.text（首条用户输入）——两者都没有即空会话。"""
+    rec = (_load(p) or {}).get("record") or {}
+    ident = rec.get("identity") or {}
+    rows = rec.get("rows") or {}
+    title = str((rows.get("title") or {}).get("val") or "").strip()
+    if not title:
+        first = ((rows.get("titleInput") or {}).get("val") or {}).get("first") or {}
+        title = str(first.get("text") or "").strip()
+    return title, str(ident.get("cwd") or "").strip()
+
+
+def _t_dsh(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
+    """DSH 历史：全局平铺（每条自带 cwd，跳目录口径与 jcode 同），按缓存 mtime 倒序。
+       **只起界面、没提问的空会话不占历史位**（实测 TUI 启动即建 3 事件会话）。"""
+    root = DSH_SESSIONS
+    if not root.is_dir():
+        return [], "dsh 无会话仓库（~/.dsh/storages/session_projcache）"
+    files = sorted(root.glob("session-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        return [], "dsh 暂无可续会话"
+    items: List[dict] = []
+    for p in files:
+        if time.time() - t0 > HARD_BUDGET_S:
+            return items, "扫描超时，仅显示已读到的条目"
+        sid = p.stem[len("session-"):]
+        if not UUID_RE.match(sid):
+            continue
+        try:
+            title, s_cwd = _dsh_title_and_cwd(p)
+        except Exception:  # noqa: BLE001
+            continue
+        if not title:
+            continue
+        items.append({"agent": "dsh", "id": sid, "title": mask_title(title) or "未命名会话",
+                      "ts": int(p.stat().st_mtime), "msgs": None, "cwd": s_cwd or cwd})
+        if len(items) >= limit:
+            break
+    return items, ""
+
+
 def _ro(db: Path) -> sqlite3.Connection:
     c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     c.row_factory = sqlite3.Row
@@ -636,6 +688,10 @@ SESSION_STORES: Dict[str, dict] = {
     # WorkBuddy 包内、不在 PATH，写 "codebuddy" 会被 term.py 的 which() 判定失败、会话拉不起来。
     # 这里 import profiles 是安全的：profiles 不 import本模块（反向 term.py 才 import 两者）。
     "codebuddy": {"kind": "codebuddy_json", "id_re": UUID_RE, "resume": [_cb_cli(), "--resume", "{id}"], "fn": _t_codebuddy},
+    # dsh（DeepSeek Harness，2026-10-24）：`dsh` 在 ~/.local/bin，profiles.which() 的兜底目录
+    # 已覆盖，不必写绝对路径；但**必须带 `--profile tui`**——裸 dsh 会变成 `dsh web`（判例 252 §四.2）。
+    # `--resume` 接裸 uuid（TUI 自己的退出提示就是这个形状）。
+    "dsh":      {"kind": "dsh_json",       "id_re": UUID_RE,      "resume": ["dsh", "--profile", "tui", "--resume", "{id}"], "fn": _t_dsh},
 }
 
 _CACHE: Dict[tuple, Tuple[float, dict]] = {}
@@ -700,6 +756,10 @@ def _store_path(agent_id: str, sid: str):
         if not hits:
             return None
         return max(hits, key=lambda p: p.stat().st_mtime)
+    if agent_id == "dsh":
+        # 投影缓存文件名带 `session-` 前缀，但 id 对外是裸 uuid（resume 用）。
+        f = DSH_SESSIONS / f"session-{sid}.json"
+        return f if (f.is_file() and f.stat().st_size > 0) else None
     return None
 
 
@@ -770,6 +830,8 @@ def _session_cwd_recorded(agent_id: str, sid: str) -> str:
         elif agent_id == "cursor":
             m = _cursor_meta(sid) or {}
             c = m.get("cwd") or ""      # 实测有 1 条 cwd 为空 ⇒ 走下面的 fallback
+        elif agent_id == "dsh" and f:
+            c = _dsh_title_and_cwd(f)[1]
     except Exception:  # noqa: BLE001
         c = ""
     return (c or "").strip()
@@ -1019,6 +1081,15 @@ def _title_of_session(agent: str, sid: Optional[str], cwd: Optional[str] = None)
         # 与 _t_cursor 共用 _cursor_title（问题原文优先、meta.title 兜底）——理由见该函数注释。
         # 绝不回落成 id 前缀（D2）。
         return mask_title(_cursor_title(sid, _cursor_meta(sid) or {}))
+    if agent == "dsh":
+        # 与 _t_dsh 同口径：投影缓存里的标题/首条输入，取不到就空串（D2：不回落成 id 前缀）。
+        f = _store_path("dsh", sid)
+        if not f:
+            return ""
+        try:
+            return mask_title(_dsh_title_and_cwd(f)[0])
+        except Exception:  # noqa: BLE001
+            return ""
     return ""
 
 

@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+import chain_judge
 import db
 import verifier
 
@@ -120,6 +121,10 @@ _TASK_COLUMNS = (
     ("retrieval_json", "TEXT"),
     # B3：自动重试计数（上限 MAX_AUTO_RETRY，防验证失败→重跑→再失败→无限循环）。
     ("attempts", "INTEGER"),
+    # 2026-10-23：主链判定附注（三态 completed/partial/off_topic + ok/ms/model/cached）。
+    # 为什么留原文 JSON 而不是拆列：它是**判定证据**，字段还会随判定原语演进；
+    # 而处置只依赖 `label` 一个字段（off_topic ⇒ 不自动接受），拆列没有收益。
+    ("judge_json", "TEXT"),
 )
 
 
@@ -810,26 +815,51 @@ async def _run_task(run_id: str, row: dict):
             # 关则停在 `submitted` 等外部 `POST /accept`。两条路都写 submitted_at，
             # 于是「提交→接受」的时延在两种模式下都可度量。
             out = str(result.get("response") or "")[:20000]
-            if AUTO_ACCEPT:
+            # ── 主链判定（2026-10-23）──
+            # verifier 只判**结构**（非空 / 是 JSON 数组 / 含指定子串），不判「有没有答任务」。
+            # 这里补一次三态分类（completed / partial / off_topic），处置方向刻意单向：
+            #   判成 off_topic ⇒ 不自动接受，转 `submitted` 等人工复核；
+            #   判成 partial/completed ⇒ 与接入前一致（partial 只记附注，不拦）；
+            #   判定没跑成（脚本缺失/超时/标签不在枚举） ⇒ **完全旧行为**，不拦不降级。
+            # 为什么不是「判成 completed 才接受」：1.5b 的置信度不可信（451 题以 0.95 选错），
+            # 拿它当放行闸等于把「模型觉得像」当成事实；反过来只让它拦，错了最多多一次人看。
+            jv = await asyncio.to_thread(
+                chain_judge.classify_output,
+                row.get("goal") or row.get("prompt") or "", out)
+            judge_json = json.dumps(jv, ensure_ascii=False)[:2000]
+            # 处置折成纯函数（`chain_judge.accept_decision`），L0 才能把「方向」钉死：
+            # 判成 off_topic 只降级不丢弃；判定没跑成 = 旧行为。
+            decision = chain_judge.accept_decision(AUTO_ACCEPT, jv)
+            need_review = decision["review"]
+            if decision["accept"]:
                 db.execute("UPDATE tasks SET status='success',output=?,duration_ms=?,spent_ms=?,"
                            "spent_tokens=?,model=?,verdict=?,verify_reason=?,verify_ms=?,"
-                           "submitted_at=?,accepted_at=?,accepted_by=?,finished_at=?,updated_at=?"
+                           "judge_json=?,submitted_at=?,accepted_at=?,accepted_by=?,"
+                           "finished_at=?,updated_at=?"
                            " WHERE run_id=? AND task_id=?",
                            (out, dur, dur, spent_tokens, used_model, verdict["status"], None,
-                            verify_ms, _now(), _now(), "auto", _now(), _now(), run_id,
-                            row["task_id"]))
+                            verify_ms, judge_json, _now(), _now(), "auto", _now(), _now(),
+                            run_id, row["task_id"]))
             else:
+                # need_review 时这里就是「verifier 过了但判定说答非所问」——原因写进
+                # verify_reason（它此时必为 NULL），让复核的人知道**不是** verifier 失败。
+                reason = decision["reason"]
                 db.execute("UPDATE tasks SET status='submitted',output=?,duration_ms=?,spent_ms=?,"
                            "spent_tokens=?,model=?,verdict=?,verify_reason=?,verify_ms=?,"
-                           "submitted_at=?,updated_at=?"
+                           "judge_json=?,submitted_at=?,updated_at=?"
                            " WHERE run_id=? AND task_id=?",
-                           (out, dur, dur, spent_tokens, used_model, verdict["status"], None,
-                            verify_ms, _now(), _now(), run_id, row["task_id"]))
+                           (out, dur, dur, spent_tokens, used_model, verdict["status"], reason,
+                            verify_ms, judge_json, _now(), _now(), run_id, row["task_id"]))
             db.log_profile_event("task_exec", row["agent_id"],
-                                 "success" if AUTO_ACCEPT else "submitted", dur,
+                                 "success" if (AUTO_ACCEPT and not need_review) else "submitted",
+                                 dur,
                                  trace_id=row["trace_id"],
                                  detail={"task": row["task_id"], "verify": kind,
-                                         "model": used_model, "auto_accept": AUTO_ACCEPT})
+                                         "model": used_model,
+                                         "auto_accept": AUTO_ACCEPT and not need_review,
+                                         "judge": jv.get("label") if jv.get("ok") else "unjudged",
+                                         "judge_ok": bool(jv.get("ok")),
+                                         "judge_ms": jv.get("ms")})
         else:
             gaps = "; ".join("%s: %s" % (g["id"], g["detail"]) for g in verdict["gaps"])
             err = ("verifier %s (%s): %s" % (verdict["status"], kind, gaps))[:500]

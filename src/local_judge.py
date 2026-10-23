@@ -187,6 +187,20 @@ def _fail(kind: str, ms: int, err: str) -> None:
     _log_fail(kind, ms, err, fired)
 
 
+def record(ok: bool, ms: int, err: Optional[str] = None, kind: str = "chain") -> None:
+    """外部调用点（`chain_judge`）写回统计的**公开入口**。
+
+    为什么需要它：主链判定直接打 Ollama（技能自带的 `choice` 原语实测有位置偏置，
+    见 `chain_judge` 模块头），但「失败要告警、状态要在 `/api/vitals` 看见」是同一件事——
+    不允许出现两套计数，否则「判定到底跑了几次/坏没坏」会有两个真相。
+    """
+    if ok:
+        if _record(True, int(ms)):
+            _log_recovered(kind)
+    else:
+        _fail(kind, int(ms), str(err or "chain_fail"))
+
+
 def status() -> Dict[str, Any]:
     """只读状态，供 `/api/skill/status`、`/api/vitals`、`/health` 回显。
 

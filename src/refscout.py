@@ -45,6 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+import chain_judge
 import db
 import llm
 import outbound
@@ -1508,6 +1509,24 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
         })
 
     ranked.sort(key=_order_key)
+    # ── 主链判定（2026-10-23）：候选已成型、尚未落卡 ──
+    # 在前 4 条里选一个「最适合当该任务参考资料」的，提到**它所在桶的首位**。
+    # 为什么限制在同桶：`impl/design` 分桶是硬语义（实现参考 vs 设计参考），
+    # 跨桶提升会把一份 README 很漂亮但没实现的仓库顶到实现位。
+    # 为什么可以信：这边判错的后果只是「同一层里次序变了」，卡里候选一条不少；
+    # 与 tasks 的接受闸不同，这里没有「判错就丢掉产物」的风险面。
+    # 失败/未启用 ⇒ 原序（`ok=false` + why 进 meta），不把「没判」说成「模型同意原序」。
+    lj = chain_judge.pick_candidate(
+        ("模块 %s；关键词 %s" % (module, "、".join(keywords[:8]))).strip(),
+        [{"name": r["repo"], "desc": r["desc"]} for r in ranked[:4]])
+    if lj.get("ok"):
+        lj["moved"] = chain_judge.promote_within_bucket(ranked, int(lj["index"]))
+        for r in ranked:
+            if r["repo"] == lj.get("picked"):
+                r["local_judge"] = {"picked": True, "moved": lj["moved"],
+                                    "confidence": lj.get("confidence"),
+                                    "ms": lj.get("ms"), "model": lj.get("model")}
+                break
     rerank_err, used_model = "", ""
     if do_rerank and ranked:
         mark("rerank")
@@ -1519,6 +1538,7 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int,
     failed = [a for a in arms_log if not a["ok"] and not a["name"].startswith("llm-")]
     meta = {
         "arms": arms_log,
+        "local_judge": lj,
         "pool_size": len(pool),
         "sources": src_overview,
         "list_expand": expanded_log,

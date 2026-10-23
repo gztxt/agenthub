@@ -102,7 +102,20 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.144"
+VERSION = "0.13.145"
+#   v0.13.145：**判定进主链**（此前只有 vitals sweep 与默认关的 `/relevant?rerank=true`，
+#   即「接了但从不调用」）。新增 `src/chain_judge.py`。**关键实测**：技能自带的 `choice`
+#   原语是**位置偏置**——同一段无关文本，completed 放首位就选 completed（conf 1.0），
+#   off_topic 放首位就选 off_topic（conf 0.5）⇒ 拿它做裁决等于「永远不拦」。
+#   故两处落点都改成「让它产出可机械核对的东西」，而不是让它表态：
+#   ① `tasks.py`：要求模型**从产物里逐字摘一句能证明完成的原文**，无关则答 NONE；
+#      摘到的句子必须在产物里原样存在（幻觉守卫），否则按「没判成」处理。
+#      只有 off_topic 会把自动接受降为 `submitted` 待人工复核——方向单向。
+#   ② `refscout.py`：候选列成编号清单让它先写编号；**正序/倒序各问一次，两次一致才采纳**，
+#      不一致（偏置回来）就当没判成、原序不动；采纳后只提到**同桶首位**。
+#   纪律：输入硬截断（任务 400 / 产物 1500 字，ctx 4096）；进程内单飞 +
+#   `CHAIN_JUDGE_QUEUE_WAIT=5s`（Ollama 串行，等不到就不判）；实测单次 0.8~5.1s；
+#   `CHAIN_JUDGE=0` 一键回滚；每次调用都写回 `local_judge` 的计数/告警，不另建一套。
 #   v0.13.144：**判定从「能跑」补到「可运维」**。四件事：
 #   ① 判定缓存（键=脚本指纹+题面+state，TTL 7 天，**只缓存成功**——失败固化等于
 #      把「现在不能问」变成「永远是这个答案」）；

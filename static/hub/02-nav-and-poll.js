@@ -81,17 +81,16 @@ function bindCloudcliDelegation() {
    嵌进 hub 就是一张要重新登录的白页，而终端页里的 TUI 与本机命令行完全一致。
    宿主界面保留为可切换的第二形态（终端页头部「原生界面」按钮）。
    cloudcli 独立子菜单：无终端卡（纯服务型），默认形态 = embed（原生界面）+ 项目直达面板。
-   dsh 同理走 embed 优先（2026-10-24 用户报障「新建会话还是没有输入框」）：
-   上游 CLI 只有 web/headless 两种 profile（`apps/cli/src/args.ts` + `~/.dsh/profiles`），
-   裸 `dsh` 经启动器 `case "${1:-web}"` 直接变成 `dsh web` ⇒ 终端页里只有服务横幅，
-   没有可打字的位置；它的输入框只在自带 Web UI 里（:3080，token 由画像卡实时注入）。
-   用户 2026-10-24 二次裁定：「点击新会话还是没有正常运行，使用原生界面正常」⇒ 对它
-   **不再只是默认 embed，而是不给终端形态**：NO_TERM 里的实体一律不出「终端」按钮、
-   stored 偏好里的 term 也当无效，否则那个按钮每点一次就在后台多起一个 dsh web
-   （实测 3080 之外又冒出 3081/3082，两个实例争写 `~/.dsh`，判例 252 §四.2）。 */
+   dsh 默认 embed、但**保留**终端形态（2026-10-24 01:15 改判，见 profiles.py 同名注释）：
+   DSH 本体不带终端前端，可 `dsh --profile tui`（外置插件 @tomowang/dsh-tui）就是全屏 TUI。
+   裸 `dsh` 仍会变成 `dsh web`（启动器 `case "${1:-web}"`）⇒ 命令由后端画像钉死成
+   `dsh --profile tui`，前端只按画像的 term entry 决定是否出「终端」按钮。
+   早先的 NO_TERM 结论（点一次多起一个 dsh web、3081/3082 争写 ~/.dsh，判例 252 §四.2）
+   对**裸 dsh** 仍然成立，所以机制保留、只是集合里不再有 dsh。 */
 const EMBED_FIRST = new Set(['cloudcli', 'dsh']);
-/* 没有 CLI 交互会话的实体 —— 「终端」形态对它们必然是死屏（不是"不好用"，是"没有这个东西"） */
-const NO_TERM = new Set(['dsh']);
+/* 没有 CLI 交互会话的实体 —— 「终端」形态对它们必然是死屏（不是"不好用"，是"没有这个东西"）。
+   2026-10-24 01:15 起为空集：dsh 已有 TUI（dsh --profile tui）。 */
+const NO_TERM = new Set();
 function defaultModeOf(a) {
   const es = (a && a.entries) || [];
   const has = t => es.some(e => e.type === t);

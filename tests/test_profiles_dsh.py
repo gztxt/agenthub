@@ -14,12 +14,20 @@ dsh 原来只在 `CLI_ALIASES` 里（B 档动态发现），而动态卡硬编�
 ③ token 不得写进画像 —— 它是进程级随机（browser-auth.ts 的 randomBytes(32)），
    写死既是「凭据落配置」，也会在每次 restart 后立刻失效。
 
-2026-10-24 追加第四条（口径反转，见判例 253）
----------------------------------------------
-原先是「加了 Web UI 也不能丢终端」，现在**必须没有终端**：
-dsh 没有 CLI 交互会话（`~/.dsh/profiles` 只有 web/headless，裸 `dsh` 经启动器
-`case "${1:-web}"` 直接变 `dsh web`）⇒ 每次"新会话"都在后台多起一个 Web 服务器、
-抢端口并争写 `~/.dsh`。用户两轮报障后裁定去掉终端入口。前端 `NO_TERM` 同批收口。
+2026-10-24 第四条（见判例 253，已被同日 01:15 改判）
+--------------------------------------------------
+原先是「加了 Web UI 也不能丢终端」，随后改成**必须没有终端**：dsh 没有 CLI 交互会话
+（`~/.dsh/profiles` 只有 web/headless，裸 `dsh` 经启动器 `case "${1:-web}"` 直接变
+`dsh web`）⇒ 每次"新会话"都在后台多起一个 Web 服务器、抢端口并争写 `~/.dsh`。
+
+2026-10-24 01:15 第五条（用户第三次报障「调研显示可以使用终端」后反转回来）
+------------------------------------------------------------------
+「没有 CLI 交互会话」只对了半句：DSH **本体**不带终端前端，但终端前端是**外置插件**，
+装上 `@tomowang/dsh-tui`（MIT，peerDeps 钉 ^0.2.1-rc.2）后 `dsh --profile tui` 就是
+全屏 TUI。2026-10-24 01:14 实测：PTY 内起界面 → bash 工具跑 `date` 回值；
+01:17 再在 hub 的 xterm 里起同一命令，输入 `/status` 有回显与工具调用。
+⇒ terminal 恢复，但**命令必须钉死** `--profile tui`：裸 `dsh` 仍会变成 `dsh web`
+（判例 252 §四.2 的端口/争写风险只对裸 dsh 成立）。
 """
 import os
 import sys
@@ -50,22 +58,30 @@ class DshProfileTest(unittest.TestCase):
         dyn = [p["id"] for p in profiles._dynamic_cli_agents(gate=False)]
         self.assertNotIn("dsh", dyn, "动态发现必须跳过已收录的 dsh（否则菜单两张卡）")
 
-    def test_entries_expose_web_only(self):
-        """只出 Web 入口：term 必须**不在**（2026-10-24 改判，见文件头第四条）。
+    def test_entries_expose_web_and_term(self):
+        """Web 入口 + 终端入口都要在（2026-10-24 01:15 改判，见文件头第五条）。
 
-        旧断言 `assertIn("term", …)` 的理由是"加了 Web UI 不能丢终端"；
-        但那条终端命令起的是 `dsh web` 而不是会话，留着就是在后台多起实例。
+        旧断言是「term 必须不在」；改判依据：dsh 本体不带终端前端，但外置插件
+        @tomowang/dsh-tui 提供全屏 TUI，`dsh --profile tui` 已在 PTY 与 hub xterm 双实测。
         """
         p = profiles.get_profile("dsh")
         types = [e["type"] for e in profiles.entries_for(p, "running")]
         self.assertIn("embed", types, "应给出嵌入会话入口")
         self.assertIn("open", types, "应给出新窗口入口")
-        self.assertNotIn("term", types, "dsh 没有 CLI 会话，不得再出终端入口")
+        self.assertIn("term", types, "dsh 的终端形态来自 dsh --profile tui，必须给")
 
-    def test_no_terminal_entry(self):
-        """画像层面直接收口：terminal 为空 ⇒ POST /api/term/sessions 会 400。"""
+    def test_terminal_cmd_pins_tui_profile(self):
+        """画像层钉死命令：必须是 `dsh --profile tui`，绝不能退化成裸 `dsh`。
+
+        裸 `dsh` 经启动器 `case "${1:-web}"` 变成 `dsh web` ⇒ 再起一个 Web 服务器，
+        抢 3080 之后的端口并争写 `~/.dsh`（判例 252 §四.2）。
+        """
         p = profiles.get_profile("dsh")
-        self.assertFalse(p.get("terminal"), "dsh 的 terminal 必须为空（无 CLI 交互会话）")
+        term = p.get("terminal") or {}
+        cmd = term.get("cmd", "")
+        self.assertIn("--profile tui", cmd, "dsh 的终端命令必须是 `dsh --profile tui`")
+        self.assertNotRegex(cmd, r"(^|/)dsh\s*$", "不得裸 dsh（会变成 dsh web）")
+        self.assertEqual(term.get("cwd"), "/fs/1000/ftp/技术文档")
         # cli 仍留着：detect / vitals 靠它判活，去掉会让卡片降级成 unknown
         self.assertTrue(p.get("cli"), "cli 不能一起删——判活要用")
 

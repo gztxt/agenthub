@@ -201,20 +201,25 @@ PROFILES: List[dict] = [
     # 用户要"原生界面"又只能在嵌入式终端里手敲 `dsh web`，两次会撞 3080。
     # 现改为静态卡：ui 走 loopback，entries 里再用 _dsh_web_url() 换成带 token 的实时地址。
     # 动态发现那边不会重复出卡 —— _dynamic_cli_agents 的 covered 含本卡 id。
-    # 2026-10-24（用户两轮报障「新建会话还是没有输入框」后裁定）：**去掉 terminal**。
-    # dsh 没有 CLI 交互会话：`~/.dsh/profiles` 只有 web/headless，裸 `dsh` 经启动器
-    # `case "${1:-web}"` 直接变成 `dsh web` ⇒ 所谓"新会话"等于再起一个 Web 服务器，
-    # 抢 3080 之后的端口并争写 `~/.dsh`（判例 252 §四.2）。前端早已不给这个形态
-    # （NO_TERM，判例 253），这里把后端也收口：entries_for 不再出 term，
-    # `POST /api/term/sessions{agent_id:'dsh'}` 直接 400「无终端入口」。
+    # 2026-10-24 01:15（用户第三次报障，指出「调研显示可以使用终端」后**改判**）：
+    # 上次的「没有 CLI 交互会话」只对了半句 —— DSH **本体不带**终端前端，但终端前端是
+    # **外置插件形态**：`dsh plugin --profile tui add @tomowang/dsh-tui` 装好后
+    # `dsh --profile tui` 就是全屏 TUI（MIT；peerDeps 钉 ^0.2.1-rc.2，与本机 0.2.1-rc.2 同版）。
+    # 实测 2026-10-24 01:14：TUI 起界面 → bash 工具跑 `date -u +%FT%TZ` →
+    # 回来 `2026-10-23T17:14:09Z`（文本+真工具调用双证据）。
+    # ⇒ 恢复 term entry，命令**必须**是 `dsh --profile tui`：
+    #   · 裸 `dsh` 仍会变成 `dsh web`（启动器 `case "${1:-web}"`）⇒ 抢 3080 后的端口、
+    #     争写 `~/.dsh`（判例 252 §四.2），这条禁令不变；
+    #   · 用绝对路径：服务 PATH 不保证含 ~/.local/bin（同 codex/CODEBUDDY_CLI 的做法）。
+    # 前端 NO_TERM 同步清空（判例 253 的机制保留，只去掉 dsh 成员）。
     {"id": "dsh", "name": "DSH", "kind": "agent",
      "detect": {"systemd": ["dsh"], "proc": [r"(^|/)dsh( |$)"]},
      "cli": "dsh", "port": 3080, "ui": "http://192.168.5.102:3080",
-     "terminal": None,
+     "terminal": {"cmd": "/home/gztxt/.local/bin/dsh --profile tui",
+                  "cwd": "/fs/1000/ftp/技术文档"},
      "chat": None,
-     "desc": "DeepSeek Harness 自带 Web UI（dsh.service 常驻 :3080）；"
-             "访问 token 每次启动随机生成，卡片实时从 journal 取，重启即换；"
-             "无 CLI 交互会话，交互全在原生界面"},
+     "desc": "DeepSeek Harness：自带 Web UI（dsh.service 常驻 :3080，token 由卡片实时注入）"
+             "+ 外置 TUI 终端（dsh --profile tui，@tomowang/dsh-tui）"},
     {"id": "jcode", "name": "JCode", "kind": "agent",
      "detect": {"proc": [r"(^|/)jcode( |$)"]},
      "cli": "jcode", "port": None, "ui": None,

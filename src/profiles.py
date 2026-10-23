@@ -110,6 +110,43 @@ def running_systemd_units(*, force_fresh: bool = False) -> set:
     return _cached(_unitsds_cache, "units", _UNITSD_TTL_S, _produce)
 
 
+# ── dsh Web UI 的带 token 地址（2026-10-23）─────────────────────────
+# dsh web 的浏览器鉴权 token 是**进程级随机**：`packages/client/connection/src/browser-auth.ts`
+# 里 `processLaunchToken()` 用 `randomBytes(32)` 生成，只在启动横幅打印一次，前端用
+# `?token=` 换一个 HttpOnly、SameSite=Strict、最长 1 天的 cookie。推论三条：
+#   ① token 不能写进本文件 —— 既是「凭据不落配置」，也会在每次 restart 后立刻失效；
+#   ② 只能每次从服务日志取**最新一条**（每次启动都会多一条）；
+#   ③ 取不到就退化为裸地址（服务没跑 / journal 滚掉），卡片仍出但打开会 401 ——
+#      明确降级，不做「看起来能用其实打不开」。
+# 直接读 journal 而不调 dshctl --url：后者要跑一遍完整脚本（实测 1~3s），
+# 而 discovery 是每请求路径；缓存 30s，与 _UNITSD_TTL_S 同量级。
+_DSH_URL_CACHE = {"ts": 0.0, "url": None}
+_DSH_URL_TTL_S = 30.0
+
+
+def _dsh_web_url() -> Optional[str]:
+    import subprocess
+    import time
+    now = time.monotonic()
+    if now - _DSH_URL_CACHE["ts"] < _DSH_URL_TTL_S:
+        return _DSH_URL_CACHE["url"]
+    url = None
+    try:
+        out = subprocess.run(
+            ["journalctl", "--user", "-u", "dsh.service", "-n", "200",
+             "--no-pager", "-o", "cat"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout or ""
+        hits = re.findall(r"https?://\S+\?token=[A-Za-z0-9._-]+", out)
+        if hits:
+            url = hits[-1]
+    except Exception:  # noqa: BLE001  取不到只降级，不能让整条 discovery 挂掉
+        url = None
+    _DSH_URL_CACHE["ts"] = now
+    _DSH_URL_CACHE["url"] = url
+    return url
+
+
 def docker_states(*, force_fresh: bool = False) -> Dict[str, str]:
     """{容器名: running|exited}"""
     def _produce() -> Dict[str, str]:
@@ -159,6 +196,18 @@ PROFILES: List[dict] = [
      "chat": None,
      "desc": "Pi Coding Agent，原生 Web 会话界面 :30141；CLI（v0.85.1，默认交互 TUI）" +
              "可在本机/GitHub 项目页按目录拉起终端会话"},
+    # dsh 自带 Web UI（上游 v1.6.0 起 dshctl 可托管为 systemd 单元）。
+    # 2026-10-23：原来只有 B 档动态卡（ui 硬编码 None）⇒ 只能开终端，
+    # 用户要"原生界面"又只能在嵌入式终端里手敲 `dsh web`，两次会撞 3080。
+    # 现改为静态卡：ui 走 loopback，entries 里再用 _dsh_web_url() 换成带 token 的实时地址。
+    # 动态发现那边不会重复出卡 —— _dynamic_cli_agents 的 covered 含本卡 id。
+    {"id": "dsh", "name": "DSH", "kind": "agent",
+     "detect": {"systemd": ["dsh"], "proc": [r"(^|/)dsh( |$)"]},
+     "cli": "dsh", "port": 3080, "ui": "http://192.168.5.102:3080",
+     "terminal": {"cmd": "dsh", "cwd": "/fs/1000/ftp/技术文档"},
+     "chat": None,
+     "desc": "DeepSeek Harness 自带 Web UI（dsh.service 常驻 :3080）；"
+             "访问 token 每次启动随机生成，卡片实时从 journal 取，重启即换"},
     {"id": "jcode", "name": "JCode", "kind": "agent",
      "detect": {"proc": [r"(^|/)jcode( |$)"]},
      "cli": "jcode", "port": None, "ui": None,
@@ -536,6 +585,10 @@ def entries_for(p: dict, status: str) -> List[dict]:
     if kind == "agent":
         ui = p.get("ui")
         if isinstance(ui, str):
+            # dsh 的访问 token 是进程级随机、只在启动横幅出现一次（见 _dsh_web_url）：
+            # 每次现取最新一条，取不到则保留裸地址（打开会 401，属明确降级）。
+            if p["id"] == "dsh":
+                ui = _dsh_web_url() or ui
             # frame_deny = 控制台自设 X-Frame-Options: DENY，iframe 必被浏览器拒 → 仅新窗口
             if not p.get("frame_deny"):
                 es.append({"type": "embed", "label": "嵌入会话", "url": ui})

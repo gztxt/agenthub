@@ -101,7 +101,10 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.142"
+VERSION = "0.13.143"
+#   v0.13.143：**判定附注超时 20→45s**。v0.13.142 上线后第一次真调用即超时
+#   （load=2.4，同载荷直测 10.4s/21s）——「2.3 倍余量」是按空负载算的，不能外推。
+#   附注默认关，宁可慢也不能一开就降级。
 #   v0.13.142：**外部 jev 代码层彻底清除**。端点 2026-10-22 实测恒 451（区域封禁），
 #   随后整体下线；判定后端统一改本机 Ollama（技能 `jev-decision`，qwen2.5:1.5b）。
 #   新增 `src/local_judge.py`（子进程 + 失败必抛，不吞）；`ask_jev` → `ask_local`；

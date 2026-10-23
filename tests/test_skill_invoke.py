@@ -432,6 +432,21 @@ class TestLocalRoots(_InvokeCase):
         self.assertEqual(disk["src"]["kind"], "global")
         self.assertIn("已证伪", disk["opencode"]["note"])
 
+    def test_status_judge_note_follows_real_backend(self):
+        """判例 251：note 写死「本机 Ollama」而同一对象 backend 已是 deepseek-flash。
+
+        判据不看具体后端名（L0 不该绑网关配置），只要求 **note 与 backend_id 同源**：
+        换后端时 note 必须跟着换，旧模型名不得残留。
+        """
+        skill._STATUS_CACHE.update(ts=0.0, data=None)
+        r = self.client.get("/api/skill/status", params={"force": True})
+        self.assertEqual(r.status_code, 200, r.text)
+        j = r.json()["judge"]
+        self.assertIn(j["backend_id"], ("remote", "ollama"))
+        self.assertIn("判定后端=%s" % j["backend_id"], j["note"],
+                      "note 必须由 status() 派生，不得写死旧后端")
+        self.assertNotIn("qwen2.5:1.5b", j["note"], "换后端后不得残留旧模型名")
+
 
 # ── runlog._pick_extra：请求体字段进埋点的单测 ────────────────────────────
 class TestPickExtra(unittest.TestCase):

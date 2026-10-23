@@ -1583,6 +1583,8 @@ async def skill_status(force: bool = Query(default=False)):
         }
     unique, aliases = _dedup(all_items)
     tdai_items = tdai_raw.get("items") or []
+    # 判定状态只取一次：下面既要用字段，也要用 status() 自己派生的 note。
+    judge_st = local_judge.status()
     data = {
         "disk": disk_out,
         "dedup": {"walked": len(all_items), "unique": len(unique), "aliases": aliases},
@@ -1599,12 +1601,15 @@ async def skill_status(force: bool = Query(default=False)):
                     if tdai_raw.get("ok") and not tdai_items else
                     "注册表有数据" if tdai_items else "注册表这一路本次不可用，原因见 error"),
         },
-        # 2026-10-23：外部 jev（api.typesafe.ai）已下线 ⇒ 技能判定改本地模型。
-        # 这里只报本地判定的就绪状态（脚本在不在、真调用过几次、上次错误），
-        # 不再报 key / 区域封禁——那套判据随端点一起作废（判例 244 §5.3）。
-        "judge": dict(local_judge.status(),
-                      note="判定后端=本机 Ollama（jev-decision 技能，qwen2.5:1.5b）；"
-                           "ready=false = 技能脚本不在，/relevant 的判定附注整体降级"),
+        # 2026-10-23：外部 jev（api.typesafe.ai）已下线 ⇒ 判定后端由 JUDGE_BACKEND 决定
+        # （默认 remote=deepseek-flash）。这里只报判定就绪状态（后端在不在、真调用过几次、
+        # 上次错误），不再报 key / 区域封禁——那套判据随端点一起作废（判例 244 §5.3）。
+        # ⚠ 文案必须由 status() 派生：这里曾写死「本机 Ollama（jev-decision 技能）」，
+        # 接上 remote 后同一对象里出现 backend=deepseek-flash + note=Ollama（判例 251）。
+        "judge": dict(judge_st,
+                      note=judge_st["note"] +
+                      "；ready=false = 该后端未配置（remote 看网关地址、ollama 看脚本在不在），"
+                      "/relevant 的判定附注整体降级"),
         "gap": {
             "disk_unique": len(unique),
             "tdai_rows": len(tdai_items),

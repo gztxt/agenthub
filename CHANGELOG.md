@@ -48,6 +48,18 @@ PT-08 同一批 20 题实测：远端三档**质量已饱和**（noul 中英各 
 `VITALS_JUDGE` / `CHAIN_JUDGE` 仍为 0：前者是持续成本（16 agent × 每 15min × 5 题），
 后者换后端后**没做质量对照**。CCR 不返 `cost`，只能报 token。
 
+### ⑥ 复验修正（同日）：`/api/skill/status` 的 note 仍写死 Ollama
+
+§② 只修好了 `local_judge.status()`；`src/skill.py` 用
+`dict(local_judge.status(), note="判定后端=本机 Ollama（jev-decision 技能…）")`
+把正确 note **覆盖**掉 ⇒ 同一响应里 `backend=deepseek-flash`、`note=Ollama`
+（卡 251 §2 宣称该端点已修，实测不成立）。
+
+改为从 `status()["note"]` 派生（后端名与模型不再二次书写），并加
+`test_status_judge_note_follows_real_backend`：断言 note 必含 `backend_id`、
+不含旧模型名。教训：`dict(base, **override)` 的覆盖位是「接了但面板说没接」的
+复发点，判据要从**端点响应**断言，不能只测被复用的函数。
+
 ## v0.13.145 — 判定进主链：任务验收降级 + 参考候选提位
 
 > 来源：2026-10-23 用户令「判定进主链」。此前本地判定只有两处调用：vitals sweep（被 sha

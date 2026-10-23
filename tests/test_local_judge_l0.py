@@ -47,6 +47,10 @@ class _Base(unittest.TestCase):
         self._saved = {k: os.environ.get(k) for k in self._ENV}
         os.environ["JUDGE_CACHE_PATH"] = str(self.tmp / "judge_cache.json")
         os.environ["JUDGE_ALERT_PATH"] = str(self.tmp / "judge_alerts.jsonl")
+        # 2026-10-23 起生产默认 LOCAL_JUDGE=0（本地模型已下线）。本文件测的是**启用时**
+        # 的契约，故用例内强制打开；下线态另由 TestDisabled 覆盖，不改生产默认值。
+        self._enabled_saved = local_judge.ENABLED
+        local_judge.ENABLED = True
         local_judge.reset_stats()
         self.addCleanup(self._restore)
 
@@ -56,6 +60,7 @@ class _Base(unittest.TestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+        local_judge.ENABLED = self._enabled_saved
         local_judge.reset_stats()
 
     def _script(self, body: str, name: str = "fake_decision.py") -> pathlib.Path:
@@ -276,6 +281,48 @@ class TestAlerts(_Base):
                 local_judge.judge({"q": {"type": "noul", "instructions": "x"}},
                                   state="s", timeout_s=5)
         self.assertFalse(local_judge.status()["alert"])
+
+
+class TestDisabled(_Base):
+    """2026-10-23 用户裁定：本机 Ollama 与 jev-decision 技能已删除，判定默认下线。
+
+    下线态必须是**显式不可用**：不静默返空答案、不起子进程、不计失败/告警
+    （否则运维指标里会出现「判定一直坏」的假象）。
+    """
+
+    def test_default_is_off(self):
+        """模块默认值必须是关——生产靠这个默认值，不靠 env。"""
+        src = (_REPO / "src" / "local_judge.py").read_text(encoding="utf-8")
+        self.assertIn('os.getenv("LOCAL_JUDGE", "0")', src,
+                      "默认值被改回开：Ollama 已删，开了就是每次调用都失败")
+
+    def test_off_raises_explicitly_and_counts_nothing(self):
+        local_judge.ENABLED = False
+        before = local_judge.status()
+        with self.assertRaises(local_judge.LocalJudgeUnavailable) as cm:
+            local_judge.judge({"q": {"type": "noul", "instructions": "x"}}, timeout_s=5)
+        msg = str(cm.exception)
+        self.assertIn("下线", msg)
+        self.assertIn("LOCAL_JUDGE=1", msg, "必须告诉运维怎么复活")
+        after = local_judge.status()
+        self.assertEqual(after["calls"], before["calls"], "下线态不是一次调用")
+        self.assertEqual(after["fail"], before["fail"], "下线态不许计失败")
+        self.assertEqual(after["consecutive_fail"], before["consecutive_fail"])
+        self.assertFalse(after["alert"])
+
+    def test_off_does_not_run_script(self):
+        marker = self.tmp / "ran.txt"
+        self._script("open(%r, 'w').write('ran')" % str(marker))
+        local_judge.ENABLED = False
+        with self.assertRaises(local_judge.LocalJudgeUnavailable):
+            local_judge.judge({"q": {"type": "noul", "instructions": "x"}}, timeout_s=5)
+        self.assertFalse(marker.exists(), "下线态仍起了子进程")
+
+    def test_status_reports_enabled(self):
+        local_judge.ENABLED = False
+        self.assertFalse(local_judge.status()["enabled"])
+        local_judge.ENABLED = True
+        self.assertTrue(local_judge.status()["enabled"])
 
 
 if __name__ == "__main__":

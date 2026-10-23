@@ -48,7 +48,7 @@ import profiles
 # ── 开关与阈值（env 可覆写，默认对现有部署零影响）────────────────
 #: 语义判定开关：本地模型（local_judge → Ollama qwen2.5:1.5b）。0 = 只用硬规则。
 #: 2026-10-23：外部 jev（api.typesafe.ai）已下线，原 VITALS_JEV/TYPESAFE_* 一并作废。
-JUDGE_ENABLED = os.getenv("VITALS_JUDGE", "1") == "1"
+JUDGE_ENABLED = os.getenv("VITALS_JUDGE", "0") == "1"
 #: 单轮判定的硬超时（秒）。一次 5 题 = 5 次 CPU 推理。实测（2026-10-23，本机
 #: qwen2.5:1.5b）：空闲时 5 题 37~41s（≈7.5s/题，冷启动含加载 9s）；sweep 用
 #: `max_workers=4` 并发打同一台 Ollama，2 题并发实测 15~24s ⇒ 5 题会逼近 60s。

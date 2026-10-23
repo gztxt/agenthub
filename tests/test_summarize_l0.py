@@ -27,9 +27,14 @@ class _Base(unittest.TestCase):
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="l0sum-"))
         self._saved = os.environ.get("JUDGE_CACHE_PATH")
         os.environ["JUDGE_CACHE_PATH"] = str(self.tmp / "cache.json")
+        # 2026-10-23 起生产默认 SUMMARIZE_ENABLED=0（本地模型已下线）。本文件测的是
+        # **启用时**的分块/归并/缓存语义，故用例内强制打开；下线态见 TestDisabled。
+        self._enabled_saved = summarize.ENABLED
+        summarize.ENABLED = True
         self.addCleanup(self._restore)
 
     def _restore(self):
+        summarize.ENABLED = self._enabled_saved
         if self._saved is None:
             os.environ.pop("JUDGE_CACHE_PATH", None)
         else:
@@ -136,6 +141,34 @@ class TestEndpoint(_Base):
     def test_validation_rejects_empty_text(self):
         r = self.client.post("/api/summarize", json={"text": "", "points": 2})
         self.assertEqual(r.status_code, 422)
+
+
+class TestDisabled(_Base):
+    """2026-10-23 用户裁定：Ollama 与模型文件已删 ⇒ 摘要默认下线。
+
+    下线态必须是显式 503（`SummarizeUnavailable`），不能静默返空要点，
+    也不能发起任何 `_post`（否则等于每次请求都去撞一个不存在的端口）。
+    """
+
+    def test_default_is_off(self):
+        src = (_REPO / "src" / "summarize.py").read_text(encoding="utf-8")
+        self.assertIn('os.getenv("SUMMARIZE_ENABLED", "0")', src,
+                      "默认值被改回开：本机 Ollama 已删，开了就是每次 503 前先等超时")
+
+    def test_off_raises_without_calling_model(self):
+        summarize.ENABLED = False
+        with mock.patch.object(summarize, "_post",
+                               side_effect=AssertionError("下线态不该调模型")):
+            with self.assertRaises(summarize.SummarizeUnavailable) as cm:
+                summarize.summarize("正文")
+        self.assertIn("下线", str(cm.exception))
+        self.assertIn("SUMMARIZE_ENABLED=1", str(cm.exception), "必须给出复活方法")
+
+    def test_status_reports_enabled(self):
+        summarize.ENABLED = False
+        self.assertFalse(summarize.status()["enabled"])
+        summarize.ENABLED = True
+        self.assertTrue(summarize.status()["enabled"])
 
 
 if __name__ == "__main__":

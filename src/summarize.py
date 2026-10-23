@@ -34,6 +34,10 @@ import judge_cache
 
 MODEL = os.getenv("SUMMARIZE_MODEL", "qwen2.5:1.5b")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
+#: 2026-10-23 用户裁定：本地摘要质量不达标（关键事实覆盖率 3/10，且模型会改写数字），
+#: 已随 Ollama 一并下线。默认 0 ⇒ summarize() 抛 SummarizeUnavailable（端点回 503），
+#: 调用方必须按失败处理，不会拿到空要点。复活须恢复 Ollama 并设 SUMMARIZE_ENABLED=1。
+ENABLED = os.getenv("SUMMARIZE_ENABLED", "0").strip().lower() in ("1", "true", "on", "yes")
 CHUNK_CHARS = int(os.getenv("SUMMARIZE_CHUNK_CHARS", "1600"))
 MAX_INPUT = int(os.getenv("SUMMARIZE_MAX_CHARS", "20000"))
 TIMEOUT_S = float(os.getenv("SUMMARIZE_TIMEOUT", "300"))
@@ -138,6 +142,10 @@ def summarize(text: str, points: int = 3, style: str = "",
     t = _canonical(text)
     if not t:
         raise ValueError("正文为空")
+    if not ENABLED:
+        raise SummarizeUnavailable(
+            "本地摘要已下线（2026-10-23）：本机 Ollama 与模型文件已删除。"
+            "要复活须恢复 Ollama 并设 SUMMARIZE_ENABLED=1")
     if len(t) > MAX_INPUT:
         raise ValueError("正文过长：%d 字，上限 %d 字；请先分段" % (len(t), MAX_INPUT))
     n = max(1, min(MAX_POINTS, int(points or 3)))
@@ -177,7 +185,8 @@ def summarize(text: str, points: int = 3, style: str = "",
 
 def status() -> Dict:
     cs = judge_cache.stats()
-    return {"backend": "ollama-local", "model": MODEL, "chunk_chars": CHUNK_CHARS,
+    return {"backend": "ollama-local", "enabled": ENABLED, "model": MODEL,
+            "chunk_chars": CHUNK_CHARS,
             "max_input": MAX_INPUT, "ttl_s": CACHE_TTL_S,
             "cache": {"entries": cs.get("entries"), "hits": cs.get("hits"),
                       "misses": cs.get("misses"), "path": cs.get("path")}}

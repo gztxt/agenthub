@@ -74,6 +74,12 @@ ALERT_AFTER = int(os.getenv("JUDGE_ALERT_AFTER", "3"))
 DEFAULT_SCRIPT = (Path(__file__).resolve().parents[2] / "skills" / "@user_36623aa7"
                   / "jev-decision" / "scripts" / "decision.py")
 
+#: 本地推理总开关（2026-10-23 用户裁定：本地模型对判定/摘要无收益，已整体下线）。
+#: 默认 0 ⇒ judge() 立即抛 LocalJudgeUnavailable，调用方按「没判成」降级；
+#: 不发起子进程、不连 11434、不写缓存。要复活本地模型须同时恢复 ollama 服务与
+#: jev-decision 技能，并显式设 LOCAL_JUDGE=1。
+ENABLED = os.getenv("LOCAL_JUDGE", "0").strip().lower() in ("1", "true", "on", "yes")
+
 _LOCK = threading.Lock()
 _STAT: Dict[str, Any] = {
     "calls": 0, "ok": 0, "fail": 0, "ms_sum": 0, "ms_max": 0,
@@ -217,6 +223,7 @@ def status() -> Dict[str, Any]:
     cs = judge_cache.stats()
     return {
         "backend": "ollama-local",
+        "enabled": ENABLED,
         "ready": p.is_file(),
         "script": str(p),
         "model": st.get("last_model"),
@@ -292,6 +299,11 @@ def judge(questions: Dict[str, Any], state: str = "",
     """
     if not isinstance(questions, dict) or not questions:
         raise LocalJudgeUnavailable("没有问题可判（questions 为空）")
+    if not ENABLED:
+        # 不计失败、不告警：这是「按设计下线」，不是故障。记录会污染连续失败计数。
+        raise LocalJudgeUnavailable(
+            "本地推理已下线（2026-10-23）：Ollama 与 jev-decision 技能已删除；"
+            "要复活须先恢复二者并设 LOCAL_JUDGE=1")
     script = script_path()
     if not script.is_file():
         _fail("script_missing", 0, "脚本不在：%s" % script)

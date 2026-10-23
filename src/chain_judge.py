@@ -46,7 +46,7 @@ from typing import Any, Dict, List, Optional
 import local_judge
 
 #: 主链判定总开关。默认开——否则又回到「接了但从不调用」的休眠态。
-ENABLED = os.getenv("CHAIN_JUDGE", "1").strip().lower() not in ("0", "false", "off", "no")
+ENABLED = os.getenv("CHAIN_JUDGE", "0").strip().lower() not in ("0", "false", "off", "no")
 #: 单次超时。实测 1.5~3.7s，45s 只是兜底（Ollama 冷加载 / 别的活占着）。
 TIMEOUT_S = float(os.getenv("CHAIN_JUDGE_TIMEOUT", "45"))
 #: 产物短于此长度不值得判（「完成」两个字复述不出证据）。

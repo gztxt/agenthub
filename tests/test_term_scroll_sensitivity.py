@@ -238,7 +238,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.142"
+    CURRENT_VERSION = "0.13.143"
+
+    #: v0.13.143：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「20s 余量是按空负载算的」「不能外推」「宁可慢也不能一开就降级」。
+    VERSION_ROOT_CAUSES["0.13.143"] = (
+        "判定附注超时 20→45s", "不能外推", "宁可慢也不能一开就降级", "2.3 倍余量",
+    )
 
     #: v0.13.142：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「外部 jev 恒 451 已下线」「失败必抛不吞」「精排默认关守注入预算」。

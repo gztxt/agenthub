@@ -364,6 +364,28 @@ PROFILES: List[dict] = [
              "（" + LAN_HOST_NOTE + "）→ 原生会话；CLI 亦可在项目目录拉起终端会话；"
              "⚠ workbuddy-daemon/headless 两单元 2026-10-24 用户裁定**豁免**"
              "「不长驻」（小程序通道与桌面 Electron 依赖它们，停了手机端断）"},
+    # QoderWake：Qoder 云端 Agent 的本地宿主。2026-10-24 用户报「不是所有 agent 都
+    # 按需拉起」后实测抓出：`qoderwake __daemon`（PID 1359，845MB）+
+    # `qodercli-wake --sdk`（PID 16085，205MB）两个进程长驻，QoderWake.service
+    # enabled + Restart=always ⇒ 本仓画像此前**零登记**，10-24 全军整改没覆盖它。
+    # 本卡按方案2补登：静态卡 id 取 `qoder`（压掉 B 档 CLI watchlist 的同 id
+    # 动态卡，covered 机制见 _dynamic_cli_agents）；AGENT_PROBE 里 qoder 的
+    # verify_argv（qodercli -p）会自动注入，无需重写。
+    # detect 双路：unit 名大小写敏感（QoderWake 精确匹配，见 detect_status）；
+    # proc 两条覆盖 daemon 与 SDK 唤醒进程（daemon 拉起的子进程，unit 停了它也没了）。
+    # 终端入口绝对路径：qodercli 在 ~/.local/bin，服务 PATH 不保证含（同 dsh 做法）。
+    {"id": "qoder", "name": "QoderWake", "kind": "agent",
+     "detect": {"systemd": ["QoderWake"],
+                "proc": [r"(^|/)qoderwake( |$)", "qodercli-wake"]},
+     "cli": "qodercli", "port": 19820, "ui": "http://127.0.0.1:19820",
+     "terminal": {"cmd": "/home/gztxt/.local/bin/qodercli",
+                  "cwd": "/fs/1000/ftp/技术文档"},
+     "chat": None,
+     "desc": "Qoder 云端 Agent 本地宿主：Web UI :19820 按需启动 "
+             "systemctl --user start QoderWake（2026-10-24 起不长驻；原 "
+             "enabled+Restart=always，daemon 845MB + qodercli-wake 205MB "
+             "长驻且 hub 无登记）；CLI qodercli（v1.1.65）终端按需拉起；"
+             "云端 agent API 走 openapi.qoder.sh"},
 
     # ── Gateways（非 Agent，仅快捷方式）──────────────────────
     {"id": "ccr", "name": "CCR Gateway", "kind": "gateway",

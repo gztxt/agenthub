@@ -1,13 +1,14 @@
 """全 agent 按需拉起（2026-10-24 用户令「所有 agent 参考 omp 不长驻 按需拉起」）
 
 画像层不变量：
-① cloudcli/pi/dsh/qwenpaw 四卡 desc 必须带启动命令（零代码按需入口）；
+① cloudcli/pi/dsh/qwenpaw/qoder 五卡 desc 必须带启动命令（零代码按需入口）；
    codebuddy 卡必须带豁免注记（workbuddy 两单元用户明示保留常驻）；
 ② agent 的 string ui 的 embed/open 入口必须带 probe_port == 画像 port——
    服务停了按钮要消失（「死面板不出按钮」doctrine 从 panel 类扩展到 agent ui）；
 ③ _entry_alive：loopback 双栈之外，URL 端口==probe_port 时按 URL host 补探
    （dsh 只绑 192.168.5.102）；URL 端口≠probe_port（qwenpaw 注入代理）不补探；
-④ 终端入口不受影响：pi/dsh 停了仍给出 term 入口（按需形态的本体）。
+④ 终端入口不受影响：pi/dsh 停了仍给出 term 入口（按需形态的本体）；
+⑤ qoder 静态卡必须压掉 B 档动态卡（同 id ⇒ covered），否则一张 agent 两张卡。
 """
 import os
 import sys
@@ -23,8 +24,8 @@ import vitals  # noqa: E402
 
 class OnDemandProfilesTest(unittest.TestCase):
     def test_ondemand_cards_document_start_command(self):
-        """四张按需卡的 desc 必须自带启动命令（用户裁定零代码入口）。"""
-        for pid in ("cloudcli", "pi", "dsh", "qwenpaw"):
+        """按需卡的 desc 必须自带启动命令（用户裁定零代码入口）。"""
+        for pid in ("cloudcli", "pi", "dsh", "qwenpaw", "qoder"):
             desc = profiles.get_profile(pid).get("desc", "")
             self.assertIn("systemctl --user start", desc,
                           f"{pid} 卡 desc 必须写启动命令（零代码按需入口）")
@@ -38,7 +39,7 @@ class OnDemandProfilesTest(unittest.TestCase):
 
     def test_string_ui_entries_carry_probe_port(self):
         """string ui 的 embed/open 必须带 probe_port == 画像 port。"""
-        for pid in ("pi", "dsh", "qwenpaw", "codebuddy"):
+        for pid in ("pi", "dsh", "qwenpaw", "codebuddy", "qoder"):
             p = profiles.get_profile(pid)
             es = [e for e in profiles.entries_for(p, "running")
                   if e["type"] in ("embed", "open")]
@@ -47,6 +48,18 @@ class OnDemandProfilesTest(unittest.TestCase):
                 self.assertEqual(e.get("probe_port"), p.get("port"),
                                  f"{pid} 的 {e['type']} 入口 probe_port 必须等于画像 port"
                                  f"（真实服务端口，不是注入代理端口）")
+
+    def test_qoder_static_card_suppresses_dynamic(self):
+        """qoder 静态卡（id=qoder）必须让 B 档动态发现不出第二张 qoder 卡。
+
+        动态卡由 CLI watchlist 生成（qodercli 已安装 ⇒ 不压就会出「Qoder CLI」
+        终端卡 + 「QoderWake」静态卡两张）。covered 集合含 PROFILES 的 id/cli。
+        """
+        dyn_ids = {c["id"] for c in profiles._dynamic_cli_agents(gate=False)}
+        self.assertNotIn("qoder", dyn_ids,
+                         "静态卡已收录 qoder，动态发现不得再出一张同 id 卡")
+        self.assertIn("qoder", {p["id"] for p in profiles.PROFILES},
+                      "qoder 静态卡必须存在（QoderWake daemon 的登记入口）")
 
     def test_term_entries_survive_stopped(self):
         """停了也要给终端入口——按需形态的本体就在这。"""

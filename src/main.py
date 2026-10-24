@@ -104,24 +104,19 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.149"
-#   v0.13.149：**全 agent 按需拉起**（用户 2026-10-24 令「所有 agent 参考 omp
-#   不长驻 按需拉起」；裁定：workbuddy 两单元豁免、停完即 disable、零代码入口）。
-#   cloudcli/pi/dsh/qwenpaw 四卡的 resident backend（11 个 systemd 单元）
-#   stop+disable；crontab 两套守护中性化（watchdog 摘 pi-web、cloudcli 转发
-#   脚本 exit 0）。本仓两处改动：
-#   ① entries_for：agent 的 string ui 的 embed/open 带 probe_port —— 服务停着时
-#      按钮必须消失（「死面板不出按钮」doctrine 从 panel 类扩展到 agent ui）。
-#      陷阱：probe_port 必须取**画像 port** 而不是 ui 里的端口——qwenpaw 的 ui 是
-#      hub **注入代理** :3103（进程内常驻），拿它判活会把停着的服务显示成活的。
-#   ② discovery._entry_alive：双栈之外按 **URL host 补探**——dsh 只绑
-#      192.168.5.102，loopback/::1 全拒连，不补探会把**活着的** dsh 误判成死面板。
-#      两道闸同时成立才补探：URL 端口 **端口相等**（URL 指向真实服务而非代理）
-#      + host 非回环（回环的双栈已覆盖，test_loopback_url_host_not_reprobed
-#      钉探针调用恰好两次）。
-#   红向自证抓出**判据恒假**：qwenpaw 用例原用回环 URL，回环排除先挡住补探，
-#   「端口相等」条件实际没被检验到；补 LAN host + 端口不符 + 探针在 LAN 开着的
-#   用例（test_proxy_with_mismatched_port_not_probed）后再破坏才精确变红。
+VERSION = "0.13.150"
+#   v0.13.150：**补登 QoderWake 长驻缺口**（用户 2026-10-24 报「不是所有 agent
+#   都按需拉起，还有几个在长驻」）。实测：`qoderwake __daemon`（845MB）+
+#   `qodercli-wake --sdk`（205MB）两进程长驻，QoderWake.service enabled+
+#   Restart=always，而本仓画像零登记 ⇒ v0.13.149 的全军整改没覆盖它。
+#   本版只改画像层一件事：profiles.py 加 qoder 静态卡（kind=agent，
+#   ui :19820 + qodercli 终端入口，desc 写按需启动命令）。
+#   宿主侧配套（随用户裁定执行，不在本仓）：QoderWake.service stop+disable。
+#   两个实现陷阱：
+#   ① 静态卡 id 必须取 `qoder` —— CLI watchlist 已有同 id 动态卡（qodercli
+#      已安装），covered 机制靠 id 相同才压得住；test 钉「动态卡不得含 qoder」。
+#   ② detect.systemd 单元名大小写敏感（`u in units` 精确匹配）⇒ 必须写
+#      `QoderWake` 不能写 `qoderwake`；proc 两条兜底 daemon/SDK 两进程。
 # ── v0.13.148 及更早的逐版根因已于 2026-10-24 归档至 ──
 # ── CHANGELOG.md（脚本 scripts/extract_changelog.py + scripts/extract_changelog_newfmt.py 逐字搬运）──
 # 此处**只保留当前版本**的根因，避免两份会各自漂移的副本。

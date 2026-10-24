@@ -1,3 +1,38 @@
+## v0.13.150 — 补登 QoderWake 长驻缺口（按需拉起全军整改的漏网实体）
+
+> 来源：2026-10-24 用户报「不是所有的 agent 都按需拉起，还是有几个在长驻」。
+> v0.13.149 整改了 cloudcli/pi/dsh/qwenpaw 四卡（11 个单元），但实测抓出
+> **QoderWake 完全在登记面外**：`qoderwake __daemon`（845MB）+
+> `qodercli-wake --sdk`（205MB）两进程长驻，`QoderWake.service`
+> enabled + Restart=always，agenthub 画像零登记 ⇒ 10-24 全军整改没覆盖它。
+
+### ① 画像层（profiles.py）
+
+- 新增 qoder 静态卡（kind=agent）：`detect` 双路（systemd `QoderWake` +
+  proc `qoderwake`/`qodercli-wake`），`ui` loopback :19820（实测 Web UI
+  200，标题 QoderWake），`terminal` 绝对路径 `~/.local/bin/qodercli`
+  （v1.1.65，服务 PATH 不保证含 ~/.local/bin，同 dsh 做法），`desc`
+  写按需启动命令 + 长驻证据（进程 RSS、unit 自起形态）。
+- 两个实现陷阱：① 卡 id 取 `qoder`——CLI watchlist 已有同 id 动态卡
+  （qodercli 已安装），靠 covered 机制同 id 相压，否则一张 agent 两张卡；
+  ② `detect_status` 对 systemd 单元名**大小写敏感精确匹配**（`u in units`），
+  必须写 `QoderWake`；proc 两条兜底 daemon 与 SDK 唤醒子进程。
+
+### ② 测试（tests/test_profiles_ondemand.py）
+
+- 按需卡启动命令断言扩到五卡（+qoder）；string ui probe_port 断言扩到
+  五卡；新增 `test_qoder_static_card_suppresses_dynamic`：静态卡收录后
+  动态发现不得再出同 id 卡（防重复出卡回归）。
+
+### ③ 宿主侧配套（不在本仓，随用户裁定执行）
+
+- `QoderWake.service` stop+disable（daemon 与 qodercli-wake 进程随之退出，
+  :19820 关闭）；需要时 `systemctl --user start QoderWake` 零代码拉起。
+- claude-mem（worker + service + ts4/ts6 转发）保持长驻：卡上
+  `kind=service`，按「kind=agent 才不长驻」的军规字面不在整改面，如实记录。
+
+---
+
 ## v0.13.149 — 全 agent 按需拉起：五卡口径整改 + ui 入口死端口过滤
 
 > 来源：2026-10-24 用户令「所有 agent 参考 omp 不长驻 按需拉起」。

@@ -459,11 +459,13 @@
            裸 `padding: 8px`，两份独立字面量各改各的。抽成变量后窄屏只赋值对变量，
            padding 只在这里算一次。 */
         main { --main-pad-y: 4.8px; --main-pad-x: 6.4px;
-               flex: 1; min-width: 0; max-width: 1400px; width: 100%; margin: 0 auto;
+               flex: 1; min-width: 0; max-width: 1400px;
                padding: var(--main-pad-y) var(--main-pad-x);
                display: flex; flex-direction: column; overflow: hidden; }
         section.page { display: none; }
         section.page.on { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+        /* 设置页等 sys 页面在激活时需要可滚动（内容可能超出视口），.page.on 的 overflow:hidden 会覆盖 .page.sys 的 overflow-y:auto，故此处显式恢复 */
+        section.page.sys.on { overflow-y: auto; }
         .hint { color: var(--muted); font-size: var(--fs-base); line-height: var(--lh-base); }
 
         /* ── 右侧操作区顶栏：面包屑 + 模式 tab（模式 tab 的唯一来源，聊天内嵌的旧栏已停用）── */

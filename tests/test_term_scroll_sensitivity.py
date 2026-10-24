@@ -238,7 +238,15 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.149"
+    CURRENT_VERSION = "0.13.150"
+
+    #: v0.13.150：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「补登 QoderWake 长驻缺口」「双进程长驻实测」「单元名大小写敏感」
+    #: 「静态卡 id 压动态卡（covered）」。
+    VERSION_ROOT_CAUSES["0.13.150"] = (
+        "补登 QoderWake 长驻缺口", "qoderwake __daemon", "QoderWake.service",
+        "covered", "大小写敏感",
+    )
 
     #: v0.13.149：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「全 agent 按需拉起」「probe_port 死按钮过滤」「注入代理误判」

@@ -245,6 +245,26 @@ PROFILES: List[dict] = [
      "chat": None,
      "desc": "Pi Coding Agent，原生 Web 会话界面 :30141；CLI（v0.85.1，默认交互 TUI）" +
              "可在本机/GitHub 项目页按目录拉起终端会话"},
+    # oh-my-pi（omp）：Pi 的 coding-first 分支。2026-10-24 用户令接入（按需拉起、不常驻）。
+    # 与现役 pi 三处全不同 ⇒ 可并存零迁移：包名 `@oh-my-pi/pi-coding-agent`（现役是
+    # `@earendil-works/pi-coding-agent`）、配置根 `~/.omp/`（现役 `~/.pi/`）、命令 `omp`。
+    # 终端入口必须**绝对路径**：`~/.local/bin/omp` 是 /bin/sh 包装脚本（exec 绝对路径的
+    # bun 1.3.14）—— omp 本体 shebang `#!/usr/bin/env bun`，服务 PATH 里没有 bun，
+    # 与 pi 当年 `#!/usr/bin/env node` 撞系统 node v20 同族（见 child_env 注释）；
+    # 包装后解释器不依赖 PATH。安装态 `/vol1/omp/npm-global`（独立 npm 前缀）。
+    # detect 两条并存：包装脚本直调（`(^|/)omp`）+ 经 bun 跑 dist/cli.js
+    # （`@oh-my-pi/pi-coding-agent`）。⚠ 不能只写 `pi-coding-agent`：pi-web 的包名是
+    # `@earendil-works/pi-coding-agent`，漏了厂商前缀会把 pi-web 进程误判成 omp 在跑。
+    # 无 ui/port：omp 不带 Web UI（有 RPC/ACP 模式，但 hub 终端卡只拉 TUI）；
+    # 无常驻进程/unit，单进程 RSS 约 379 MB ⇒ 只按需拉起。
+    {"id": "omp", "name": "oh-my-pi (omp)", "kind": "agent",
+     "detect": {"proc": [r"(^|/)omp( |$)", r"@oh-my-pi/pi-coding-agent"]},
+     "cli": None, "port": None, "ui": None,
+     "terminal": {"cmd": "/home/gztxt/.local/bin/omp", "cwd": "/fs/1000/ftp/技术文档"},
+     "chat": None,
+     "desc": "oh-my-pi：Pi 的 coding-first 分支（v18.12.6），TUI 按需拉起；模型走 "
+             "~/.omp/agent/models.yml（provider ccr → CCR :3456）。增量能力："
+             "LSP/DAP、浏览器/桌面自动化、子代理治理"},
     # dsh 自带 Web UI（上游 v1.6.0 起 dshctl 可托管为 systemd 单元）。
     # 2026-10-23：原来只有 B 档动态卡（ui 硬编码 None）⇒ 只能开终端，
     # 用户要"原生界面"又只能在嵌入式终端里手敲 `dsh web`，两次会撞 3080。
@@ -571,7 +591,7 @@ def _nvm_bins() -> List[Path]:
 
 
 def extra_path_dirs() -> List[str]:
-    """终端子进程 PATH 需要**前置**的目录（目前 = nvm node bin，新版优先）。
+    """终端子进程 PATH 需要**前置**的目录（目前 = nvm node bin，新版优先 + bun bin）。
 
     为什么光有 which() 兜底还不够（2026-09-27 实测）：`which` 只解决"hub 自己找
     不找得到这个 CLI"，解决不了"CLI 起来之后自己再找解释器"。`pi` 的 shebang 是
@@ -579,8 +599,29 @@ def extra_path_dirs() -> List[str]:
     而 pi v0.85.1 的 bundle 用了 `node:fs` 的 `globSync`（Node 22+ 才有）⇒ 启动就
     `SyntaxError: ... does not provide an export named 'globSync'`，终端里是一屏 JS
     堆栈。交互 shell 里 PATH 含 nvm（v24.18.0）⇒ 一切正常，所以「本机跑没事、
-    hub 里必崩」。前置目录而不是改 node 软链、也不改 systemd 单元配置。"""
-    return [str(d) for d in _nvm_bins()]
+    hub 里必崩」。前置目录而不是改 node 软链、也不改 systemd 单元配置。
+
+    2026-10-24 补 bun（同族第二例）：omp（oh-my-pi）shebang 是 `#!/usr/bin/env bun`。
+    omp 卡当前用 /bin/sh 包装脚本绕过了这层（见 PROFILES 里 omp 卡注释），这里仍补：
+    终端里手敲 `bun`/`bunx`、以及将来任何 bun 系 CLI 都受益。
+    ⚠ 只加 `~/.bun/bin`（本机 1.3.14，满足 omp `engines.bun>=1.3.14`）；
+      `/var/apps/bunjs/target/bin` 那枚 1.3.9 **不加**——它会抢答案。"""
+    dirs = [str(d) for d in _nvm_bins()]
+    bun = _bun_bin()
+    if bun:
+        dirs.append(str(bun))
+    return dirs
+
+
+def _bun_bin() -> Optional[Path]:
+    """`~/.bun/bin` 存在才返回（2026-10-24：omp 等 bun 系 CLI 的解释器目录）。
+
+    与 `_nvm_bins()` 同构成函数而非内联 `Path.home()`：L0 测试要能 patch 掉它
+    才能钉「没有 bun 的机器上 PATH 原样」这条不变量（见 test_term_child_env.py）。
+    只认 `~/.bun/bin`（本机 bun 1.3.14，满足 omp `engines.bun>=1.3.14`）——
+    `/var/apps/bunjs/target/bin` 的 1.3.9 不满足，故意不收。"""
+    bun_bin = Path.home() / ".bun" / "bin"
+    return bun_bin if bun_bin.is_dir() else None
 
 
 def which(name: str) -> Optional[str]:

@@ -238,7 +238,15 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.147"
+    CURRENT_VERSION = "0.13.148"
+
+    #: v0.13.148：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「dsh 工作区联动」「启动器 cd 覆盖 cwd」「workspace/create 注册」
+    #   「req_cwd 才联动」「to_thread 不占循环」。
+    VERSION_ROOT_CAUSES["0.13.148"] = (
+        "dsh 工作区联动", 'cd "$DSH_DIR"', "workspace/create",
+        "req_cwd", "asyncio.to_thread",
+    )
 
     #: v0.13.147：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「dsh 拒绝通配地址」「self_addrs」「整段 host 相等」。

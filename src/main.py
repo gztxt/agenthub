@@ -102,7 +102,20 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.147"
+VERSION = "0.13.148"
+#   v0.13.148：**dsh 工作区联动**（用户 2026-10-24 报障：点本机项目选 dsh 新建会话，
+#   工作目录没转到项目目录，其他 agent 都正常）。两层根因，缺一层都修不好：
+#   ① 嵌入式 CLI：`~/.local/bin/dsh` 启动器入口无条件 `cd "$DSH_DIR"`，把 term.py
+#      设好的进程 cwd 覆盖回源码目录 ⇒ TUI 横幅/会话/分层全落 dsh-src（dshctl 仓
+#      已修：删入口 cd + `dsh_source_run()` 保留调用方 cwd，web 分支内部单独 cd）。
+#   ② 原生界面：侧栏只列**已注册工作区**的会话，TUI 会话不过 session.create 的
+#      workspaceId 分支 ⇒ 落 Ungrouped。本仓补②：新增 `src/dshws.py`，建会话前
+#      best-effort 调 dsh web RPC（`POST /api/workspace/create`，先 `?token=` 换
+#      HttpOnly cookie 再打 `/api`——dsh 鉴权只认签名 cookie）把 cwd 注册成工作区。
+#   接线判据：`prof["id"] == "dsh" and req_cwd`（显式选项目目录才联动），
+#   `asyncio.to_thread` 不占事件循环，失败只记日志绝不阻塞建会话。
+#   边界：TUI 会话仍落 Ungrouped（attach 只在 session.create workspaceId 分支，
+#   第三方 TUI 插件无接缝）；续聊不触发注册。判例 `agent-knowledge/257`。
 #   v0.13.147：**卡片地址按访问网络自适应**（用户 2026-10-24 报障：手机经 Tailscale
 #   点 DSH 打不开，局域网正常）。两层根因，缺一层都修不好：
 #   ① 监听层：**dsh 拒绝通配地址**（`--host` 帮助原文 "wildcard addresses are

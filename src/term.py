@@ -29,6 +29,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSock
 from pydantic import BaseModel, Field
 
 import db
+import dshws
 import modelcfg
 import profiles
 import sessions_store
@@ -880,6 +881,13 @@ async def create_session(body: CreateIn, request: Request):
         if reason:
             raise HTTPException(409, reason)
         cwd = cwd_ex["cwd"]
+    # v0.13.148：dsh 工作区联动（判例 257）。本机项目/GitHub 项目页按 cwd 拉起
+    # dsh 时，先把 cwd 注册成 dsh 原生界面的工作区 —— 否则会话落在 Ungrouped，
+    # 侧栏看不到项目目录，即用户报的「工作目录没有正常转到项目目录」。
+    # 判据用 req_cwd（显式选了项目目录才联动；裸「新会话」用画像默认目录不动），
+    # best-effort：dsh web 没开/超时/失败只记日志，绝不阻塞建会话。
+    if prof["id"] == "dsh" and req_cwd:
+        await asyncio.to_thread(dshws.ensure_workspace, cwd)
     resolved = profiles.which(cmd[0])
     if not resolved:
         raise HTTPException(400, f"命令 {cmd[0]} 未在本机找到")

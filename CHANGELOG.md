@@ -1,3 +1,51 @@
+## v0.13.148 — dsh 工作区联动：本机项目按目录拉起即注册原生界面工作区
+
+> 来源：2026-10-24 用户令「修复dsh原生界面和嵌入式cli选择工作区目录的错误
+> 联动本机项目选择工作目录」。前置判例 `agent-knowledge/257`（两层根因）、
+> `252/253/254`（dsh 形态）、dshctl 仓 `8738908`（启动器不再 cd）。
+
+### ① 现象与根因
+
+用户报「点击本机项目 选取 dsh 新建会话 工作目录没有正常转到项目目录，
+其他 agent 都是正常的」。两层根因，缺一层都修不好：
+
+1. **嵌入式 CLI**：`~/.local/bin/dsh` 启动器入口无条件 `cd "$DSH_DIR"`，把
+   term.py `os.chdir(cwd)` 设好的进程 cwd 覆盖回源码目录 ⇒ TUI banner、
+   会话 `meta.cwd`、`<cwd>/.env` 分层全落在 dsh-src（dshctl 仓已修并提交，
+   本机 `~/.local/bin/dsh` 已同步，实测 banner 显示项目目录）。
+2. **原生界面**：dsh web 侧栏只列**已注册工作区**的会话；TUI 会话走
+   `agents.create({meta:{cwd}})` 直通路径，不过 `session.create` 的
+   workspaceId 分支 ⇒ 按目录拉起的会话落在 Ungrouped，项目目录无迹可寻。
+
+### ② 改动
+
+- 新增 `src/dshws.py`：`ensure_workspace(cwd)` best-effort 调 dsh web 的
+  HTTP RPC（`POST /api/workspace/create`；先 `?token=` 换 HttpOnly cookie 再
+   POST，envelope 形状照 dsh `packages/client/connection` 的 rpc.ts），把 cwd
+  注册成工作区（幂等，同路径返回既有）。地址/token 走
+  `profiles._dsh_web_url()`（journalctl 横幅，与卡片按钮同源）。
+- `src/term.py` `create_session`：`prof["id"] == "dsh" and req_cwd` 时
+  `asyncio.to_thread(dshws.ensure_workspace, cwd)` —— 只在**显式选了项目
+  目录**时联动（本机项目/GitHub 项目页）；失败只记日志，绝不阻塞建会话。
+- 新增 `tests/test_dshws.py`（18 例）：best-effort 契约（连不上/超时/RPC 错/
+  无 token 一律 False 不抛）、两步 RPC 形状、接线判据（AST 断言 dsh+req_cwd、
+  to_thread、单一接线点）。
+
+### ③ 测试与实测
+
+- L0 hermetic 3009 例 0 失败；新模块 18 例全绿。
+- 实盘（真 dsh web、真 journalctl token）：`ensure_workspace('/fs/1000/ftp/
+  技术文档/dsh-src')` 53ms 注册成功，`workspace.json` 落盘；测试产物已回收。
+- dshctl 仓 `tests/run.sh` 14 个测试文件全绿（stdin=/dev/null）。
+
+### ④ 边界（故意没做）
+
+- **TUI 会话仍落在 Ungrouped**：dsh 的 workspace attach 只存在于
+  `session.create` 的 workspaceId 分支与 web 侧流程，TUI 插件
+  （`@tomowang/dsh-tui`，第三方）不过这条路径，且 TUI profile 不组合
+  workspace 包 ⇒ 进程内 attach 无接缝。工作区本身已注册，侧栏可见项目。
+- 续聊（resume）不触发注册：其 cwd 来自会话记录，工作区理应在首建时已注册。
+
 ## v0.13.147 — 卡片地址按访问网络自适应（dsh 三网可达）
 
 > 来源：2026-10-24 用户令「dsh 使用 tailscale 连接失败 还是使用局域网IP地址

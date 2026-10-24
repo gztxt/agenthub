@@ -1,3 +1,48 @@
+## v0.13.149 — 全 agent 按需拉起：五卡口径整改 + ui 入口死端口过滤
+
+> 来源：2026-10-24 用户令「所有 agent 参考 omp 不长驻 按需拉起」。
+> 裁定三点：① workbuddy 两单元**豁免**（小程序通道+桌面 Electron 依赖）；
+> ② 停完即 disable（重登录不再自动起）；③ cloudcli/qwenpaw 零代码入口
+> （desc 写启动命令），不加按钮。
+
+### ① 画像层（profiles.py）
+
+- cloudcli/pi/dsh/qwenpaw 四卡 desc 改「按需拉起」口径，自带
+  `systemctl --user start <unit>` 启动命令；codebuddy 卡加豁免注记。
+- omp 卡注释标注为全军口径样板（终端入口 + 无 resident backend）。
+
+### ② 死按钮过滤（profiles.py + discovery.py）
+
+- `entries_for`：agent 的 string ui 的 embed/open 入口带 `probe_port`
+  （取**画像 port**，不是 ui 里的端口——qwenpaw 的 ui 是 hub 注入代理 :3103，
+  进程内常驻，拿它判活会把停着的 qwenpaw 显示成活的）。
+- `discovery._entry_alive`（新）：loopback+::1 双栈之外，URL 端口 == probe_port
+  时按 URL host 补探。dsh 只绑 192.168.5.102，loopback/::1 全拒连，
+  不补探会把**活着的** dsh 误判成死面板。回环 URL 不补探（双栈已覆盖，
+  `test_loopback_url_host_not_reprobed` 钉探针调用次数恰好两次）。
+
+### ③ 测试
+
+- 新增 `tests/test_profiles_ondemand.py`（11 例）：四卡启动命令/豁免注记/
+  probe_port 不变量/term 入口存活/_entry_alive 五条路径。
+- 红向自证：破坏 probe_port、破坏 URL host 补探、破坏端口相等条件分别
+  精确变红。⚠ 第三条首轮**没红**——原 qwenpaw 用例 URL 是回环，被回环
+  排除挡掉，端口相等条件实际没被检验（判据恒假）；已补
+  `test_proxy_with_mismatched_port_not_probed`（LAN host + 端口不符 +
+  探针在 LAN 开着）后再破坏即精确变红。
+
+### ④ 宿主侧配套（不在本仓，随用户裁定执行）
+
+- 11 个单元 stop+disable：cloudcli{,-lan,-ts4,-ts6}、pi-web{,-relay}、
+  dsh{,-ts4,-ts6}、qwenpaw{,-ipv4}；workbuddy{,-daemon,-headless} 豁免。
+- crontab 两套守护中性化（禁写 crontab，改脚本本体）：
+  `agent-hub-watchdog.sh` 看护清单摘除 pi-web/pi-web-relay（保留 agenthub）；
+  `cloudcli-tailscale-forward.sh` 头部 exit 0（停了还保持 :3010 转发=常驻残留）。
+- `pi-web-auto-update.timer` 已核实**自中性化**：pi-web 停着时
+  `wait_for_idle` 判「活动不可判定」直接退出，不 swap ⇒ 不用动。
+
+---
+
 ## v0.13.148 — dsh 工作区联动：本机项目按目录拉起即注册原生界面工作区
 
 > 来源：2026-10-24 用户令「修复dsh原生界面和嵌入式cli选择工作区目录的错误

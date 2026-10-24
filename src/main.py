@@ -104,20 +104,24 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.148"
-#   v0.13.148：**dsh 工作区联动**（用户 2026-10-24 报障：点本机项目选 dsh 新建会话，
-#   工作目录没转到项目目录，其他 agent 都正常）。两层根因，缺一层都修不好：
-#   ① 嵌入式 CLI：`~/.local/bin/dsh` 启动器入口无条件 `cd "$DSH_DIR"`，把 term.py
-#      设好的进程 cwd 覆盖回源码目录 ⇒ TUI 横幅/会话/分层全落 dsh-src（dshctl 仓
-#      已修：删入口 cd + `dsh_source_run()` 保留调用方 cwd，web 分支内部单独 cd）。
-#   ② 原生界面：侧栏只列**已注册工作区**的会话，TUI 会话不过 session.create 的
-#      workspaceId 分支 ⇒ 落 Ungrouped。本仓补②：新增 `src/dshws.py`，建会话前
-#      best-effort 调 dsh web RPC（`POST /api/workspace/create`，先 `?token=` 换
-#      HttpOnly cookie 再打 `/api`——dsh 鉴权只认签名 cookie）把 cwd 注册成工作区。
-#   接线判据：`prof["id"] == "dsh" and req_cwd`（显式选项目目录才联动），
-#   `asyncio.to_thread` 不占事件循环，失败只记日志绝不阻塞建会话。
-#   边界：TUI 会话仍落 Ungrouped（attach 只在 session.create workspaceId 分支，
-#   第三方 TUI 插件无接缝）；续聊不触发注册。判例 `agent-knowledge/257`。
+VERSION = "0.13.149"
+#   v0.13.149：**全 agent 按需拉起**（用户 2026-10-24 令「所有 agent 参考 omp
+#   不长驻 按需拉起」；裁定：workbuddy 两单元豁免、停完即 disable、零代码入口）。
+#   cloudcli/pi/dsh/qwenpaw 四卡的 resident backend（11 个 systemd 单元）
+#   stop+disable；crontab 两套守护中性化（watchdog 摘 pi-web、cloudcli 转发
+#   脚本 exit 0）。本仓两处改动：
+#   ① entries_for：agent 的 string ui 的 embed/open 带 probe_port —— 服务停着时
+#      按钮必须消失（「死面板不出按钮」doctrine 从 panel 类扩展到 agent ui）。
+#      陷阱：probe_port 必须取**画像 port** 而不是 ui 里的端口——qwenpaw 的 ui 是
+#      hub **注入代理** :3103（进程内常驻），拿它判活会把停着的服务显示成活的。
+#   ② discovery._entry_alive：双栈之外按 **URL host 补探**——dsh 只绑
+#      192.168.5.102，loopback/::1 全拒连，不补探会把**活着的** dsh 误判成死面板。
+#      两道闸同时成立才补探：URL 端口 **端口相等**（URL 指向真实服务而非代理）
+#      + host 非回环（回环的双栈已覆盖，test_loopback_url_host_not_reprobed
+#      钉探针调用恰好两次）。
+#   红向自证抓出**判据恒假**：qwenpaw 用例原用回环 URL，回环排除先挡住补探，
+#   「端口相等」条件实际没被检验到；补 LAN host + 端口不符 + 探针在 LAN 开着的
+#   用例（test_proxy_with_mismatched_port_not_probed）后再破坏才精确变红。
 # ── v0.13.148 及更早的逐版根因已于 2026-10-24 归档至 ──
 # ── CHANGELOG.md（脚本 scripts/extract_changelog.py + scripts/extract_changelog_newfmt.py 逐字搬运）──
 # 此处**只保留当前版本**的根因，避免两份会各自漂移的副本。

@@ -160,8 +160,14 @@ class AgentDiscovery:
             else:
                 endpoint = ui or p.get("panel") or (f"http://127.0.0.1:{p['port']}" if p.get("port") else "")
             # 死面板不出按钮（probe_port 过滤）
+            # v0.13.149（2026-10-24）：过滤判据从「loopback+::1 双栈」扩展为
+            # _entry_alive——URL 端口与 probe_port 相同（URL 指向真实服务而非代理）时，
+            # 按 URL 里的 host 再补探一次。为什么需要：dsh 只绑 192.168.5.102，
+            # loopback/::1 全拒连，不补探会把**活着的** dsh 误判成死面板、按钮消失。
+            # 反向保护：qwenpaw 的 ui 是注入代理 :3103 ≠ probe_port :8088 ⇒ 不补探，
+            # 代理进程内常驻，补探会把停着的 qwenpaw 误判成活的。
             entries = [e for e in entries
-                       if not (e.get("probe_port") and not self._sync_check_port(e["probe_port"]))]
+                       if not (e.get("probe_port") and not self._entry_alive(e))]
             # 判定层异常 / 无记录：正常出卡，前端会显示 null 字段
             vv = _verdict_view(p, vrec)
             agents.append(AgentInfo(
@@ -238,6 +244,22 @@ class AgentDiscovery:
         if not port:
             return False
         return vitals.port_open(port) or vitals.port_open(port, "::1")
+
+    def _entry_alive(self, e: dict) -> bool:
+        """probe_port 入口活性（v0.13.149）：双栈 + URL host 补探。
+
+        补探条件两条同时成立才生效：① URL 端口 == probe_port（URL 指向真实服务，
+        不是 hub 注入代理之类的前置）；② URL host 不是回环（回环的上面已经探过）。
+        dsh 是唯一命中者：只绑 192.168.5.102:3080，token URL 与裸地址同 host。
+        """
+        port = e.get("probe_port")
+        if self._sync_check_port(port):
+            return True
+        url = e.get("url") or ""
+        m = re.search(r"https?://([^/:]+):(\d+)", url)
+        if m and int(m.group(2)) == port and m.group(1) not in ("127.0.0.1", "localhost", "::1"):
+            return vitals.port_open(port, m.group(1))
+        return False
 
     def _find_config_path(self, agent_id: str) -> Optional[str]:
         paths = {

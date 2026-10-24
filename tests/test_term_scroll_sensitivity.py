@@ -238,9 +238,18 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.148"
+    CURRENT_VERSION = "0.13.149"
 
-    #: v0.13.148：关键词取自版本注释里**实际写下的字句**。
+    #: v0.13.149：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「全 agent 按需拉起」「probe_port 死按钮过滤」「注入代理误判」
+    #   「URL host 补探（dsh LAN 绑定）」「端口相等+非回环双闸」「判据恒假」。
+    VERSION_ROOT_CAUSES["0.13.149"] = (
+        "全 agent 按需拉起", "probe_port", "注入代理",
+        "URL host 补探", "端口相等", "判据恒假",
+    )
+
+    #: v0.13.148：关键词取自版本注释里**实际写下的字句**（已归档 CHANGELOG，
+    #   本条目保留供 test_earlier_version_root_causes_survive 稽查「不许蒸发」）。
     #: 核心是「dsh 工作区联动」「启动器 cd 覆盖 cwd」「workspace/create 注册」
     #   「req_cwd 才联动」「to_thread 不占循环」。
     VERSION_ROOT_CAUSES["0.13.148"] = (

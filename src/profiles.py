@@ -236,15 +236,25 @@ PROFILES: List[dict] = [
      "cli": None, "port": 3010,
      "ui": {"url": "http://127.0.0.1:3010", "port": 3010, "unit": "cloudcli", "label": "CloudCLI"},
      "terminal": None, "chat": None,
-     "desc": "Claude Code 的 Web 原生宿主（cloudcli 单元 :3010）：会话列表+项目直达，"
-              "独立子菜单，embed 面板下方挂 CloudCLI 项目直达面板（renderCloudcliProjects）"},
+     # 2026-10-24 用户令「所有 agent 参考 omp 不长驻 按需拉起」：cloudcli 四单元
+     # （cloudcli + lan/ts4/ts6 三个 socat 转发）已 stop+disable。停着时 dict ui 的
+     # 端口探测不出按钮（discovery 既有机制）；启动命令写在这里当零代码入口。
+     # 项目清单直读 auth.db 与服务活死解耦，照常可用。
+     "desc": "Claude Code 的 Web 原生宿主 :3010（按需拉起，不长驻）：启动 "
+             "systemctl --user start cloudcli；手机/Tailscale 访问另起 "
+             "cloudcli-lan/ts4/ts6 三个转发单元；会话列表+项目直达面板读 auth.db，"
+             "与服务活死解耦"},
     {"id": "pi", "name": "Pi Agent", "kind": "agent",
      "detect": {"proc": [r"next-server", r"(^|/)pi( |$)"], "systemd": ["pi-web"]},
      "cli": None, "port": 30141, "ui": "http://127.0.0.1:30141",
      "terminal": {"cmd": "pi", "cwd": "/fs/1000/ftp/技术文档"},
      "chat": None,
-     "desc": "Pi Coding Agent，原生 Web 会话界面 :30141；CLI（v0.85.1，默认交互 TUI）" +
-             "可在本机/GitHub 项目页按目录拉起终端会话"},
+     # 2026-10-24 按需拉起：pi-web + pi-web-relay 两单元 stop+disable，
+     # watchdog（crontab 每 5 分钟）看护清单已摘除 ⇒ 停了不会自动回来。
+     # CLI 终端入口本就是按需形态（hub pty 拉 TUI），不受影响。
+     "desc": "Pi Coding Agent：CLI（v0.85.1，默认交互 TUI）按需拉起终端会话；"
+             "原生 Web 界面 :30141 按需启动 systemctl --user start pi-web"
+             "（2026-10-24 起不长驻，watchdog 已摘除看护）"},
     # oh-my-pi（omp）：Pi 的 coding-first 分支。2026-10-24 用户令接入（按需拉起、不常驻）。
     # 与现役 pi 三处全不同 ⇒ 可并存零迁移：包名 `@oh-my-pi/pi-coding-agent`（现役是
     # `@earendil-works/pi-coding-agent`）、配置根 `~/.omp/`（现役 `~/.pi/`）、命令 `omp`。
@@ -257,6 +267,9 @@ PROFILES: List[dict] = [
     # `@earendil-works/pi-coding-agent`，漏了厂商前缀会把 pi-web 进程误判成 omp 在跑。
     # 无 ui/port：omp 不带 Web UI（有 RPC/ACP 模式，但 hub 终端卡只拉 TUI）；
     # 无常驻进程/unit，单进程 RSS 约 379 MB ⇒ 只按需拉起。
+    # ★ 2026-10-24 用户令「所有 agent 参考 omp 不长驻 按需拉起」——本卡是全军口径的
+    #   样板：终端入口 + 无 resident backend。cloudcli/pi/dsh/qwenpaw 四卡已按此整改，
+    #   codebuddy 的 workbuddy 两单元经用户明示豁免（小程序通道+桌面 Electron 依赖）。
     {"id": "omp", "name": "oh-my-pi (omp)", "kind": "agent",
      "detect": {"proc": [r"(^|/)omp( |$)", r"@oh-my-pi/pi-coding-agent"]},
      "cli": None, "port": None, "ui": None,
@@ -287,8 +300,10 @@ PROFILES: List[dict] = [
      "terminal": {"cmd": "/home/gztxt/.local/bin/dsh --profile tui",
                   "cwd": "/fs/1000/ftp/技术文档"},
      "chat": None,
-     "desc": "DeepSeek Harness：自带 Web UI（dsh.service 常驻 :3080，token 由卡片实时注入）"
-             "+ 外置 TUI 终端（dsh --profile tui，@tomowang/dsh-tui）"},
+     "desc": "DeepSeek Harness：Web UI :3080 按需启动 systemctl --user start dsh"
+             "（2026-10-24 起不长驻；dsh-ts4/ts6 两个 Tailscale 转发单元同步停用，"
+             "需要时一起 start）；token 进程级随机，由卡片实时注入，取不到时打开会 401"
+             "+ 外置 TUI 终端（dsh --profile tui，@tomowang/dsh-tui）按需拉起"},
     {"id": "jcode", "name": "JCode", "kind": "agent",
      "detect": {"proc": [r"(^|/)jcode( |$)"]},
      "cli": "jcode", "port": None, "ui": None,
@@ -330,7 +345,12 @@ PROFILES: List[dict] = [
      "detect": {"proc": [r"qwenpaw app"]},
      "cli": None, "port": 8088, "ui": QWENPAW_UI,
      "terminal": None, "chat": None,
-     "desc": "QwenPaw 助理框架（本 Agent 宿主），WebUI :8088" +
+     # 2026-10-24 按需拉起：qwenpaw + qwenpaw-ipv4（IPv4 socat 前端）两单元
+     # stop+disable。ui 探针用画像 port 8088 而非注入代理 3103——代理在 hub
+     # 进程内常驻，后端停了仍能连上，拿它判活会把死服务显示成活的。
+     "desc": "QwenPaw 助理框架（本 Agent 宿主），WebUI :8088 按需启动 "
+             "systemctl --user start qwenpaw（2026-10-24 起不长驻；"
+             "IPv4 前端另起 qwenpaw-ipv4）" +
              ("；经 hub 注入代理 :%d 统一外框" % EMBED_PROXY_PORT if EMBED_UNIFY else "；直连（注入已关）")},
     {"id": "codebuddy", "name": "CodeBuddy Code", "kind": "agent",
      "detect": {"proc": [r"(^|/)codebuddy( |$)"]},
@@ -341,7 +361,9 @@ PROFILES: List[dict] = [
      "terminal": {"cmd": CODEBUDDY_CLI, "cwd": "/fs/1000/ftp/技术文档"},
      "chat": None,
      "desc": "WorkBuddy 包内捆绑 CLI（`codebuddy --serve`）的遥控 Web 界面 :35431" +
-             "（" + LAN_HOST_NOTE + "）→ 原生会话；CLI 亦可在项目目录拉起终端会话"},
+             "（" + LAN_HOST_NOTE + "）→ 原生会话；CLI 亦可在项目目录拉起终端会话；"
+             "⚠ workbuddy-daemon/headless 两单元 2026-10-24 用户裁定**豁免**"
+             "「不长驻」（小程序通道与桌面 Electron 依赖它们，停了手机端断）"},
 
     # ── Gateways（非 Agent，仅快捷方式）──────────────────────
     {"id": "ccr", "name": "CCR Gateway", "kind": "gateway",
@@ -692,9 +714,20 @@ def entries_for(p: dict, status: str) -> List[dict]:
             if p["id"] == "dsh":
                 ui = _dsh_web_url() or ui
             # frame_deny = 控制台自设 X-Frame-Options: DENY，iframe 必被浏览器拒 → 仅新窗口
+            # v0.13.149：ui 入口也带 probe_port（2026-10-24 全 agent 改按需拉起）——
+            # 服务停着时按钮必须消失。「死面板不出按钮」原先只覆盖 panel 类入口，
+            # agent 的 string ui 是裸 embed/open，端口死了照样出按钮 = 坏入口。
+            # probe_port 取**画像 port**（真实服务端口）而非 ui 里的端口：
+            # qwenpaw 的 ui 是 hub 注入代理 :3103（进程内常驻，后端死了仍能连上），
+            # 拿 3103 判活会把停着的 qwenpaw 显示成活的 ⇒ 必须用 :8088。
+            # dsh 只绑 192.168.5.102（loopback/::1 全拒连）⇒ discovery 侧对
+            # 「URL 端口 == probe_port」的入口按 URL host 补探（见 discovery.py）。
+            _pp = p.get("port")
             if not p.get("frame_deny"):
-                es.append({"type": "embed", "label": "嵌入会话", "url": ui})
-            es.append({"type": "open", "label": "新窗口", "url": ui})
+                es.append({"type": "embed", "label": "嵌入会话", "url": ui,
+                           "probe_port": _pp})
+            es.append({"type": "open", "label": "新窗口", "url": ui,
+                       "probe_port": _pp})
         if p.get("terminal") and status in ("running", "installed", "stopped"):
             es.append({"type": "term", "label": "终端", "agent": p["id"]})
         if p.get("chat"):

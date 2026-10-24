@@ -104,7 +104,23 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.152"
+VERSION = "0.13.153"
+#   v0.13.153：**点「原生界面」没有拉起，只弹「目标界面未响应 / 启动失败：缺少凭据」**
+#   （2026-10-25 用户报「有 web ui 原生界面的 agent 点击原生界面应该是正常拉起并运行，
+#   但是现在点击原生界面没有拉起 显示错误」）。三层根因：
+#   ① 只给按钮不给动作：v0.13.152 的「启动原生界面」要用户点第二次，点「原生界面」
+#     先看到的是错误覆盖层 ⇒ 改为**点开即拉起**：用户明确的进入动作（点菜单行/模式
+#     按钮）置一次性 `_embedAutoStartPending`，由本次探活消费；后台轮询不会顺手起服务。
+#   ② 凭据弹两次 + 原始 401：调用处传 `termHeaders()` 会先 prompt 一次，`api()` 再
+#     prompt 一次；两次取消即回 401「缺少凭据」⇒ 用户看到的就是「启动失败」。
+#     改为只由 `api()` 注入 `x-hub-token`，401 给可操作提示（去设置应用 TERM_TOKEN）。
+#   ③ 判活口径错两层：浏览器侧探活对 IPv6-only 后端永远假死（qwenpaw 只监听
+#     `[::]:8088`，UI 走 hub 注入代理 :3103）；服务端单栈 `port_open` 同样判死。
+#     新增 `GET /api/agents/{id}/ui-status`，由 hub **双栈**判定就绪，前端只读结论。
+#   另两处必修：hub 的 PATH 只有 /usr/*bin（实测 /proc/<pid>/environ），`opencode`
+#   装在 ~/.npm-global/bin ⇒ `cmd` 式拉起直接 FileNotFoundError，按用户级 bin 补 PATH；
+#   并发探活会在 await 后各 append 一层，实测叠出**两个 .embed-dead**（同文案两个
+#   按钮）⇒ 加探活序号闸，只让最后一次挂覆盖层。
 #   v0.13.152：**设置子菜单「上下布局」根因＝模板多一个 </div>**（用户 2026-10-25
 #   报「设置菜单的子菜单点开后应该是左右布局，不是上下布局；所有子菜单页面
 #   布局应该是同一套，只是右边内容不一样」）。

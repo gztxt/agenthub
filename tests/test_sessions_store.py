@@ -588,13 +588,20 @@ class TestTitleFor(unittest.TestCase):
                            ("hermes", str(Path.home())), ("codex", CWD), ("qoder", QODER_CWD),
                            ("cursor", CWD), ("codebuddy", CWD)):
             with self.subTest(agent=agent):
-                items = ss.list_history(agent, cwd, 1)["items"]
-                if not items:
-                    self.skipTest(f"{agent} 该目录无历史")
-                t = ss.title_for(agent, items[0]["id"], cwd)
+                # 只取**有内容**的一条：2026-10-24 22:36 grok 的 build-plan 探针在本机
+                # 留下一条骨架会话（num_messages=0 / session_summary=""），它合法地没有
+                # 标题（title_for 返 ""是正确行为），旧的 items[0] 写法把它当解析失败
+                # ⇒ 闸门 ⑥ 在 10-25 被这条数据卡住。判据用**独立于被测代码**的 msgs
+                # 字段筛，不拿「title 是否为空」筛（那会把真解析坏静默跳过，同 _first_live 的教训）。
+                # 注意只有 grok 侧会给出 msgs（其余 agent 为 None）⇒ 只排 ==0，不排 None。
+                it = next((x for x in ss.list_history(agent, cwd, 20)["items"]
+                           if x.get("msgs") != 0), None)
+                if it is None:
+                    self.skipTest(f"{agent} 该目录无有内容的历史")
+                t = ss.title_for(agent, it["id"], cwd)
                 self.assertTrue(t, f"{agent} title_for 返回空")
                 self.assertTrue(re.search(r"[\u4e00-\u9fffA-Za-z]", t), f"{agent} 标题无实义：{t!r}")
-                self.assertNotEqual(t, items[0]["id"][:8], "标题退化成 sid 前缀")
+                self.assertNotEqual(t, it["id"][:8], "标题退化成 sid 前缀")
 
     def test_bad_shape_id_rejected(self):
         for bad in ("../../etc/passwd", "a;rm -rf", "", "x" * 300):

@@ -238,7 +238,15 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.152"
+    CURRENT_VERSION = "0.13.153"
+
+    #: v0.13.153：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「点击原生界面没有拉起」「ui-status 双栈判活」「termHeaders 二次弹窗」
+    #: 「两个 .embed-dead」「PATH 补用户级 bin」。
+    VERSION_ROOT_CAUSES["0.13.153"] = (
+        "点击原生界面", "没有拉起", "ui-status", "双栈", "termHeaders",
+        "两个 .embed-dead", "PATH",
+    )
 
     #: v0.13.152：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「设置子菜单上下布局」「模板多一个 </div>」「main 提前关闭」

@@ -154,9 +154,16 @@ class AgentDiscovery:
             # 停着的服务由前端 probeEmbed 出「目标界面未响应」覆盖层，按钮本身必须在。
             if isinstance(ui, dict):
                 ui_alive = self._sync_check_port(ui.get("port"))
-                entries = ([{"type": "embed", "label": "原生会话", "url": ui["url"]},
-                            {"type": "open", "label": "↗UI", "url": ui["url"]}]
-                           + entries)
+                # v0.13.152：带「启动原生界面」的拉起描述（与 string-ui 同口径），
+                # 停着的宿主由前端覆盖层按钮按需起，不是让用户去敲 systemctl。
+                _st = profiles.ui_start_for(p["id"])
+                _ui_es = []
+                for _t, _lbl in (("embed", "原生会话"), ("open", "↗UI")):
+                    _e = {"type": _t, "label": _lbl, "url": ui["url"]}
+                    if _st:
+                        _e["start"] = _st
+                    _ui_es.append(_e)
+                entries = (_ui_es + entries)
                 if ui_alive and status in ("installed", "stopped"):
                     status = "running"
                 endpoint = ui["url"] if ui_alive else (p.get("panel") or "")

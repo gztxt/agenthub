@@ -1,3 +1,63 @@
+## v0.13.153 — 点「原生界面」即拉起：凭据只问一次、判活用服务端双栈
+
+> 来源：2026-10-25 用户报「有 web ui 原生界面的 agent 点击原生界面应该是正常
+> 拉起并运行，但是现在点击原生界面没有拉起 显示错误」。
+
+### 根因（四层，逐层实测）
+
+1. **只给按钮不给动作**：v0.13.152 的「启动原生界面」要用户点第二次。按需拉起
+   之后「点开 = 目标停着」是常态，用户点「原生界面」第一眼看到的是
+   「目标界面未响应（…）」错误覆盖层 ⇒ 观感就是「没拉起、显示错误」。
+2. **凭据弹两次 + 原始 401**：`startNativeUI` 调用处传 `termHeaders()`（内部
+   `termToken()` 会 prompt），`api()` 见写方法再 prompt 一次；两次都取消 ⇒
+   401「缺少凭据（x-hub-token / x-term-token / ?token=）」原样弹成
+   「启动失败：…」。无头浏览器实测请求根本没发出（服务端零条 ui-start 日志）。
+3. **判活口径两层错**：浏览器侧 `no-cors` 探活打 `lanUrl(health_url)`，对
+   IPv6-only 后端永远假死 —— qwenpaw 实测只监听 `[::]:8088`，其 UI 走 hub
+   注入代理 :3103；而服务端 `vitals.port_open(8088)` 单栈也判死，于是
+   「服务已 active、代理返 200」仍回「已启动，但界面仍未响应」。
+4. **并发探活叠层**：`applyChatMode` 被 `go('chat')` 与 `renderChatSide()`
+   连调两次，每次探活都在 `await` 后 append ⇒ 实测同一只停着的 agent 出现
+   **两个 `.embed-dead`**（同文案两个按钮，上层挡住下层点击点）。
+
+### 改动
+
+- `static/hub/02-nav-and-poll.js`（hub.js 已重建，`?v=` 内容派生）：
+  - 用户明确的进入动作（`gotoChat` / `pickChatEntity` / `switchMode('embed')`）
+    置一次性 `_embedAutoStartPending`，**探活确认死链时直接启动**，不再要求
+    第二次点击；消费点在 `probeEmbed` 挂覆盖层处（入口消费会被第二次调用吃掉）。
+  - `startNativeUI` 不再传 `termHeaders()`，凭据只由 `api()` 注入 `x-hub-token`；
+    401 改为可操作提示「请在设置→口令应用 TERM_TOKEN 后重试」。
+  - 新增探活序号闸 `_embedProbeSeq`：只有最后一次探活能挂覆盖层。
+  - 就绪判定改问服务端 `ui-status`；无启动描述的入口保持浏览器探活。
+- `src/api_agents.py`：
+  - 新增 `GET /api/agents/{id}/ui-status`（只读、不涉写闸门）：hub 在本机
+    **双栈**探 `port_open(port) or port_open(port, "::1")`，返回 `{ready, port}`。
+  - `ui-start` 的 already_running 判定同改双栈。
+  - `cmd` 式拉起补 PATH：hub 由 systemd --user 起，PATH 只有
+    `/usr/{local/,}{s,}bin:/bin`（实测 `/proc/<hub>/environ`），而 `opencode`
+    装在 `~/.npm-global/bin` ⇒ Popen 直接 FileNotFoundError。现按
+    `~/.npm-global/bin`、`~/.local/bin`、`/usr/local/bin` 补 PATH 并
+    `shutil.which` 解析绝对路径，找不到回 `binary_not_found`。
+- `src/profiles.py` / `src/discovery.py`：沿用 v0.13.152 的 `UI_START` 与
+  `entries.start`（本次未改语义）。
+- `src/main.py`：VERSION → 0.13.153。
+
+### 验证（2026-10-25 07:0x–07:2x，真浏览器 + 真服务）
+
+| agent | 启动方式 | 结果 |
+|---|---|---|
+| cloudcli | systemd `cloudcli` | 点「原生界面」→ 自动 start → 覆盖层消失，`:3010` 200 |
+| qwenpaw | systemd `qwenpaw` | 同上；`ui-status` 双栈判活后覆盖层消失（IPv6-only 不再假死） |
+| opencode | `cmd`（Popen） | 同上；`:4096` 200，日志落 `data/logs/ui-start/opencode.log` |
+
+- 无凭据场景实测：只弹一次口令框；取消后提示改为「启动需要写凭据：请在
+  「设置 → 口令」应用 TERM_TOKEN 后重试」，不再把 401 原文抛给用户。
+- `pytest tests/test_profiles_ondemand.py tests/test_hubjs_split.py
+  tests/test_writeauth.py tests/test_writeauth_actor.py` → 49 passed。
+- 测试后已 `systemctl --user stop cloudcli qwenpaw pi-web`、按精确 PID 停
+  opencode，端口 3010/8088/30141/4096 全部关闭（恢复按需态）。
+
 ## v0.13.152 — 设置子菜单回到「菜单右侧」：模板多一个 </div> 提前关闭了 main
 
 > 来源：2026-10-25 用户报「设置菜单的子菜单点开后应该是左右布局，而不是上下

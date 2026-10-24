@@ -105,12 +105,16 @@ function defaultModeOf(a) {
   if (has('term')) return 'term';
   return 'chat';
 }
+/* 用户明确的进入动作（点菜单行 / 点侧栏图标 / 点模式按钮）⇒ 允许在嵌入目标未运行时
+   **自动拉起**。一次性标志：applyChatMode 消费后即清，后台定时刷新不会顺手起服务。 */
+let _embedAutoStartPending = false;
 function gotoChat(id, mode) {
   chatPick = id;
   lsSet('hub.chat.pick', id);  // T9：记忆上次实体
   const a = entityById(id);
   chatMode = mode || lsGet(MODE_KEY + id) || defaultModeOf(a) || 'chat';
   if (mode) lsSet(MODE_KEY + id, mode);   // 只有点名了形态才算偏好；推导出来的不写盘
+  _embedAutoStartPending = true;
   go('chat');
   renderChatSide();
 }
@@ -135,10 +139,11 @@ function pickChatEntity(id) {
   lsSet('hub.chat.pick', id);
   // T9：模式记忆优先——只认用户**显式**选过的形态（新键），没选过就走默认
   chatMode = lsGet(MODE_KEY + id) || defaultModeOf(entityById(id));
+  _embedAutoStartPending = true;
   renderChatSide();
 }
 
-function applyChatMode() {
+function applyChatMode(opts) {
   const a = entityById(chatPick);
   renderModeBar(a);
   const en = $('chatEntName');
@@ -169,7 +174,7 @@ function applyChatMode() {
     if (hintTxt) hintTxt.textContent = url; else if (hintEl) hintEl.textContent = url;
     const f = $('embedFrame');
     if (f.dataset.src !== url) { f.src = url; f.dataset.src = url; }
-    probeEmbed(url);
+    probeEmbed(url, !!(opts && opts.auto));
     /* 独立 cloudcli 子菜单：embed 面板下挂 CloudCLI 项目直达（渲染到 #embedBody 槽位，
        旧缓存无槽位时 loadCloudcliProjects 兜底走 claude 详情抽屉旧路径）。 */
     if (chatPick === 'cloudcli') renderCloudcliProjects();
@@ -206,31 +211,114 @@ function switchMode(m) {
   }
   chatMode = m;
   lsSet(MODE_KEY + chatPick, m);  // T9：按实体记忆模式（这里是用户点名切换 ⇒ 算真偏好）
-  applyChatMode();
+  /* v0.13.153：用户点「原生界面」＝明确的拉起意图。2026-10-24 起全 agent 按需拉起，
+     停着是常态；只挂「目标界面未响应」再让用户点第二次「启动」正是 2026-10-25 报障
+     「点击原生界面没有拉起」的原样。这里把意图传下去，死链时直接启动。 */
+  applyChatMode({ auto: m === 'embed' });
 }
 
 /* 嵌入存活探测：no-cors fetch 失败=目标端口无响应 → 覆盖层引导切换 */
-async function probeEmbed(url) {
-  const pane = $('embedPane');
-  // 存活信号只保留"死时"的那一份：失败会有整屏覆盖层（含切模式/重试按钮），
-  // 活着时行内再挂一句「可达」是纯噪声 —— 用户 09-20 要求删掉该字样。
-  let dead = pane.querySelector('.embed-dead');
-  if (dead) dead.remove();
+async function _embedAlive(url) {
   try {
     await Promise.race([
       fetch(url, { mode: 'no-cors', cache: 'no-store' }),
       new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 4000))
     ]);
-  } catch (e) {
-    dead = document.createElement('div');
-    dead.className = 'embed-dead';
-    dead.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;gap:12px;align-items:center;justify-content:center;background:var(--mask);z-index:5';
-    dead.innerHTML = '<div style="font-size:var(--fs-base);color:var(--danger-text)">目标界面未响应（' + escapeHtml(url) + '）</div>' +
-      '<div style="display:flex;gap:8px"><button class="btn sm" onclick="switchMode(\'chat\')">改用对话模式</button>' +
-      '<button class="btn sm ghost" onclick="switchMode(\'term\')">改用终端</button>' +
-      '<button class="btn sm ghost" onclick="embedRefresh()">重试嵌入</button></div>';
-    if (getComputedStyle(pane).position === 'static') pane.style.position = 'relative';
-    pane.appendChild(dead);
+    return true;
+  } catch (e) { return false; }
+}
+/* 并发探活序号：applyChatMode 会被 renderChatSide / switchMode / 启动成功后重载
+   多次调入，旧实现每次都在 await 之后 append 一层 ⇒ 2026-10-25 实测同一只停着的
+   agent 叠出 **2 个 .embed-dead**（同文案两个按钮，上层还挡住下层点击点）。
+   只允许最后发起的那次探活挂覆盖层。 */
+let _embedProbeSeq = 0;
+
+/* 就绪判定：有启动描述的卡一律问**服务端**（/api/agents/{id}/ui-status，hub 本机双栈探）。
+   浏览器侧探活对 IPv6-only 后端是假死（qwenpaw 实测只监听 [::]:8088，其 UI 走 hub 注入
+   代理 :3103；客户端探 127.0.0.1/lanUrl 永远失败）。没有启动描述的入口保持浏览器探活。 */
+async function _uiReady(a, e, url) {
+  if (e && e.start) {
+    try {
+      const d = await api('/api/agents/' + encodeURIComponent(a.id) + '/ui-status');
+      return !!d.ready;
+    } catch (x) { /* 端点不可用 ⇒ 退回浏览器探活，不因后端缺端点把界面判死 */ }
+  }
+  return await _embedAlive(lanUrl((e && e.health_url) || url || (e && e.url) || ''));
+}
+
+async function probeEmbed(url, autoWant) {
+  const pane = $('embedPane');
+  const seq = ++_embedProbeSeq;
+  // 存活信号只保留"死时"的那一份：失败会有整屏覆盖层（含切模式/重试按钮），
+  // 活着时行内再挂一句「可达」是纯噪声 —— 用户 09-20 要求删掉该字样。
+  pane.querySelectorAll('.embed-dead').forEach(n => n.remove());
+  const a = entityById(chatPick);
+  const entry = (a && (a.entries || []).find(x => x.type === 'embed')) || null;
+  if (await _uiReady(a, entry, url)) return;
+  if (seq !== _embedProbeSeq) return;   // 期间已有更新的探活接管，别叠第二层
+  /* 自动拉起意图在这里**消费**而不是在 applyChatMode 入口消费：go('chat') 与
+     renderChatSide() 会连着调两次 applyChatMode，入口消费会让第二次（真正挂覆盖层
+     的那次，见上面的 seq）拿到 false ⇒ 自动拉起永不触发（2026-10-25 实测）。 */
+  const autoStart = autoWant || _embedAutoStartPending;
+  _embedAutoStartPending = false;
+  const dead = document.createElement('div');
+  dead.className = 'embed-dead';
+  dead.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;gap:12px;align-items:center;justify-content:center;background:var(--mask);z-index:5';
+  /* 按需拉起（2026-10-24 起全 agent 不长驻）⇒ 停着是常态。覆盖层必须给出**拉起**
+     的按钮，否则用户只剩自己去终端敲 systemctl（2026-10-25 报障「要使用原生界面
+     都没有拉起的地方」）。start 由后端画像声明（profiles.UI_START），未登记的
+     TUI-only agent 不出这个按钮。 */
+  const canStart = !!(entry && entry.start);
+  dead.innerHTML = '<div class="embed-dead-msg" style="font-size:var(--fs-base);color:var(--danger-text)">目标界面未响应（' + escapeHtml(url) + '）</div>' +
+    '<div style="display:flex;gap:8px">' +
+    (canStart ? '<button class="btn sm" data-act="start" onclick="startNativeUI(this)">启动原生界面</button>' : '') +
+    '<button class="btn sm ghost" onclick="switchMode(\'chat\')">改用对话模式</button>' +
+    '<button class="btn sm ghost" onclick="switchMode(\'term\')">改用终端</button>' +
+    '<button class="btn sm ghost" onclick="embedRefresh()">重试嵌入</button></div>';
+  if (getComputedStyle(pane).position === 'static') pane.style.position = 'relative';
+  pane.appendChild(dead);
+  /* 用户是点「原生界面」进来的（autoStart）就直接拉起，不再让用户点第二次：
+     按需拉起后「点开 = 目标停着」是常态，二次确认等于把报障原样保留。 */
+  if (canStart && autoStart) {
+    const msg = dead.querySelector('.embed-dead-msg');
+    if (msg) { msg.style.color = 'var(--text-1)'; msg.textContent = '原生界面未运行，正在拉起…'; }
+    startNativeUI(dead.querySelector('[data-act="start"]'));
+  }
+}
+
+/* 启动原生界面（按需拉起）：POST /api/agents/{id}/ui-start → 轮询真实后端 → 重载嵌页。
+   服务冷启动实测数秒（dsh/qwenpaw），所以轮询 2s × 10 次；成功前按钮保持禁用，
+   失败要**如实报**并恢复可点，不静默吞掉。 */
+async function startNativeUI(btn) {
+  const a = entityById(chatPick);
+  if (!a) return;
+  const e = (a.entries || []).find(x => x.type === 'embed');
+  if (!e || !e.start) return;
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '启动中…'; }
+  try {
+    /* 凭据只交给 api() 注入 x-hub-token（写方法它本来就会问一次并带对头）。
+       调用处**不要**再传 termHeaders()：2026-10-25 实测在缺 token 的浏览器上
+       这会先弹一次口令框，api() 再弹一次；两次都取消即回 401「缺少凭据」，
+       用户看到的就是「启动失败：缺少凭据…」——即本次报障。 */
+    const d = await api('/api/agents/' + encodeURIComponent(a.id) + '/ui-start',
+                        { method: 'POST' });
+    toast(d.status === 'already_running' ? '原生界面已在运行' : '已派发启动，等待界面就绪…', 'ok');
+    for (let i = 0; i < 10; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      if (await _uiReady(a, e, e.url)) {
+        await loadAgents();          // dsh 的 token/端口可能随启动变化，先取新 entries
+        applyChatMode();             // 重建 embed（含新 URL）并重新探活
+        return;
+      }
+    }
+    toast('已启动，但界面仍未响应；稍后可点「重试嵌入」', 'err');
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  } catch (err) {
+    toast(err.http === 401
+      ? '启动需要写凭据：请在「设置 → 口令」应用 TERM_TOKEN 后重试'
+      : '启动失败：' + err.message, 'err');
+    if (btn) { btn.disabled = false; btn.textContent = old; }
   }
 }
 

@@ -4,7 +4,10 @@
 """
 import asyncio
 import json
+import os
 import re
+import shutil
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -158,6 +161,99 @@ async def unregister_agent(agent_id: str):
     if appstate.discovery:
         appstate.discovery.reload()
     return {"status": "deleted", "id": agent_id}
+
+
+# ── 原生界面按需拉起（v0.13.152）────────────────────────────────────
+# 2026-10-25 用户报障「要使用原生界面 都没有拉起的地方」：2026-10-24 全 agent 改
+# 按需拉起后，各卡的原生界面常态是停着的；v0.13.151 把按钮复还了，但点开只有
+# 「目标界面未响应」覆盖层，用户只能自己去终端敲 systemctl。
+#
+# 安全边界：执行目标**只能**取自 `profiles.UI_START`（服务端常量，按 agent id 白名单），
+# 请求体不参与命令构造 ⇒ 本端点不提供任意命令执行。与 /api/term/sessions 的权限同级
+# （同一个写闸门，需要 x-hub-token / ?token=）。
+def _ui_port_open(port) -> bool:
+    """双栈探活，与 `discovery._sync_check_port` 同口径。
+
+    **必须双栈**：qwenpaw 2.2.1 实测只监听 `[::]:8088`，`127.0.0.1:8088` 拒连不等于没起
+    （2026-09-21 判例）。单栈判活会把它永远报成「未运行」——2026-10-25 实测：
+    服务已 active、UI 经 hub 代理 :3103 返 200，单栈探活仍判死并回「已启动，但界面仍未响应」。
+    """
+    if not port:
+        return False
+    return vitals_mod.port_open(port) or vitals_mod.port_open(port, "::1")
+
+
+@router.get("/api/agents/{agent_id}/ui-status")
+async def agent_ui_status(agent_id: str):
+    """原生界面就绪态（**服务端**判定）。
+
+    为什么不让浏览器直接探 ui/health 地址：探针在客户端跑，`127.0.0.1` 指客户端；
+    换成 lanUrl 后又只能打到某一张网卡。qwenpaw 这种 IPv6-only 后端在 IPv4 客户端上
+    永远探不通，而它的 UI 走的是 hub 注入代理 :3103 —— 浏览器侧探活得到的是
+    「假死」（2026-10-25 实测）。就绪与否由 hub 在本机双栈探一次，客户端只读结论。
+    """
+    p = profiles_mod.get_profile(agent_id)
+    if not p:
+        raise HTTPException(404, {"error": "no_agent", "agent_id": agent_id})
+    spec = profiles_mod.ui_start_for(agent_id)
+    port = (spec or {}).get("port") or p.get("port")
+    return {"agent_id": agent_id, "ready": _ui_port_open(port), "port": port}
+
+
+@router.post("/api/agents/{agent_id}/ui-start")
+async def start_agent_ui(agent_id: str):
+    p = profiles_mod.get_profile(agent_id)
+    spec = profiles_mod.ui_start_for(agent_id)
+    if not p or not spec:
+        raise HTTPException(404, {"error": "no_ui_start", "agent_id": agent_id,
+                                  "hint": "该 agent 未登记原生界面启动方式（TUI-only 或卡不存在）"})
+    port = spec.get("port") or p.get("port")
+    if port and _ui_port_open(port):
+        return {"status": "already_running", "agent_id": agent_id, "port": port}
+    unit = spec.get("unit")
+    if unit:
+        try:
+            r = await asyncio.to_thread(
+                subprocess.run, ["systemctl", "--user", "start", unit],
+                capture_output=True, text=True, timeout=25)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(500, {"error": "unit_start_spawn_failed", "unit": unit,
+                                      "detail": "%s: %s" % (type(e).__name__, str(e)[:160])})
+        if r.returncode != 0:
+            raise HTTPException(502, {"error": "unit_start_failed", "unit": unit,
+                                      "detail": ((r.stderr or "") + (r.stdout or ""))[-400:]})
+        return {"status": "started", "kind": "unit", "unit": unit, "agent_id": agent_id}
+
+    cmd = spec.get("cmd")
+    if not cmd:
+        raise HTTPException(500, {"error": "bad_ui_start_spec", "agent_id": agent_id})
+    # ★ hub 由 systemd --user 拉起，PATH 只有 /usr/{local/,}{s,}bin:/bin（实测
+    #   /proc/<hub>/environ）⇒ `opencode` 这类装在 ~/.npm-global/bin 的工具
+    #   在服务进程里**找不到**，Popen 直接 FileNotFoundError。补用户级 bin 目录：
+    #   只影响本端点的子进程，不改全局 env。
+    env = dict(os.environ)
+    extra_bins = [str(Path.home() / ".npm-global" / "bin"),
+                  str(Path.home() / ".local" / "bin"), "/usr/local/bin"]
+    path_env = ":".join([env.get("PATH", "")] + extra_bins)
+    exe = shutil.which(cmd[0], path=path_env)
+    if not exe:
+        raise HTTPException(500, {"error": "binary_not_found", "agent_id": agent_id,
+                                  "binary": cmd[0], "path": path_env[-200:]})
+    env["PATH"] = path_env
+    cmd = [exe] + list(cmd[1:])
+    log_dir = Path(config.log_dir) / "ui-start"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        logf = open(log_dir / (agent_id + ".log"), "ab")   # noqa: SIM115  常驻子进程持有
+        proc = subprocess.Popen(
+            list(cmd), cwd=spec.get("cwd") or None, env=env,
+            stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
+            start_new_session=True, close_fds=True)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, {"error": "spawn_failed", "agent_id": agent_id,
+                                  "detail": "%s: %s" % (type(e).__name__, str(e)[:160])})
+    print(f"[ui-start] {agent_id} pid={proc.pid} cmd={' '.join(cmd)}", flush=True)
+    return {"status": "started", "kind": "cmd", "pid": proc.pid, "agent_id": agent_id}
 
 
 # ── 统一对话（Phase 2：真实适配器直连）──────────────────────────────

@@ -96,6 +96,67 @@ class OnDemandProfilesTest(unittest.TestCase):
             self.assertIn("term", types, f"{pid}  stopped 时仍必须给出 term 入口")
 
 
+class UiStartTest(unittest.TestCase):
+    """原生界面拉起（v0.13.152）：按钮之外必须有「怎么起」。
+
+    2026-10-25 用户报障「要使用原生界面 都没有拉起的地方」——按需拉起下停着是常态，
+    只有按钮没有启动动作 ⇒ 用户只能自己去终端敲 systemctl。
+    """
+
+    def test_every_web_ui_agent_declares_start(self):
+        """登记了 ui 的 agent 必须能拉起原生界面。
+
+        cloudcli 的 ui 是 dict（独立宿主），入口由 discovery 注入 ⇒ 这里只钉
+        UI_START 存在；其余 string-ui 的 agent 在 entries_for 层直接断言带 start。
+        """
+        for pid in ("cloudcli", "pi", "dsh", "qwenpaw", "qoder", "opencode"):
+            self.assertIsNotNone(profiles.ui_start_for(pid),
+                                 f"{pid} 有 Web UI 但未登记 UI_START（没有拉起的地方）")
+        for pid in ("pi", "dsh", "qwenpaw", "qoder", "opencode"):
+            p = profiles.get_profile(pid)
+            for st in ("running", "stopped"):
+                es = profiles.entries_for(p, st)
+                ui_es = [e for e in es if e["type"] in ("embed", "open")]
+                self.assertTrue(ui_es, f"{pid} 必须有原生界面入口")
+                for e in ui_es:
+                    self.assertIn("start", e,
+                                  f"{pid} status={st} 的 {e['type']} 入口必须带 start")
+
+    def test_tui_only_agents_have_no_start(self):
+        """TUI-only agent 不得登记启动器——终端就是它们的原生界面。"""
+        for pid in ("claude", "omp", "jcode", "codex", "hermes", "grok", "cursor"):
+            self.assertIsNone(profiles.ui_start_for(pid),
+                              f"{pid} 没有 Web UI，不该有 UI_START")
+
+    def test_opencode_static_card_has_ui(self):
+        """opencode 上游自带 web 界面 ⇒ 必须有原生界面入口，且压掉动态终端卡。"""
+        p = profiles.get_profile("opencode")
+        self.assertEqual(p.get("ui"), "http://127.0.0.1:4096")
+        self.assertEqual(p.get("port"), 4096)
+        types = [e["type"] for e in profiles.entries_for(p, "stopped")]
+        self.assertIn("embed", types)
+        self.assertIn("open", types)
+        self.assertNotIn("opencode", {c["id"] for c in profiles._dynamic_cli_agents(gate=False)},
+                         "静态卡已收录 opencode，动态发现不得再出一张同 id 卡")
+
+    def test_qwenpaw_health_url_points_to_real_backend(self):
+        """qwenpaw 的 ui 是注入代理 :3103 ⇒ 入口必须带 health_url 指向真后端 :8088。"""
+        p = profiles.get_profile("qwenpaw")
+        for e in profiles.entries_for(p, "stopped"):
+            if e["type"] == "embed":
+                self.assertEqual(e.get("health_url"), "http://127.0.0.1:8088",
+                                 "探活必须打真实后端，代理常驻会把停着的服务显示成活的")
+
+    def test_ui_start_targets_are_server_side_constants(self):
+        """start 描述里只有 unit/cmd 两种形态，单元名非空——不接受请求体拼命令。"""
+        for pid, spec in profiles.UI_START.items():
+            self.assertTrue(spec.get("unit") or spec.get("cmd"),
+                            f"{pid} 的 UI_START 必须给 unit 或 cmd")
+            if spec.get("cmd"):
+                self.assertIsInstance(spec["cmd"], list,
+                                      f"{pid} 的 cmd 必须是 argv 数组（不经过 shell）")
+
+
 class EntryAliveTest(unittest.TestCase):
     def _d(self):
         return discovery.AgentDiscovery(config=None)

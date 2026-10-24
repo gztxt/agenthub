@@ -42,7 +42,18 @@ if not TERM_TOKEN:
     # 兜底：未配置 token 时自动生成，避免"空 token=不鉴权"的裸奔状态
     TERM_TOKEN = secrets.token_urlsafe(32)
     print(f"[term] TERM_TOKEN 未配置，已自动生成随机 token（前4位={TERM_TOKEN[:4]}，len={len(TERM_TOKEN)}）")
-IDLE_TTL_S = int(os.getenv("TERM_IDLE_TTL", "2700"))
+IDLE_TTL_S = int(os.getenv("TERM_IDLE_TTL", "600"))
+#: **无人观看**时的更短 TTL（PT-20261024-05 B2）。
+#: 为什么需要两级：IDLE_TTL_S 判的是「会话整体静默」，
+#: 而「客户端已断开（viewers 空）但 agent 还在跑」是另一种形态 ——
+#: 用户关掉页面后，agent 进程继续占着 485MB（实测单个 codebuddy CLI 485MB，
+#: 而 hub 的 cgroup 记账里它占大头，判例 agent-knowledge/259）。
+#: ⇒ 无人观看时用更短的 TTL 收掉，**但**仍受「pty 有产出」的豁免保护
+#:   （见 `_reap()`：pty 有产出 ⇒ `last_activity` 续命 ⇒ 不回收）。
+#: 默认 120s：给「用户只是切走了页面、马上回来」留缓冲，同时不让
+#: 一个关掉的页面把 485MB 挂几十分钟。
+#: 设 0 = 关闭这一档（只按 IDLE_TTL_S 判）。
+UNWATCHED_TTL_S = int(os.getenv("TERM_UNWATCHED_TTL", "120"))
 MAX_SESSIONS = 8
 # 回收心跳间隔（P0-4）：早先 _reap() 只寄生在 list_sessions() 上，前端一关就没人回收
 REAP_INTERVAL_S = float(os.getenv("TERM_REAP_INTERVAL", "60"))
@@ -1103,6 +1114,24 @@ def _touch_bytes(sess: "Session") -> None:
     _mark_interaction(sess)
 
 
+def effective_ttl(s: "Session") -> int:
+    """该会话此刻适用的 TTL（秒）。
+
+    **单一真相源**：`_reap()` 与测试都用它算阈值 —— 两处各算一套必然漂移
+    （本批实踩：既有测试 `test_borderline_not_reaped` 拿 `IDLE_TTL_S - 5`
+    当边界，而两级 TTL 下无人观看的有效阈值是 `UNWATCHED_TTL_S` ⇒ 判红）。
+
+    规则：
+    - 有人在看（viewers 非空）⇒ **不适用 TTL**（永不被回收），返回 0 哨兵值；
+    - 无人观看 ⇒ `min(IDLE_TTL_S, UNWATCHED_TTL_S)`（后者为 0 时关闭该档）。
+    """
+    if bool(getattr(s, "viewers", None)):
+        return 0                                  # 0 = 「有人在看，永不回收」
+    if UNWATCHED_TTL_S > 0:
+        return min(IDLE_TTL_S, UNWATCHED_TTL_S)
+    return IDLE_TTL_S
+
+
 def _reap():
     """回收两件事，缺一不可（这两条曾各自单独失效 ⇒ 配额被占死）：
 
@@ -1148,7 +1177,21 @@ def _reap():
         base = s.last_io if activity is None else max(activity, s.last_io)
         if watched:
             continue
-        if now - base > IDLE_TTL_S:
+        # ③ **无人观看**档（PT-20261024-05 B2）：viewers 空 = 客户端已断开。
+        #    为什么单独一档：`watched` 为空时上面的 IDLE_TTL_S 才生效，
+        #    而 IDLE_TTL_S 是 10 分钟 —— 用户关掉页面后，一个 485MB 的 agent
+        #    CLI 仍会挂在 hub 的 cgroup 账上 10 分钟（实测单个 codebuddy CLI
+        #    485MB，判例 agent-knowledge/259）。
+        #    ⇒ 无人观看时用更短的 TTL。
+        #    ⚠ **仍受「pty 有产出」豁免**：base 取的是 max(last_activity, last_io)，
+        #      pty 有产出时 last_activity 会续命 ⇒ `now - base` 不涨 ⇒ 不回收。
+        #      即「agent 还在真干活」时**不会**被这一档误杀（这正是 09-19 那次
+        #      误杀「agent 明明每 2s 在产出却被回收」的同型坑，必须守住）。
+        #    ⚠ UNWATCHED_TTL_S=0 = 关闭这一档（只按 IDLE_TTL_S 判）。
+        #    ⚠ 阈值一律走 `effective_ttl()`（单一真相源）：`_reap()` 与测试
+        #      各算一套必然漂移（本批实踩过：既有测试拿 IDLE_TTL_S 当边界）。
+        ttl = effective_ttl(s)
+        if ttl > 0 and now - base > ttl:
             s.kill()
 
 

@@ -66,6 +66,8 @@ import staticguard
 import tdai_client
 import gwprobe                      # 上游网关（CCR）连通性 + 模型注册清单的缓存式体检
 import healthx                      # /health 派生量的纯函数层（L0 不 import src.main，故抽出来）
+import memview                     # 内存三口径可观测（本体/托管子进程/cgroup 记账）
+import retention                    # 保留期定时清理（term_recordings + profile_events）
 import resilience                   # 出站韧性层：退避重试 + 熔断（/health 的 breakers 字段）
 import settings_bundle as settings_bundle_mod  # 配置包导出/导入（PT-20260927-15，JSON，不引 YAML）
 import approvals as approvals_mod   # P1-2：审批三态（ASK + Preview-Approve-Commit-Verify）
@@ -332,6 +334,18 @@ async def health():
            "db_ok": db_ok,
            "term_sessions": term_mod.alive_count(),
            "term_idle_max_s": term_mod.idle_max_s()}
+    # 内存三口径（PT-20261024-05 B5）：**本体 / 托管子进程 / cgroup 记账**。
+    # 为什么必须分开：2026-10-24 实测同一服务三个口径差 7 倍（判例 agent-knowledge/259）
+    # ——进程 RSS 232MB、cgroup 进程合计 753MB、cgroup 记账 1.4~2.0GB（差额是 page cache）。
+    # 只报一个数必然误导：按进程口径低估（漏掉托管的 agent CLI 与文件缓存），
+    # 只看 cgroup 总量又看不出「是本体大还是被托管的进程大」。
+    # ⚠ 三个字段都是**读数**不是常量；用它们做告警判据前必须先量自己的方差
+    #   （判例 259：轮间极差 < |两读数之差| 才是「有差异」的前提）。
+    # ⚠ 拿不到一律是 null（不是 0）：0 与「测不到」是两件事。
+    try:
+        out["memory"] = memview.memory_snapshot()
+    except Exception as e:  # noqa: BLE001
+        out["memory"] = {"error": "%s: %s" % (type(e).__name__, str(e)[:120])}
     out.update(selfattest.snapshot())
     # 记忆后端体检（P0-6）：权威库在 TDAI，它挂不挂必须从 /health 能看出来。
     # 旧态是「/api/memory/search 永远回 count:0 且无任何错误字段」——全绿而功能层已死。
@@ -658,6 +672,13 @@ async def startup():
     _spawn(term_mod.fast_reap_loop())
     _spawn(wal_checkpoint_loop())   # WAL 周期检查点（把自动检查点从逐帧写路径挪走）
     _spawn(refscout_mod.refresh_loop())   # 情报卡到期自动重跑（30 天/次，REF_AUTO_REFRESH=0 可关）
+    # PT-20261024-05 B3/B4：保留期清理必须有独立心跳。
+    # 为什么必须有（实测）：`term_recordings` 258.7 万行 / 597MB，而 `sweep()`
+    # **只在 `Recorder.close()` 里调** ⇒ 长开会话 ⇒ 录像只增不减
+    # （src/main.py 原注释自己写着「⚠ 未治本：sweep() 只在会话 close 时跑，
+    #   表一天长 44 万行」）；`profile_events` 3,250 行/天且**全仓无 DELETE**。
+    # ⇒ 不寄生在任何会话生命周期上，自带 1 小时心跳。
+    _spawn(retention.retention_loop())
     mcpgw_mod.ensure_schema()
     cronjobs_mod.ensure_schema()
     cronjobs_mod.set_context(

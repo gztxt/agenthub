@@ -110,9 +110,19 @@ class TestTtlIsAboutActivityNotClientSilence(unittest.TestCase):
         self.assertEqual(0, s.killed)
 
     def test_borderline_not_reaped(self):
-        """刚过 TTL 一小会儿也不杀：TTL 判据看 max(时钟)，别在边界抖动。"""
+        """刚过 TTL 一小会儿也不杀：TTL 判据看 max(时钟)，别在边界抖动。
+
+        ⚠ 2026-10-24（PT-20261024-05 B2）：边界值改用 `term.effective_ttl(s)`
+        而不是硬编码 `IDLE_TTL_S` —— 两级 TTL 后（无人观看有更短的
+        `UNWATCHED_TTL_S`），拿 `IDLE_TTL_S - 5` 当边界会**远超**有效阈值 ⇒ 误判红。
+        `effective_ttl()` 是 `_reap()` 与测试共用的**单一真相源**。
+        """
         s = _S("edge", idle_s=term.IDLE_TTL_S - 5, activity_s=term.IDLE_TTL_S - 5,
                viewers=0)
+        ttl = term.effective_ttl(s)
+        s.idle_s = ttl - 5          # 刚过**有效** TTL 一小会儿
+        s.last_io = time.time() - (ttl - 5)
+        s.last_activity = time.time() - (ttl - 5)
         term._sessions["edge"] = s
         self._reap()
         self.assertEqual(0, s.killed)

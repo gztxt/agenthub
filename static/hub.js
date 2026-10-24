@@ -520,10 +520,36 @@ function fillAgentSelect(sel, withAuto) {
   if (cur) sel.value = cur;
 }
 
-/* 上游 loopback→LAN 语义：把 127.0.0.1 换成当前访问主机名 */
+/* 卡片地址 → 当前访问主机（2026-10-24 扩写；原来只换 127.0.0.1）
+ *
+ * 为什么必须换：服务端给的 URL 里是**某一个**网卡的地址（dsh 甚至只能绑一张网卡：
+ * 192.168.5.102:3080），而同一个 hub 会被 局域网 / Tailscale(100.x) / Tailscale IPv6
+ * (fd7a::) / MagicDNS 名 访问。不换的后果就是「局域网能开、手机和外面全打不开」。
+ *
+ * 规则（只改 host 段，路径与 ?token=... 一个字节都不动）：
+ *   ① 回环 127.0.0.1 / localhost / ::1 → 当前主机（上游原语义，保留）；
+ *   ② 命中 SELF_ADDRS（后端 /api/agents 下发的本机自有地址）→ 当前主机。
+ *      只做**整段 host 相等**匹配，不做子串替换 —— 否则 192.168.5.10 会吃掉
+ *      192.168.5.102 这种前缀相同的地址。
+ *   ③ 其它 host（外站链接、真远程机器）原样返回。
+ * SELF_ADDRS 为空（接口未返回 / ip 命令不可用）时退化为只做 ①。
+ */
+let SELF_ADDRS = [];
+function _selfHost(cur) {
+  /* location.hostname 在部分浏览器对 IPv6 带方括号，统一成可拼进 URL 的形式 */
+  const bare = String(cur || '').replace(/^\[|\]$/g, '');
+  return bare.indexOf(':') >= 0 ? '[' + bare + ']' : bare;
+}
 function lanUrl(url) {
   if (!url) return url;
-  return url.replace(/127\.0\.0\.1|localhost/g, location.hostname);
+  const cur = _selfHost(location.hostname);
+  if (!cur) return url;
+  return url.replace(/^(https?:\/\/)(\[[0-9a-fA-F:]+\]|[^\/:?#]+)/, function (m, scheme, host) {
+    const bare = host.replace(/^\[|\]$/g, '');
+    if (bare === '127.0.0.1' || bare === 'localhost' || bare === '::1') return scheme + cur;
+    if (SELF_ADDRS.indexOf(bare) >= 0) return scheme + cur;
+    return m;
+  });
 }
 
 /* ── 教室 ─────────────────────────────────────────── */
@@ -540,6 +566,9 @@ async function loadAgents() {
   try {
     const d = await api('/api/agents');
     AGENTS = d.agents || [];
+    /* 本机自有地址（后端 ip 实测）：卡片地址里的这些字面量在渲染时会被换成
+       location.hostname，见 lanUrl。空表时 lanUrl 只做回环替换（旧行为）。 */
+    if (Array.isArray(d.self_addrs)) SELF_ADDRS = d.self_addrs;
     agentFailStreak = 0;
     renderHomeStats();
     renderNav();   // v0.7.1：Agent / 基础设施的唯一入口是左侧手风琴，随数据刷新

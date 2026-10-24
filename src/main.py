@@ -102,7 +102,20 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.146"
+VERSION = "0.13.147"
+#   v0.13.147：**卡片地址按访问网络自适应**（用户 2026-10-24 报障：手机经 Tailscale
+#   点 DSH 打不开，局域网正常）。两层根因，缺一层都修不好：
+#   ① 监听层：**dsh 拒绝通配地址**（`--host` 帮助原文 "wildcard addresses are
+#      rejected"，理由是会暴露远程代码执行），只能绑一张网卡 ⇒ Tailscale 侧没有 socket；
+#      补法是系统层两个 socat 单元（`dsh-ts4`/`dsh-ts6`，`PartOf=dsh.service`）。
+#   ② 寻址层：卡片地址写死 `http://192.168.5.102:3080`，前端 `lanUrl()` 只替换
+#      `127.0.0.1|localhost` ⇒ 补了监听也照样指向局域网。改为后端
+#      `profiles.own_addrs()`（`ip -o addr show scope global`，排除回环/link-local/
+#      容器网桥）随 `/api/agents` 下发 `self_addrs`，前端命中即换成
+#      `location.hostname`（IPv6 补方括号），**整段 host 相等**匹配（子串替换会让
+#      192.168.5.10 吃掉 192.168.5.102），路径与 `?token=` 一个字节不动。
+#   判据：`tests/test_net_url.py` 用 node 执行**源文件里的 `lanUrl`** 比对 7 组
+#   输入输出（行为断言，不是 grep 代码）；`own_addrs` 口径有单测。
 #   v0.13.146：**接 deepseek-flash 判定后端**。本机 Ollama 与 jev-decision 技能删除后
 #   判定归零，对照实测（`agent-knowledge/250`）：远端三档质量已饱和（noul CN/EN 4/4、
 #   choice 两序 4/4），差别只在延迟 ⇒ 钉死 `deepseek/deepseek-flash`（3.3s，5 题≈17s），

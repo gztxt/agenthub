@@ -89,6 +89,55 @@ def list_processes() -> List[dict]:
     return procs
 
 
+# ── 本机自有地址（2026-10-24）─────────────────────────────────────────
+# 为什么需要：卡片地址是**服务端**写死的字面量（dsh 更极端，只能绑一张具体网卡，
+# 见 dsh.service 注释），可同一个 hub 会被三种方式访问：局域网 192.168.5.102、
+# Tailscale 100.x / fd7a::、MagicDNS 名。服务端不知道浏览器走哪条路，只有前端知道
+# `location.hostname`。于是后端把「本机自有地址清单」随 /api/agents 下发，
+# 前端把 URL 里命中的自有地址换成当前访问主机名（static/hub/01-core-boot.js:lanUrl）。
+# 口径：`ip -o addr show scope global` ⇒ 天然排除回环与 link-local；再排除容器网桥
+# （docker0/br-/veth/…）—— 那些地址浏览器到不了，列进来只会制造假候选。
+_OWN_ADDRS_CACHE: dict = {"ts": 0.0, "addrs": []}
+_OWN_ADDRS_TTL_S = 60.0
+_OWN_ADDRS_SKIP_IFACE = ("lo", "docker", "br-", "veth", "virbr", "lxc", "cni", "tun", "flannel")
+
+
+def own_addrs() -> List[str]:
+    """本机对外可达的 IPv4/IPv6 字面量（不含回环 / 链路本地 / 容器网桥）。
+
+    只做「有哪些地址」的事实采集，不判断哪个地址此刻可达 —— 那是前端的事
+    （它知道 location.hostname）。取不到就返回空表，前端退回旧行为（不替换）。
+    """
+    import time
+    now = time.monotonic()
+    if now - _OWN_ADDRS_CACHE["ts"] < _OWN_ADDRS_TTL_S:
+        return _OWN_ADDRS_CACHE["addrs"]
+    addrs: List[str] = []
+    try:
+        import subprocess
+        r = subprocess.run(["ip", "-o", "addr", "show", "scope", "global"],
+                           capture_output=True, text=True, timeout=3)
+        for ln in r.stdout.splitlines():
+            parts = ln.split()
+            if len(parts) < 4:
+                continue
+            iface = parts[1].rstrip(":")
+            if iface.startswith(_OWN_ADDRS_SKIP_IFACE):
+                continue
+            # 形如 `2: enp1s0-ovs    inet 192.168.5.102/24 brd … scope global …`
+            fam = "inet" if "inet" in parts else ("inet6" if "inet6" in parts else None)
+            if fam is None:
+                continue
+            addr = parts[parts.index(fam) + 1].split("/")[0]
+            if addr and addr not in addrs:
+                addrs.append(addr)
+    except Exception:  # noqa: BLE001  ip 不在 / 超时 ⇒ 空表降级，不让 discovery 挂
+        addrs = []
+    _OWN_ADDRS_CACHE["ts"] = now
+    _OWN_ADDRS_CACHE["addrs"] = addrs
+    return addrs
+
+
 def running_systemd_units(*, force_fresh: bool = False) -> set:
     """在跑的 systemd user 单元名集合（去 .service 后缀）。
 

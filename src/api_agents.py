@@ -51,7 +51,10 @@ async def list_agents():
     if appstate.discovery is None:
         raise HTTPException(status_code=503, detail="Discovery not initialized")
     agents = await appstate.discovery.discover_all()
-    return {"agents": [a.to_dict() for a in agents], "count": len(agents)}
+    # self_addrs：本机自有地址清单，供前端把卡片地址换成**当前访问主机**
+    # （局域网 / Tailscale / MagicDNS 各自命中自己的地址）。见 profiles.own_addrs。
+    return {"agents": [a.to_dict() for a in agents], "count": len(agents),
+            "self_addrs": profiles_mod.own_addrs()}
 
 
 # ⚠ 注册顺序：`/api/agents/releases` 必须在 `{agent_id}` **之前**。

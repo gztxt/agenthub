@@ -1,3 +1,50 @@
+## v0.13.147 — 卡片地址按访问网络自适应（dsh 三网可达）
+
+> 来源：2026-10-24 用户令「dsh 使用 tailscale 连接失败 还是使用局域网IP地址
+> 检查所有agent 不同网络环境 应该是使用不同IP地址局域网和互联网使用的地址应该不一样」。
+> 前置：卡片 `agent-knowledge/252`（dsh 常驻）、`253/254`（终端形态）、本卡片 `255`。
+
+### ① 现象与根因
+
+手机经 Tailscale 打开 hub，DSH 卡片打不开；局域网正常。三网探针实测只有 dsh
+两网不通（127.0.0.1 000 / Tailscale v4+v6 000，LAN 401 是正常 token 语义）。
+两层原因，缺一层都修不好：
+
+1. **监听层**：dsh CLI 拒绝通配地址（`startup.ts:64` *"wildcard addresses are
+   rejected"*），只能绑一张网卡 ⇒ Tailscale 侧没有 socket。
+2. **寻址层**：卡片地址写死 `http://192.168.5.102:3080`，前端 `lanUrl()` 只替换
+   `127.0.0.1|localhost` ⇒ 补了监听也照样指向局域网。
+
+### ② 改动
+
+- `src/profiles.py`：新增 `own_addrs()`（`ip -o addr show scope global`，
+  排除回环/link-local/容器网桥，60s 缓存），随 `/api/agents` 以 `self_addrs` 下发。
+- `src/api_agents.py`：响应加 `self_addrs`。
+- `static/hub/01-core-boot.js`：`lanUrl()` 扩为「命中 `SELF_ADDRS` 或回环 ⇒ 换成
+  `location.hostname`（IPv6 补方括号）」，**整段 host 相等**匹配，路径与 `?token=` 不动。
+- 系统层（不在本仓）：`~/.config/systemd/user/dsh-ts4.service`、`dsh-ts6.service`
+  socat 转发 Tailscale v4/v6 :3080 → 192.168.5.102:3080，`PartOf=dsh.service`；
+  `~/bin/service-health-check.sh` 加 dsh-ts4/ts6 单元与 HTTP 探针。
+
+### ③ 测试与实测
+
+- 新增 `tests/test_net_url.py`（4 例）：`own_addrs` 口径 + 用 `tests/net_url_probe.js`
+  **执行源文件里的 `lanUrl`** 逐条比对 7 组输入输出（TS/LAN/回环/IPv6/前缀不误伤/
+  外站不动/token 保留）——判据是函数行为，不是 grep 代码字符串。
+- 全量 L0：见提交信息（本节末尾实测值）。
+- 临时实例（PORT=3199，`env -i` 隔离 DATA_DIR/LOG_DIR）实测
+  `self_addrs=['100.117.232.62','fd7a:…','192.168.5.102','2409:…×2','192.168.1.2']`；
+  TS 侧 `?token=` 换 cookie 成功（303 + `dsh-auth-…`，authority=100.117.232.62:3080）。
+- 健康探针 5 条 dsh 全绿（unit / LAN / ts4 / ts6 HTTP）。
+
+### ④ 边界（故意没做）
+
+- claude-mem 面板 `127.0.0.1:37700` 在 LAN/TS 均 000，属监听层缺口，需报请后改绑定
+  （不顺手改别人服务的 bind）。
+- ccr/cloudcli 的跨网转发仍走 cron 脚本（`*/5` 兜底），未改造成 systemd 单元。
+- 生产需 `systemctl --user restart agenthub` 才加载 `self_addrs`（重启会杀本会话，
+  由用户执行；静态 hub.js 已重建，浏览器刷新即得）。
+
 ## v0.13.146 — 接 deepseek-flash 判定后端
 
 > 来源：2026-10-23 用户令「接 deepseek flash 判定后端 测试判定质量 对比验证结果」。

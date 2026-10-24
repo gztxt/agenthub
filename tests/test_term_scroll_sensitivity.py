@@ -238,7 +238,14 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.151"
+    CURRENT_VERSION = "0.13.152"
+
+    #: v0.13.152：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「设置子菜单上下布局」「模板多一个 </div>」「main 提前关闭」
+    #: 「7 页错位」「新增 test_dom_structure.py」。
+    VERSION_ROOT_CAUSES["0.13.152"] = (
+        "上下布局", "</div>", "提前关闭", "test_dom_structure.py",
+    )
 
     #: v0.13.151：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「按钮复还」「probe_port 自相矛盾」「空白嵌页」「模型设置自动发现」

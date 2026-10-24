@@ -1073,7 +1073,7 @@
                窄屏不再有独立差异项。 */
             #sideMask.on { display: block; position: fixed; inset: 0; background: var(--mask); z-index: 45; }
             /* 窄屏基准 8px/8px ×0.4（v0.13.97）—— 与宽屏各自基准同比，不是同一个绝对值 */
-            main { max-width: 100%; margin: 0; --main-pad-y: 3.2px; --main-pad-x: 3.2px; }
+            main { max-width: 100%; margin: 0; flex: 1; min-width: 0; --main-pad-y: 3.2px; --main-pad-x: 3.2px; }
             .home-stat { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             select { max-width: 100%; }
             .toolbar input, .toolbar select { min-width: 0; }
@@ -2279,7 +2279,6 @@
                         </div>
                     </div>
                 </div>
-                </div>
                 <!-- v0.13.127 P1：自检与实验室下沉诊断折叠区（Grill 裁定 5）。
                      默认折叠——绿是常态，展开是取证需要；details/summary 无 JS、
                      不写盘（与记忆页探针折叠同一形态）。 -->
@@ -2305,6 +2304,12 @@
                     </div>
                 </details>
             </div>
+            <!-- ⚠ v0.13.152 修复：上面只能有**一个** </div>（关 .sp）。
+                 2026-10-20 的 37fdd382 在此多写了一行 </div>，浏览器解析时会把
+                 <main> 提前关闭 ⇒ 本页之后的知识库 / 资产 / 设置五页全被甩到
+                 <body> 下：渲染在菜单**下方**（整宽、压住侧栏），而不是菜单右侧。
+                 它不报错、既有测试也全绿（没有一条断言看父子关系），只在真渲染里可见。
+                 现由 tests/test_dom_structure.py 钉住「所有 section.page 必须在 #mainWrap 内」。 -->
         </section>
 
         <!-- 知识库中心（v0.13.40 统一骨架）：与记忆页同构（检索条 + 结果；健康/文档树
@@ -2879,6 +2884,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=c721c3be"></script>
+    <script src="/static/hub.js?v=337df23d"></script>
 </body>
 </html>

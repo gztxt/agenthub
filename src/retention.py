@@ -1,4 +1,4 @@
-"""保留期清理：把「只增不减」的表变成有界的（PT-20261024-05 批次 B3/B4）。
+"""保留期清理：把「只增不减」的表变成有界的（PT-20261024-08 批次 B3/B4）。
 
 ## 背景（2026-10-24 实测）
 
@@ -60,7 +60,7 @@ def sweep_profile_events(days: int = DEFAULT_PROFILE_EVENTS_DAYS) -> int:
 
     判据列是 `created_at`（TEXT，ISO 8601 带时区）——
     ⚠ **不是** `ts`：实测 `SELECT date(ts/86400,...)` 报 `no such column: ts`
-    （列名猜错过一次，见 PT-20261024-05 §B4）。
+    （列名猜错过一次，见 PT-20261024-08 §B4）。
     """
     if not db.is_open():
         return 0

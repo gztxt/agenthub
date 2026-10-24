@@ -39,6 +39,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import time
@@ -52,6 +53,79 @@ CREDS_PATH = Path.home() / ".pi" / "agent" / "memory-tencentdb.json"
 
 # 后端标识（进 /health 与响应的 backends[] 用，便于前端一眼看出哪路死了）
 BACKEND = "tdai"
+
+# ── 查询缓存（PT-20261024-08 C3）──────────────────────────────────────
+#:
+#: 为什么要：**实测**（2026-10-24）`/api/memory/search?q=备份` 的 6 路里，
+#: `tdai_l1` 单独占 **804ms**，总 884ms —— 即 TDAI 一路占 91%。
+#: 原因是每次查询都新建一个 `aiohttp.ClientSession`（无连接复用），
+#: 且 TDAI 的 `/v2/atomic/search` 本身要走一次语义检索。
+#: ⇒ 对**同 query 的重复检索**加短 TTL 缓存：接单前置（intake）与随后的
+#:   追问常常是同一个 query（`intake` → `hub_memory_search` → 技能命中后回查），
+#:   缓存命中后 804ms → 近 0。
+#:
+#: **只缓存成功结果**：失败不缓存（否则一次网络抖动会把「查不到」缓存住 TTL 秒，
+#:   制造「明明有却查不到」的假空）。
+#: **不缓存含凭据/错误的内容**：错误响应里带 `error` 文本，一律不缓存。
+#:
+#: TTL 默认 60s：够覆盖「同一次接单流程内的重复查询」，
+#: 又不至于让记忆库的变化长时间不可见。
+QUERY_CACHE_TTL_S = float(os.getenv("TDAI_QUERY_CACHE_TTL", "60"))
+
+#: 查询缓存条目上限（防无界增长）。按 LRU 淘汰。
+QUERY_CACHE_MAX = 256
+
+#: {(path, body 规范化串): (monotonic_ts, 结果dict)}
+_query_cache: Dict[str, Any] = {}
+_query_cache_order: List[str] = []
+
+
+def _cache_key(path: str, body: Dict[str, Any]) -> str:
+    return path + "|" + json.dumps(body, sort_keys=True, ensure_ascii=False)
+
+
+def _cache_get(path: str, body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    key = _cache_key(path, body)
+    hit = _query_cache.get(key)
+    if hit is None:
+        return None
+    ts, data = hit
+    if (time.monotonic() - ts) >= QUERY_CACHE_TTL_S:
+        _query_cache.pop(key, None)
+        return None
+    # 命中也要标 cached（口径诚实：调用方要能看出「这次没真查」）
+    # **深拷贝**：浅拷贝下 items 列表与缓存共享，调用方改 items[0]
+    # 会污染后续每一次命中（缓存是进程级全局的，污染面是所有人）。
+    out = copy.deepcopy(data)
+    out["cached"] = True
+    return out
+
+
+def _cache_put(path: str, body: Dict[str, Any], data: Dict[str, Any]) -> None:
+    if not data.get("ok"):
+        return                      # 失败不缓存（见上方注释）
+    key = _cache_key(path, body)
+    if key not in _query_cache:
+        _query_cache_order.append(key)
+    _query_cache[key] = (time.monotonic(), copy.deepcopy(data))
+    # LRU 淘汰
+    while len(_query_cache_order) > QUERY_CACHE_MAX:
+        old = _query_cache_order.pop(0)
+        _query_cache.pop(old, None)
+
+
+def cache_stats() -> Dict[str, Any]:
+    """查询缓存状态（进 /health 与调试用）。"""
+    now = time.monotonic()
+    live = sum(1 for ts, _ in _query_cache.values() if (now - ts) < QUERY_CACHE_TTL_S)
+    return {"entries": len(_query_cache), "live": live,
+            "ttl_s": QUERY_CACHE_TTL_S, "max": QUERY_CACHE_MAX}
+
+
+def clear_query_cache() -> None:
+    """清空查询缓存（记忆库写入后、或改了 TTL 后调用）。"""
+    _query_cache.clear()
+    _query_cache_order.clear()
 
 
 # ── 配置解析 ──────────────────────────────────────────────────────────
@@ -125,13 +199,24 @@ def _fail(error: str, http: Optional[int] = None, ms: float = 0.0, **extra) -> D
 
 
 async def _post(path: str, body: Dict[str, Any],
-                timeout_s: float = DEFAULT_TIMEOUT_S) -> Dict[str, Any]:
+                timeout_s: float = DEFAULT_TIMEOUT_S,
+                use_cache: bool = False) -> Dict[str, Any]:
     """POST 一个 v2/v3 数据面请求，拆信封，把一切失败都变成结构化返回。
 
     刻意不抛异常：调用方（memory.py / kb）要在 200ms 预算内拿到「有/没有/为什么没有」，
     而不是被一个 traceback 打断对话链路。但**绝不静默** —— error 字段必填。
+
+    `use_cache=True` 时走**查询缓存**（PT-20261024-08 C3）：
+    实测 `tdai_l1` 单路 804ms 占检索总耗时 91% ⇒ 同 query 的重复检索（接单前置
+    → 追问 → 技能命中后回查）应当命中缓存。
+    ⚠ 只缓存**成功**结果；失败不缓存（否则一次网络抖动会缓存出「查不到」）。
     """
     t0 = time.monotonic()
+    if use_cache:
+        hit = _cache_get(path, body)
+        if hit is not None:
+            hit["ms"] = round((time.monotonic() - t0) * 1000, 1)
+            return hit
     c = resolve_creds()
     if not c["api_key"]:
         # 这是最容易被误判成「TDAI 挂了」的一种：服务好好的，只是本进程没拿到 key
@@ -188,12 +273,15 @@ async def _post(path: str, body: Dict[str, Any],
     items = data.get("items") if isinstance(data, dict) else None
     if items is None:
         items = data.get("results") if isinstance(data, dict) else None
-    return {"ok": True, "backend": BACKEND, "items": items or [],
-            "data": data if isinstance(data, dict) else {},
-            "count": len(items or []) if isinstance(items, list) else int(data.get("total") or 0),
-            "total": data.get("total") if isinstance(data, dict) else None,
-            "error": None, "http": 200, "ms": round(ms, 1),
-            "request_id": env.get("request_id"), "creds_source": c["source"]}
+    out = {"ok": True, "backend": BACKEND, "items": items or [],
+           "data": data if isinstance(data, dict) else {},
+           "count": len(items or []) if isinstance(items, list) else int(data.get("total") or 0),
+           "total": data.get("total") if isinstance(data, dict) else None,
+           "error": None, "http": 200, "ms": round(ms, 1),
+           "request_id": env.get("request_id"), "creds_source": c["source"]}
+    if use_cache:
+        _cache_put(path, body, out)
+    return out
 
 
 def _norm(hit: Dict[str, Any], source: str = "tdai") -> Dict[str, Any]:
@@ -230,7 +318,7 @@ async def search_memories(q: str, limit: int = 10, mem_type: Optional[str] = Non
     body: Dict[str, Any] = {"query": q, "limit": max(1, min(100, int(limit)))}
     if mem_type:
         body["type"] = mem_type
-    r = await _post("/v2/atomic/search", body, timeout_s)
+    r = await _post("/v2/atomic/search", body, timeout_s, use_cache=True)
     if r["ok"]:
         r["items"] = [_norm(h, "tdai_l1") for h in r["items"]]
     return r
@@ -243,7 +331,7 @@ async def search_conversations(q: str, limit: int = 5,
     if not q:
         return _fail("query 为空")
     r = await _post("/v2/conversation/search",
-                    {"query": q, "limit": max(1, min(100, int(limit)))}, timeout_s)
+                    {"query": q, "limit": max(1, min(100, int(limit)))}, timeout_s, use_cache=True)
     if r["ok"]:
         r["items"] = [_norm(h, "tdai_l0") for h in r["items"]]
     return r
@@ -252,7 +340,7 @@ async def search_conversations(q: str, limit: int = 5,
 async def core_read(timeout_s: float = DEFAULT_TIMEOUT_S) -> Dict[str, Any]:
     """L3 长期画像（persona.md）。实测契约：`POST /v2/core/read {}` → `data.content`。
     hub 自己的 `memory_docs` 里 **L3 是空行**，所以开局包的「长期 Profile」段只能从这里来。"""
-    r = await _post("/v2/core/read", {}, timeout_s)
+    r = await _post("/v2/core/read", {}, timeout_s, use_cache=True)
     if r["ok"]:
         r["content"] = (r.get("data") or {}).get("content") or ""
     return r
@@ -397,9 +485,11 @@ def backend_status() -> Dict[str, Any]:
     if d is None:
         _schedule_probe()
         return {"state": "unknown", "stale": True, "probes": 0, "age_s": None,
-                "ttl_s": PROBE_TTL_S, "creds": creds_summary()}
+                "ttl_s": PROBE_TTL_S, "creds": creds_summary(),
+                "query_cache": cache_stats()}
     stale = bool(age is not None and age > PROBE_TTL_S)
     if stale:
         _schedule_probe()       # 先回旧值，刷新在后台——这就是 stale-while-revalidate
     return {**d, "age_s": age, "stale": stale, "probes": _PROBE["count"],
-            "ttl_s": PROBE_TTL_S, "creds": creds_summary()}
+            "ttl_s": PROBE_TTL_S, "creds": creds_summary(),
+            "query_cache": cache_stats()}

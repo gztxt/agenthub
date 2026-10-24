@@ -115,6 +115,10 @@ def run(coro):
 class TdaiBase(unittest.TestCase):
     def setUp(self):
         _STATE["record"] = []
+        # 查询缓存是**进程级全局**的（PT-20261024-08 C3）⇒ 不清就会把上一个用例的
+        # 成功结果漏给下一个用例（实测：test_auth_headers 缓存了空结果，
+        # 后面 7 个用例的脚本全被挡住）。与重置 _STATE/env 同一个位置。
+        tdai_client.clear_query_cache()
         self._env = {k: v for k, v in os_environ_snapshot().items()}
         for k in ("TDAI_URL", "TDAI_API_KEY", "TDAI_SERVICE_ID"):
             import os

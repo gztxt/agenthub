@@ -43,7 +43,7 @@ if not TERM_TOKEN:
     TERM_TOKEN = secrets.token_urlsafe(32)
     print(f"[term] TERM_TOKEN 未配置，已自动生成随机 token（前4位={TERM_TOKEN[:4]}，len={len(TERM_TOKEN)}）")
 IDLE_TTL_S = int(os.getenv("TERM_IDLE_TTL", "600"))
-#: **无人观看**时的更短 TTL（PT-20261024-05 B2）。
+#: **无人观看**时的更短 TTL（PT-20261024-08 B2）。
 #: 为什么需要两级：IDLE_TTL_S 判的是「会话整体静默」，
 #: 而「客户端已断开（viewers 空）但 agent 还在跑」是另一种形态 ——
 #: 用户关掉页面后，agent 进程继续占着 485MB（实测单个 codebuddy CLI 485MB，
@@ -1177,7 +1177,7 @@ def _reap():
         base = s.last_io if activity is None else max(activity, s.last_io)
         if watched:
             continue
-        # ③ **无人观看**档（PT-20261024-05 B2）：viewers 空 = 客户端已断开。
+        # ③ **无人观看**档（PT-20261024-08 B2）：viewers 空 = 客户端已断开。
         #    为什么单独一档：`watched` 为空时上面的 IDLE_TTL_S 才生效，
         #    而 IDLE_TTL_S 是 10 分钟 —— 用户关掉页面后，一个 485MB 的 agent
         #    CLI 仍会挂在 hub 的 cgroup 账上 10 分钟（实测单个 codebuddy CLI

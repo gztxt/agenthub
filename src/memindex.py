@@ -643,7 +643,19 @@ def build(scope: str = "full", db_path: Optional[Path] = None,
         total_chunks = con.execute("SELECT COUNT(*) FROM fed_proj").fetchone()[0]
         _meta_set(con, "files", str(total_files))
         _meta_set(con, "chunks", str(total_chunks))
-        _meta_set(con, "corpus_bytes", str(br.bytes_corpus))
+        # 2026-10-24 修（PT-20261024-08 C3）：corpus_bytes 原写 `br.bytes_corpus`
+        # —— 那是**本次 build 枚举到的字节**（incremental 时只有变更文件），
+        # 与上面两个「库内实测」口径**混用** ⇒ 实测偏差 8.2 倍：
+        # meta 记 115,812,334（110MB），而库内去重后真实 sum(size) = 1,000,248,153（954MB）。
+        # 后果：`corpus_bytes` 被当容量/放大比的分母时，30× 的膨胀会读成 86×
+        # （判例：2026-10-24 索引瘦身评估，误以为「corpus 110MB → 索引 3643MB」）。
+        # ⇒ 改为**库内实测**（与 files/chunks 同源）：
+        #     DISTINCT realpath 后再 sum(size)（同一文件多 chunk 只算一次）。
+        corpus_bytes = con.execute(
+            "SELECT COALESCE(SUM(size),0) FROM "
+            "(SELECT DISTINCT realpath, size FROM fed_proj)").fetchone()[0]
+        _meta_set(con, "corpus_bytes", str(corpus_bytes))
+        br.bytes_corpus = corpus_bytes
         con.commit()
     finally:
         con.close()

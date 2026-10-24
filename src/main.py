@@ -334,7 +334,7 @@ async def health():
            "db_ok": db_ok,
            "term_sessions": term_mod.alive_count(),
            "term_idle_max_s": term_mod.idle_max_s()}
-    # 内存三口径（PT-20261024-05 B5）：**本体 / 托管子进程 / cgroup 记账**。
+    # 内存三口径（PT-20261024-08 B5）：**本体 / 托管子进程 / cgroup 记账**。
     # 为什么必须分开：2026-10-24 实测同一服务三个口径差 7 倍（判例 agent-knowledge/259）
     # ——进程 RSS 232MB、cgroup 进程合计 753MB、cgroup 记账 1.4~2.0GB（差额是 page cache）。
     # 只报一个数必然误导：按进程口径低估（漏掉托管的 agent CLI 与文件缓存），
@@ -672,7 +672,7 @@ async def startup():
     _spawn(term_mod.fast_reap_loop())
     _spawn(wal_checkpoint_loop())   # WAL 周期检查点（把自动检查点从逐帧写路径挪走）
     _spawn(refscout_mod.refresh_loop())   # 情报卡到期自动重跑（30 天/次，REF_AUTO_REFRESH=0 可关）
-    # PT-20261024-05 B3/B4：保留期清理必须有独立心跳。
+    # PT-20261024-08 B3/B4：保留期清理必须有独立心跳。
     # 为什么必须有（实测）：`term_recordings` 258.7 万行 / 597MB，而 `sweep()`
     # **只在 `Recorder.close()` 里调** ⇒ 长开会话 ⇒ 录像只增不减
     # （src/main.py 原注释自己写着「⚠ 未治本：sweep() 只在会话 close 时跑，

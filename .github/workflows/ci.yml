@@ -1,0 +1,83 @@
+# Agent Hub CI —— 复用仓内既有闸门，不新写测试逻辑
+#
+# 【为什么此前没有 CI，而测试有 2934 例】
+# 本仓的测试体系是完整的（L0 hermetic 2934 例零跳过 + L1 host 74 例），
+# 闸门是 `scripts/prepush.sh` —— 但它**只在人工 push 时手动跑**，
+# 没有远端自动触发 ⇒ 「谁推的」决定「有没有跑过」。
+# 本 workflow 的职责只有一个：**把既有的 `scripts/run_tests.sh hermetic-clean`
+# 搬到远端自动跑**，不新增任何测试逻辑、不改任何判定标准。
+#
+# 【口径】
+# - L0 hermetic 是**强口径**：零跳过必过（run_tests.sh 退出码 2）。
+#   CI 里 `continue-on-error` 一律不给 —— 给了就等于「失败也算过」。
+# - L1 host 依赖本机环境（家目录里的 agent 家目录、node、真实端口），
+#   在 runner 上**必然大面积 skip/失败** ⇒ **不进 CI**，仍由 prepush.sh 在本机跑。
+#   这是刻意的分层，不是遗漏。
+# - venv 不入 git（.gitignore），CI 现场按 requirements.txt 重建 —— 而
+#   requirements.txt 的版本号来自生产 venv 的 pip freeze 实测值（锁死）。
+#
+# 【触发】
+# push 到 master（带 [skip ci] 可跳）+ PR 到 master。
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# 同一 PR 的后续提交取消上一轮（省配额，且结果以最新提交为准）
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  l0-hermetic:
+    name: L0 hermetic（零跳过闸门）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 生产 venv 实测 Python 3.11.2（.venv/bin/python3 -V）
+          python-version: '3.11'
+
+      - name: 建 venv 并按锁文件装依赖
+        run: |
+          python -m venv venv
+          . venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # 测试用到但 requirements.txt 里没列的（starlette 由 fastapi 带出，
+          # 这里显式装齐免得解析到传递依赖的意外版本）
+          pip install starlette
+
+      - name: node（JS 闸门用；仓内 tests/*.js 依赖 node 跑真源码）
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: L0 hermetic —— 零跳过必过
+        # ⚠ 不给 continue-on-error：闸门红了就是红了。
+        # ⚠ 显式给 HUB_VENV：仓内 venv 不入 git，runner 上是新建的，
+        #    run_tests.sh 默认找 `venv/bin/python`（相对路径），CI 里 cwd 就是仓根，
+        #    但显式写死更稳（与 prepush.sh 的 HUB_VENV 约定一致）。
+        env:
+          HUB_VENV: ${{ github.workspace }}/venv/bin/python
+          # 闸门日志不得回显任何密钥值；这里再兜一层：不给凭据，
+          # 让依赖真实凭据的用例走 skip/失败分支而不是拿到真值。
+          NO_COLOR: '1'
+        run: |
+          bash scripts/run_tests.sh hermetic-clean
+
+      - name: 收集器对账（unittest 与 pytest 必须一致）
+        # 判「有没有跑」而不是「跑得对不对」：收集数不等 ⇒ 有用例掉出收集范围
+        # （历史判例：v5 评测集三次因标签出错、一次因 pytest 与 unittest 不一致）。
+        env:
+          HUB_VENV: ${{ github.workspace }}/venv/bin/python
+        run: |
+          . venv/bin/activate
+          python -m unittest discover -s tests -t . --collect-only 2>&1 | tail -3 || true
+          python -m pytest tests --collect-only -q 2>&1 | tail -3

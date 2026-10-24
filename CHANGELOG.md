@@ -271,6 +271,1215 @@ YES/NO 恒「否」是同一类退化）。所以本轮**没有**用「让模型
 
 ---
 
+## v0.13.147
+
+v0.13.147：**卡片地址按访问网络自适应**（用户 2026-10-24 报障：手机经 Tailscale
+点 DSH 打不开，局域网正常）。两层根因，缺一层都修不好：
+① 监听层：**dsh 拒绝通配地址**（`--host` 帮助原文 "wildcard addresses are
+rejected"，理由是会暴露远程代码执行），只能绑一张网卡 ⇒ Tailscale 侧没有 socket；
+补法是系统层两个 socat 单元（`dsh-ts4`/`dsh-ts6`，`PartOf=dsh.service`）。
+② 寻址层：卡片地址写死 `http://192.168.5.102:3080`，前端 `lanUrl()` 只替换
+`127.0.0.1|localhost` ⇒ 补了监听也照样指向局域网。改为后端
+`profiles.own_addrs()`（`ip -o addr show scope global`，排除回环/link-local/
+容器网桥）随 `/api/agents` 下发 `self_addrs`，前端命中即换成
+`location.hostname`（IPv6 补方括号），**整段 host 相等**匹配（子串替换会让
+192.168.5.10 吃掉 192.168.5.102），路径与 `?token=` 一个字节不动。
+判据：`tests/test_net_url.py` 用 node 执行**源文件里的 `lanUrl`** 比对 7 组
+输入输出（行为断言，不是 grep 代码）；`own_addrs` 口径有单测。
+
+## v0.13.146
+
+v0.13.146：**接 deepseek-flash 判定后端**。本机 Ollama 与 jev-decision 技能删除后
+判定归零，对照实测（`agent-knowledge/250`）：远端三档质量已饱和（noul CN/EN 4/4、
+choice 两序 4/4），差别只在延迟 ⇒ 钉死 `deepseek/deepseek-flash`（3.3s，5 题≈17s），
+不用路由器（实测 8 次有 2 次被换成审核模型）。
+① 新增 `src/remote_judge.py`：三原语 prompt 照抄已测版本，只换 HTTP 出口；
+② `local_judge` 按 `JUDGE_BACKEND` 分派（remote 默认，ollama 保留但已无服务），
+缓存键带后端+模型，`status()` 报真实后端；`LOCAL_JUDGE=0` 仍是一键关；
+③ **截断即失败**：`finish_reason=length` 单独判失败——「解析出半个对象」会被
+clamp 补成 0，读起来像「模型判 0」而不是「这次没判成」；
+④ 判定与生成分预算（1200 / 4000）：共用 1200 时中文摘要被截断，关键项命中掉到 0/5。
+`CHAIN_JUDGE` / `VITALS_JUDGE` 仍默认 0：这两条链没有做质量对照，只作预备。
+
+## v0.13.145
+
+v0.13.145：**判定进主链**（此前只有 vitals sweep 与默认关的 `/relevant?rerank=true`，
+即「接了但从不调用」）。新增 `src/chain_judge.py`。**关键实测**：技能自带的 `choice`
+原语是**位置偏置**——同一段无关文本，completed 放首位就选 completed（conf 1.0），
+off_topic 放首位就选 off_topic（conf 0.5）⇒ 拿它做裁决等于「永远不拦」。
+故两处落点都改成「让它产出可机械核对的东西」，而不是让它表态：
+① `tasks.py`：要求模型**从产物里逐字摘一句能证明完成的原文**，无关则答 NONE；
+摘到的句子必须在产物里原样存在（幻觉守卫），否则按「没判成」处理。
+只有 off_topic 会把自动接受降为 `submitted` 待人工复核——方向单向。
+② `refscout.py`：候选列成编号清单让它先写编号；**正序/倒序各问一次，两次一致才采纳**，
+不一致（偏置回来）就当没判成、原序不动；采纳后只提到**同桶首位**。
+纪律：输入硬截断（任务 400 / 产物 1500 字，ctx 4096）；进程内单飞 +
+`CHAIN_JUDGE_QUEUE_WAIT=5s`（Ollama 串行，等不到就不判）；实测单次 0.8~5.1s；
+`CHAIN_JUDGE=0` 一键回滚；每次调用都写回 `local_judge` 的计数/告警，不另建一套。
+
+## v0.13.144
+
+v0.13.144：**判定从「能跑」补到「可运维」**。四件事：
+① 判定缓存（键=脚本指纹+题面+state，TTL 7 天，**只缓存成功**——失败固化等于
+把「现在不能问」变成「永远是这个答案」）；
+② 失败告警（**连续 3 次失败**→ERROR + `data/judge_alerts.jsonl`，恢复记一条；
+`alert`/`consecutive_fail` 进 `/api/vitals`，不再只看「最近一次成功」）；
+③ 摘要提炼（**分块归并**，1600 字/块，`/api/summarize` + MCP `hub_summarize`，
+正文超 2 万字直接报错，不静默截断）；
+④ 自动调用修复（`by_sha` 以 core_sha 为键 ⇒ agent 不升级就永不重判，实测 16 条
+全是 rule、本地判定零调用；改 24h TTL + 每轮预算 2，历史空语义记录立即补判）。
+质量校正：1.5b 的 `noul` 恒返回 1.0（缺失证据、正反问同值，10/10），
+改为**硬证据优先**覆盖模型 + 三态具体标签；菜单闸门改用 `is_entry_shim`；
+安装判定实测 3/5 → 5/5，模型只在证据模糊时生效。
+
+## v0.13.143
+
+v0.13.143：**判定附注超时 20→45s**。v0.13.142 上线后第一次真调用即超时
+（load=2.4，同载荷直测 10.4s/21s）——「2.3 倍余量」是按空负载算的，不能外推。
+附注默认关，宁可慢也不能一开就降级。
+
+## v0.13.142
+
+v0.13.142：**外部 jev 代码层彻底清除**。端点 2026-10-22 实测恒 451（区域封禁），
+随后整体下线；判定后端统一改本机 Ollama（技能 `jev-decision`，qwen2.5:1.5b）。
+新增 `src/local_judge.py`（子进程 + 失败必抛，不吞）；`ask_jev` → `ask_local`；
+删 `src/jev_client.py` / `tests/test_jev_451_l0.py`；`source` 词表
+`jev/jev-lowconf` → `local/local-lowconf`（史实记录照旧降级、不篡改）；
+`/api/skill/relevant` 精排块改本地判定附注且**默认关**（注入链预算 600ms）。
+
+## v0.13.141
+
+v0.13.141：**两个「数字对不上」**——都是展示层口径，但都能让人做出错误判断。
+① `/api/skill/usage`：`totals` 与把 `items` 加起来**永远不相等**，而响应里
+只有一个全局 `no_name`，解释不了任何一桶。实测（生产 :3102，30 天）：
+点名汇总 26 / 榜内 24（差 2 条无名事件）；legacy 1276 / 榜内 630
+（418 条无名 + 228 条被 `limit=100` 截掉）。两个成因叠在一起，
+读的人只能二选一：信汇总（看不见的 228 行）或信列表（少算 418 笔）。
+现补 `named_by_bucket` / `unnamed_by_bucket` / `listed_by_bucket` /
+`listed_items` / `dropped_by_limit`，恒等式
+`totals[b] == named_by_bucket[b] + unnamed_by_bucket[b]` 与
+`named_by_bucket[b] - listed_by_bucket[b] == dropped_by_limit`
+在响应里自证；页面按桶显示「（榜内 N）」并在 tooltip 里拆出差额两份。
+② `/api/skill/budget`：预算 1200 实测「全条目 9 / 仅名 61 / 被裁 308」，
+面板能显示结果却答不出「为什么只剩 3 条」。补 `full_cap` / `full_used_est` /
+`name_used_est` / `remaining_est` / `truncated_head`：全条目档位上限 840
+被 9 条吃了 824，仅名区 376 tok 装 61 个用 373，剩 3 tok 装不下下一个名字
+就 `break` ⇒ 其后按名排序的 308 条**连续**丢弃（不是随机少）。
+面板现在把三段占用与「从哪个名字起断」一起写出来。
+测试 +6 例（逐桶对账 / 分页差额可归因 / 截断可解释 / 未截断时 truncated_head 为 null
+/ 汇总逐桶「（榜内 N）」/ 预算成因 + 老后端守卫），
+四条红臂逐条先红后绿：unnamed 恒 0、dropped_by_limit 恒 0、truncated_head 恒 None、
+full_used 取在仅名循环之后。第四条是**真盘 E2E 抓出来的**：单测断言
+`full_used_est + name_used_est == used_est` 恒真（1197+0 也成立），
+真跑才看见 824+373=1197；判据已补上「各段不过上界 + 仅名段 > 0」。
+顺带修 `test_totals_events_bucket_sum_and_named_are_two_numbers` 的漏项：
+求和式少了 `auto_use`，夹具里恰好为 0 才没红——同族「断言恒真」。
+
+## v0.13.140
+
+v0.13.140：**权重榜接上页面**。`/api/skill/usage` 10-20 就有 14 例测试，
+但前端零入口 ⇒ 「数据有了没人看」，与「登记不等于入役」同型（实测 grep
+`skill/usage` 在 static/ 与 templates/ 里 0 命中）。
+新增技能中心第四个视图「权重榜」：窗口 7/30/90 天 + 发现点 + 调用方三个下拉，
+列表逐行给出 score 与四类证据（点名/自动激活/读取/曝光），并显示证据条数。
+三条口径写死在渲染里，测试钉住：
+① **不在前端重算 score**——公式在 `skill_weights`，页面照抄必然漂移，漂移后
+「同一技能两个分数」就是第二个真相；渲染只用服务端 `it.score`。
+② **过滤一律打服务端**——`caller` 是「先过滤再算分」，前端后过滤会把别人的
+曝光留在分母里（分数虚低），所以三个下拉的 change 都触发重新请求。
+③ **失败态与空态分开**——空榜语义是「这个窗口没人用」，不能与 500 同形。
+④ `route` 过滤原先只筛 items、totals 仍报全机 ⇒ 同一屏两份真相（下钻 techdocs 时
+顶部显示全机的「点名 20」）。改为 `build(only_route=)` 聚合前过滤，与 caller 同口径。
+测试 6 例（第四个视图/过滤打服务端/不重算/失败空分开/下拉走委托/面板归属）+ 权重侧 1 例。
+⚠️ 首版把面板插在**预算卡之后**（不在 tab 卡内）：display=block、127 行都渲染，
+断言全绿，但真浏览器实测 top=913 ⇒ 首屏只看得到「安装与注入预算」。判据量的是
+DOM 属性，用户看的是位置——静态能钉的就是顺序，已补 `test_panel_lives_inside_the_tab_card`。
+红臂三条：前端重算 score、删 `&caller=` 拼接、把 `if (d.error)` 改成 `if (false)`。
+⚠️ 第三条首次**没变红**——原断言是 `assertIn("d.error", render)`，而错误文案里
+也有 d.error ⇒ 改条件仍通过。已改成 `assertRegex(r"if \(d\.error\)")` 后变红。
+「断言里出现了某字符串」不等于「那个分支还在」，这是本轮第二次量错对象。
+
+## v0.13.139
+
+v0.13.139：**中文任务**在商店兜底里的三处硬伤（都是「搜不到 / 装错 / 说不清」）。
+① 中文技能被语言系统性扣分：相关性里的「关键词命中」只对 **ASCII 关键词**有定义，
+中文任务该通道结构性恒 0 ⇒ rel 上限 0.35（英文是 1.0），哪怕名字完全对得上
+也过不了 `STORE_QUALITY_MIN`（实测「播客音频转知识笔记」六维 0.4355 < 0.45）。
+改为 `rel = 0.65*max(kw_name, qcov_name) + 0.35*qcov`：取大不取和，因为两者
+是同一个「像不像」判断的中英两种可达形式，相加会重复计数。
+② 整句搜不到（上游对中文是**词级匹配**，约 4 字以内）：实测整句返回 12 条「编程
+专家」，`播客 音频 文字稿`（空格分隔）更差，`播客音频` 才把播客类顶到第一。
+新增 `_cn_segments()`：按虚词切段 + 长段取头/尾 4 字，**只在首轮无候选时**
+再搜一轮（≤2 路并发），不无条件 fan-out。
+③ 派生短词补到的候选**不许自动装**：短词命中的可能是**反向技能**
+（`播客音频生成` vs `播客音频转文字`）。`matched_main` 单独判：整句不达标时
+该行 veto=「只靠派生短词命中…需人工看一眼再装」，只进排行榜给人看。
+这一轮也不查安全报告（反正装不了），实测整条兜底 8.6s → 4.0s。
+④ 顺带修两处口径：`store.ok` 装成功后没翻绿（同一响应里「store 失败」与「已落盘」
+并存）；`/auto` 的 keep 里只有 `bytes_total`（**仅截断时才存在**）而缺 `bytes`
+（未截断时恒 None）⇒ 调用方拿到正文却不知道多大。
+实测（2026-10-20，生产 :3102）：`语音转文字` 本地 0.247 不够像 ⇒ 商店选
+@user_03f2ab96/yuyinzhuanxie（Q=0.867，两家 benign，下载 9.9k）⇒ 装入 techdocs
+回 3322B 正文，3.1s；再问同题走本地（source=local，不联网）；`把播客音频转成带
+说话人标注的文字稿` 整句 0.38 ⇒ 派生短词补到播客类技能（Q=0.72）但**不落盘**。
+红臂四条（逐条先红后绿）：撤 rel 取大 / 撤 matched_main 否决 / 撤派生补搜 /
+撤 store.ok 翻绿。
+
+## v0.13.138
+
+v0.13.138：**自动取用**——agent 手里只有任务描述、不知道技能名时，一次调用拿回说明书。
+① 新端点 POST /api/skill/auto：收一句任务 → 本地 BM25 归一化 ≥0.40 就直接激活并回正文
+（不联网、不写盘）；不够像才走商店六维择优 + 安全报告 + 小时额度（与
+/store/acquire **同一条选人逻辑**，本端点不另立门槛）。返回 `source=local|store|none`
+与 `activated`；失败仍 200 + `ok=false` + 顶层 `reason`，不拿 404 逼调用方猜。
+② `local_only` 与 `allow_install=false` 是两件事：后者只阻止落盘、**搜索照打**；
+前者才是「不联网」。`/auto` 的 `allow_store=false` 映射到 local_only。
+③ 记账分层：自动激活落 `skill.invoke` + `mode=auto_invoke`，权重榜进 `auto_use`
+桶（use=1），**不许混进 explicit**（use=2，那是有人点名）。服务端选的技能
+既不是「同一批候选的曝光」，也不该按点名调用同权计分。
+④ MCP 加 `hub_skill_auto`：agent 在工具环里不必先 list 再猜名字；`allow_store=false`
+时纯本地可用（短预算/离线）。实测 9 例 × 4 条红臂（取消 mode 强制 / 取消 local_only /
+取消 auto_use 分桶 / 去掉顶层 reason）逐条先红后绿。
+⑤ 顺带修 acquire 的四处半截话：搜索失败 / 无结果 / 无候选 / 开关关闭原先只在
+`store.reason` 里写原因，顶层没有 ⇒ 调用方读顶层看到「没原因」。现全部回填。
+
+## v0.13.137
+
+v0.13.137：端到端实测（搜→装→调）暴露的四处「说得不清 / 记错了账」的修补。
+① **计划态不再冒充未命中**：`dry_run` / `allow_install=false` 都是 `ok=false` +
+`source=none`，原先顶层连 `reason` 都没有 ⇒ agent 把「再调一次就能装」读成
+「商店没有」。现回 `reason` + `would_install`（slug/名称/目标/质量分/安全结论/
+下一步怎么做）。
+② **计划态不算一次使用**：`/store/acquire` 以 `skill.invoke` 记账，dry_run 交付了
+0 字节却留下一条**技能名为空**的流水，权重账虚增。`runlog.track` 新增
+`skip_when`，`ok=false` 不记成功事件（失败/异常仍照记）。
+③ **`cli_present` 与 `available` 同源**：前者原用 `shutil.which("skillhub")` 查进程
+PATH，systemd 下无 ~/.local/bin ⇒ 恒 false，面板一边「可用」一边「缺失」。
+④ **安装目标默认＝自动兜底目标**：下拉原停在列表第一项（claude），而面板写着
+「自动兜底 → techdocs」⇒ 点安装会写进另一个 agent 的发现点。
+实测（2026-10-20，生产 :3102）：ppt 查询 12 条候选 → 六维选中
+`@user_f9ab891e/666-v2`（Q=0.846，两实验室 benign）→ 3.96s 装好并回正文
+→ 再 `invoke` 一次 26ms 回 1085B；可疑技能 `martin-pdf` 不带 force 被 409 拦下且不落盘。
+
+## v0.13.136
+
+v0.13.136：同类技能择优——商店里同一件事有十几条技能，装错等于白装。
+① **富字段**：CLI 的 `search --json` 把上游已返回的 downloads/stars/
+labels.requires_api_key/updated_at 丢了，直连同一搜索 API 取回（失败回落 CLI，
+并在 `via` 里如实标 api/cli）；`downloads=null` 记「未知」，**不当 0**。
+② **六维加权**：相关性 0.35 / 安全 0.20 / 下载量 0.25 / 维护度 0.10 / 认证 0.05 /
+免 Key 0.05；权重与门槛在 375 条真实语料 + 真实商店上标定（work/store-cal/）。
+③ **两条硬否决**：查询不像；安全报告（科恩/云鼎）标 suspicious。质量分低于
+0.45 也不装——「装个用不上的」比「没装」更糟（污染发现点）。
+④ **免 Key 优先**：同类有免 Key 的就不选要配 Key 的，否则装完 agent 还得停下来
+要凭据；全组都要 Key 时才选分最高的并把 warning 带回去。
+⑤ **中选者必查过报告**：只给初筛前 3 名查安全（每条一次子进程），若重排后冠军
+是没查过的那条，补查再定（最多两轮）——不许让「未核查」以未知分混进冠军位。
+⑥ 人工安装同样先查报告：可疑默认 409 拒绝，`force=true` 才装（面板会先问人）。
+
+## v0.13.135
+
+v0.13.135：技能商店从「人工货架」变成 **agent 找不到技能时的自动补货通道**。
+① 新端点 POST /api/skill/store/acquire：收一段任务描述，本地 BM25 够像就直接回正文
+（不联网、不装盘）；不够像才搜商店，候选覆盖率过门槛才装到自动目标
+（默认 techdocs），装完立刻解析 SKILL.md 回正文。返回顶层 name/route/content
+与 /invoke 同形，`source=local|store|none` 说明这次是怎么拿到的。
+② 三道闸：本地优先（归一化 BM25 ≥0.40，分母＝查询词 IDF 之和，避免绝对分随语料
+规模漂移）/ 商店门槛（ASCII 关键词名称命中 ≥0.5 或查询覆盖 ≥0.5；中文长句先抽
+英文词重搜，否则「把 PDF 拆成图片」的首条是视频创作技能）/ 小时额度（默认 6，
+计数读 profile_events 的 skill.store_auto，不另建状态表）。超了 429 并说清。
+③ `/api/skill/invoke` 加 `allow_store`（默认关）：MCP `hub_skill_invoke` 默认开，
+agent 点名一个本地没有的技能时自动补货；web/旧客户端不受影响（防手误写盘）。
+MCP 另加 `hub_skill_acquire`（任务描述入口）。
+④ 账号入口：实测**搜索与安装匿名可用**（2026-10-20 匿名额装了一条验证），
+需要 skh_ Token 的只有 publish/comment/run/whoami ⇒ 商店页加「账号」行与
+/store/login|/logout|/auth 三个端点；token 交给官方 CLI 落 ~/.skillhub，
+hub 不落库、不回显、不写日志。
+⑤ 边界：不接 `skillhub run`（在线执行把正文发到第三方）；商店技能标记
+trust=community 并带警示，hub 只当说明书交回，不代跑脚本。
+
+## v0.13.134
+
+v0.13.134：调用记录排版重做（用户报「文字没对齐、主题不清晰」）。
+① 根因是**容器与换行手段不匹配**：`.sk-inv-sum` 是 flex 而 JS 用 `<br>` 分行，
+flex 里的 <br> 只是一个空 flex 项、不换行 ⇒ 三行文案被摊成一串参差项。
+改为两列网格（标签 max-content / 值 minmax(0,1fr)），所有值左缘同一 x。
+② 流水行改 grid 两栏：主列（技能名/来源片/调用方/结果/任务/时间·耗时）+
+右列动作。技能名从实心黑胶囊改字重区分，来源片 inline-flex 定高（原 inline
+的边框会压到文字下缘）。时间与耗时用等宽数字，逐行右缘对齐。
+③ 状态除颜色外必须有文字（「成功」/失败原因），灰度屏与色弱下才可读。
+
+## v0.13.133
+
+v0.13.133：技能权重端点 `/api/skill/usage`（PT-20261020-01）。
+① 公式 `use = 2*explicit + read; score = use^2/(use+auto)`：曝光（auto_inject）
+**只作分母**，从曝光不使用的技能得 0 分；explicit_invoke 与 read 才是正样本。
+② 身份 = (name, route)：同名多路分开计，另给 by_name 汇总（分数在各自层级重算）。
+③ caller 过滤**先过滤再算分**（按某个 agent 自己的曝光重算分母），不是后过滤。
+④ 修埋点缺口：/relevant 的 route 是逐条目字段，原实现只记名字 ⇒ 曝光落到 route=""
+的另一行，auto 永远配不到使用上。改为逐名事件带自己那条的 route。
+⑤ legacy（无 mode/via 的旧 relevant）单列，不进 use 也不进 auto；坏 detail 计数。
+
+## v0.13.132
+
+v0.13.132：调用徽标不再冻结 + 自动下发/指名调用分桶（PT-20261020-01）。
+① 用户报「调用记录后面一直显示 0」：`skillsLoaded` 一次性加载闸把汇总请求一起挡住了，
+首屏那一刻库里 0 条 ⇒ 徽标永远停在 0。改为重进页/切到记录视图各补刷一次，
+另加 60s 保活（仅技能页可见时，只刷数字不重绘 375 行）。
+② 自动下发与指名调用分桶：注入链打 /relevant 时自报 `caller` 与 `via=hook`，
+runlog 落 `mode`（explicit_invoke / auto_inject / query）。判据只有 via=hook，
+缺省不推断；无身份的旧事件在 `unknown_caller` 单列，不硬塞给任何 agent。
+③ /invocations 新增 auto 桶（total/by_caller/by_skill/unknown_caller/error），
+界面单列「自动下发」——曝光不是使用，权重统计不能混加。
+
+## v0.13.131
+
+v0.13.131：六处 inline onclick + jsStr 全改 data-* 委托（PT-20261019-02）——
+双引号属性被 jsStr 的双引号字面量截断 ⇒ 点击静默 SyntaxError（19 天无人察觉）。
+反向闸门扫全部分片 + 渲染态探针（敌意引号路径逐字符回读）。
+
+## v0.13.130
+
+v0.13.130：技能中心前端细化 + 一条闸门自身缺陷（台账 PT-20261019-01 / PT-20261019-04）。
+① 技能目录/调用记录两个 tab 内联到「技能中心」标题行（`.sk-titlebar` + ARIA tabs +
+键盘 ←→ Home End），去掉内层重复卡头；目录补整行点击/清除/排序/计数；
+调用记录补徽标/行内查看/过滤计数/0 条出口。
+② 调用记录恒 0 **不是查询坏**：库内 `skill.invoke`=0，日志只有 POST /invoke 401
+（浏览器 TERM_TOKEN 与服务端不一致）⇒ 写入在 writegate 被拒；UI 单列 401 文案。
+③ L1 项目精度闸恒红（212 > 50）：`_under_excluded` 里点名根豁免压过硬排除，
+扫描根含 HOME 时 `~/hub-l0test-fixtures/**` 整支被豁免 ⇒ 168 个 L0 夹具仓
+被当真实项目。改成硬排除优先，但「点名根落在排除前缀内」仍豁免（保住 12 例）。
+
+## v0.13.129
+
+v0.13.129：技能名录三修（台账 LEDGER-skillcenter.md 同日「修复 ①②③」）。
+① 12 路里只有 **3 路是真发现点**（grok / picoclaw / hermes-web），补铺 63 条；
+其余 9 路刻意不铺：superpowers 与 hermes-agent 是上游 git clone（软链=untracked，
+git clean 即丢），qoderwake* 是 manifest 驱动的随包资源，opencode 是已证伪的假发现点。
+② `ima-skills/{notes,knowledge-base}` **不是技能**，是父技能的子文档：父级用
+MANDATORY RULES 统管写前校验，补 frontmatter 让它们可选 ⇒ 模型会绕过校验。
+改为 `_is_nested_doc()` 标记 `nested`，`/budget` 排除并回 `nested_docs` 名单
+（排除可以，静默不行）。budget total 375 → 373。
+③ `git reset --hard` 冲掉未提交改动后无法恢复：仓内无脚本会发它，17:44:25 那次
+来自 agent 临时动作，git 也没有 pre-reset 钩子 ⇒ 拦住不现实。改为
+`scripts/wip_snapshot.sh` 把未提交改动铸成 commit 挂到 `refs/wip/auto`，
+由 agenthub-wip-snapshot.timer 每 5 分钟跑一次；实测 reset 后能原样找回。
+
+## v0.13.128
+
+v0.13.128：技能中心目录静默截断（PT-20261019-03）。`/api/skill/list` 默认 limit=200，
+响应只有 count ⇒ 生产 walked=487、unique=371 却只回 200 条：jcode / hermes-web /
+techdocs / superpowers 等 **12 路整路不可见**，前端把 200 当总量。现在响应必带 total
+与 truncated（**截断必须自报**，不许把少收读成「本机只有这么多」），上限 500→1000，
+前端显式取全量并在统计条明示「本次只显示 N 条」。
+
+## v0.13.127
+
+v0.13.127：技能中心统一调用入口（PT-20261019-01 P0）。新增 POST /api/skill/invoke
+（激活+记账，回 SKILL.md 指令正文，不代跑代码）、GET /api/skill/catalog（L1 发现层）、
+GET /api/skill/invocations（调用流水只读投影，零新表）；MCP 加 hub_skill_invoke /
+hub_skill_catalog；扫描三补强（codebuddy 只读路由 / 项目本地 local 路 / opencode
+假发现点证伪注记）。顺带修：hubmcp.HUB_URL 写死 3102（影子实例误打生产）改为从
+config.port 推导；runlog 失败路径不带技能名的缺口（_pick_extra）。
+
+## v0.13.126
+
+v0.13.126：嵌入式终端「Mac 下复制/粘贴快捷键失效」（纯静态前端，服务端一字未动）。
+端侧取证：Mac（192.168.5.101）走 `http://192.168.5.102:3102`，即 isSecureContext=false、
+navigator.clipboard 不存在 ⇒ 复制只剩 execCommand 一条路。两条独立根因：
+① v0.13.90–125 把它排在 `Promise.then` 里，而 WebKit/Safari 的**用户手势**不跨
+**微任务** ⇒ execCommand 被拒、剪贴板没内容 ⇒ 后续 Cmd+V「粘不出东西」。
+② 有选区 Cmd+C 自己 `preventDefault` 并用 JS 写剪贴板，把 xterm 6.0 在 `.xterm` 上
+自带的那条**原生 copy** 链（copyHandler 写 clipboardData）整条废掉。
+修法：有选区 Cmd/Ctrl+C 只 return false（不 preventDefault）⇒ 交给浏览器原生 copy 链；
+termCopyFallback（右键/OSC 52）非安全上下文改为**同步** execCommand。
+保留 `SIGINT`（无选区 Ctrl+C 仍进 pty）、Cmd+V 仍不 preventDefault。
+闸门：tests/test_term_clipboard_handoff.py（契约改判）+ tests/verify_term_clipboard.py（L2，
+量 copy 事件与 clipboardData）；真 chromium 对生产 hub.js 实测
+`work/probe_copy_native_path.py --real` 6/6。
+注：纯静态前端改动，**不重启生产**；code_stale=true 是设计意图，端侧硬刷新生效。
+
+## v0.13.125
+
+v0.13.125：前端静态修复（`static/hub.js` 三处 trim）。
+病灶（2026-10-18 实弹取证，非推断）：同一份带尾随空白的 token 在两条鉴权路径上
+待遇不同 —— HTTP 头里的空白被解析器按 OWS 裁掉（`X-TERM-TOKEN: <43字符> ` → 200），
+WS query 里的 `%20` 不会（`/ws/term/<sid>?token=<43字符>%20` → 403）。
+于是 `POST /api/term/sessions` 200（pty 起得来）而 `WebSocket /ws/term/<sid>` 403，
+xterm 零字节 ⇒ **终端永久空白**（全 agent 同形，用户以 codebuddy 报障；
+journald 实测干净 token 26 次 / 带 %20 10 次）。
+修法：`termToken()` 读存量 + prompt 返回值、`settingsApplyToken()` 写入口、
+`wsUrl()` 读侧一律 trim（存量脏值因此**自愈**，用户无需清 localStorage）。
+**服务端一字未动**：`term.py` 精确比对是对的，放宽成 strip 等于在鉴权闸上开口子。
+闸门：tests/test_term_token_trim.py(6，含 node 行为层 + 旧文件红基线)。
+注：纯静态前端改动，**不重启生产**；`/health` 的 code_stale 变 true 是设计意图。
+
+## v0.13.124
+
+v0.13.124：P2 第 9/9 项（C17「工具瓶颈不在数量而在描述质量」）。补建 `src/tooldesc.py`
+（前序会话 in-progress 工作因 merge 混乱丢失，从零重建）。
+① `tooldesc.py`（新模块）：parse_sections() 标签归一；completeness() 三态判定
+complete/partial/insufficient，缺项显式列出；select() 委派 skill_relevance.rank。
+② `mcpgw.py` 接线：_tool_shape() 每工具加 description_quality；
+aggregated_tools() 加 resp["description_quality"] 分布（不写 note ——
+A10 闸门钉着「后端全绿 ⇒ note==""」，质量是结构化数据不是运维信号）；
+新端点 /mcp/select（任务裁剪 + 可选 ACL 叠筛）。
+③ `skill.py` 接线：_scan_one() 每技能条目加 description_quality。
+闸门：tests/test_tooldesc_p2_c17_l0.py(18)。
+
+## v0.13.123
+
+v0.13.123：P2 A10
+v0.13.123：P2 第 7/9 项补位（A10「统一 Action Plane」）。
+病灶：「做一件事」在本机有三种互不相通的表达（mcp_call / term 命令 / llm.acall），
+各自记日志、各自判成败 ⇒ 「这一轮做了哪些行动、哪步被谁拒了」只能人肉对三份日志。
+① 新 `actionplane.py`：ActionRequest / ActionDecision / ActionResult + 显式状态机
+（pending → approved|denied|waiting_approval → done|unknown）。
+② **ACL 降为 policy decision point**：`decide()` 只**接收**裁决并落账，不自己算 ACL
+—— 两份真相必然漂移（mcpgw 的 docstring 已写明）。故本模块**零 import mcpgw**，
+闸门 `TestNoImportMcpgw` 用 AST 钉住（写者面隔离，本项才能在 mcpgw.py 被并发
+改写时独立交付）。
+③ **pending ≠ approved**：「已登记」不是「已准许执行」；合并两态就是「写入成功即完成」。
+④ **unknown ≠ failed**：执行抛异常且拿不到结果 ⇒ 不知做没做成。记 failed 会诱导
+调用方重试，而重试有副作用的行动是最危险的动作，故 unknown 是一等结论。
+⑤ **结论不可覆盖**：一个 action 只能 settle 一次（results 表主键）；改判走 unknown→done 复查。
+拒绝**不写 results** —— 那是 PDP 的终局结论，不是执行结果。
+⑥ **参数只落形状**：`{键: 类型}`，不吃值（凭据不得被复制进事件表）。
+⑦ `execsem` 登记 source=`action` 与三拍映射（`requested`→skipped，不冒充成功数）；
+这条是 C3 覆盖闸门当场抓出来的 —— 写了 source 却没登记，闸门变红。
+⚠ **未接线（如实标注）**：`mcpgw.mcp_call` / `term` / `llm.acall` 三处真实调用点**尚未**
+改走本模块（同样因为 mcpgw.py 的写者面）。所以今天生产里 `action_requests` 只有
+API 显式登记的行；「三种表达归一」这一步**没有发生**，本节只是把那层地基铺好。
+
+## v0.13.122
+
+v0.13.122：P2 第 7/9 项（C7「外部资产准入六阶段」）。
+v0.13.122：P2 第 7/9 项（C7「外部资产准入六阶段」）。
+病灶：`skill.package_digest()` 能证明「内容是什么」、`skill_assets` 状态机能声明
+「处于哪一态」，但**中间四道检查根本不存在** —— 来源是谁、脚本有没有外连、
+隔离环境跑过没有、谁批的。没有这四份记录，`published` 只是一个自称。
+① 新 `admission.py`：六阶段 `source/integrity/static/isolated/review/publish`
+（手册 15 章的原文表，逐条对应），一张准入单锁一个候选包 digest。
+② **顺序不可跳**：`can_advance()` 是唯一推进闸门（前置全 pass/waived 才许推进），
+所有写入路径都必须过它。重复记 pass 也拒（幂等 ≠ 可重复确认）。
+③ **三种结论不可合并**：`rejected`（跑过且失败）/ `incomplete`（**还有没跑的**）/
+`admitted`。`pending` 永远不是 `pass` —— 本仓反复禁的「空即无」。
+④ 失败必须回 `source` 回炉，不许"修一半继续"。
+⑤ `waived` 必须带理由（无理由豁免＝漏检）；`pending` 不许被写成记录
+（那会让"没跑"与"跑了没结果"不可分辨）。
+⑥ 静态检查（`static_scan`）：零网络零执行的纯判据，复用 `outbound.check_url`；
+`allowed=true` **自述"不是安全结论"**（手册原话：静态检查不能穷尽自然语言指令）。
+⑦ **刻意不合并** `skill_assets` 的四段状态机：那是资产生命周期，本模块是外来包
+的准入检查链。前者可从 published 回 draft，后者一次检查**永不回退**。只产出记录。
+⚠ **自抓两处**（红向自证逼出，都是"测试看着绿但其实没测到"）：
+· 只断言 `assertRaises(ValueError)` ⇒ 删掉 pending 专属检查后仍被下一行兜底，
+全绿。**断言拒绝必须连理由一起断言**。
+· 脱敏用例把 token 放在命中处 **后面 30 字**，而 `_snippet` 只取前后各 20 字
+⇒ token 没进样本，删掉脱敏照样全绿。**样本必须让被测机制真的被触发**。
+⚠ 阶段 4（隔离验证）/ 阶段 5（人工评审）目前只有**记录位**，不做执行与人签
+—— 真跑沙箱属 L1/主机级，不在本批（如实标注，不假装已落地）。
+
+## v0.13.121
+
+v0.13.121：P2 第 6/9 项（A1「Agent Release manifest」）。
+病灶：手册要求「发布单元 = 模型+参数+预算+Harness+Skill 版本+Tool 权限+评估基线，绑定可追溯」，
+而本机这些**分散在六个地方**各读各的 ⇒ 没有「这个 agent 现在是哪个版本」这个概念；
+改模型/换 skill/动 ACL 从界面上看**什么都没变**，出问题也说不清回到哪个组合。
+① 新 `release.py`：只读聚合 + `release_id`（sha256 前 16）。**零写入、不缓存**
+（缓存会造「改了配置但 manifest 还是旧的」假绿）。
+② 指纹**只吃语义**：模型 current / 画像(kind,cli,port,terminal_cmd,adapter) /
+已发布 skill(slug,version,status,digest) / ACL(server,tool,allow,effect) / execsem 词表。
+**不吃**：文件路径、时间戳、耗时、描述文案、detect 规则 —— 换目录不是换版本。
+③ 读不到 ⇒ 该维 `unknown` + `degraded=True`，**不留 `{}`**（那会把「不知道」读成「没有」）。
+④ 端点 `/api/agents/releases`（放 api_agents.py，不动 main 的 include 列表）。
+⚠ **自抓三处**（都在红向自证/真数据里现形）：
+· `_semantic_view` 原样透传 model 维度 ⇒ `files` 路径进了指纹，与模块 docstring
+「换目录不是换版本」**正好相反**（闸门打红）；已 pop 掉。
+· ACL 读 `r.get("tool")`，**列名是 `tool_pattern`** ⇒ 每条规则 `{"tool": null}`，
+字段在、值是空、不抛错，把「限哪个工具」丢干净。
+· 端点注册在 `{agent_id}` 之后 ⇒ 被 `get_agent("releases")` 接走，**永远打不到**。
+⚠ 顺带实测：为一行 SQL 而 `import mcpgw` 的冷代价 **894ms**（它拉 mcp SDK + resilience
++ outbound）；改为直接 `db.query` 后 23 个 agent 冷启动 959ms → 347ms、热 10ms。
+✅ 已销（2026-10-17，同一张表的**登记**部分）：`scripts/skill_assets_register.py`
+把 `技术文档/skills/` 的 18 个包登进 `skill_assets`，**全部停在 draft**、digest/path 留空。
+仍然为 0 条的是 **published** —— 那是刻意的：15/16 包许可证未确认
+（`skills/PROVENANCE.md` 第四节：对外分发禁止），推 `published`（唯一可依赖态）
+等于替它们盖章「可依赖」。per-包 Test→Review→Publish 逐条走，不批量。
+
+## v0.13.120
+
+v0.13.120：P2 第 5/9 项（A11「端到端 Trace 因果链」）。
+病灶：手册要「模型/状态/Action/Artifact/Verifier/Outcome 同一条 trace 可见」，
+而三张表里 `profile_events`/`tasks` 有 `trace_id`、**`asset_audit` 没有**
+（实测生产 441 行带 trace，审计 74 行零 trace）⇒ 审计事件在 trace 视图里是**断的**。
+① `asset_audit` 幂等补 `trace_id` 列；**旧行保持 NULL**（回填＝替历史编因果）；
+索引**不放 SCHEMA** —— executescript 早于 ALTER，会死在缺列上（服务启动即挂）。
+② `log_asset_event(..., trace_id=)`：拿得到就传，拿不到留空 —— 留空是诚实，编号是造假。
+③ 新 `traceview`：`build_chains()` 按 trace 聚链，**无 trace 的行按表分桶进 `orphans`**，
+绝不按时间就近归并（那是凭空造因果）。链内排序键 `(at, table, seq)` 保证可复现。
+④ 端点 `/api/audit/trace` 放 audit.py（不新开 router —— main.py 今天多会话在写）。
+⚠ 缺口：写入端调用点未逐个接 trace（碰他会话在制品，按单写者不动）⇒ 审计仍进 orphans。
+⚠ **自抓**：首版 `collect()` 节点没带 `trace_id` ⇒ 端点恒回空链；单测只覆盖降级路径
+（空库/缺列）没测主路径 ⇒ 全绿。已补 `TestCollectReturnsRealChain`(2) 钉住。
+两种「空」分开：`audit_trace_available=false`（能力没上线）≠ `chain=[]`（事实为空）。
+
+## v0.13.119
+
+v0.13.119：P2 第 4/9 项（C2「检测与拦截分开建模」）。
+病灶：`mcp_acl` 只有「拦/不拦」两种结果 ⇒ **加一条 deny 规则就是当场生效**，
+没人能先看它命中过谁、会拒掉什么 ⇒ 规则一上线就可能把正常调用打死。
+① `mcp_acl` 幂等补 `effect` 列（`enforce`|`shadow`）；**缺列/空值/NULL 折算 enforce**
+（灰度是**选择进入**的，旧行不得因为新列而变成不拦）。
+② `_acl_check()` 改为**返回决定对象**（不再只抛异常）：实际生死只由 `enforce` 规则算，
+shadow 规则对生死**零影响**；再把 `enforce+shadow` 全量算一遍，若全量会拒而实际放行
+⇒ 记一条 `mcp_acl_shadow` 的 `would_deny`（「本应拒绝」可查、可统计）。
+shadow **只会多说话，不会少拦**：实际为拒时照旧 403。
+③ 写入口 `/mcp/acl` 接受 `effect`（只认 `enforce|shadow`，别的 400）。
+④ 新 source `mcp_acl_shadow` 落入 `execsem.SOURCES`+`STATUS_MAP`
+（`would_deny → degraded`：有异常但未阻断）—— P2 C3 的**覆盖闸门当场把我拦下**，
+这正是「写入点各自发明词」那条判例的机械防线。
+闸门：`tests/test_mcp_acl_shadow_l0.py`(9)。
+
+## v0.13.118
+
+v0.13.118：170 §7 后两项
+v0.13.118：`agent-knowledge/170` §7 四项的**后两项**（前两项已在 v0.13.116）。⇒ §7 全闭合。
+① **§7-① verifying 不再瞬时**：旧实现置 `verifying` 后**同步**调 verifier 写回 ⇒ 协程从不
+yield、DB 上那一瞬没人看得到（前端/监控只能看到 running→success/failed，分不出
+「还没验」与「正在验」）。现：verifier 改走 `asyncio.to_thread`（协程在此 yield，
+外部读得到），并新增 `verify_started_at`/`verify_ms` 两列 ⇒ 该阶段**可观测且可度量**。
+② **§7-② waiting 有界且自愈**：回包说 waiting 时写 `wait_until = now + TASK_WAIT_RESUME_S`
+（默认 300s）+ `wake_count`；新增 `resume_expired_waits()`：过期的等待态**未到
+`TASK_MAX_WAKES`（默认 3）⇒ 自动重新排队并拉起 runner**（不靠人记得调 /resume）；
+到顶 ⇒ 如实 `failed 等待超时`。挂进现有 sweeper 心跳（不为等待态另起 loop）。
+人工 `/resume` **也计数**且清掉旧期限——否则「有界」可被无限续命名存实亡。
+闸门：`tests/test_task_statemachine.py` 新增 `TestVerifyingIsObservable`(2) + `TestWaitingSelfHeal`(5)。
+
+## v0.13.117
+
+v0.13.117：`P1-6` 模块（`src/resilience.py`）建好了但**只接了一处**调用点（ghsettings），
+台账记着的「接线剩两处」在本批补齐。
+① **`resilience.acall`**（新）：`call()` 的**异步孪生**。抽了纯函数 `_decide()`
+让两条入口**共用**分类/退避/预算决策 ⇒ 不会出现「同一错误在同步路径重试、在异步路径不重试」。
+为何必需：`llm.py` 走 aiohttp，拿同步 `call()` 包会把事件循环整段阻塞在退避睡眠里。
+② **`llm.py`**：`LLMGatewayError`（**结构化携带** `status`/`headers`）替代纯 RuntimeError ——
+否则 429/5xx 分类不出、重试判定只能猜文本；`_post_once()` 抽成测试接缝；
+`_create_message` 走 `acall(attempts=LLM_ATTEMPTS, sleep_budget_s=LLM_RETRY_BUDGET_S)`
++ attempt 逐次落 `profile_events`（source=resilience，call_id 跨 attempt 不变）。
+③ **`resilience._http_code/_headers` 认鸭子类型**（`status`/`code`/`headers`）——
+urllib 旧路径行为**逐字不变**（有闸门钉着）。
+④ **`mcpgw.mcp_call`**：落 `call_id` + `idempotency_key(server,tool,规范化 args)`（确定性、
+绝不吃时间戳/随机数），两者**进回包与 profile_events.detail**；
+⚠ **刻意 attempts=1**（不自动重试）—— MCP 工具副作用未知，盲目重发可能重复执行；
+本项只把「可幂等」变成可用信息，要重试必须逐点显式决定（闸门钉着 attempts=1）。
+闸门：`tests/test_llm_resilience_l0.py`(12) + `tests/test_mcp_idempotency_l0.py`(8)。
+
+## v0.13.116
+
+v0.13.116：170 §7 两项
+v0.13.116：`agent-knowledge/170` §7 四项里的**前两项**（用户 2026-10-16 授权）。
+① **§7-④ 执行者不得自证 fail**：旧 `_run_task` 遇 `result["success"]=False` 直接置 failed，
+**不看产物、不留结论** ⇒「其实产物合格」被静默掩盖、事后不可复核。现：失败方向仍保守
+（不因产物非空就升级为 success），但**必跑一遍 verifier** 并把结论写进 `verify_reason`；
+自称失败而产物被复核为合格时另发一条 `mismatch` 事件（可查）。
+⚠ 口径冲突已消解：P0-b 契约「没过 verifier 的路径 `verdict` 必须 NULL」被**保留**
+（不给自述失败写 verdict），复核结论走 `verify_reason`。
+② **§7-③ run 级预算**：新表 `task_run_budgets`（一 run 一行，upsert）+ `run_spent()` +
+`run_budget_exceeded()`；`_execute_run` 在**派发前**逐 pending 查累计消耗 ⇒
+「run 预算耗尽」的剩余 pending 一律 failed（已跑的不打断）。
+闸门：`tests/test_task_statemachine.py` 新增两类（含红向修正：预算用例必须让 t1 真花时间，
+否则 dur 可能 0ms 让断言时红时绿）。
+
+## v0.13.115
+
+v0.13.115：出站韧性层 + 依赖锁版本 + token 取用 + 知识索引 + 配置包导入导出（PT-20260927-12/13/14/15）
+叙事全文见 CHANGELOG.md 同版本；此处只留「为何这么改」的根因。
+① **出站韧性层**（src/resilience.py）：本机8 处裸 urlopen 零重试。借鉴
+nathangtg/agent-hub 的熔断器 + 限流退避，但**只抄语义**（上游是 async + 硬时钟
+单例，本机是同步 urlopen + 多线程）。**429 不计熔断失败** —— 限流是对端健康的
+表现，算失败会在对端最需要被调用时主动切断。**Retry-After 必须封顶**
+（对端可写 3600，照单全收会挂住线程池 worker 一小时）。**半开只放一个探针**；
+`_leave` 必须在抛异常那条路也执行，否则半开永不自愈（比一直开闸更糟）。
+⚠ `vitals.http_ok` 刻意**零重试**：它在 L4 探活路径上，AGENTS.md 立着「探活最多 2 次」。
+接了 4 个**只读幂等**调用点；写路径不接。`/health.breakers` 让熔断从黑盒变可观测。
+② **依赖锁版本**：9 个裸包名零版本号，又无 pyproject/uv.lock ⇒ 一次 venv 重建就可能
+装到 breaking 版本而无人察觉（NAS 无 CI 兜底）。版本取自生产 venv `pip freeze` 实测值。
+③ **token 取用**（`agent-hubctl.sh token`）：随机 token 只 print 前 4 位到 journald
+⇒ 首次接线（手机/另一台机）只能去日志挖全文，而日志会滚走。这是**可用性**改善，
+不是放宽鉴权（四条终端路由仍全过 `_check_term_token`），故只打 stdout、不写 journald。
+外部评估把它误判成「没鉴权」——真痛点是取用方式。
+④ **README 瘦身 + 知识索引**：228 行里 160 行是逐版本施工流水（迁 `docs/HISTORY-features.md`，
+原文逐字保留）；更关键的是仓内对 `agent-knowledge`（155+ 篇）**零指针**。
+新增 `tests/test_knowledge_index_l0.py` 钉「索引里的编号必须解析得到真实文件」——
+它能验指针有效，**验不了**判据是否仍与现状一致，所以索引节必须同时写明
+「结论绑定取证日期，以代码与实测为准」。
+⑤ **配置包导入导出**（src/settings_bundle.py）：画像=代码定义+运行时注册，重装全靠手工。
+**不导出 mcp_servers 与 .env**（机器事实+凭据）；自由文本过既有脱敏器；
+导入**幂等 upsert**且不清本机独有条目；未来版本**显式拒绝**（尽力解析＝字段改名
+静默丢配置）；导出虽是 GET 但**按写方法判鉴权**（批量读＝数据外流，同 audit.py 口径）。
+**一律 JSON，不引 YAML**（零新增第三方依赖是硬约束）。
+① **P0-a 成本归因**：`adapter.chat` 本就返回 model+usage，`_run_task` 却只取
+total_tokens 就丢、`model` 一次没读过 ⇒ 任务↔模型↔token 无法 JOIN。
+取 adapter 回包值而非我方请求值；缺则留 NULL 不兜底；五条落库路径都记 ——
+验收失败照样花钱，成本不随 verdict 消失。
+② **P0-b 验收落库**：P0-3 已实现「执行者不自证」，但三态只折叠进 status/error
+就丢了。新增 verdict+verify_reason；**NULL 严格区别于 'fail'**（NULL＝未走到验收：
+等待/预算/自称失败/超时，记成 fail 会虚增失败率）；`insufficient` 是第三态。
+③ **潜伏缺陷（非本次引入）**：超时分支把 '超时熔断 %ds' 写成字面量却按 5 个参数传
+（SQL 只 4 占位符）⇒ ProgrammingError 在**异常处理器内部**抛出，任务永远 running。
+④ **标签型产物**（src/outputguard.py）：免费池会把请求路由到审核/分类模型，返回
+'User Safety: safe' 这类标签而非正文，而 nonempty 只判非空 ⇒ 标签被记成「成功
+产出内容」。三档 content/label/empty + 恒非空 reason；只认强信号（模型属审核族，
+或「标签: 值」且值属分类**封闭枚举** —— 靠长度判据拦不住 'User Safety: <中文正文>'）。
+⑤ **账本归一口径**（src/ledgernorm.py）：账本是**只读生命线资产** ⇒ 只在读取侧归一。
+只剥**网关前缀**（反复剥）**不剥厂商前缀**；`:free` 分两轴（成本 canonical /
+能力 base）；provider 内部逻辑名拆两半 —— 名字合并、**协议形状**必须留。
+实测 98→91 key、合并 12398 行（33%）。
+⑥ **清 test_boundary 既存红**：期望 400 实得 401 —— 测试从没走到它声称在测的那道闸。
+根因：模块头 `os.environ.setdefault("TERM_TOKEN", 假值)` 是**空操作** ——
+config.py 的 `load_dotenv(override=True)` 无条件用仓内 .env 覆盖环境。改送
+`term.TERM_TOKEN` 本身，**先过鉴权**、**再验边界**。守卫见 test_token_fixture_hygiene
+（子进程先 import config 仍须全绿 ⇒ **顺序无关**已自动盯住）。
+⑦ **P0-c 模型边界画像**（src/modelprofile.py）：勘察确认 CCR /v1/models **不给任何
+能力元数据**、账本**无输出正文** ⇒ 只出**边界**（能否成/多快/多贵/哪些协议形状），
+语义能力不编。**最关键：429 是负载信号不是质量信号**，须单独计并从质量口径**剔除** ——
+实测把 `agnes-3.0-flash` 44.0%→99.8%、`qwen3.7-max` 40.2%→93.3% 翻成「近乎完美」，
+混算就会把这三个永久误判成「一半都在失败」。三态与 verifier 同构：ok /
+insufficient_sample（不是模型差，是没量够）/ unstable。阈值实测得来。
+闸门：L0 **1848/0/0**、对账 1913=1913、L1 65/0/0；新测 70 例
+（task_attribution 14 + outputguard 13 + ledgernorm 22 + token_hygiene 4 + modelprofile 17）。
+⑨ **迁移专项验收脚本** tests/verify_migration_p0ab.py（六组判据、一轮取齐、不建 pty）：
+与 verify_prod_smoke **互补不重叠**（那个查通用健康，这个只管迁移）。
+A4 钉「存量行 model/verdict 必须 NULL」；A5 钉「/api/audit/list 必须 401」。
+写它时踩两坑：**① 验收脚本自己制造了要验证的变更** —— 幂等判据原本直连生产库调
+`ensure_schema`，首跑必然加列 ⇒ 误报 FAIL；已改副本（与账本 mode=ro 同源纪律）。
+**② 三列没到位时脚本直接崩**（no such column）⇒ 没出报告；已降级为「不适用」并跑完。
+⇒ **验收脚本崩掉等于没有报告，它必须能在任何状态下把话说完。**
+
+## v0.13.113
+
+v0.13.113：接 D18。三件都是「让闭环**可比、可追溯**」，不是新功能。
+① **D5 轨迹行 schema**：新增 `TRAJECTORY_SCHEMA="trajectory/1"` +
+`normalize_trajectory()`（补 `seq`/`metrics`，幂等）+ `validate_trajectory()`
+（回缺口清单，不抛）。管线 `build_items()` 改用它落轨迹 ⇒ 每条轨迹形状一致。
+② **D13 版本推进**：新增 `dataset_versions` 快照表 + `bump_version()`/`list_versions()`；
+`eval_is_stale()` 把「跑完才发现题集被改过」当场判陈旧（拿不到评估行也回 True）。
+③ **D16 badcase 回写**：`dataset_items` 幂等 ALTER 补 `last_eval_id/last_verdict/
+last_score/last_eval_at`（旧行 NULL=未判，不回填）；`record_eval_result()` 三道硬闸
+（verdict 三态、题必须属该数据集、**陈旧评估不许回写**）；`badcases()` = 回写过且
+`verdict != pass`（含 insufficient；没跑过的不算）。
+④ 只读路由加 `/api/dataset/{id}/versions`、`/api/dataset/{id}/badcases`。
+闸门：tests/test_dataset_d5d16.py（17 例）。
+
+## v0.13.112
+
+v0.13.112：P0-1 的 **D18**（经验接入记忆联邦）。经验库若只躺在 db 里就不是「记忆」。
+① `memfed.REGISTRY` 新起一路 `experiences`（kind=`hub_sqlite`，weight=0.65，enabled）：
+查的是 hub **自己的** agents.db（同进程连接，毫秒级），不是第二份权威副本。
+新增 `_search_experiences/_recent_experiences`（`RECENT_Q` 哨兵路）与 `_probe_one` 分支。
+② **只召回活跃条**：`retired_at IS NULL`（退役条只能按 id 追溯，不回流）。
+③ 进默认集：`memory.FED_FAST_SOURCES` 加 `experiences` ⇒ 默认检索/注入包都含它；
+`hubmcp.hub_memory_search` 的默认值本就从 `enabled_ids()` 派生，自动跟随。
+④ 前端同源：`templates/index.html` 源选多一个 option、`SRC_ABBR` 加 `EX`
+（`tests/test_center_ui_l0.py` 钉「前端枚举 = REGISTRY」）。
+闸门：tests/test_experience_fed.py（7 例）。
+
+## v0.13.111
+
+v0.13.111：P0-1 的**收尾**（接切片 A/B/C）。
+① **真实轨迹源**：`telemetry_events` 在本机**实测仅 1 行** ⇒ 闭环没有燃料。
+新增 `hook.build_traces()/traces_from_store()`：从 hub 自己的 `profile_events`
+（实测 2970 行、438 行带 trace_id）按 **trace_id** 分组成执行轨迹，
+管线加 `--source profile|telemetry`（默认 profile）；新增 `GET /telemetry/traces`。
+② **抽取**：`experience_mine.extract_trajectories()` + `parse_experience()`（解不出就
+**不入库**，不拿自然语言填结构化列）；`--extract --limit N` 走 hub 自己的 LLM 通道，
+非会话一律 `openrouter/free`。
+③ **验收③ 真实取证**（scratch DB，真数据）：真实轨迹 **65** 条 → 数据集 **40** 样本
+（train 36 / holdout 4，`assert_train_only` 对 holdout 真抛）；free 模型抽取 3 条轨迹
+→ 入库经验 **1** 条（另 2 条模型没给出可解析经验 ⇒ 按设计丢弃）→
+召回 `query='list'` **命中 1 条且带真实 trace_id 来源**。
+④ 守卫缺口修正：`assert_free_model` 原先只认 `openrouter/free`，会把军规写的
+**经 CCR 形式 `openrouter/openrouter/free`** 也拒掉 ⇒ 已一并认。
+
+## v0.13.110
+
+v0.13.110：P0-1 的**切片 B/C**（接切片 A 的四表）。
+① `scripts/dataset_pipeline.py`（**声明式管线**）：轨迹 → 确定性过滤 → 确定性采样 →
+按 grain 哈希切分 → **模型在最后**（`enrich()`）。`build_items()` 是纯函数，`output`
+恒为空；`assign_split(grain_hash,frac)` 只由 grain 哈希决定 ⇒ 重跑不洗牌。
+② `src/hook.py` 轨迹级聚合：`build_trajectories()` 按 `(source,session_id)` 分组保序，
+`trajectories_from_store()` 只读拉事件；新增 `GET /telemetry/trajectories`。
+③ `scripts/experience_mine.py`（AMR「Dreaming」）：**合并重复 / 删过期 / 解冲突**，
+三类 reason `duplicate`/`conflict`/`expired`；只**退役**（`retired_at`+`superseded_by`）
+不物理删。`plan()` 是纯函数，`apply_plan()` 才落库。
+④ `src/api_dataset.py`（只读路由）：`/api/dataset/*` + `/api/experience/*`；
+`/api/dataset/{id}/train` 当场用 `assert_train_only()` 自证不含 holdout。
+⑤ 模型纪律：非会话一律 `openrouter/free`，`openrouter/auto` 直接 `ValueError`
+（`assert_free_model`，两脚本共用）。
+闸门：tests/test_dataset.py / test_dataset_pipeline.py / test_experience_mine.py。
+未做：systemd user timer（unit 属受保护面，待单独授权）⇒ 本批只做端点触发。
+
+## v0.13.109
+
+v0.13.109：P0-1 切片 A。
+闭环位置：轨迹（hook/profile_events）→ **数据集** → 评估（eval_run）→ **经验库**（experiences）。
+① 新增 src/dataset.py：四表 `datasets/dataset_items/eval_runs/experiences`（幂等建表，
+在 main lifespan 与 tasks 同处创建）。
+② **grain 唯一键**：`grain_hash = sha256(grain + 规范化 key_fields)[:32]`，
+`UNIQUE(dataset_id, grain_hash)` ⇒ 同一逻辑样本重复写入**复用同一行**
+（否则同一件事会灌进数据集多次、指标失真）。
+③ **split 隔离（验收②）**：`holdout` 样本**永不**进 train 批次；`assert_train_only()`
+是给切片 B 管线用的硬闸（掺入即抛 ValueError）；已入样样本的 split **不可改**。
+④ **字段映射显式**（手册 D7）：input/output/trajectory 三列各义，input 空⇒拒；
+`eval_runs` 记 `dataset_version` 快照（D13）；`experiences{situation,action,
+precondition,source_trace_ids}`（D17），退役走 `retired_at`（不物理删）。
+闸门：tests/test_dataset.py（17 例）。切片 B（管线）/C（经验挖掘）/调度载体待做。
+
+## v0.13.108
+
+v0.13.108：P0 施工排序第四项（P0-3）。治的是「**执行者既是被测对象、又握着判定权**」。
+① 新增 src/verifier.py（叶子模块，纯函数）：三态 `pass` / `fail` / `insufficient`。
+**判不了绝不放行**（未知 kind / 产物缺失 / 判据缺失 ⇒ insufficient，永不 pass）——
+这是 P0-4 `evidence.py` 口径在**产物验证层**的复用。fail 带结构化缺口（id+detail）
+与 `repairable`，调用方据此决定重跑还是上报，不解析自然语言。
+② tasks 状态机扩到十态：新增 `waiting_input|waiting_approval|paused`（**等待态**）
+与 `verifying`（交产物后、判定前的短暂态）、`cancelled`（终态）。
+`_run_task` 不再信 `result["success"]` 就置 success：先置 verifying，再由
+verifier 判产物；未过则 failed（错误里带 verifier 缺口）。
+执行者回 `{"waiting": "waiting_input"}` ⇒ 任务进等待态、**让出执行资源**、
+run 挂起等外部输入（不空转、不误判「疑似悬挂」）；下游 pending 保持 pending。
+③ 预算：tasks 幂等 ALTER 补 `verify_kind/verify_expect/budget_ms/budget_tokens/
+spent_ms/spent_tokens`（旧行 budget=NULL=不限、verify_kind='nonempty'）；
+`budget_exceeded()` 是纯函数（超限一律 failed，不静默放过）。
+新增 `POST /api/tasks/{run_id}/resume|pause|cancel` + `requeue_waiting()`。
+④ 闸门 tests/test_verifier.py(19) + tests/test_task_statemachine.py(12)；
+其中「回包 success=True 但产物为空 ⇒ **不得**置 success」是 RED→GREEN 的负向主判据。
+
+## v0.13.107
+
+v0.13.107：P0-5 两处**改判**（用户 2026-10-15 裁定，均指向「一句话自称」的余留形态）：
+① **label 按 kind 取词**：原先 `enforced_covered` 一律叫「只读」，但 `exec` 边界
+讲的是「拉起进程走唯一受闸入口」，不是「文件只读」⇒ 对终端型 agent 用词过强。
+现改为 `LABEL_BY_KIND = {"config_write": "只读", "exec": "受闸"}`，未登记 kind
+保守叫「受控」；纯观测仍只一个说法「未观察到写操作」。
+② **`covered` / `fail_closed` 不再手填布尔**：旧登记表写 `{"covered": True}` 正
+是 P0-5 要治的形态。现改为逐条枚举**绕过面清单**（每条挂一个证明「该路径被拒」
+的测试节点）+ `fail_closed_by`，由 `derive_coverage()` 机械导出：
+`covered` = 清单非空 **且** 每条路径的 AST 节点都真实存在；
+`fail_closed` = `fail_closed_by` 节点存在。删/改清单或节点 ⇒ 自动不算覆盖。
+并加冻结钉钉住绕过面 id 集合，防静默缩水（“覆盖全路径”从手填布尔→对已枚举
+绕过面的断言；枚举是否完整仍是人判，但必须逐条列出、逐条可对账）。
+③ 闸门 tests/test_boundary.py 28 例 + 14 subtests（含 RED→GREEN 实阅）。
+
+## v0.13.106
+
+v0.13.106：P0 施工排序第三项（P0-5），治本仓旧账「纳管 ≠ 可用 / 只读未证」
+（09-23 opencode 首扫假阴性同族）。手册 C12 给的判据是：一个边界只有**同时**
+满足 ①覆盖全部绕过路径 ②fail-closed（判不了就拒）③有负向测试证明绕过被拒，
+才可称**强制边界**；缺任一条 ⇒ 文字上只能写「未观察到写操作」，不得写「只读」。
+① 新增 src/boundary.py：**纳管四维** = 强制/观测 × 覆盖/未覆盖，恰好四个格子
+（`enforced_covered` / `enforced_uncovered` / `observed_covered` /
+`observed_uncovered`）。核心不变量是**只降不升**：`classify_claims` 把
+强制声明折成四维时，唯一升级通道是 `NEGATIVE_PROOFS` —— 一张
+「kind → 真实存在的负向测试」登记表；登记表里找不到 ⇒ 自动降级为
+observed_uncovered，且只有 `enforced_covered` 才配 `label="只读"`。
+② 接线：`profiles._enrich` 给**每个画像**挂 `boundary`（`profiles.boundary_claims`
+数据驱动声明：有 terminal ⇒ exec 声明为强制）；`scanner.add_boundary` 给扫描
+产物挂 `observed_product()`（第三方服务只能观测，永不 enforced）；
+`discovery.AgentInfo` 增 `boundary` 字段 ⇒ 四维进 `/api/agents` 契约。
+③ tests/test_boundary.py：负向测试登记表的节点用 AST 对账（改名即红）+
+绕过路径真被拒（无终端入口 agent ⇒ 400、token 错 ⇒ 401；写闸门缺口令 ⇒
+misconfig、错口令 ⇒ deny，**从不放行**）。
+
+## v0.13.105
+
+v0.13.105：P0 施工排序第二项（P0-4）。要解决的是本仓**反复出事的那一种静默**：
+「判不了」在二元口径里没有位置 —— 于是它被读成「没问题」。原话是「禁把 SKIP 当 PASS」，
+写在纸上很久，每次都得靠人记得；本批把它做成**可断言的对象**。
+① 新增 src/evidence.py（叶子模块，不读盘不打网络不碰 db）：三层链路
+`原始事实 facts → 候选信号 signals → 研判 judgments`。**唯一不变量**：
+证据缺失 / 观测失败（`Fact.ok=False`）/ 规则引用不存在的事实 / 规则抛异常 /
+规则回 None —— 五种「判不了」**一律** `insufficient`，永不退化成 `dismissed`。
+两条配套口径：**空证据集不许投票**（零覆盖 ≠ 零问题）；`insufficient`
+的 `confidence` 留 `None`（不许编假刻度）。
+② `summarize()` 的 `decisive` =「禁把 SKIP 当 PASS」的机械形态；
+`unjudged`（**从来没判过**）与 `insufficient`（判过了、判不了）**分开计数**，
+但**同样**让 `decisive=False`；`require_decisive()` 就是「insufficient 不走放行」。
+③ asset_audit 增 `verdict/severity/confidence` 三列（`init_db` 幂等 ALTER 补建）。
+语义**严格限定**为「本事件记载的变更在 hub 本地是否确实发生」——每个调用点都在
+落库**之后**才写审计，所以「行存在」本身就是证据，默认 `confirmed`；
+**不**声明上游（TDAI / 远端 GitHub）效果，核不了就显式传 `insufficient`。
+`verdict IS NULL`（迁移前旧行）保持 NULL = **未研判**，**不回填** —— 回填等于替历史编证据。
+④ `GET /api/audit/verdicts`：把审计行当事实过一遍三层，回**四字段结果对象**
+`exec_status + validity + evidence + quality`（`validity` 三态而不是布尔）。
+与 `/api/audit/list` **共用 `_require_read`**（有 AST 钉子钉住「两个端点都走它」）。
+⑤ scripts/run_tier.py 同批拆出四字段产物并以 `[gate] {json}` 一行输出；
+**L0 出现 skip ⇒ `validity=insufficient` + 退出码 2，永不再报绿**；
+「0 例」也不再是绿（判据没被扫到 = 发现器坏了）。
+闸门：tests/test_evidence.py(24) + tests/test_audit_verdicts.py(18) +
+tests/test_gate_result_fields.py(18) + tests/test_asset_audit.py 新增 10 例。
+
+## v0.13.104
+
+v0.13.104：用户逐条裁决 aliyun《AI Agent Handbook》融合评估的四项待裁定后立项施工
+（P0-1~P0-5 全批；排序 P0-2 → P0-4 → P0-5 → P0-3 → P0-1，逐项串行），本条是第一名。
+缺口：runlog 只记「成不成 / 多快」，没有 token / cost ⇒「单位成功任务成本」不可度量。
+① 新增 src/usage_ledger.py：CCR 账本 `~/.claude-code-router/app-data/usage.sqlite`
+的**只读**聚合门面（`?mode=ro`，写不进去有负向测试钉着）。聚合维度白名单
+`client/model/provider/credential_id`，**故意不含 `logical_model`**
+（2026-09-07 判例：那是 CCR 内部逻辑名，不是客户端/模型 ID，误用致 jcode 不可用）。
+② `COALESCE(cost_usd,0)` 求和**必须同时回 `null_cost` 与 `cost_sources`（含 "" 桶）
+—— 2026-10-15 实测：免费模型落库 `cost_usd=NULL`，静默当 0 就是把成本报小。
+③ 新增 `GET /api/runlog/cost`（与 `/api/runlog` **共用 `_require_read`**，防改一处漏一处）；
+账本拿不到一律 **503 + ok:false**，绝不回 rows=[]/total=0 那种静默 0。
+④ src/llm.py 发 `X-Request-Id`（新 `new_request_id()`）。**单次只读探针实测 CCR 不透传**
+（带 `hubprobe-…` 打 /v1/messages 得 200，账本落的是 CCR 自生成的 UUIDv4
+`19eccbce-…`）⇒ 回包 `attribution=approximate`（按 client×model×时间窗近似归因），
+调用方不得当作精确对齐。同批给 `chat_tools_loop` 加 `request_id` / `usage_sink`
+两个**关键字**参数（不改 `(answer, steps)` 返回形状，memory.py/tasks.py 零改动）。
+闸门：tests/test_usage_ledger.py + tests/test_runlog_cost_api.py（共 22 例，全 L0）。
+余下四项与验收/回滚口径见 docs/AI-AGENT-HANDBOOK-P0-立项施工-20261014.md。
+
+## v0.13.103
+
+v0.13.103：用户要求评估 Cognition「Agent Memory Repo」能否融入本机记忆中心。
+**规范本身无检索层（纯 grep），不构成替代**；评估反而照出本机记忆中心三个硬缺陷：
+① 联邦融合被 TDAI 吃满（W=1.0 + 满额 top10 + 无下限 ⇒ 数学上其余 10 路永不出结果），
+实测 20 查询里 TDAI 独占 200/200 槽位、逐源单查平均 5.2 路有货却只出 1 路；
+② `score` 是 TDAI 原始分直通（距离类、量纲不可比），乱码查询 0.52 > 真命中 0.03；
+③ 会话起始注入包无 q 时**根本不查联邦**（fed.chars=0）却仍报 sources=3 ——
+「计数绿、内容空」，pi 门面正走这条链路。
+修复见 src/memory.py 的 FUSE_TOP_FRAC/_rank_cap 与 src/memfed.py 的 RECENT_Q。
+评估全文（含证据边界与 P1/P2 建议）见 docs/AGENT-MEMORY-REPO-评估-20261013.md。
+
+## v0.13.102
+
+v0.13.102：用户「嵌入式中断现在又反应很慢，之前修复一次速度很快，现在又开始慢了；
+另外 grok 无法正常启动」。两条**互不相干**的根因，都在「一个同步动作挂在
+**高频路径**上」这个家族里（与 v0.13.100/101 同源），但触发面不同：
+
+① grok 起不来（`src/term.py`）：`pty.fork()` 给的 winsize 是 **0×0**，而原实现
+只在 Session 上填 rows/cols 两个 **Python 属性**、**从不调 ioctl** ⇒ 子进程
+开局拿到「终端 0 行 0 列」。真 pty 实测（只差这一个变量、各 3 轮一致）：
+0×0   ⇒ grok 只吐 128 字节就**永久停住**，不发 `Grok Build` 界面
+120×40 ⇒ 4.3s 正常渲染
+而且**事后补尺寸救不回来**（先 9s 0×0、再 TIOCSWINSZ 到 120×40 ⇒ 新增 0 字节，
+grok 已把「没有尺寸」读死，SIGWINCH 唤不醒）。别的画像在 0×0 下照常出界面
+（claude/codex/opencode/qodercli），是 grok 独有硬失败。
+`_apply_size` 又拿被硬编码的「80×24」去跟这个**假值**比 ⇒ 前端首帧 resize 若
+恰是 80×24，短路生效、真 ioctl 永不下发 ⇒ pty 一直停在 0×0（这是「刷新也没用」
+的第二层：刷新会清屏并让前端重发 resize，但只要尺寸与宣布值相同就仍不下发）。
+改法：`Session.__init__` fork 后立刻 `_set_winsize(fd, INITIAL_ROWS, INITIAL_COLS)`
+（抽成函数供 `_apply_size` 共用、也为了可测），宣布值 == 真值从此一致。
+端到端 A/B（同一探针、只差这份代码）：修复后 4.6s 出界面 / 未修的生产 NEVER。
+闸门 tests/test_term_size_owner.py::TestInitialSize（含红向自证：把 _set_winsize
+抹成 no-op，同一断言必须能看出 0×0）。
+
+② 「又变慢」（`src/main.py` + `src/db.py`）：SQLite 的**自动**检查点是「每积满
+wal_autocheckpoint(默认 1000) 页，就在**触发它的那条写语句**里同步 checkpoint」。
+而 term_record 的逐帧写（每个按键 / 每帧输出一条 INSERT+commit）正落在这条路上
+⇒ 每 ~183 帧（1000 页 ÷ ~5.5 页/帧）就有一帧被同步 checkpoint 拖住。100 万行
+真库副本实测 4000 帧：
+wal_autocheckpoint=1000（默认）⇒ 尖峰 22 次，单帧 p99 **6.9ms** / max **116ms**
+wal_autocheckpoint=0（关自动）  ⇒ 尖峰 **0** 次，单帧 p99 **0.17ms** / max 16ms
+关闭自动检查点后 WAL 仍会增长（实测 4000 帧 → 88MB），所以**必须**有替代触发点：
+`db.checkpoint()` + `main.wal_checkpoint_loop()`（默认每 120s、走 to_thread、
+PASSIVE 不抢独占），总 fsync 次数不变，只是换了执行位置。启动期仍保留
+init_db 的一次 `wal_checkpoint(TRUNCATE)` 做彻底收口。
+为什么不改 db.py 的 PRAGMA 默认值：那是**连接全局**语义，engine/MCP 侧不该被
+本模块的取舍顺带改掉；改在 hub 主连接 + 后台循环里，影响面就一个对象。
+⚠ 本条的取值取证属本机（NAS 卷、4 核），绝对值不宜外引；方向性结论
+（自动检查点在逐帧写路径上 ⇒ 尖峰归零）是机制性的。
+
+## v0.13.100
+
+v0.13.100：用户「嵌入式终端会话文字输入非常慢 很不正常」。**根因不在终端**——
+`Recorder.feed()` 的全局预算检查是 `SELECT SUM(bytes) FROM term_recordings`，
+EXPLAIN 实测 `SCAN term_recordings`（表上只有 idx_termrec_sid(session_id,seq)，
+**盖不住全表聚合**），而 feed() 被**同步**调在 asyncio 事件循环的两处：
+term.py:1221 的 pty 读回调（= 每帧输出）与 :1488 的 WS 收包（= 每次按键）。
+生产库 44.7 万行 / 157MB（/fs 是 trimafs 卷）时单次 SUM 实测 **110~124ms**
+⇒ 整个事件循环被独占上百毫秒，别的会话/WS/HTTP 一起卡。生产真机逐键
+RTT p50 = 677ms、max = 784ms。
+改法（src/term_record.py::total_bytes）：进程内缓存 (字节数, 库路径)。首次/换库
+后首次真查；每次成功 INSERT 按 len(blob)（脱敏后的落盘值）递增且写在 `if ok`
+里（写失败不许推进）；任何 DELETE（sweep / 同 sid 覆盖）**一律作废**——
+增量法遇 DELETE 会**永久偏高且不可逆**，故不做减法修正（行数≠字节数）。
+换库判据用 `db.current_path()`（3µs，比它挡掉的 117ms 便宜四个数量级），
+**不用连接对象 id**：`init_db` 复用同一模块全局，id 会撞。
+实测：离线 444,040 行 feed p50 67.92ms → 0.114ms（1405 倍）；端到端 A/B
+（隔离影子 44 万行预置，两组只差这一个文件）逐键 RTT p50 56.54ms → 0.24ms。
+闸门 tests/test_term_record_total_cache.py（9 例，红向自证 3 向均转红）；
+完整取证与集成说明见 docs/INTEGRATE-v0.13.100.md。
+⚠ 未治本：`sweep()` 只在会话 close 时跑，表一天长 44 万行。缓存把每帧成本
+从「随表线性」压成常数，**表本身仍会长**——治表属另一次范围变更。
+⚠ 另一处漏网（同一批发现）：一个正确的局部优化，**如果它的失效条件被高频路径
+命中，等于没优化**——本条的「DELETE 一律作废」正被`Recorder.__init__`
+每次建会话都命中，所以「每帧」那条路治好之后，「建会话」那条路原样留着。
+
+## v0.13.101
+
+v0.13.101：用户「彻底消除」。上条的 ⚠ 未治本正是本条要收的尾——缓存只把每帧
+成本从「随表线性」压成常数，**建会话这条路仍然是全表 SUM**：
+`Recorder.__init__` 先 DELETE（同 sid 覆盖）再立刻算预算，v0.13.100 的
+「DELETE 一律作废缓存」规则 ⇒ 必然重查 ⇒ 生产库上每次建会话端到端实测
+**156~210ms**（其中 ~108ms 是这条 SUM），同步独占事件循环。
+改法：单行计数表 `term_rec_meta(k='total_bytes')` + 两个数据库侧触发器
+（`trg_termrec_ins` AFTER INSERT 加 / `trg_termrec_del` AFTER DELETE 减），
+写入与计数更新在同一事务里。
+`total_bytes()` 变成一次主键点查（实测 3µs），**与表大小无关**，
+也不再存在「什么时候作废」这个问题。存量库由 startup 的
+`term_record.ensure_counted()` 幂等播种一次（只在计数行缺失时才做那一次 SUM）。
+同时给 `ts` 补索引（`idx_termrec_ts`）：`sweep()` 的 `DELETE WHERE ts < ?`
+原本 SCAN 全表（77~568ms，挂在会话收尾路径上），改 SEARCH 后 0.06ms。
+实测：录制表 48 万行时total_bytes() 108ms → 0.00ms；每帧 INSERT 代价
+0.043ms → 0.063ms（+0.02ms，相对 5ms 合并窗口可忽略）。
+闸门 tests/test_term_record_meta_count.py（计数与 SUM 恒等、DELETE 收敛、
+无SUM 回流、播种幂等）+ 真浏览器 work/probe-term-render-latency.py。
+⚠ 播种这条路上**另有两处竞态**，同批自查发现并修掉（详见 CHANGELOG 四之二）：
+① 播种原本是两条语句（先 SELECT SUM、再 SET v=excluded.v 覆盖）——
+48万行 SUM 的那几十~上百 ms里写入的帧被覆盖抹掉，
+生产库实测计数少 11251 字节 ⇒ 计数偏低 ⇒ 预算偏松。
+② 更严重：播种闸门原判「计数行在不在」，而 trg_termrec_ins 在行不存在时
+会**顺手创建**它 ⇒ 并发首帧落在「查行」与「写值」之间时闸门误判
+「已播种」⇒ 跳过 ⇒ 历史全漏算（实测 4200 万字节漏到剩 1.4 万）。
+修法：播种合成**单条** `INSERT…SELECT … WHERE true … ON CONFLICT`（同一快照），
+闸门改用独立的 `seeded` 标记（触发器只碰 total_bytes，不会伪造它）。
+⚠ 别把播种改回「先插占位行 v=0 再 v=v+SUM」：占位行期间写入的帧已计过一次，
+再加 SUM 会双计（实测缺口 -1.4亿，比原写法更糟）。
+⚠ 别把闸门改回判「计数行在不在」—— 见 ②。**这两处的教训是：单语句化解决的是
+「读-写窗口」，不解决「判据被被测系统自己伪造」。**
+
+## v0.13.99
+
+v0.13.99：用户「嵌入式终端会话文字输入框无法正常使用键盘的上下左右光标键…输入框只是
+不需要鼠标焦点 但是键盘的全部原生功能都是需要的」，并明确要求**滚轮向上翻不许受影响**。
+**先取证再动手**，三轮真机实测（真 chromium + CDP，真鼠标/真键盘事件，pty 侧
+`stty -echo -icanon` + `cat -A` 逐键对账，work/probe-arrow/ 可复跑）：
+① ★ v0.13.83 那行 `textarea.style.pointerEvents='none'`（当时为解决「输入框与内容
+显示抢鼠标焦点致滚轮不能上翻」而钉）**没有**打断键盘：实测点终端后焦点照样落在
+`.xterm-helper-textarea`、方向键 `^[[A/B/C/D` 全到 pty。**滚轮与键盘是两条独立
+通路**（pointer-events 只管命中测试，不管 JS focus()；xterm 的 `focus()` 是
+`textarea.focus({preventScroll:true})`）⇒ 修键盘**不能**回退那行，否则滚轮回归。
+② 真缺口在**焦点离开终端之后**：字符接力器原只放行 `e.key.length === 1`，于是
+方向键 + Enter/Backspace/Tab/Home/End/PageUp/PageDown/Insert/Delete **全部消失**
+（pty 收 0 份，浏览器也没拿它做别的 ⇒ 键彻底消失、无任何提示）。
+改前那句注释「非可打印键一律放行」在本场景下等于「所有键都丢了」。
+③ 修法 = 把「编辑键」从「单字符」放宽为**显式映射表**（TERM_EDIT_KEYS），
+逐个映到标准 VT 序列交给 `term.input()`。**不放开所有非单字符键**：放行等于把
+语义交还浏览器（方向键变滚动页面、F5 被浏览器吃掉），而终端输入位上这些键的
+语义**只有一个来源：pty**。Ctrl/Cmd/Alt 组合键与 Escape 仍整体放行。
+实测（tests/verify_term_editing_keys.py，L2 真机 14/14）：
+· 滚轮组 R0~R4 全绿：viewportY 379→369→358→**0**（连续上翻到顶、不卡中段），
+`pointerEvents` computed 仍为 `none` ⇒ 用户点名要保的功能零回归；
+· 键盘组 K1/K2 13/13：焦点在终端内与**终端外**两种状态下，13 个键实收全部等于
+期望序列（`^[[A/B/C/D`、`^[[H/F`、`^[[5~/6~/2~/3~`、`^I`、`$`、`^?`）；
+· K3 搜索框内按方向键/Delete：pty 收 0 份 ⇒ P2-11「不得劫持真输入位」不破。
+回归：tests/test_term_editing_keys.py（L0，12 例，含**滚轮护栏** 3 例）
++ tests/verify_term_editing_keys.py（L2 live，14 例）。
+⚠ 探针判据本身也踩了三轮坑（cat -v 不转写 Tab/换行 ⇒ 假红；translateToString(false)
+满宽补空格 ⇒ delta 失效），已用**纯 pty 实验**（不经浏览器）逐键对拍选型出 `cat -A`
+统一记法。教训：**先证明判据测的是被测对象，再拿它判红**；最强自证是
+「改前即成立的对照组 K1 也红」⇒ 那两次红是判据自己的问题。
+
+## v0.13.98
+
+v0.13.98：用户「右上角 github 链接只保留图标和版本号」。**减的是「看得见的字」，
+不是入口本身** —— href / target / rel / title / aria-label 五项全留，外链安全属性
+与「地址可被抄走」这两条旧裁定都不受影响（tests/test_header_footer_trim.py 仍守）：
+① 顶栏 .hstats 是 `flex-wrap:nowrap + overflow:hidden`，右缘先被切的是**最右**那一项。
+仓库入口刻意放在本组最左（v0.13.74 已为此挨过一次投诉：状态字被视口右缘切断），
+但它仍常驻 14 字符宽度；换成 `v0.13.98` 后宽屏只占 8 字符，窄屏仍只留图标。
+② 版本号走 **Jinja 变量 `{{ version }}`**，不写死字面量 —— 本文件这行是唯一真相源，
+`/` 路由早就把 `{"version": VERSION}` 传进模板（main.py:1115），此前模板里一个
+变量都没用过。写死就会出现「/health 报 0.13.99、顶栏还写 0.13.98」的**无告警漂移**
+（本仓 CHANGELOG 顶部版本漂过 13 版、tests/README 计数漂过两轮，都是同一形态）。
+闸门 tests/test_header_footer_trim.py 断言模板里是变量而非字面量。
+回归：tests/test_header_footer_trim.py（图标 / 外链三要素 / 窄屏档 / 版本单一真相源）。
+
+## v0.13.97
+
+v0.13.97：用户「右边终端框上下左右边距缩小60%」，当日复核追加「**所有页面都是这个尺寸**」。
+**先把「边距」是哪一层取证清楚**（1440×900 截图 + getBoundingClientRect 逐层分解，
+tests/verify_term_box_geom.py 可复跑），再动手 —— 否则很容易改错层：
+① 右侧内容区留白的**唯一来源是 `main` 的 padding**（原上/下 12px、左/右 16px）。
+`.chat-grid`/`.chat-main` 的 padding 都是 0；`.chat-grid` 的 gap:16px 不产生
+任何列间距（它已是单列 —— .chat-side 被 display:none 且宽屏规则覆盖成1fr）。
+② 黑底**内侧**的 `#termEl` / `.term-body` padding 四向已是 0，且被上一轮定案钉死：
+FitAddon 按 #termEl 内容盒算行数，父层多1px 就多算一行、底部被裁一行。
+「终端框边距」很容易被实现成「给黑底加内衬」—— 那是本版最大的坑，闸门守着。
+③ ⚠ **范围是全站，不只终端页**。第一版写成 `main:has(> #page-chat.on)` 只收窄终端页，
+用户当日复核后否掉：「点左边菜单栏的其他菜单时右边页面边距又变了，应该全部统一」。
+`:has()` 在这里是**多余的第二判据** —— 它让同一份留白出现两种值。
+故改为直接改基准（4.8/6.4）、删掉整条覆写：用户要同一个值，就只留一处声明。
+**教训**：用 `:has()` 做「某页特殊化」之前，先确认用户说的是「这一页」还是
+「所有页」——本例默认答案是「所有页」。
+④ 抽 `--main-pad-y/x` 为唯一真相源（此前宽屏裸 `12px 16px`、窄屏裸 `8px` 是两份
+独立字面量，各改各的）。**两档各自 ×0.4、不是同一绝对值**：窄屏基准是 8/8，
+照抄宽屏的 4.8/6.4 只缩到27%，不是用户要的 60% ⇒ 窄屏取 3.2/3.2。
+实测：逐页 18 页 × 2 档，main padding 唯一取值 = 宽屏 (4.8,6.4) / 窄屏 (3.2,3.2)
+（tests/probe_all_pages_gap.py）；终端页净留白 宽屏 13/17/13/17 → 6/7/6/7、
+窄屏 9/9/9/9 → 4/4/4/4；黑底与容器尺寸差 0×0（FitAddon 口径未破）。
+回归：tests/test_term_box_gap.py（6 例，L0）+ tests/probe_all_pages_gap.py（逐页，L2）
++ tests/verify_term_box_geom.py（几何，L2）。红基线：在第一版上逐页探针报
+「各页main padding 不一致：[(4.8,6.4),(12,16)]」= 精确复现用户报的现象。
+⚠ 真 xterm 实例的 rows×行高是否放得下，本机 headless 量不到（termLoadRenderer 的
+WebGL addon 在 --disable-gpu 下会挂住 renderer，试 4 版无结论后按军规停手），
+**该项仍是缺口，待端侧确认**。
+
+## v0.13.96
+
+v0.13.96：用户报「cursor 历史会话记录使用英文」。**根因是取错了源，不是编码/locale**
+（往编码方向查会跑偏，半天找不出东西）：
+① `~/.cursor/chats/<md5(cwd)>/<sid>/meta.json` 有个 `title` 字段，本机 99 条里 5 条
+有值，**无一例外全是 Cursor 服务端生成的英文**（`Cursor Startup Garbled Characters`…），
+而这些会话的用户原话是中文 ⇒ 谁优先取谁，就决定整排显示哪种语言；
+② 修复＝判据收成**唯一函数 `_cursor_title`**：用户原文优先、服务端标题当**兜底**（D2）。
+列表侧与 title_for 侧**共用这一份** —— 本仓已因「两处各写一遍优先级」走过两次弯路，
+这次按教训直接设计成不可漂移，而不是修完这次就留下第二次的入口。
+v0.13.94 改了仓名/远端/systemd 单元，但**前端与 /health 的展示层还写着旧名** ——
+靠一次八层健康巡检才发现（判据：把 hub.js 拉下来 grep 旧单元名，命中 1 处）。
+三处都是「无消费方 / 不报错」类型，所以没有任何自动机制会提醒：
+① static/hub/05-chat-and-history.js:330 的降级文案「后端未更新：需重启 X 后生效」
+—— 这条**在用户排障时给指令**，写旧名等于教用户去重启一个已停用的单元
+（restart 它既起不来、Restart=always 又会在 journald 里刷重试）；
+② src/main.py /health 的 "service" 字段（纯展示，但它是运维第一手看到的标识）；
+③ src/main.py 启动横幅 `[Agent Hub]`。
+为什么这次能一次改对：v0.13.94 已把「三份真值互相比对」固化成
+TestUnitNameConsistency，本版再加 3 例把**前端源码 / 构建产物 / ?v= 提手**纳入比对：
+- test_frontend_user_visible_text_names_current_unit：源码不得含旧单元名；
+- test_built_bundle_is_in_sync_with_sources：产物不得含旧名，且 `?v=` 必须等于
+产物 md5 前 8 位（手改产物不跑 build 脚本会被这条抓住）；
+- test_health_service_field_uses_current_name：/health 的 service 字段。
+红向自证三种漏改形态（源码退旧名 / 产物残留 / 提手脱钩）全部转红，复位转绿。
+刻意**不改**的三类旧名：注释里的历史叙事与判例原文、下载文件名
+（agent-hub-sessions.json 等，改会破坏既有用户习惯）、MCP server 名（外部契约）。
+2026-10-08 用户指令：「重启 agent-hub.service 但是为什么名字还是agent-hub 已经更新名字
+为agenthub」→「改名并同步更新」。10-08 仓名（目录）与远端已改齐，AGENTS.md 当时明写
+「服务名不变」⇒ unit 名是**刻意留下的**，本版补上。
+本版的要害不是 `mv` 文件，是**漏改不报错**：`journalctl -u <不存在的单元>` 返空且
+退出码 0 ⇒ 「代码里的单元名与真实 systemd 单元脱钩」这种故障全程无异常，表现只是
+「设置→日志页空白、而 /health 全绿」。本版实测红向对照：新单元近 5min 47 行 vs
+旧单元 0 行 —— 拿旧名查就长这样。所以必须同批改的三处（前两处承重）：
+① src/hublog.py 的 DEFAULT_UNIT（`journalctl -u` 的单元名）：漏改＝日志页静默空白；
+② src/scanner.py 的 EXCLUDE_PATTERNS：漏改＝端口扫描把自家 3102 登记成「外部服务」，
+资源页多一条自己家的条目；它是**前缀**匹配（影子/备份单元也要排除，勿写死全等）；
+③ ~/bin/agent-hub-watchdog.sh 的看护清单：漏改的症状最隐蔽 —— 脚本照跑、日志照写，
+但 `svc_alive agent-hub` 恒 false ⇒ 每 5min 误判掉线并重启旧单元，**真服务无人看护**，
+而日志里全是「已恢复」。
+另同步 deploy/ 归档副本、scripts/hublog-cli.py 文案、tests/verify_hist_tdz.py 探针命令、
+~/bin/service-health-check.sh 探针标签；**判例与旧会话里的 `journalctl -u agent-hub`
+命令一律不改**（那是当时的取证记录，改了就失真）。
+新闸门 tests/test_hublog.py::TestUnitNameConsistency（5 例）把「代码常量 / 仓内归档
+副本 / 真实 systemd 单元」三份真值互相比对，旧名副本残留判红。
+切换手法：本会话跑在旧 unit 自己的 cgroup 里（`codebuddy ← python3` 属
+agent-hub.service），而 `KillMode=control-group` ⇒ stop 会连坐杀掉调用者，故走
+`systemd-run --user` 的独立 transient unit（work/unit-switch-agenthub.sh）。
+
+## v0.13.93
+
+── 以下为 v0.13.93 的根因（保留供追溯，非本版条目）──
+前八家（grok/claude/qoder/jcode/hermes/codex/opencode/cursor）都在 src/sessions_store.py
+的 SESSION_STORES 里登记了「盘上仓库 → 条目 → resume argv」三段映射；codebuddy 之前
+**只在菜单里**（profiles 有终端入口），点开没有历史下拉 —— 与 v0.13.83 修 cursor 前同款。
+三处与 claude 不同、逐条实测钉死（详见 sessions_store._t_codebuddy 的注释）：
+① 行判据是 `type=='message' and role=='user'`（不是 claude 的 `type=='user'`），
+content 块类型是 `input_text`/`output_text` ⇒ 不能复用 `_first_user_text`；
+② 桶名是 `compressPath(realpath(cwd))`（`/ \ :`→`-`、合并连续`-`）而不是 slug；
+③ `--resume <id>` **按起 pty 的工作目录定位会话**（dist 里 findExistingSession 调
+sessionManager.get 不传 cwd ⇒ 只剩当前进程 cwd 那个桶）⇒ 与 cursor 同构，
+必须自带「桶名对得上才列」的可续判据，否则点了必然 SessionNotFound。
+
+## v0.13.92
+
+── 以下为 v0.13.92 的根因（保留供追溯，非本版条目）──
+根因（2026-10-08 用户报障：「agent-hub 嵌入式终端 页面文字无法选择 复制，
+按右键显示是图片」）——两个症状一个源头：终端是 WebGL 渲染器画在 <canvas> 上的。
+① **选区在松手瞬间被自己清掉（真缺陷，探针红绿可分）**：
+xterm 的 CoreMouseService 协议一从 NONE 变非 NONE，就会调
+`SelectionService.disable()`，其实现是 `clearSelection(); _enabled=false`
+（vendor/xterm.js 逐字实证）——**把跟踪态装回去 = 当场把刚拖出的选区抹掉**。
+时序正是体感：拖选（mousedown 复位 ⇒ 选区能建）→ 松手（window mouseup 上挂的
+`setTimeout(termMouseArm)`）⇒ 选区在用户看到之前没了 ⇒「选不中/复制不动」。
+真 chromium + CDP 实测（修复前）：程序化建选区后调 termMouseArm()，
+`term.getSelection()` 由 '❯ echo …' 变 ''；只调 termMouseResetNow() 则保留。
+修法（三处，缺一不可）：(a) termMouseArm() 在 `term.hasSelection()` 时**不回装**
+（鼠标此刻归浏览器），回装时机从 mouseup 挪到 wheel（termWheelNow 里、无选区时才装）；
+(b) 有选区时在 `?h` CSI 处理器里**吞掉 app 的鼠标跟踪 DECSET**（claude/codex 每帧
+重画都重断言 `?1000;1002;1003;1006h`，不挡的话协议又被翻回非 NONE、选区照样被清）；
+(c) 换会话时 `term.clearSelection()`（term.clear() 不清选区 ⇒ 残留选区会让新会话的
+上报通道建不起来，实测 opencode A1 rep=0 转红）。
+② **右键给的是「图片另存为」**：浏览器眼里 canvas 就是一张图，没有文字的「复制」项；
+容器上那条原生 `copy` 兜底因此永远等不到触发。修法：接管 contextmenu、自出菜单
+（复制 / 粘贴 / 全选）。浮层纪律按 AGENTS 4.2：唯一入口 termCtxOpen、唯一出口
+termCtxClose、点空白（capture pointerdown）/Esc/失焦/滚动即关，触屏可逃生。
+闸门：`tests/test_term_select_persist.py`（L0 静态契约 + 红基线）+
+`tests/verify_term_select_persist.py`（真 chromium 真渲染：选区抗 mouseup / 抗 app
+重断言、右键菜单出项/复制落盘/点空白关；红绿对照＝打到 v0.13.91 实例 10 FAIL、
+打到修复态 0 FAIL）。
+本批为**纯静态前端**（static/hub/02、03 + templates/index.html + 重建 static/hub.js），
+下次页面加载即生效，不需要重启服务。
+
+## v0.13.91
+
+── 以下为 v0.13.91 的根因（本版摘要：吞备用屏时同步清屏 —— jcode 启动期残影），保留供追溯，非本版条目 ──
+⚠️ **范围更正（2026-10-08 自审）**：不得写成「根治」。已证并已修的是「客户端 resize
+之前那段 245B 真实回放里的残影」；用户报的「乱码」是否就是它，**无端侧证据**
+（稳态跑起来改前改后都干净，jcode 自己的 2J 会自愈）。详见 CHANGELOG v0.13.91 顶部横幅。
+根因（2026-10-08 用户报障：「agent-hub 的 jcode 启动嵌入式终端时会带入乱码」）：
+① **报障形态与病灶**：v0.13.83 为治 codex「终端滚不动」，把 DECSET 的 1049/1047/47
+注册成**吞掉**（termAltScreenBlock，内建 activateAltBuffer 不执行），终端恒在主屏。
+内建 `?1049h` 的语义是 `saveCursor + 进备用屏`，而 xterm.js 的备用屏是**初始空白的新缓冲**
+—— 只吞、不切缓冲 ⇒ 全屏 TUI 会在**旧画面**上按绝对坐标作画：hub 写在第 0~1 行的头部
+（「jcode · 终端」「提示：点『新会话』…」）与 jcode 的 `Connecting to server...` 留在屏上，
+和 TUI 首帧叠在一起 —— 用户看到的「乱码」就是这团叠加，真终端里它会被备用屏的空白画布盖掉。
+② **修法与两条硬判据**：吞掉的**同一刻同步** term.clear()，等价于那块空白画布。
+(a) 必须**同步**调用：`term.write('\x1b[2J')` 会被 xterm 的异步 write 队列排到本帧
+之后、把刚画好的 TUI 一起抹掉（实测那一档：整屏空白、TUI 全丢）；term.clear()
+直接操作缓冲、同步生效，同帧其后的 TUI 字节照常落在干净画布上。
+(b) 判据从「只看 p[0]」改为「任一参数命中」：DECSET 允许合并（`?1049;1003h`），
+只认 p[0] 时 `?1003;1049h` 会漏吞 ⇒ 照旧进备用屏。
+③ **取证与闸门**（真 chromium + 本仓 vendor xterm + 真 hub 影子 ring 原始字节）：
+吞而不清 ⇒ 第 0~2 行残影（`jcode · 终端` / `Connecting to server...`）+ TUI 正常；
+吞 + 同步 term.clear() ⇒ 屏面干净、TUI 完好。
+⚠️ 稳态会自愈：jcode 在客户端 resize 后会自己发一次 `\x1b[2J` 整屏重画（全量 ring
+3824B 里 2J ×1）⇒ 改前稳态也干净 —— 报障的「乱码」是**客户端 resize 之前**那段
+真实回放（实测 245B，含 `Connecting to server...` + `?1049h`）停留的窗口。
+④ **已知差异（如实登记）**：重复 `?1049h` 本实现会重清，xterm 内建不重清；
+实测 jcode 一次会话只发 1 次（喂输入 + 59 对同步块重画后仍 1 次），codex 走
+--no-alt-screen 不发、claude/opencode 开机各一次 ⇒ 现实里不会命中。
+闸门：`tests/test_term_altclear.py`（5 例静态契约，含分片/产物一致）+
+`tests/verify_term_altclear.py`（喂真实 245B 前缀，3 项真渲染，
+`HUB_ALT_CLEAR_DISABLE=1` 红向自证）+
+`tests/verify_term_altclear_live.py`（真 hub+真 jcode 稳态/不回归 7 项；其文件头写清
+它不能区分修复前后，别当红绿判据）。
+本批为**纯静态前端**（static/hub/03-agents-cards.js + 重建 static/hub.js），
+下次页面加载即生效，不需要重启服务。
+
+## v0.13.90
+
+── 以下为 v0.13.90 的根因（本版摘要：会话计数不再依赖终端口令 + 终端复制粘贴（焦点归还 / 原生粘贴通道）），保留供追溯，非本版条目 ──
+根因（2026-10-07 用户同日两项报障）：
+① **顶栏「会话数」一时显示一时不显示**：该指示读的是 localStorage 里的
+`hub.term.token`，没口令就直接放弃渲染。而 localStorage **按 origin 隔离** ——
+同一个页面从局域网 IP、Tailscale 名、loopback 三个源进来各有一份存储，
+只在其中一个源上配过口令时，另外两个源的顶栏就整块空白；口令过期被清、
+或用户换了访问方式，同样会静默消失。更糟的是「读不到」与「真的零会话」
+在屏幕上长得**一模一样**，用户无法区分。修法＝新增**免 token** 的只读聚合
+端点 api/term/activity（只回 alive 计数与每 agent 条数，不含 sid/cmd/cwd，
+故不绕开 P1-7 对 /api/term/sessions 的口令闸门），前端改读它；口径同时按
+用户要求补齐为「在跑 N · 会话 M」两个数都给（N=有活会话的 Agent 数、
+M=活会话总条数）。
+A/B 实测（同一 profile、同一时刻、都无 token）：生产旧版 busy=""，
+新版 busy="在跑 1 · 会话 3"。
+② **嵌入式终端无法复制粘贴、连键盘快捷键都用不了**：两条独立的腿。
+(a) 复制兜底 `termCopyFallback` 走 execCommand 时会把临时 textarea `select()`
+⇒ **焦点被抢到 body**，而 xterm 的键盘通路完全依赖它的 helper textarea
+持焦 ⇒ 用户复制一次之后所有按键都不再进终端（"快捷键全哑"）。实测：
+复制前 focus=termTA、复制后 focus=BODY，此后 pasteEvt 恒 0。
+修法＝记下复制前的焦点宿主并在 finally 里原样归还。
+(b) Ctrl+V 被 xterm preventDefault ⇒ 浏览器原生粘贴被掐断；而改前那条 JS
+路径依赖 `navigator.clipboard.readText`，它在**非安全上下文**
+（局域网 http，正是用户实际访问方式）压根不存在 ⇒ 粘贴整个不可用。
+修法＝Ctrl/Cmd+V 一律 return false 但**不** preventDefault：只让 xterm 别把
+^V 当字节送进 pty，浏览器照常把剪贴板粘进 helper textarea ⇒ 触发 paste
+事件 ⇒ 由既有的 termPasteBind 接住做 bracketed-paste 安全包装。
+这条路不需要 navigator.clipboard，非安全上下文照样通。
+红向自证：撤掉 (a) 的焦点归还 ⇒ A/C/C2/D/E 五条同时变红（正是用户的完整症状）；
+只撤掉 (b) ⇒ C/C2/D 红而 A 仍绿，两条腿互相独立。
+③ 闸门：L0 hermetic **1332 例 0 跳过**；hermetic-clean 同数字全绿；L1 host 57/58
+（唯一红是 grok 会话标题解析的**既有**失败，主树复现，与本批无关）。
+新增 `tests/test_term_clipboard_handoff.py`（6 例静态契约）+
+`tests/verify_term_clipboard.py`（13 项真渲染，局域网非安全上下文全绿）+
+`tests/test_activity_indicator.py` 补 4 例（免 token / 不漏句柄 / 两个数都给）。
+④ 不动 pty 输出、不动 xterm 版本、不改任何凭据：本次只动一个只读聚合端点与
+前端三处行为，重启即可全部生效（无迁移、无数据面改动）。
+
+## v0.13.83
+
+── 以下为 v0.13.83 的根因（本版摘要：终端恒在主屏（吞 ?1049h）+ 输入控件去鼠标 + cursor 历史会话接入），保留供追溯，非本版条目 ──
+根因与修复（三条，2026-10-07 用户裁定）：
+① **备用屏从根上禁止**：v0.13.82 是「换会话那帧补写退出序列 + 手点逃生按钮」，
+用户裁定改为嵌入式终端**只用主屏** —— 在解析层把 DECSET 的 1049/1047/47 注册成
+「吞掉」（返回 true，内建 activateAltBuffer 不执行），其余 DECSET（鼠标/粘贴/
+同步块）一律放行。实现见 static/hub/03-agents-cards.js 的 termAltScreenBlock()。
+v0.13.82 的 TERM_ALT_OFF/TERM_STATE_RESET、缓冲区状态字
+#termBufChip 与「退出备用屏」#termAltOut 全部删除（备用屏不会发生，它们已是死码）。
+实测依据：registerCsiHandler({prefix:'?',final:'h'}) 与内建 DECSET 共用一张表，
+且该表在建内建处理之前被咨询。⚠️ handler 收到的是**参数数组本身**（`p[0]===1049`），
+不是 `{params:[…]}` —— 按 p.params 取参会抛 TypeError 被 catch 吞掉、静默失效
+（第一版就是这样，靠验收探针 B3 抓红）。
+② **输入控件关闭鼠标功能，只保留页面滚动**（用户判据：Windows 自带终端里滚轮就是
+向上翻页面内容，嵌入式终端也该如此，两边不抢鼠标焦点）。终端页有两个文字输入控件：
+查找框 #termFindInput 按**开/关**分档 —— 关闭时（.term-find:not(.on)，即日常所有时刻）
+整条浮层 pointer-events:none，鼠标完全穿透、滚轮不被截走；打开时恢复 auto，
+Ctrl+F 期间鼠标照常可用（初版一律 none，等于顺手把 Ctrl+F 拆了半边，用户当日追认收紧）。
+xterm 自带的 .xterm-helper-textarea 只靠 vendor CSS 不够 —— 它静息态是 0×0/left:-9999em，
+但组字期间 updateCompositionElements 会把 inline left/top/width/height 改写到
+光标处并撑开（inline 压过 class）⇒ 运行时钉 style.pointerEvents='none'。
+滚轮因此只滚 scrollback。鼠标上报的转发逻辑**不动**（TUI 主动请求鼠标时照旧转发）。
+③ **cursor 接入历史会话**：cursor 之前只出现在菜单里（CLI_ALIASES 有、SESSION_STORES 没有）
+⇒ 前端 TERM_HIST_AGENTS 不含它，点开菜单行没有历史下拉。新增 cursor_json 适配器：
+以 ~/.cursor/chats/<md5(cwd)>/<id>/meta.json 为主表（有 cwd 与毫秒时间戳、有
+hasConversation），转录 ~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl 只供
+标题（首句用户提问）；录制的行形状是 role 键而非各家的 type 键，故单设 _cursor_first_user。
+⚠️ 已知残留（不在本次收口）：上游 open（#14277/#10331/#20063/#23651）指出 codex 在
+普通屏整屏重画时仍可能丢 scrollback（\x1b[2J 把 viewportY 拽回底部，xterm.js#5801 未修）
+—— 本次只解决**备用屏**这一条腿。
+
+## v0.13.81
+
+── 以下为 v0.13.81 的根因备忘（保留原文，不删；与 v0.13.82 是**两条不同的腿**）──
+根因：TUI 程序开启 xterm 鼠标跟踪（1003h）后滚轮/拖选被吞，异常退出不发
+?1003l 时 mouseTrackingMode 卡 any 只有重连才复位 ⇒「时好时坏、无法复制」。
+修复：capture 阶段 wheel/mousedown 看门狗，检测到跟踪态同步切
+coreMouseService.activeProtocol='NONE' 并异步写 TERM_MOUSE_OFF 到 pty。
+① **闸门自己会说谎，所以先修它**：`FORCE_COLOR=3` 让 node 把 `console.log(数字)`
+染成 ANSI ⇒ `int('\x1b[33m60\x1b[39m')` 直接 ValueError ⇒ 22 条用例**假红**。
+而「全绿/全红」是本轮一切判据的前提 —— 判据本身不可信时，后面八批的
+「已验证」全是自欺。`NO_COLOR` 在 `FORCE_COLOR` 存在时**无效**（node 自己
+警告后忽略），唯一可靠解是从 `run_tier.py` 里摘掉变量。这类**假红比没有
+闸门更坏**：它逼人改断言求绿。本仓的假红禁令见 `tests/tiers.py:107-114`。
+② **性能主症是缓存缺失，不是算法慢**：`/api/skill/list` 174ms 每次全盘重扫、
+`/api/agents` 57ms 里 `docker ps` 独占 16.5ms、`/api/kb/status` 冷启动 1.49s ——
+而 `/status` 早有 60s TTL 范式，只是没被其余四条路由复用。**逐字搬运**式的
+「抽取而非编写」也用在这里：历史根因搬进 CHANGELOG 是同一手法。
+③ **闸门盲区下的漏网比缺陷本身更值得记**：`renderTaskTable` 四处裸拼 innerHTML
+（LLM 返回的 `task_id` 无字符集校验直达 DOM ⇒ 存储型 XSS），**而同一函数
+下一格有 `escapeHtml`** ⇒ 证明是漏网非有意。三处同型，所以新闸门的主判据是
+**形状**（同行两种写法）而不是逐点列举 —— 后者修完就忘。
+同类教训已在册 6 次（TDAI 透传三错、chat 端点每请求 500、WS 双消费者偷字节…）。
+④ **只缓存成功路径**：模型清单那次我先写成「fetch 没抛异常 ⇒ 成功」，影子实测
+证明错 —— `async with s.get()` 连接失败时**不抛异常**，只回空清单 ⇒ 缓存了失败
+（用户看到「没有模型」，真因是上游连不上）。判据必须是 `payload["error"]` 为空。
+── v0.13.70 及更早的逐版根因已于 2026-10-05 归档至 ──
+── CHANGELOG.md（脚本 scripts/extract_changelog.py 逐字搬运）──
+此处**只保留当前版本**的根因，避免两份会各自漂移的副本。
+（上一版 v0.13.78 的根因随本批归档至 CHANGELOG.md §v0.13.78）原三条：
+① **收起态图标条第 4、5 个形状完全一样**（用户 2026-10-04 报「分不清是什么」）。
+真因是 `cpu` 一次被用了**三处**：静态「资源」、`NAV_ICONS.agents`、
+`SET_PAGES` 的「模型」—— 收起态里前两处**并排可见**，直接造成误读。
+一次清完三处：「资源」cpu → **`monitor`**（它监视 CPU+内存+进程，
+cpu 这个隐喻本来就偏窄）；「AGENTS」cpu → **`hubmark`**（hub 中心 +
+4 个 agent 节点 + 辐条，语义正对）；「模型」保留 cpu（AI 模型常见隐喻）。
+两处**顺带查过** `monitor`/`hubmark` 是否已被导航占用 —— 只在
+agent 卡片徽标与页眉 logo 用，不在图标条，避免「改了 A 又造出 B 的撞车」。
+② **`/list?q=` 与 MCP 工具描述口径统一**：MCP `tools/list` 的
+`description` 原走 `escapeHtml` ⇒ 星号原样显示。现与技能描述同走 `mdInline`。
+③ **顺带修一处 XSS 洞（超出用户点名范围，必须报）**：MCP 工具行里
+`<b>' + x.name + '</b>` 与 `onclick="pickTool('' + x.name + '')"`
+**既没转义、也没过 `jsStr`** —— 同一个串同时进 **HTML 正文**与
+**onclick 的 JS 字面量**两个语境，两处都不设防。工具名来自 MCP server
+（外部注册）。本仓 `jsStr` 的注释早就写明「`escapeHtml` 只处理 HTML
+上下文，HTML 实体转义**不足以**让任意串安全进 JS 字面量」，此处却没用。
+现补：HTML 语境 `escapeHtml`、JS 字面量语境 `jsStr`。
+── v0.13.70 及更早的逐版根因已于 2026-10-05 归档至 ──
+── CHANGELOG.md（脚本 scripts/extract_changelog.py 逐字搬运）──
+此处**只保留当前版本**的根因，避免两份会各自漂移的副本。
+: 常驻后台任务统一登记处。裸 create_task 不持引用 ⇒ 事件循环只持弱引用，
+: GC 可能在任意时刻回收掉这些循环任务（表现为「跑着跑着某功能静默停摆」），
+: 且 shutdown 时无法 cancel，进程退出要等事件循环超时。
+
 ## v0.13.143 — 判定附注超时按**生产负载**校正：20s → 45s
 
 > 来源：v0.13.142 上线后第一次真调用。`/api/skill/relevant?rerank=true` 返回

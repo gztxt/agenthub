@@ -22,6 +22,13 @@ yaml，pi 还要顺带补模型清单、grok 要建命名 profile），逐一白
   hermes  ~/.hermes/config.yaml       model.default / model.provider
   codebuddy（WorkBuddy 包内 CLI）    **不支持**：--model 只认自有清单
           （hy4-preview / hy3 …，实测 help 输出），与 CCR 的 provider/model ID 不通用。
+
+agent 清单怎么来（2026-10-25 用户令「应该是自动发现并添加」）：
+  ① SPECS/UNSUPPORTED 两张硬编码表（逐家实测的读写器与理由）；
+  ② **注册表自动发现**：profiles.all_profiles() 里在册的 agent 若两张表都没登记
+     （如将来新接入的 agent），以「未接入」+ 如实原因出现在设置页，置灰 ——
+     宁可显示「设不了 + 为什么」，也不让用户在页面上找不到这个 agent。
+  已按此登记：omp（argv-only，见 _omp_read）、dsh（UNSUPPORTED，TUI 无 --model）。
 """
 from __future__ import annotations
 
@@ -55,6 +62,9 @@ MODEL_ARGV: Dict[str, str] = {
     "opencode": "--model",   # opencode --help: -m, --model  model to use in the format of provider/model
     "qoder": "--model",      # qodercli --help: -m, --model <model>  Model for the current session
     "cursor": "--model",     # cursor-agent --help: --model <model>  Model to use (e.g. gpt-5, sonnet-4-thinking)
+    # ── 2026-10-25 新增（omp 入册，实测 omp --help：`--model=<value>  Model to use
+    #    (fuzzy match: "opus", "gpt-5.2", or "openai/gpt-5.2")`）──
+    "omp": "--model",
 }
 
 #: 写入模式（2026-10-07，用户裁定「原生 + 插入」）。三类语义不同，设置页必须分开说：
@@ -69,16 +79,23 @@ WRITE_MODE: Dict[str, str] = {
     "grok": "ccr", "hermes": "ccr",
     "opencode": "ccr", "cursor": "ccr",
     "qoder": "native",
+    # argv-only：无默认模型配置文件可落（见 _omp_read），hub 侧设置只经终端注入。
+    "omp": "argv",
 }
 
-#: 该 agent 的模型字段要求的**值前缀**（v0.13.86，2026-10-07）。
+#: 该 agent 的模型字段要求的**值前缀**（v0.13.86，2026-10-07；2026-10-25 补 omp）。
 #: 为什么需要：CCR 清单（/api/models）给的是裸 ID（`alibaba/qwen3.8-max`），而
 #: opencode 的 `model` / `--model` 收的是 `provider/model_id` 形状 —— 官方文档 Models 页
 #: 原话「The format is `provider/model`」，本机同名 CLI 亦实测回 `ccr/<id>`（`opencode
 #: models ccr` 逐行都是 `ccr/…`）。用户若照着清单点裸 ID，`_opencode_write` 会 409
 #: 且指错方向（它说「没有 provider alibaba」，实际缺的是 `ccr/` 前缀）。
 #: ⇒ 设置页据此把选项值拼成 `<前缀><CCR ID>`，让"能点到的"与"能写进的"是同一个东西。
-VALUE_PREFIX: Dict[str, str] = {"opencode": "ccr/"}
+#: omp 同族（2026-10-25 实测）：`omp --model openrouter/openrouter/free` 报
+#: 「No API key found for openrouter」—— 它把裸 ID 的**首段**当成 provider 名；
+#: 正确形状是 `ccr/openrouter/openrouter/free`（provider key = ~/.omp/agent/models.yml
+#: 里的 `ccr`，实测该形状一句话正常返回）。⚠ 前缀跟着 provider key 走，用户若把
+#: models.yml 里的 provider 改名，这里要同步改。
+VALUE_PREFIX: Dict[str, str] = {"opencode": "ccr/", "omp": "ccr/"}
 
 #: 该 agent 的**原生模型清单**（v0.13.86）。取证：`qodercli --list-models` 实测输出
 #: （2026-10-07）= Qwen3.8-Max / Qwen3.8-Flash；`~/.qoder/.models/default` 的 key
@@ -757,7 +774,37 @@ def _cursor_write(model: str):
     changes.append({"where": "cli-config.json:hasChangedDefaultModel", "from": "", "to": "true", "op": "set"})
     return [(p, json.dumps(d, ensure_ascii=False, indent=2) + "\n", changes)]
 
+# ── argv-only 型 agent（2026-10-25：omp 入册）────────────────────────
+# 判据（实测，不是推断）：omp 的配置根 ~/.omp/agent 里是 sqlite（agent.db /
+# models.db）+ models.yml 的 provider 清单，**没有** pi 那样的 settings.json
+# 明文默认模型字段（`omp config list` 也列不出 defaultModel 键）⇒ 无可定点
+# 改写的配置文件；而 `omp --help` 实测有 `--model=<value>`（fuzzy match:
+# "opus" / "openai/gpt-5.2" 两种形状）⇒ 唯一合法落点就是 hub 拉起终端时注入。
+# 这类 agent 在本文件里叫 argv_only：read 报告「无文件可读」，write 返回空写表，
+# apply_model 只落 hub 侧持久化行（set_hub_model），不碰任何文件。
+# ⚠ 为什么不给 omp 写 models.yml / 动 sqlite：models.yml 是用户手写的 provider
+#   清单（含 !cmd 凭据只读取用），sqlite 是运行库 —— 两者都不属于「模型设置」
+#   该动的面（「不破坏原生」裁定，见第二阶段注释）。
+
+
+def _omp_read() -> dict:
+    """omp 无默认模型配置文件可读：配置根 ~/.omp/agent 内是 sqlite 与 models.yml
+    （provider 清单），没有 settings.json 那样的明文默认模型字段。
+
+    note 里必须点出 `ccr/` 前缀（VALUE_PREFIX）：实测 `omp --model <裸ID>` 会把
+    首段当 provider 名报「No API key found」，设置页存的值必须带 provider key。"""
+    return {"current": "", "files": [],
+            "note": "omp 的默认模型在 ~/.omp/agent 的 sqlite 内（无明文配置文件）；"
+                    "hub 侧设置经终端 --model 注入生效（值带 ccr/ 前缀，新开终端才带）"}
+
+
+def _omp_write(model: str):
+    """argv-only：不落任何文件，返回空写表（hub 侧注入是唯一落点）。"""
+    return []
+
+
 #: agent_id -> {name, read, write, argv}
+#: argv_only=True 的条目：writable 语义 = 「hub 侧可设置」（无配置文件可落）。
 SPECS: Dict[str, dict] = {
     "claude": {"name": "Claude Code", "read": _claude_read, "write": _claude_write},
     "jcode": {"name": "JCode", "read": _jcode_read, "write": _jcode_write},
@@ -769,6 +816,10 @@ SPECS: Dict[str, dict] = {
     "opencode": {"name": "OpenCode", "read": _opencode_read, "write": _opencode_write},
     "qoder": {"name": "Qoder CLI", "read": _qoder_read, "write": _qoder_write},
     "cursor": {"name": "Cursor Agent", "read": _cursor_read, "write": _cursor_write},
+    # ── 2026-10-25 新增（用户报障「模型设置页面也没有自动发现并添加 dsh omp 等
+    #    agent，应该是自动发现并添加」）──
+    "omp": {"name": "oh-my-pi (omp)", "read": _omp_read, "write": _omp_write,
+            "argv_only": True},
 }
 
 #: 在册但**不可统一设置**的 agent（理由必须写清，前端据此置灰）
@@ -780,6 +831,11 @@ UNSUPPORTED: Dict[str, str] = {
     # 无 --model 选项，其模型由内嵌的 claude / codex / opencode 客户端各自决定。
     "cloudcli": "CloudCLI 是 Web 宿主（cloudcli --help 实测无 --model 选项）："
                 "它的模型由内嵌的 claude/codex/opencode 客户端各自决定，应在对应 agent 上设置",
+    # 2026-10-25 实测取证：dsh 是 profile 启动器，`dsh --profile tui --help` 的全部
+    # 选项只有 --resume / --agent-preset / -h —— **没有 --model**（模型由 agent
+    # preset 与 Web UI 内的选择决定）。故 hub 侧无处可注入，只能如实置灰。
+    "dsh": "dsh TUI 无 --model（实测 dsh --profile tui --help 仅 --resume/--agent-preset）："
+           "模型由 agent preset 与 Web UI 内选择决定，hub 无注入入口",
 }
 
 
@@ -965,11 +1021,33 @@ def terminal_argv(agent_id: str, model: str) -> List[str]:
 
 
 # ── 对外：状态 / 预览 / 落笔 ────────────────────────────────────────
+def _registry_agent_ids() -> List[str]:
+    """hub 注册表里在册的 agent id（静态画像 + 动态 CLI 发现）。
+
+    为什么设置页要合并它（2026-10-25 用户报障「模型设置页面也没有自动发现并添加
+    dsh omp 等agent，应该是自动发现并添加」）：本页原先只列 SPECS+UNSUPPORTED 两张
+    硬编码表 ⇒ 画像里新登记的 agent（dsh 10-23、omp 10-24）在设置页**零存在感**，
+    用户既设不了、也看不到为什么设不了。判据：注册表在册 ⇒ 必须出现在本页
+    （可设置，或带实测理由的置灰）。动态发现自带 30s 缓存，成本可接受。"""
+    try:
+        import profiles
+        return [p["id"] for p in profiles.all_profiles() if p.get("kind") == "agent"]
+    except Exception:  # noqa: BLE001 —— 注册表读取失败不能把设置页搞垮
+        return []
+
+
 def agent_state(agent_id: str) -> dict:
     spec = SPECS.get(agent_id)
     if not spec:
+        reason = UNSUPPORTED.get(agent_id)
+        if not reason:
+            # 注册表在册但两张表都没登记 ⇒ 自动发现的新 agent：如实说「未接入」，
+            # 不假装能设、也不假装不存在（2026-10-25 用户令「自动发现并添加」）。
+            reason = ("未接入模型设置：注册表自动发现的 agent（尚无配置文件读写器、"
+                      "CLI 未实测 --model 支持）") \
+                if agent_id in set(_registry_agent_ids()) else "不在模型设置白名单内"
         return {"id": agent_id, "supported": False, "writable": False,
-                "reason": UNSUPPORTED.get(agent_id, "不在模型设置白名单内"),
+                "reason": reason,
                 # write_mode 统一给 "argv" 之外的语义：这两个 agent 连注入都不做，
                 # 故用 "none"，前端据此不显示"字段认什么"那行（没有字段可认）。
                 "write_mode": "none",
@@ -980,8 +1058,11 @@ def agent_state(agent_id: str) -> dict:
     except ModelCfgError as e:
         st = {"current": "", "files": [], "note": e.args[0]}
     files = st.get("files") or []
+    # argv_only（omp）：没有配置文件可落，「writable」的语义是「hub 侧可设置」
+    # （落点 = 拉起终端时的 --model 注入），不是「配置文件可写」。
+    argv_only = bool(spec.get("argv_only"))
     return {"id": agent_id, "name": spec["name"], "supported": True,
-            "writable": bool(files) and all(Path(f).exists() for f in files),
+            "writable": argv_only or (bool(files) and all(Path(f).exists() for f in files)),
             "current": st.get("current", ""), "provider": st.get("provider", ""),
             "extra": st.get("extra", {}), "note": st.get("note", ""),
             "files": files, "argv": MODEL_ARGV.get(agent_id, ""),
@@ -997,7 +1078,14 @@ def agent_state(agent_id: str) -> dict:
 
 
 def list_agents() -> List[dict]:
+    """SPECS（可设置）+ UNSUPPORTED（置灰带理由）+ 注册表自动发现（2026-10-25）。
+
+    顺序即页面顺序：先两张硬编码表（按加入序），再注册表里漏掉的新 agent。
+    重复 id 去重（静态表优先）——qoder 等在册且已登记的不出现两次。"""
     ids = list(SPECS.keys()) + list(UNSUPPORTED.keys())
+    for aid in _registry_agent_ids():
+        if aid not in ids:
+            ids.append(aid)
     return [agent_state(i) for i in ids]
 
 

@@ -811,5 +811,86 @@ class LQoderDriftExempt(_HomeFixture):
         self.assertNotIn("qoder", [r["id"] for r in out["repaired"]],
                          "repair 不许把 CCR ID 写进 qoder 的原生字段")
 
+
+class MAutoDiscovery(_HomeFixture):
+    """agent 清单自动发现（2026-10-25 用户令「应该是自动发现并添加」）。
+
+    背景：本页原先只列 SPECS+UNSUPPORTED 两张硬编码表 ⇒ 画像里新登记的 agent
+    （dsh 10-23、omp 10-24）在设置页零存在感。判据三条：
+    ① 注册表在册的 agent 必须出现在 list_agents（可设或带理由置灰）；
+    ② omp 是 argv-only（实测 --help 有 --model、无明文配置文件）⇒ hub 侧可设；
+    ③ dsh 实测 TUI 无 --model ⇒ 置灰且理由里带证据关键词。
+    """
+
+    def test_registry_agents_appear_in_list(self):
+        ids = [a["id"] for a in modelcfg.list_agents()]
+        for aid in ("dsh", "omp", "claude", "pi"):
+            self.assertIn(aid, ids, f"{aid} 在 hub 注册表在册，设置页必须列出来")
+
+    def test_list_has_no_duplicate_ids(self):
+        ids = [a["id"] for a in modelcfg.list_agents()]
+        self.assertEqual(len(ids), len(set(ids)), "静态表与注册表合并后不许有重复 id")
+
+    def test_omp_is_argv_only_and_writable(self):
+        st = modelcfg.agent_state("omp")
+        self.assertTrue(st["supported"], "omp 已实测 --model 支持，必须可设置")
+        self.assertTrue(st["writable"], "argv-only 的 writable 语义 = hub 侧可设置")
+        self.assertEqual(st["write_mode"], "argv")
+        self.assertEqual(st["files"], [], "omp 无明文配置文件（sqlite + models.yml）")
+        self.assertIn("--model", st["note"])
+        self.assertEqual(st["value_prefix"], "ccr/",
+                         "omp 的 --model 收 <provider-key>/<id>（实测裸 ID 报 No API key）")
+
+    def test_omp_apply_only_touches_hub_side(self):
+        # 值必须带 ccr/ 前缀 —— 2026-10-25 实测 omp --model 的形状（见 VALUE_PREFIX）。
+        out = modelcfg.apply_model("omp", "ccr/openrouter/openrouter/free")
+        self.assertEqual(out["applied"], [], "argv-only 不许写任何文件")
+        self.assertEqual(modelcfg.hub_model("omp"), "ccr/openrouter/openrouter/free")
+        self.assertEqual(modelcfg.terminal_argv("omp", modelcfg.hub_model("omp")),
+                         ["--model", "ccr/openrouter/openrouter/free"],
+                         "hub 拉起 omp 终端必须追加 --model（term.py:912 同款通路）")
+        # 假 HOME 里不该被创建出任何 omp 配置文件
+        self.assertEqual(list((self.home / ".omp").glob("**/*.json")) if
+                         (self.home / ".omp").exists() else [], [],
+                         "apply 不许顺手创建配置文件")
+
+    def test_omp_preview_reports_injection_not_files(self):
+        p = modelcfg.preview("omp", "ccr/openrouter/nvidia/nemotron-3-ultra-550b-a55b:free")
+        self.assertEqual(p["files"], [])
+        self.assertEqual(p["argv"],
+                         ["--model", "ccr/openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"])
+        self.assertEqual(p["write_mode"], "argv")
+        self.assertEqual(p["value_prefix"], "ccr/")
+
+    def test_dsh_is_unsupported_with_evidence_reason(self):
+        st = modelcfg.agent_state("dsh")
+        self.assertFalse(st["supported"], "dsh TUI 实测无 --model，必须置灰")
+        self.assertFalse(st["writable"])
+        self.assertEqual(st["write_mode"], "none")
+        self.assertIn("--profile tui --help", st["reason"],
+                      "置灰理由必须带实测证据（dsh --profile tui --help 的选项清单）")
+
+    def test_omp_not_reported_as_drift(self):
+        """argv-only 没有配置文件可比 ⇒ 不许进漂移体检（否则恒假警报）。"""
+        modelcfg.set_hub_model("omp", "openrouter/openrouter/free")
+        ids = [d["id"] for d in modelcfg.drift_report()]
+        self.assertNotIn("omp", ids, "无文件可比的 agent 进漂移 = 恒假警报")
+
+    def test_registry_merge_adds_unlisted_agent(self):
+        """注册表在册但两张表都没登记 ⇒ 必须合并进清单并如实置灰。
+
+        用 mock 钉合并行为本身（不依赖本机安装态）：去掉 list_agents 里的注册表
+        合并段，本用例立刻红（zzz-fake 消失）。"""
+        from unittest import mock
+        with mock.patch.object(modelcfg, "_registry_agent_ids",
+                               return_value=["zzz-fake"]):
+            ids = [a["id"] for a in modelcfg.list_agents()]
+            self.assertIn("zzz-fake", ids, "注册表在册的 agent 必须合并进设置页清单")
+            st = modelcfg.agent_state("zzz-fake")
+            self.assertFalse(st["supported"])
+            self.assertIn("未接入", st["reason"],
+                          "未登记的新 agent 要给「未接入」的如实理由，不是白名单外一句话")
+
+
 if __name__ == "__main__":
     unittest.main()

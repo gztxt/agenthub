@@ -146,20 +146,26 @@ class AgentDiscovery:
             if vrec and vrec.get("verdict") in ("not_installed", "broken"):
                 continue
             entries = profiles.entries_for(p, status)
-            # 通用宿主探测：dict ui = 独立 Web 界面宿主（如 claude←cloudcli :3010），
-            # 端口活才出「原生会话」入口，且计入实体 running 证据
+            # 通用宿主探测：dict ui = 独立 Web 界面宿主（如 claude←cloudcli :3010）。
+            # v0.13.151 改判（2026-10-25）：embed/open 入口**不再**等端口活才注入 ——
+            # 与 agent string ui 同因（按需拉起下 stopped 是常态，v0.13.149 的
+            # 「端口活才出原生会话」会把 cloudcli 卡的按钮在正常状态下删掉）。
+            # 端口活性只保留两个既有语义：① 计入实体 running 证据；② endpoint 回落。
+            # 停着的服务由前端 probeEmbed 出「目标界面未响应」覆盖层，按钮本身必须在。
             if isinstance(ui, dict):
                 ui_alive = self._sync_check_port(ui.get("port"))
-                if ui_alive:
-                    entries = ([{"type": "embed", "label": "原生会话", "url": ui["url"]},
-                                {"type": "open", "label": "↗UI", "url": ui["url"]}]
-                               + entries)
-                    if status in ("installed", "stopped"):
-                        status = "running"
+                entries = ([{"type": "embed", "label": "原生会话", "url": ui["url"]},
+                            {"type": "open", "label": "↗UI", "url": ui["url"]}]
+                           + entries)
+                if ui_alive and status in ("installed", "stopped"):
+                    status = "running"
                 endpoint = ui["url"] if ui_alive else (p.get("panel") or "")
             else:
                 endpoint = ui or p.get("panel") or (f"http://127.0.0.1:{p['port']}" if p.get("port") else "")
-            # 死面板不出按钮（probe_port 过滤）
+            # 死面板不出按钮（probe_port 过滤）—— 自 v0.13.151 起只覆盖 **panel 类**
+            # 入口（services 的面板）：agent 的 embed/open 不再带 probe_port，按需拉起
+            # 政策下它们的正常态就是停着的（用户 2026-10-25 报障「dsh的原生界面按钮
+            # 也没有了」推翻 v0.13.149 把该 doctrine 扩展到 agent ui 的改判）。
             # v0.13.149（2026-10-24）：过滤判据从「loopback+::1 双栈」扩展为
             # _entry_alive——URL 端口与 probe_port 相同（URL 指向真实服务而非代理）时，
             # 按 URL 里的 host 再补探一次。为什么需要：dsh 只绑 192.168.5.102，
@@ -250,7 +256,9 @@ class AgentDiscovery:
 
         补探条件两条同时成立才生效：① URL 端口 == probe_port（URL 指向真实服务，
         不是 hub 注入代理之类的前置）；② URL host 不是回环（回环的上面已经探过）。
-        dsh 是唯一命中者：只绑 192.168.5.102:3080，token URL 与裸地址同 host。
+        v0.13.151 起只服务 **panel 类**入口（services 的面板）—— agent 的 embed/open
+        不再带 probe_port（按需拉起下停了是常态，见 discover_all 同处注释）。
+        机制本身保留：将来任何「面板死了就别出按钮」的场景仍走它。
         """
         port = e.get("probe_port")
         if self._sync_check_port(port):

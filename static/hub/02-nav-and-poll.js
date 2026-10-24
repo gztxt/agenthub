@@ -94,7 +94,12 @@ const NO_TERM = new Set();
 function defaultModeOf(a) {
   const es = (a && a.entries) || [];
   const has = t => es.some(e => e.type === t);
-  if (a && EMBED_FIRST.has(a.id)) return 'embed';
+  /* v0.13.151：EMBED_FIRST 加 has('embed') 前置。改前它无条件返回 'embed'，
+     而 applyChatMode 的「形态不可用回落默认」又会再问一次 defaultModeOf ⇒ 若该实体
+     的 embed entry 不在（frame_deny / 入口被过滤 / 画像改动），两步都落到 embed，
+     用户点开的是一张 url 为空的空白嵌页，且没有按钮能出去。
+     2026-10-25 报障「dsh的原生界面按钮也没有了」同源：后端入口恢复后这里是第二道闸。 */
+  if (a && EMBED_FIRST.has(a.id) && has('embed')) return 'embed';
   if (a && !NO_TERM.has(a.id) && a.kind === 'agent' && has('term')) return 'term';
   if (has('embed')) return 'embed';
   if (has('term')) return 'term';

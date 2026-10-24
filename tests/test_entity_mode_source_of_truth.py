@@ -58,6 +58,20 @@ class ModeSourceOfTruth(unittest.TestCase):
                          "有原生终端的 Agent 必须先给终端页")
         self.assertRegex(d, r"has\('embed'\)", "无终端的实体仍要能进嵌入页")
 
+    def test_embed_first_requires_embed_entry(self):
+        """EMBED_FIRST 必须同时要求 embed entry 存在（v0.13.151）。
+
+        改前它无条件返回 'embed'，而 applyChatMode 的「形态不可用回落默认」又会
+        再问一次 defaultModeOf ⇒ embed entry 缺失时两步都落 embed，用户点开的
+        是一张 url 为空的空白嵌页且没有按钮能出去（2026-10-25「dsh的原生界面
+        按钮也没有了」同源故障的第二道闸）。破坏方向：去掉 `&& has('embed')`
+        ⇒ 本断言红。"""
+        d = _body(self.src, "defaultModeOf")
+        self.assertIsNotNone(d, "defaultModeOf 不见了")
+        self.assertRegex(d, r"EMBED_FIRST\.has\(a\.id\)\s*&&\s*has\('embed'\)",
+                         "EMBED_FIRST 分支必须带 has('embed') 前置，否则 embed entry "
+                         "缺失时会落空白嵌页（applyChatMode 回落也会再问到这里）")
+
     def test_open_entity_does_not_reimplement_priority(self):
         o = _body(self.src, "openEntity")
         self.assertIsNotNone(o, "openEntity 不见了")

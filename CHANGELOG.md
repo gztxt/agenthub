@@ -1,3 +1,72 @@
+## v0.13.151 — 按需拉起下原生界面按钮复还 + 模型设置页自动发现 agent
+
+> 来源：2026-10-25 用户报两事：①「dsh的原生界面按钮也没有了」；
+> ②「设置菜单 模型设置页面也没有自动发现并添加 dsh omp 等 agent，
+> 应该是自动发现并添加」。
+
+### ① 根因：v0.13.149 的「死面板不出按钮」与同日按需令自相矛盾
+
+v0.13.149 给 agent string-ui 的 embed/open 入口带了 `probe_port`、由
+discovery 按端口活性过滤（doctrine 从 panel 类扩展到 agent ui）；而同一
+天的用户令把全部 Web UI agent 改成**按需拉起、常态 stopped** ⇒ 每个
+Web UI agent 的原生界面按钮在正常状态下被删（dsh/pi/qwenpaw/codebuddy/
+qoder 全中）。10-24 23:1x 快照曾对 pi 判「不是故障，是设计态」并手动
+start pi-web——watchdog 的「无会话即杀」15 分钟后又把它停掉，按钮再次
+消失；本次用户报障推翻该结论。
+
+- `profiles.py entries_for`：agent 的 string ui 的 embed/open **不再带
+  probe_port**（判据变了：按需态下 stopped 不是故障）。`probe_port` 只
+  保留给 panel 类入口（services 的面板，与 agent 按需政策无关）。
+- `discovery.py`：dict-ui（cloudcli）的 embed/open 注入不再等端口活
+  （原「端口活才出原生会话」同因删除）；端口活性只保留「计入 running
+  证据」与「endpoint 回落」两个既有语义。
+- 停着的服务 UX 由前端 `probeEmbed` 承接：fetch 失败出「目标界面未响应」
+  覆盖层（含改用对话/终端/重试三个出口），按钮本身必须在。
+- `static/hub/02-nav-and-poll.js defaultModeOf`：EMBED_FIRST 分支加
+  `has('embed')` 前置。改前它无条件返回 'embed'，而 `applyChatMode` 的
+  「形态不可用回落默认」又会再问一次 defaultModeOf ⇒ embed entry 缺失时
+  两步都落 embed，用户点开的是一张 url 为空的空白嵌页且没有按钮能出去
+  （同源故障的第二道闸）。hub.js 已随分片重建（?v= 提手内容派生）。
+
+### ② 模型设置页自动发现（src/modelcfg.py）
+
+原 `list_agents()` 只列 SPECS+UNSUPPORTED 两张硬编码表 ⇒ 画像里新登记的
+agent（dsh 10-23、omp 10-24）在设置页**零存在感**。改法：
+
+- `list_agents()` 合并 `profiles.all_profiles()` 注册表：在册但两张表都
+  没登记的 agent 以「未接入模型设置」+ 如实原因出场（置灰），不假装能设、
+  也不假装不存在。重复 id 去重（静态表优先）。
+- **omp 入 SPECS（argv-only）**：实测 `omp --help` 有 `--model=<value>`；
+  配置根 `~/.omp/agent` 是 sqlite + models.yml（provider 清单），没有
+  settings.json 那样的明文默认模型字段 ⇒ 无可定点改写的配置文件，唯一
+  落点是 hub 拉起终端时的注入（`term.py` 既有通路）。`writable` 语义对
+  argv-only = 「hub 侧可设置」；`apply` 不碰任何文件。
+  ⚠ 值形状实测：`omp --model openrouter/openrouter/free` 报
+  「No API key found for openrouter」（裸 ID 首段被当 provider 名）；
+  正确形状 `ccr/openrouter/openrouter/free` 实测一句话正常返回
+  （`omp --model ccr/openrouter/openrouter/free -p "…"` → 你好）⇒
+  `VALUE_PREFIX` 补 `omp: "ccr/"`（同 opencode 机制）。
+- **dsh 入 UNSUPPORTED**：实测 `dsh --profile tui --help` 仅
+  `--resume` / `--agent-preset` / `-h`，**无 --model** ⇒ 如实置灰，
+  理由带实测证据。
+- 漂移体检不受影响：omp 无文件可比（`current` 恒空 ⇒ 不进 bad 集合），
+  dsh 本就不在 SPECS。
+
+### ③ 测试与红向自证
+
+- `test_profiles_ondemand.py`：② 不变量**反转**——原「service 停了按钮要
+  消失（probe_port 扩展到 agent ui）」改判为「agent 的 embed/open 不带
+  probe_port 且 stopped 时仍在」；新增 panel 类入口仍带 probe_port 的
+  反向断言（doctrine 只在 panel 层保留）。
+- `test_entity_mode_source_of_truth.py`：新增
+  `test_embed_first_requires_embed_entry`（EMBED_FIRST 必须带
+  `has('embed')`）。
+- `test_modelcfg.py`：新增 `MAutoDiscovery` 8 例（注册表合并、omp
+  argv-only、omp apply 只落 hub 侧、omp 前缀、dsh 置灰带证据、omp 不报
+  漂移、mock 钉合并行为）。
+- **红向自证三破坏点各自精确变红**：给 string-ui 加回 probe_port /
+  去掉 `has('embed')` / 去掉注册表合并段 ⇒ 对应用例各红一次，恢复后全绿。
+
 ## v0.13.150 — 补登 QoderWake 长驻缺口（按需拉起全军整改的漏网实体）
 
 > 来源：2026-10-24 用户报「不是所有的 agent 都按需拉起，还是有几个在长驻」。

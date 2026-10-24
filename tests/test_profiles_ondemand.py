@@ -3,10 +3,13 @@
 画像层不变量：
 ① cloudcli/pi/dsh/qwenpaw/qoder 五卡 desc 必须带启动命令（零代码按需入口）；
    codebuddy 卡必须带豁免注记（workbuddy 两单元用户明示保留常驻）；
-② agent 的 string ui 的 embed/open 入口必须带 probe_port == 画像 port——
-   服务停了按钮要消失（「死面板不出按钮」doctrine 从 panel 类扩展到 agent ui）；
+② agent 的 string ui 的 embed/open **不带 probe_port**、stopped 时仍在 ——
+   v0.13.151 改判：按需拉起下 stopped 是常态，v0.13.149「服务停了按钮要消失」
+   （probe_port 扩展到 agent ui）与同日的按需政策直接冲突，把每个 Web UI
+   agent 的原生界面按钮在正常状态下删掉（2026-10-25 用户报障「dsh的原生界面
+   按钮也没有了」）。probe_port 只保留给 panel 类入口（services 的面板）；
 ③ _entry_alive：loopback 双栈之外，URL 端口==probe_port 时按 URL host 补探
-   （dsh 只绑 192.168.5.102）；URL 端口≠probe_port（qwenpaw 注入代理）不补探；
+   （面板入口活性判据，机制本身不变）；
 ④ 终端入口不受影响：pi/dsh 停了仍给出 term 入口（按需形态的本体）；
 ⑤ qoder 静态卡必须压掉 B 档动态卡（同 id ⇒ covered），否则一张 agent 两张卡。
 """
@@ -37,17 +40,41 @@ class OnDemandProfilesTest(unittest.TestCase):
         desc = profiles.get_profile("codebuddy").get("desc", "")
         self.assertIn("豁免", desc, "codebuddy 卡 desc 必须注明 workbuddy 豁免")
 
-    def test_string_ui_entries_carry_probe_port(self):
-        """string ui 的 embed/open 必须带 probe_port == 画像 port。"""
+    def test_agent_ui_entries_survive_stopped(self):
+        """agent 的 embed/open 停了也必须在，且**不得**带 probe_port。
+
+        v0.13.151 改判（2026-10-25 用户报障「dsh的原生界面按钮也没有了」）：
+        v0.13.149 给 agent string-ui 入口带 probe_port 并由 discovery 按端口
+        活性过滤 ⇒ 按需拉起政策下 dsh/pi 等常态 stopped，原生界面按钮被删。
+        反证：破坏方向有两个——① 给入口加回 probe_port（过滤会删按钮）；
+        ② entries_for 按 status 跳过 embed（status='stopped' 时断言变红）。
+        停着的服务由前端 probeEmbed 出「目标界面未响应」覆盖层，不关按钮的事。
+        """
         for pid in ("pi", "dsh", "qwenpaw", "codebuddy", "qoder"):
             p = profiles.get_profile(pid)
-            es = [e for e in profiles.entries_for(p, "running")
-                  if e["type"] in ("embed", "open")]
-            self.assertTrue(es, f"{pid} 应给出 embed/open 入口")
-            for e in es:
-                self.assertEqual(e.get("probe_port"), p.get("port"),
-                                 f"{pid} 的 {e['type']} 入口 probe_port 必须等于画像 port"
-                                 f"（真实服务端口，不是注入代理端口）")
+            for st in ("running", "stopped"):
+                es = profiles.entries_for(p, st)
+                types = [e["type"] for e in es]
+                for t in ("embed", "open"):
+                    self.assertIn(t, types,
+                                  f"{pid} status={st} 时必须给出 {t} 入口"
+                                  f"（按需拉起下 stopped 是常态，按钮不能消失）")
+                for e in es:
+                    if e["type"] in ("embed", "open"):
+                        self.assertNotIn("probe_port", e,
+                                         f"{pid} 的 agent ui 入口不得带 probe_port"
+                                         f"（v0.13.151 起只 panel 类入口才按端口过滤）")
+
+    def test_panel_entries_still_carry_probe_port(self):
+        """panel 类入口（services 面板）仍带 probe_port —— 「死面板不出按钮」
+        doctrine 只在这一层保留，与 agent 按需政策无关。"""
+        p = {"id": "svc", "name": "S", "kind": "service",
+             "panel": "http://127.0.0.1:18083", "terminal": None}
+        es = profiles.entries_for(p, "running")
+        for e in es:
+            if e["type"] in ("embed", "open"):
+                self.assertEqual(e.get("probe_port"), 18083,
+                                 "panel 入口必须带 probe_port（死面板过滤的判据）")
 
     def test_qoder_static_card_suppresses_dynamic(self):
         """qoder 静态卡（id=qoder）必须让 B 档动态发现不出第二张 qoder 卡。

@@ -104,7 +104,28 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.150"
+VERSION = "0.13.151"
+#   v0.13.151：**按需拉起下原生界面按钮复还 + 模型设置自动发现**（用户 2026-10-25
+#   报两事：「dsh的原生界面按钮也没有了」「模型设置页面也没有自动发现并添加
+#   dsh omp 等agent，应该是自动发现并添加」）。
+#   ① 按钮消失的根因是 v0.13.149 与 v0.13.149 的按需令**自相矛盾**：前者给
+#     agent string-ui 的 embed/open 带 probe_port、按端口活性过滤（「死面板不出
+#     按钮」扩展到 agent ui），后者把全部 Web UI agent 改成常态 stopped ⇒ 每个
+#     Web UI agent 的原生界面按钮在**正常状态**下被删。改判：agent 入口不再带
+#     probe_port（只 panel 类保留），停着的服务由前端 probeEmbed 出「目标界面
+#     未响应」覆盖层（含切模式/重试），按钮本身必须在。同因修 dict-ui 注入
+#     （cloudcli 原先端口死连原生会话都不注入）。
+#   ② defaultModeOf 的 EMBED_FIRST 加 has('embed') 前置：改前它无条件返回
+#     'embed'，而 applyChatMode 回落默认时又问一次它 ⇒ embed entry 缺失时两步
+#     都落 embed，用户点开的是一张 url 为空的空白嵌页且出不去（同源第二道闸）。
+#   ③ 模型设置页（modelcfg）原只列 SPECS+UNSUPPORTED 两张硬编码表 ⇒ 画像里
+#     新登记的 agent 在页面上零存在感。改为合并 profiles 注册表自动发现；
+#     omp 入 SPECS（argv-only：实测 `omp --help` 有 --model、配置根是 sqlite
+#     无明文模型字段；且实测 --model 收 `ccr/<id>` 前缀形状，裸 ID 会被解析成
+#     provider=openrouter 报 No API key ⇒ VALUE_PREFIX 补 omp）；dsh 入
+#     UNSUPPORTED（实测 `dsh --profile tui --help` 仅 --resume/--agent-preset）。
+#   红向自证三破坏点各自精确变红：加回 probe_port / 去掉 has('embed') /
+#   去掉注册表合并段。
 #   v0.13.150：**补登 QoderWake 长驻缺口**（用户 2026-10-24 报「不是所有 agent
 #   都按需拉起，还有几个在长驻」）。实测：`qoderwake __daemon`（845MB）+
 #   `qodercli-wake --sdk`（205MB）两进程长驻，QoderWake.service enabled+

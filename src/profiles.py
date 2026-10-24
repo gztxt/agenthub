@@ -724,8 +724,11 @@ def panel_port(p: dict) -> Optional[int]:
 
 def entries_for(p: dict, status: str) -> List[dict]:
     """卡片按钮 = 画像驱动（②服务/工具仅快捷方式；Agent 才有 term/chat）
-    dict 形态的 ui（独立宿主如 cloudcli）由 discovery 探测端口活性后注入 embed。
-    面板类入口带 probe_port，由 discovery 按端口活性过滤（死面板不出按钮）。"""
+    dict 形态的 ui（独立宿主如 cloudcli）由 discovery 注入 embed。
+    面板类入口带 probe_port，由 discovery 按端口活性过滤（死面板不出按钮）。
+    ⚠ agent 的 string ui **不带** probe_port（v0.13.151 改判，见下）：按需拉起下
+    stopped 是常态而非故障，端口探活过滤会把每个 Web UI agent 的原生界面按钮
+    在正常状态下删掉（2026-10-25 用户报障「dsh的原生界面按钮也没有了」）。"""
     es = []
     kind = p["kind"]
     if kind == "agent":
@@ -736,20 +739,16 @@ def entries_for(p: dict, status: str) -> List[dict]:
             if p["id"] == "dsh":
                 ui = _dsh_web_url() or ui
             # frame_deny = 控制台自设 X-Frame-Options: DENY，iframe 必被浏览器拒 → 仅新窗口
-            # v0.13.149：ui 入口也带 probe_port（2026-10-24 全 agent 改按需拉起）——
-            # 服务停着时按钮必须消失。「死面板不出按钮」原先只覆盖 panel 类入口，
-            # agent 的 string ui 是裸 embed/open，端口死了照样出按钮 = 坏入口。
-            # probe_port 取**画像 port**（真实服务端口）而非 ui 里的端口：
-            # qwenpaw 的 ui 是 hub 注入代理 :3103（进程内常驻，后端死了仍能连上），
-            # 拿 3103 判活会把停着的 qwenpaw 显示成活的 ⇒ 必须用 :8088。
-            # dsh 只绑 192.168.5.102（loopback/::1 全拒连）⇒ discovery 侧对
-            # 「URL 端口 == probe_port」的入口按 URL host 补探（见 discovery.py）。
-            _pp = p.get("port")
+            # v0.13.151 改判（2026-10-25）：v0.13.149 曾给这两个入口带 probe_port、
+            # 由 discovery 按端口活性过滤（「死面板不出按钮」扩展到 agent ui）。它与
+            # 同日「全 agent 按需拉起」直接冲突：服务停了才是按需态，过滤后 dsh/pi 等
+            # 卡只剩终端，用户点不到原生界面（判例：用户报障 + 快照 10-24 23:1x 那条
+            # 「不是故障，是设计态」的结论被本次报障推翻）。停着的服务由前端
+            # probeEmbed 出「目标界面未响应」覆盖层（含切模式/重试），按钮本身必须在。
+            # probe_port 只保留给 panel 类入口（services 的面板，与 agent 按需政策无关）。
             if not p.get("frame_deny"):
-                es.append({"type": "embed", "label": "嵌入会话", "url": ui,
-                           "probe_port": _pp})
-            es.append({"type": "open", "label": "新窗口", "url": ui,
-                       "probe_port": _pp})
+                es.append({"type": "embed", "label": "嵌入会话", "url": ui})
+            es.append({"type": "open", "label": "新窗口", "url": ui})
         if p.get("terminal") and status in ("running", "installed", "stopped"):
             es.append({"type": "term", "label": "终端", "agent": p["id"]})
         if p.get("chat"):

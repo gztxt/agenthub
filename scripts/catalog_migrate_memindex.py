@@ -126,6 +126,9 @@ def migrate_memindex(memindex_path: str, catalog_path: str,
     total = memcon.execute("SELECT COUNT(*) AS cnt FROM fed_proj").fetchone()["cnt"]
     print(f"[migrate] 总记录数: {total}")
 
+    # 提前加载现有状态（一次查询，避免循环内 O(n²) 开销）
+    existing = catstore.existing_states("memindex.fed_proj")
+
     # 分批读取并写入
     offset = 0
     added = updated = skipped = errors = 0
@@ -157,8 +160,7 @@ def migrate_memindex(memindex_path: str, catalog_path: str,
             size = chunks_list[0]["size"]
             digest = _hash_obj(nkey, all_text[:1000])
 
-            # 检查是否已存在
-            existing = catstore.existing_states("memindex.fed_proj")
+            # 检查是否已存在（使用预加载的字典，O(1) 查找）
             if nkey in existing:
                 old_mtime, old_size, old_hash = existing[nkey]
                 if old_mtime == mtime and old_size == size and old_hash == digest:

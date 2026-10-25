@@ -376,9 +376,12 @@ class TestAdapters(CatalogCase):
         with self.assertRaisesRegex(RuntimeError, "只读"):
             agents_adapter._discovered(db)
 
-    def test_registry_has_exact_p0_sources(self):
-        self.assertEqual({"agents.registry", "projects.local", "skills.disk"},
-                         set(adapters.REGISTRY))
+    def test_registry_has_p0_and_p1_sources(self):
+        """P0+P1 全部适配器注册检查。"""
+        expected = {"agents.registry", "projects.local", "skills.disk",
+                    "sessions.archived", "docs.filesystem",
+                    "memory.archive", "logs.hub"}
+        self.assertEqual(expected, set(adapters.REGISTRY))
 
 
 class TestApi(CatalogCase):

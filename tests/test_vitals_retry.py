@@ -55,7 +55,7 @@ class RetryBudgetGate(unittest.TestCase):
         self.assertTrue(needs(self.v, {}), "无历史记录时应允许首次探测")
 
     def test_one_try_left_still_probes(self):
-        rt = {"rt_state": "model_unsupported", "tries": 1, "at": self.now}
+        rt = {"rt_state": "answered_with_warning", "tries": 1, "at": self.now}
         self.assertTrue(needs(self.v, rt), "预算未用完（1/2）应允许再试一次")
 
     def test_budget_exhausted_stops(self):
@@ -134,11 +134,11 @@ class RetryCountingInJudge(unittest.TestCase):
 
     def test_two_failures_then_gate_closes(self):
         """一轮内失败真请求恰为 2 次 —— 本条整体等价于「2 次即结束」的行为契约。"""
-        self.run_once("model_unsupported")
+        self.run_once("answered_with_warning")
         self.assertEqual(1, self.v._rt[PROF["id"]]["tries"])
         self.assertTrue(self.v.needs_rt(PROF, dict(GOOD_EV)))
 
-        self.run_once("model_unsupported")
+        self.run_once("answered_with_warning")
         self.assertEqual(2, self.v._rt[PROF["id"]]["tries"])
         self.assertFalse(self.v.needs_rt(PROF, dict(GOOD_EV)),
                          "第二次失败后闸门必须关闭")
@@ -148,7 +148,7 @@ class RetryCountingInJudge(unittest.TestCase):
         self.assertEqual(2, self.v._rt[PROF["id"]]["tries"])
 
     def test_answer_resets_budget(self):
-        self.run_once("model_unsupported")
+        self.run_once("answered_with_warning")
         self.run_once("timeout")
         self.assertEqual(2, self.v._rt[PROF["id"]]["tries"])
         self.run_once("answered")
@@ -195,6 +195,21 @@ class RetryCountingInJudge(unittest.TestCase):
         rec = self.run_once("timeout")
         self.assertTrue(rec.get("rt_flaky") or rec.get("rt_state") == "timeout",
                         "失败态仍要能被识别成外部条件，而非本机故障")
+
+    def test_unrecognized_model_with_body_gets_answered_with_warning(self):
+        """PT-20260925-08 核心：[unrecognized_model] 告警 + 有正文 = answered_with_warning，
+        进保鲜不吃预算；只改分类函数，不走 mock，验真路径。"""
+        out_with_warn = ('[claude-code:unrecognized_model] '
+                         '{"model":"agnes/agnes-2.0-flash","query_source":"sdk"}\n\n好')
+        rc = V.classify_rt(0, out_with_warn)
+        self.assertEqual(rc, "answered_with_warning",
+                         "有正文 + unrecognized_model 应归 answered_with_warning 而非 model_unsupported")
+        # 无正文只留告警行 → RT_NOISE_RE 把 [xxx: 整行滤掉，body 变空 ⇒ no_output
+        out_warn_only = ('[claude-code:unrecognized_model] '
+                         '{"model":"x/y","query_source":"sdk"}')
+        self.assertEqual(V.classify_rt(0, out_warn_only), "no_output")
+        # 无告警无正文 → no_output
+        self.assertEqual(V.classify_rt(0, ""), "no_output")
 
 
 if __name__ == "__main__":

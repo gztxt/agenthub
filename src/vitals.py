@@ -81,8 +81,8 @@ RT_TIMEOUT = float(os.getenv("VITALS_RT_TIMEOUT", "90"))
 # →09-23 07:37 单 claude 一家连烧 68 次，单次峰值 RSS 270MB（L4 并发 2 ⇒ 540MB），
 # 而本机 swap 已用 90% ⇒ 抖动期必然演成内存尖峰风暴。上限走 env，不写死在代码里。
 RT_MAX_TRIES = int(os.getenv("VITALS_RT_MAX_TRIES", "2"))
-# 归为「外部条件」的态：可重试，但**计入预算**（区别于 answered / blocked_by_account）
-RT_RETRYABLE = ("timeout", "rate_limited", "model_unsupported", "no_output")
+# 归为「外部条件」的态：可重试，但**计入预算**（区别于 answered / answered_with_warning / blocked_by_account）
+RT_RETRYABLE = ("timeout", "rate_limited", "no_output", "answered_with_warning")
 TRANSIENT = ("unknown", "broken", "pending")
 def _default_state_path() -> Path:
     """跟随 DATA_DIR（影子实例/测试隔离）。**2026-10-23 修**：原实现直接写
@@ -145,6 +145,11 @@ def classify_rt(rc: Optional[int], out: str) -> str:
     if MODEL_UNK_RE.search(body):
         return "model_unsupported"
     if body.strip():
+        # 有告警（如 unrecognized_model）但正文非空 → SDK 不认 ID 但 CLI 仍跑通了
+        # 原 bug：这行会被判成 model_unsupported → 烧预算；修复后归 answered_with_warning
+        # （享保鲜，不计入预算，不再每轮重烧）
+        if MODEL_UNK_RE.search(out or ""):
+            return "answered_with_warning"
         return "answered"
     return "no_output"
 
@@ -732,7 +737,7 @@ class Vitals:
             rec["rt_at"], rec["rt_note"] = rt.get("at"), rt.get("run_note")
             rec["rt_model"] = rt.get("run_model")
             rec["rt_tries"] = int(rt.get("tries") or 0)   # 供 UI/排查看“本轮已烧几次”
-            if rec["rt_state"] in ("timeout", "rate_limited", "model_unsupported"):
+            if rec["rt_state"] in ("timeout", "rate_limited", "answered_with_warning"):
                 rec["rt_flaky"] = True  # 外部条件，不是本机故障，不固化成坏结论
         with self._lock:
             self._latest[aid] = {"evidence": ev, **rec}

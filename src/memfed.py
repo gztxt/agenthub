@@ -643,6 +643,17 @@ def _probe_one(source_id: str) -> Dict:
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "count": 0, "note": type(e).__name__,
                     "ms": round((time.monotonic() - t0) * 1000, 1)}
+    if source_id == "unified_archive":
+        try:
+            import memory_archive
+            d = memory_archive.list_rows(limit=1)
+            total = d.get("total") or 0
+            return {"ok": True, "count": int(total),
+                    "note": f"归档记录 {int(total)} 条",
+                    "ms": round((time.monotonic() - t0) * 1000, 1)}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "count": 0, "note": tdai_client.scrub(f"{type(e).__name__}: {e}")[:80],
+                    "ms": round((time.monotonic() - t0) * 1000, 1)}
     if source_id in _PROJ_TARGETS:
         # 投影源不跑 `rg --files`（O(文件数) 的老毛病）：读 meta，毫秒级
         p = memindex.probe()

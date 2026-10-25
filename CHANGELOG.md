@@ -1,3 +1,48 @@
+## v0.13.156 — 能力矩阵：新增 agent 不再「又没有原生界面按钮」
+
+> 来源：2026-10-25 用户第三次报同一件事——「zcode 是否有 web ui 原生界面？如果有为什么
+> 没有显示原生界面按钮？这个问题总是反复出现…最近添加几个 agent 都没有执行这一套设计
+> 逻辑；另外添加新 agent 后整个系统框架里面的设置项都要同步更新」。
+
+### 根因：不是写错，是**能力声明被拆成四张手工表**
+
+| 表 | 位置 | 维护方式 |
+|---|---|---|
+| 静态画像卡 | `profiles.PROFILES` | 手写 |
+| 原生界面启动方式 | `profiles.UI_START` | 手写白名单 |
+| 模型设置读写器 | `modelcfg.SPECS` / `UNSUPPORTED` | 手写 |
+| 扫描注册 | `agentscan` + `custom_agents` | 自动 |
+
+自动那条路**只填了终端**：`agentscan.registered_profiles()` 与
+`profiles._dynamic_cli_agents()` 都把 `"ui": None` 写死 ⇒ 凡不是手写静态卡的 agent，
+按设计就永远拿不到原生界面按钮，**且不报错、界面上也看不出缺口**。于是每次只能再手写
+一张卡 —— 这就是「反复出现」的机制。
+
+### 修法
+
+1. 新增 `src/capabilities.py` 作唯一真相源：`UI_RECIPES`（地址/端口/探针/起法）、
+   `UI_TUI_ONLY`（显式判无界面）、`UI_DECIDED`（探测命中但人工判定不是网页）、
+   `probe_web()`（`--help` 三态）。`profiles.UI_START` 改为从它派生，不再手写。
+2. 三条注册路径共用 `capabilities.annotate()`（挂在 `_enrich`）：有配方就补
+   `ui`/探针/起法；没有的必须带 `ui_state`+`ui_note`，真缺口写进 `desc`。
+3. 探测结论落 `custom_agents.caps`（含口径版本 `v`，改判据 +1 即重探；`backfill_caps()`
+   补历史行）。读路径纯查库，不进 `--help`。
+4. 闸门 `tests/test_registry_capability_matrix.py`：静态卡必须 `ok|tui_only` 二选一，
+   缺声明即红；`ok` 必须有 `start` 且 `entries_for(stopped)` 出 embed/open；
+   **探测失败记 `probe_failed`，不许当成「没有界面」**。
+
+### 实测（本次顺带判定的三家）
+
+- `zcode` v0.17.0：`--help` 无 serve/web ⇒ `tui_only`（上游源码有 `@zcode/server-cli serve`
+  与 `packages/web`，但本机这份发行 CLI 不带，且未构建）——**不是漏按钮，是真没有**。
+- `goose`：`goose serve` 是 ACP 协议端点（无 SECRET_KEY 拒启、`/` 不出 HTML）⇒ `tui_only`，
+  已写进 `UI_DECIDED` 并记理由。
+- `reasonix`：`reasonix web` 是真 Web UI（`/` 回 `text/html`、title=Reasonix），
+  但默认 `auth: token` 且 token 进程级随机 ⇒ 地址从 ui-start 日志捞 `#token=`
+  （与 dsh 同手法，取不到就降级成裸地址而不是编一个）。**本版起它有原生界面按钮。**
+- 模型设置页无需改：v0.13.155 起已按注册表自动发现，zcode/goose/reasonix 显示
+  「未接入 + 原因」，正是本矩阵要求的口径。
+
 ## v0.13.154 — 拉起成功后嵌页空白：URL 没变时 iframe 不会重新导航
 
 > 来源：2026-10-25 复验 v0.13.153（停 qwenpaw → 点原生界面）时实测：服务确实被拉起

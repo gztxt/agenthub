@@ -107,6 +107,11 @@ class AgentInfo:
     # ── 纳管边界四维（P0-5，2026-10-15）：强制/观测 × 覆盖/未覆盖。
     # `label` 只可能是「只读」或「未观察到写操作」；后者是默认值 —— 不写就降级。
     boundary: Optional[dict] = None
+    # ── 能力矩阵（v0.13.156）：这个 agent 有没有原生界面，没有的话为什么。
+    # ok|tui_only|missing_recipe|probe_failed；非 ok 一定有 note。
+    # 前端与诊断都能直接读，不用再从 entries 里反推「为什么少一个按钮」。
+    ui_state: Optional[str] = None
+    ui_note: Optional[str] = None
 
     def to_dict(self):
         return asdict(self)
@@ -204,6 +209,7 @@ class AgentDiscovery:
                 attested=vv["attested"],
                 rt_state=vv.get("rt_state") or "", rt_note=vv.get("rt_note"),
                 rt_model=vv.get("rt_model"),
+                ui_state=p.get("ui_state"), ui_note=p.get("ui_note"),
                 boundary=p.get("boundary") or boundary.cell_for_profile(p)))
         # 动态注册/扫描项（一律 service 类，仅快捷方式）
         for c in self._custom_agents():

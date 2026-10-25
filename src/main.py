@@ -104,7 +104,20 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.154"
+VERSION = "0.13.156"
+#   v0.13.156：**能力矩阵**（2026-10-25 用户第三次报同一事：「新增 agent 后没有原生界面
+#   按钮，设置项也不同步；每次都是发现问题再修」）。机制上不是某处写错，而是空白的
+#   `ui 写死 None`：`agentscan.registered_profiles()` 与 `profiles._dynamic_cli_agents()`
+#   两条自动注册路径都写 `"ui": None` ⇒ 凡不是手写静态卡的 agent 永远没有原生界面按钮，
+#   且**不报错**（配合手工 `UI_START` 白名单与手工 `modelcfg.SPECS`，一共四张表）。
+#   修法：新增 `capabilities.py` 作唯一真相源 —— `UI_RECIPES`（地址/端口/探针/起法）、
+#   `UI_TUI_ONLY`（显式判无界面）、`UI_DECIDED`（探测命中但人工判定不是网页）、
+#   `probe_web()`（`--help` 三态：missing_recipe / tui_only / probe_failed）。
+#   结论随扫描落 `custom_agents.caps` 列（带 `v` 口径版本，改判据就 +1 重探）；
+#   读路径纯查库。闸门 `tests/test_registry_capability_matrix.py`：静态卡必须
+#   `ok|tui_only` 二选一，缺声明即红；`探测失败` **不许当没有界面**（记 probe_failed）。
+#   顺带：`reasonix web` 实测是真 Web UI（`/` text/html），token 进程级随机 ⇒ 地址
+#   从 ui-start 日志捞 `#token=`（与 dsh 同手法）；`goose serve` 是 ACP 端点，判 tui_only。
 #   v0.13.154：拉起成功后嵌页仍是**空白**（2026-10-25 复验 v0.13.153 时实测）。
 #   根因：`applyChatMode()` 只在 `dataset.src != url` 时才给 iframe 赋值，而启动前后
 #   URL 没变 ⇒ 启动前那次「连接被拒」的失败导航一直留在框里；探活与标题都显示活的，

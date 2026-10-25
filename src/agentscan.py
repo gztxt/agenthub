@@ -230,6 +230,29 @@ def _version_line(path: str) -> str:
     return line[:80]
 
 
+#: 能力探测口径的版本号。**改判据就 +1** —— 否则老行的旧结论会被当成新结论一直用：
+#: 2026-10-25 实测踩过：`WEB_HINTS` 去掉了 `server`，但 zcode 的 caps 早已落库，
+#: 界面仍显示「--help 出现 server」，回填只补 NULL 行，永远修不到已判过的行。
+CAPS_VERSION = 2
+
+
+def _caps_for(cmd: str, prober=None) -> dict:
+    """登记时把「有没有 Web 原生界面」问一次，结论随条目落库。
+
+    为什么不在读路径探：`/api/agents` 前端几秒轮询一次，而 `--help` 最坏 4s。
+    探测只在扫描（10 分钟 TTL）或 `POST /api/scan/run` 时跑，读路径纯查库。
+    问不出来（超时/文件没了）如实记 `probe_failed`，**绝不默认成 TUI-only** ——
+    默认成没界面，正是「新增 agent 又没有按钮」这个循环的起点。
+    """
+    try:
+        import capabilities
+        state, note = capabilities.probe_web(cmd)
+    except Exception as e:  # noqa: BLE001  探测层坏了也不能毁掉整轮扫描
+        return {"ui_state": "probe_failed", "ui_note": f"能力探测异常：{type(e).__name__}",
+                "v": CAPS_VERSION}
+    return {"ui_state": state, "ui_note": note, "v": CAPS_VERSION}
+
+
 def _item(sig: dict, path: str, *, verified: bool) -> dict:
     return {
         "id": str(sig["id"]).lower(),
@@ -346,6 +369,8 @@ def scan(*, db=None, dirs: Optional[List[Path]] = None,
             if item["id"] in ids_cov:
                 continue
             item["version"] = _version_line(path) if probe else ""
+            if probe:
+                item["caps"] = _caps_for(path)
             found[item["id"]] = item
 
     added = register_items(list(found.values()), db) if (register and db is not None) else []
@@ -379,10 +404,22 @@ def registered_profiles(db=None) -> List[dict]:
         if not cid or not cmd:
             continue
         bin_name = Path(cmd).name
+        caps: dict = {}
+        raw_caps = r.get("caps")
+        if raw_caps:
+            try:
+                caps = json.loads(raw_caps) if isinstance(raw_caps, str) else dict(raw_caps)
+            except (ValueError, TypeError):
+                caps = {}
         out.append({
             "id": cid, "name": r.get("name") or cid, "kind": "agent",
             "detect": {"proc": [rf"(^|/){re.escape(bin_name)}( |$)"]},
             "cli": bin_name, "port": None, "ui": None,
+            # 能力矩阵（v0.13.156）：`ui` 不再在这里写死 None 就算完 —— 有配方的 agent
+            # 由 capabilities.annotate() 按 recipe 补 ui/探针/起法；没有配方的必须带上
+            # ui_state/ui_note，让「缺什么」在卡面上写出来。
+            "ui_state": caps.get("ui_state"),
+            "ui_note": caps.get("ui_note"),
             # 终端入口用**绝对路径**而不是裸名：`child_env()` 只前置 nvm/bun 目录，
             # 不含 `~/.local/bin`（扫描的主战场），裸名在 pty 里会 FileNotFound。
             # 画像里的裸名靠 PATH 兜底，扫描项没有这个前提，就直接给绝对路径。
@@ -418,17 +455,20 @@ def register_items(items: List[dict], db) -> List[str]:
         if not it.get("verified", True):
             desc = f"{desc}（自动发现，未实测应答）"
         try:
+            caps = it.get("caps")
             db.execute(
                 """INSERT INTO custom_agents(id,name,type,kind,command,args,working_dir,
-                     env,port,endpoint,description,source,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     env,port,endpoint,description,source,created_at,updated_at,caps)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET name=excluded.name,
                      kind=excluded.kind, command=excluded.command,
                      description=excluded.description, source=excluded.source,
+                     caps=COALESCE(excluded.caps, custom_agents.caps),
                      updated_at=excluded.updated_at""",
                 (cid, it["name"], "agent", "agent", it["command"], "[]",
                  "/fs/1000/ftp/技术文档", "{}", None, None, desc,
-                 "scan:cli", now, now))
+                 "scan:cli", now, now,
+                 json.dumps(caps, ensure_ascii=False) if caps else None))
         except Exception:  # noqa: BLE001  单条失败不能毁掉整轮扫描
             continue
         added.append(cid)
@@ -436,6 +476,45 @@ def register_items(items: List[dict], db) -> List[str]:
 
 
 _last_scan: Dict[str, float] = {"ts": 0.0}
+
+
+def backfill_caps(db, limit: int = 50) -> List[str]:
+    """给**已登记但没能力结论**的 agent 补一次探测（v0.13.156）。
+
+    为什么必须单独有这一条：`scan()` 里 `ids_cov |= db_ids_cov` 会跳过**已登记**的 id，
+    所以老条目永远不会被重新 upsert ⇒ 没有这条回填，历史卡片（zcode/goose/reasonix）
+    的 caps 永远是 NULL，卡面上永远显示「未声明」。
+    只在扫描轮次里跑（10 分钟一次，单条 `--help` 最坏 4s），不进读路径。
+    **口径升级也走这里**：`caps.v < CAPS_VERSION` 的行按未判定处理（见 CAPS_VERSION 注释）。
+    """
+    if db is None:
+        return []
+    try:
+        rows = db.query(
+            "SELECT id, command, caps FROM custom_agents "
+            "WHERE COALESCE(kind,'service')='agent' "
+            "ORDER BY created_at LIMIT %d" % int(limit))
+    except Exception:  # noqa: BLE001
+        return []
+    done: List[str] = []
+    for r in rows:
+        cmd = str(r.get("command") or "")
+        if not cmd:
+            continue
+        prev = {}
+        try:
+            prev = json.loads(r.get("caps") or "{}") or {}
+        except (ValueError, TypeError):
+            prev = {}
+        if prev.get("ui_state") and int(prev.get("v") or 0) >= CAPS_VERSION:
+            continue
+        try:
+            db.execute("UPDATE custom_agents SET caps=? WHERE id=?",
+                       (json.dumps(_caps_for(cmd), ensure_ascii=False), r["id"]))
+            done.append(str(r["id"]))
+        except Exception:  # noqa: BLE001  单条失败不影响其余
+            continue
+    return done
 
 
 def scan_if_due(db, ttl_s: float = 600.0) -> dict:
@@ -448,4 +527,6 @@ def scan_if_due(db, ttl_s: float = 600.0) -> dict:
     if now - _last_scan["ts"] < ttl_s:
         return {"found": [], "added": [], "unknown": [], "dirs": 0, "skipped": True}
     _last_scan["ts"] = now
-    return scan(db=db)
+    out = scan(db=db)
+    out["caps_backfilled"] = backfill_caps(db)
+    return out

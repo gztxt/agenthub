@@ -11,6 +11,7 @@ kind 语义：
 CLI 型 Agent 无进程时按 which/单元存在 → installed（可拉起终端会话）。
 """
 import boundary
+import capabilities
 import os
 import re
 import shutil
@@ -220,35 +221,23 @@ def docker_states(*, force_fresh: bool = False) -> Dict[str, str]:
     return _cached(_docker_cache, "states", _UNITSD_TTL_S, _produce)
 
 
-# ── 原生界面启动器（v0.13.152）────────────────────────────────────
+# ── 原生界面启动器（v0.13.152；v0.13.156 起改由能力矩阵派生）──────────
 # 为什么需要：2026-10-24「所有 agent 按需拉起」之后，各卡的原生界面常态是停着的。
 # v0.13.151 把按钮复还了，但点开只有「目标界面未响应」覆盖层 —— **没有拉起的地方**，
 # 用户只能自己去终端敲 systemctl（2026-10-25 报障「要使用原生界面 都没有拉起的地方」）。
-# 这里按 agent 声明「怎么把它的 Web UI 起起来」，由 /api/agents/{id}/ui-start 执行。
 #
-# 只登记**实测有 Web UI** 的 agent。TUI-only 的 omp / hermes / codex / grok /
-# cursor / jcode 不登记 —— 终端就是它们的原生界面；claude 的 Web 宿主是独立的
-# cloudcli 卡（v0.13.80 用户裁定拆出），本卡不重复给入口。
-#
-# unit = systemd --user 托管单元（按需 start，不长驻）；
-# cmd  = 没有单元的宿主（opencode 上游只提供前台进程），由 hub 脱离会话拉起。
+# ⚠ v0.13.156：**这张表不再手工维护**。地址/端口/探针/起法收敛到
+# `capabilities.UI_RECIPES` 一条记录，因为「手写 ui」「手写 UI_START」「手写 modelcfg」
+# 三张表任何一张漏写都只表现为「又少一个按钮」，且不报错 —— 用户 10-25 第三次报同一事
+# 就是这个机制。这里保留 `UI_START` 这个名字只为兼容旧调用点（api_agents / 测试）。
 UI_START: Dict[str, dict] = {
-    "cloudcli": {"unit": "cloudcli"},
-    "pi":       {"unit": "pi-web"},
-    "dsh":      {"unit": "dsh"},
-    "qwenpaw":  {"unit": "qwenpaw"},
-    "qoder":    {"unit": "QoderWake"},
-    # opencode：实测 2026-10-25 `opencode web --port 4096` root 200 + text/html、
-    # 无 X-Frame-Options ⇒ 可嵌入。绑 0.0.0.0 与 pi-web 同口径：LAN/Tailscale 访问
-    # hub 时前端 lanUrl 会把 127.0.0.1 换成当前主机名，只绑回环会得到一张必白的嵌页。
-    "opencode": {"cmd": ["opencode", "web", "--hostname", "0.0.0.0", "--port", "4096"],
-                 "cwd": "/fs/1000/ftp/技术文档", "port": 4096},
+    pid: r["start"] for pid, r in capabilities.UI_RECIPES.items() if r.get("start")
 }
 
 
 def ui_start_for(pid: str) -> Optional[dict]:
-    """该 agent 的原生界面怎么起（无 Web UI 的 agent 返回 None）。"""
-    return UI_START.get(pid)
+    """该 agent 的原生界面怎么起（无 Web UI / 常驻豁免的 agent 返回 None）。"""
+    return capabilities.start_for(pid)
 
 
 PROFILES: List[dict] = [
@@ -584,7 +573,9 @@ def _enrich(p: dict) -> dict:
     for k, v in spec.items():
         out.setdefault(k, v)
     out.setdefault("boundary", boundary.cell_for_profile(out))
-    return out
+    # 能力矩阵（v0.13.156）：终端/原生界面/模型的声明在**这里**统一贴到画像上，
+    # 三条注册路径（静态卡 / CLI_ALIASES 动态卡 / agentscan 注册表）共用同一个出口。
+    return capabilities.annotate(out)
 
 
 _cli_dyn_cache: Dict[bool, dict] = {}

@@ -242,6 +242,10 @@ def init_db(path: Path) -> None:
         # CLI Agent 与 docker/systemd 扫码项共用一张表，靠 kind 分流。
         # 存量行一律 service（它们原本就按 service 渲染），不回填不改语义。
         _add_column_if_missing(_conn, "custom_agents", "kind", "TEXT DEFAULT 'service'")
+        # v0.13.156 能力矩阵：扫描登记时探一次「有没有 Web 原生界面」，结论落这里
+        # （JSON: {"ui_state","ui_note"}）。存量的 NULL 表示**还没判过**，由
+        # agentscan.backfill_caps() 在扫描轮次补，不在此处编造默认值。
+        _add_column_if_missing(_conn, "custom_agents", "caps", "TEXT")
         # P0-4（v0.13.105）：asset_audit 研判三列。存量库交给 ALTER 幂等补，
         # **不动任何既有行**（旧行的 verdict 保持 NULL = 未研判，这是诚实的，
         # 比回填一个 confirmed 强 —— 回填等于替历史编证据）。

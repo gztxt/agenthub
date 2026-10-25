@@ -193,7 +193,10 @@ class TestSysPagesLayout(unittest.TestCase):
         # → 14（2026-10-18 codebuddy_sessions 入联邦，用户裁定）
         # —— 该数字是**前后端同源契约**的计数，加源时必须同步
         #（这正是本断言的用意：安静加一个源 = 前端收不到它）。
-        for sel, n in (("memFedSrcs", 14), ("kbRoutes", 5)):
+        # 2026-10-25 v0.13.161：memFedSrcs 14→15（新增统一归档源 unified_archive）。
+        # 这个钉子的职责是「前后端源清单同源」——后端 REGISTRY 加源时前端必须同步加，
+        # 数字跟着源走，不是常量。
+        for sel, n in (("memFedSrcs", 15), ("kbRoutes", 5)):
             m = re.search(r'<select id="%s"[^>]*>(.*?)</select>' % sel, self.html, re.S)
             self.assertTrue(m, "#%s 原生 select 没了 ⇒ 数据源被换成自造状态" % sel)
             self.assertEqual(len(re.findall(r"<option", m.group(1))), n,

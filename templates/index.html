@@ -1335,6 +1335,37 @@
         }
         .mx-stale b { font-weight: 600; }
 
+        /* ── 接入矩阵（v0.13.161）──────────────────────────────────────────
+           表格而不是卡片网格：一屏要看 16 行 × 5 列的状态，表格的列对齐就是
+           可读性本身（卡片网格在 390 宽会塌成 16 屏）。窄屏策略同 .mx-src：
+           隐藏「既有源」与「MCP」两列（信息密度让位于可读），保留
+           agent/归档/最近写入三列——「谁、写了多少、何时写」是状态的最小集。 */
+        .mx-matrix-wrap { overflow-x: auto; }
+        .mx-matrix { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+        .mx-matrix th {
+            text-align: left; font-weight: 500; color: var(--muted); font-size: 11px;
+            padding: var(--mx-1) var(--mx-2); border-bottom: 1px solid var(--divider);
+            white-space: nowrap;
+        }
+        .mx-matrix td {
+            padding: var(--mx-2); border-bottom: 1px solid var(--divider);
+            vertical-align: top; min-width: 0;
+        }
+        .mx-matrix tr:last-child td { border-bottom: 0; }
+        .mx-matrix .mx-a-id { font-family: var(--font-mono); font-size: 12px; color: var(--text-1); white-space: nowrap; }
+        .mx-matrix .mx-a-srcs { color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere; }
+        .mx-matrix .mx-a-cnt { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .mx-matrix .mx-a-cnt b { color: var(--text-1); font-weight: 600; }
+        .mx-matrix .mx-a-cnt .sup { color: var(--muted); }
+        .mx-matrix .mx-a-when { font-family: var(--font-mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
+        .mx-matrix .mx-flag { font-size: 11px; white-space: nowrap; }
+        .mx-matrix .mx-flag.on { color: var(--ok); }
+        .mx-matrix .mx-flag.off { color: var(--muted); }
+        @media (max-width: 767px) {
+            .mx-matrix th:nth-child(2), .mx-matrix td:nth-child(2),
+            .mx-matrix th:nth-child(5), .mx-matrix td:nth-child(5) { display: none; }
+        }
+
         /* 断点值必须与 static/hub/01-core-boot.js 的 matchMedia('(max-width:767px)')
            保持同一取值（分档偏好不变量③）；只允许此一个取值，不得另写 innerWidth<768 */
         @media (max-width: 767px) {
@@ -1738,6 +1769,61 @@
                 <!-- 异常清单：0 条时只占一行。每条的理由必须可读（后端保证 reason 非空）。 -->
                 <div class="mv-anoms" id="mvAnoms"><div class="hint">读取中…</div></div>
 
+                <!-- ═══ 接入矩阵（v0.13.161 统一化看板第一屏）═══════════════════════════
+                     用户令「所有 agent 能够使用统一接口自动调用记忆中心记忆数据；所有 agent
+                     的记忆数据统一归档」的**运行逻辑状态**：每个 agent 一行——既有记忆源
+                     （memfed 只读抽取，各自权威）、归档计数（统一写入口落库）、MCP 接线
+                     （现探配置文件，不写死）。零内容拷贝：矩阵只报状态不搬正文。
+                     数据源 /api/memory/archive/matrix（实时 COUNT，非定时器快照——
+                     归档计数随写变，10 分钟陈旧会让「刚提交的记忆」在看板上不存在）。 -->
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>接入矩阵</h3>
+                        <div class="sp-r"><span class="hint" id="mxMatrixHint">agent × 既有源 / 统一归档 / MCP 接线</span></div>
+                    </div>
+                    <div class="sp-bd">
+                        <div class="hint" id="mxMatrixApi" style="margin-bottom:8px">读取中…</div>
+                        <div class="mx-matrix-wrap"><table class="mx-matrix" id="mxMatrixTable">
+                            <thead><tr>
+                                <th>agent</th><th>既有记忆源（只读）</th><th>归档 活跃/取代</th><th>最近写入</th><th>MCP</th>
+                            </tr></thead>
+                            <tbody id="mxMatrixBody"><tr><td colspan="5" class="hint">读取中…</td></tr></tbody>
+                        </table></div>
+                        <div class="hint" id="mxMatrixStats" style="margin-top:8px"></div>
+                    </div>
+                </div>
+
+                <!-- ═══ 手动补齐（v0.13.161）══════════════════════════════════════════
+                     用户令「添加一个手动记忆提交框，可以手动补齐 agent 没有提炼到的记忆和
+                     规则」。与上方矩阵同一数据域：提交即落 layer='ARCH'（agent='manual'、
+                     kind='manual'），过与 agent 提交同一条质量门（ scrub/去重/审计），
+                     但**永不参与**自动 supersede——人工措辞是权威层。
+                     为什么可见不折叠：这是用户明要的写入入口，折叠起来等于没有。 -->
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>手动补齐</h3>
+                        <div class="sp-r"><span class="hint">agent 没提炼到的记忆与规则，从这里补</span></div>
+                    </div>
+                    <div class="sp-bd">
+                        <textarea class="doc" id="memManNew" aria-label="手动补齐的记忆正文"
+                                  placeholder="写一条 agent 没有提炼到的记忆或规则（Ctrl+Enter 提交）…"
+                                  style="min-height:64px"
+                                  onkeydown="if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();memManualSubmit();}"></textarea>
+                        <div class="toolbar" style="margin-top:8px;margin-bottom:0">
+                            <select id="memManCat" aria-label="分类" style="max-width:150px">
+                                <option value="fact">fact · 事实</option>
+                                <option value="decision">decision · 决策</option>
+                                <option value="constraint">constraint · 约束</option>
+                                <option value="preference">preference · 偏好</option>
+                            </select>
+                            <input id="memManNote" placeholder="为什么补这条（可选，进审计）" style="flex:1;min-width:160px">
+                            <button class="btn sm" id="memManBtn" onclick="memManualSubmit(this)">提交</button>
+                        </div>
+                        <div class="hint" style="margin-top:6px">提交后立即可被全部 agent 经统一接口检索到（联邦源「统一归档」）；
+                        重复或近似重复会被去重门挡下并说明原因。</div>
+                    </div>
+                </div>
+
                 <div class="sp-card">
                     <div class="sp-hd">
                         <h3>分源</h3>
@@ -1774,7 +1860,7 @@
                     <!-- 联邦检索：本地 L1 + TDAI 权威库 + 外部源，RRF 融合。按需触发。 -->
                     <div class="sp-bd" style="border-top:1px solid var(--divider)">
                         <div class="sp-sub">联邦检索</div>
-                        <div class="hint" id="memFedHint" style="margin-bottom:8px">本地 L1 + TDAI 权威库 + 8 路外部源 · RRF 融合</div>
+                        <div class="hint" id="memFedHint" style="margin-bottom:8px">本地 L1 + TDAI 权威库 + 9 路外部源 · RRF 融合</div>
                         <div class="toolbar">
                             <input id="memFedQ" placeholder="跨全部记忆源检索（如：端口 / 备份 / CCR）…" onkeydown="if(event.key==='Enter')memFedSearch()">
                             <button class="btn sm" onclick="memFedSearch()">检索</button>
@@ -1796,6 +1882,7 @@
                                 <option value="archived_sessions" selected>归档会话</option>
                                 <option value="amr_memory" disabled>AMR 记忆仓（已停用）</option>
                                 <option value="experiences" selected>经验库（Dreaming）</option>
+                                <option value="unified_archive" selected>统一归档（提交+补齐）</option>
                             </select>
                         </div>
                     </div>
@@ -1829,10 +1916,34 @@
                      这一点由 #mxStale 用实测数字说清，不靠文案暗示。 -->
                 <details class="sp-card mv-det" id="mxLegacyBox" ontoggle="mxLegacyToggle(this)">
                     <summary class="mv-sum">
-                        <span>本机旧层</span>
-                        <span class="hint" id="mxLegacyHint">L1 便签（可写）· L2 近 30 天压缩 · L3 长期画像（草稿→确认制）</span>
+                        <span>档案与旧层</span>
+                        <span class="hint" id="mxLegacyHint">统一归档（ARCH）· L1 旧便签 · L2 压缩 · L3 画像</span>
                     </summary>
                     <div class="sp-bd">
+                        <!-- 统一归档（ARCH）：在役的单一归档存储。与下方 L1 旧便签**同表不同层**——
+                             L1 已判「被 TDAI 取代仅存档案」，ARCH 是 agent 提交 + 手动补齐的在役层。
+                             列表口径与 L1 对齐（total/truncated 分开，截断不静默）。 -->
+                        <div class="sp-sub">统一归档 · ARCH</div>
+                        <div class="hint" style="margin-bottom:8px">agent 经统一接口提交 + 手动补齐的记忆（质量门去重后）。
+                        全局检索请用上方「联邦检索」（源：统一归档），这里只浏览本层。</div>
+                        <div class="toolbar">
+                            <select id="memArchAgent" onchange="memArchList()" aria-label="按提交方过滤" style="max-width:150px">
+                                <option value="">全部提交方</option>
+                            </select>
+                            <select id="memArchCat" onchange="memArchList()" aria-label="按分类过滤" style="max-width:130px">
+                                <option value="">全部分类</option>
+                                <option value="fact">fact · 事实</option>
+                                <option value="decision">decision · 决策</option>
+                                <option value="constraint">constraint · 约束</option>
+                                <option value="preference">preference · 偏好</option>
+                            </select>
+                            <button class="btn ghost sm" onclick="memArchList()" title="重新读取归档列表">
+                                <svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+                        </div>
+                        <div class="hint" id="memArchHint" style="margin:2px 0 6px">展开后加载…</div>
+                        <div class="sp-bd box flush tscroll" style="border-top:1px solid var(--divider)">
+                            <div class="sp-list" id="memArchList"></div>
+                        </div>
                         <div class="mx-stale" id="mxStale">展开后读取本机旧层实测口径…</div>
                         <div class="sp-grid">
                             <!-- L1：唯一可增删改的一层。搜索是**本层过滤**，不是联邦检索 -->
@@ -2924,6 +3035,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=2b1b6939"></script>
+    <script src="/static/hub.js?v=c487e2be"></script>
 </body>
 </html>

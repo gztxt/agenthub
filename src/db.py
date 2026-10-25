@@ -257,6 +257,18 @@ def init_db(path: Path) -> None:
         # 诚实表达；回填成某个值＝替历史编因果。traceview 把 NULL 计 orphans。
         _add_column_if_missing(_conn, "asset_audit", "trace_id", "TEXT")
         _conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_trace ON asset_audit(trace_id)")
+        # ── v0.13.161 统一归档层（PT-20261025-11）──────────────────────────
+        # memories 表补四列：content_hash（精确去重键）/ simhash（近似去重，64 位）/
+        # superseded_by（被谁取代，矛盾链指针；NULL=上限淘汰）/ kind（distilled|manual）。
+        # 索引用在质量门的热路径：同 (agent, category) 活跃行里找近似重复，
+        # 以及每 agent 活跃计数（上限淘汰）。建在 ALTER 之后（见 137 行注释）。
+        for _col, _decl in (("content_hash", "TEXT"), ("simhash", "INTEGER"),
+                            ("superseded_by", "INTEGER"), ("kind", "TEXT")):
+            _add_column_if_missing(_conn, "memories", _col, _decl)
+        _conn.execute("CREATE INDEX IF NOT EXISTS idx_mem_arch_dedup "
+                      "ON memories(layer, source, category, status)")
+        _conn.execute("CREATE INDEX IF NOT EXISTS idx_mem_arch_hash "
+                      "ON memories(layer, content_hash)")
         _conn.commit()
 
 

@@ -369,7 +369,7 @@ const SRC_ABBR = {
   codebuddy_sessions: 'CB',
   grok_memory: 'GK', hermes_memory: 'HM', workbuddy_memory: 'WB',
   workspace_files: 'WS', archived_sessions: 'AR', amr_memory: 'AM',
-  experiences: 'EX',
+  experiences: 'EX', unified_archive: 'UA',
   turbovec: 'TV', xerj: 'XJ', tdai_l1: 'TD', tdai: 'TD', local: 'L1'
 };
 function srcTag(srcName) {
@@ -474,6 +474,7 @@ function mxLegacyToggle(el) {
   if (!el.open || el.dataset.loaded) return;
   el.dataset.loaded = '1';
   loadMemories(); loadDoc('l2'); loadDoc('l3');
+  memArchList();   // v0.13.161：抽屉里新增的 ARCH 段，同懒加载纪律
 }
 function mxCatOptions(cur) {
   return Object.keys(MX_CAT_LABEL).map(k =>
@@ -554,7 +555,8 @@ async function loadMemories() {
     if (hint) {
       const shown = MX_L1_ROWS.length;
       hint.textContent = (q || p.get('category'))
-        ? '筛选结果 ' + shown + ' 条 / 全库 ' + MX_L1_TOTAL + ' 条'
+        ? '筛选结果 ' + shown + ' 条 / 全部 ' +
+          ((typeof d.total_unfiltered === 'number') ? d.total_unfiltered : MX_L1_TOTAL) + ' 条'
         : '共 ' + MX_L1_TOTAL + ' 条' +
           (d.truncated ? '，当前显示最近 ' + shown + ' 条（上限 ' + MX_L1_LIMIT + '）' : '');
     }
@@ -653,6 +655,128 @@ async function memVitals() {
     const asof = $('mvAsOf'); if (asof) asof.textContent = e.message;
     CENTER_HEALTH.memory = 'err';
   }
+}
+
+/* ── 统一归档看板（v0.13.161，PT-20261025-11）─────────────────────────────
+ * 三块前端与三个端点一一对应，都是**状态优先**：矩阵渲染真实计数、不猜；
+ * 提交有进行中态与失败上屏；列表口径与 L1 对齐（total/truncated 分开）。
+ * ① memMatrixLoad  → GET  /api/memory/archive/matrix（实时 COUNT）
+ * ② memManualSubmit → POST /api/memory/archive（agent='manual', kind='manual'）
+ * ③ memArchList    → GET  /api/memory/archive?agent&category（抽屉里的浏览）      */
+
+let MX_MATRIX_AGENTS = [];   // 矩阵回包（归档抽屉的提交方下拉从这里取，不再另拉一次）
+
+async function memMatrixLoad() {
+  try {
+    const d = await api('/api/memory/archive/matrix');
+    MX_MATRIX_AGENTS = d.agents || [];
+    const ua = d.unified_api || {};
+    mxSet('mxMatrixApi', '统一接口 · 写 REST ' + (ua.rest || '/api/memory/archive') +
+      ' · MCP ' + (ua.mcp_tool || 'hub_memory_archive') + ' · 读 ' +
+      ((ua.read_tools || []).join(' / ')) + '（全部 agent 可用，写带身份与审计）');
+    const body = $('mxMatrixBody');
+    if (body) {
+      body.innerHTML = (d.agents || []).map(a => {
+        const srcs = (a.sources || []).map(s =>
+          escapeHtml(s.id) + (s.enabled ? '' : '（停用）')).join('、') || '<span class="hint">—</span>';
+        const when = a.last_write ? String(a.last_write).slice(0, 16).replace('T', ' ') : '—';
+        return '<tr><td class="mx-a-id">' + escapeHtml(a.id) + '</td>' +
+          '<td class="mx-a-srcs">' + srcs + '</td>' +
+          '<td class="mx-a-cnt"><b>' + (a.archive_active || 0) + '</b>' +
+          '<span class="sup"> / ' + (a.archive_superseded || 0) + '</span></td>' +
+          '<td class="mx-a-when">' + escapeHtml(when) + '</td>' +
+          '<td class="mx-flag ' + (a.mcp_wired ? 'on' : 'off') + '">' +
+          (a.mcp_wired ? '已接' : '未接') + '</td></tr>';
+      }).join('');
+    }
+    const st = d.stats || {};
+    mxSet('mxMatrixStats', '质量门 · 活跃 ' + (st.active || 0) + ' 条 · 取代(去重/上限) ' +
+      (st.superseded || 0) + ' 条 · 取代率 ' + Math.round((st.dedup_ratio || 0) * 100) + '% · ' +
+      '近似阈值 simhash≤' + (st.simhash_max_dist || 0) + '/64 · 每 agent 上限 ' + (st.per_agent_cap || 0));
+    memArchAgentsFill();
+  } catch (e) {
+    mxSet('mxMatrixApi', '读取失败：' + e.message);
+    const body = $('mxMatrixBody');
+    if (body) body.innerHTML = '<tr><td colspan="5" class="hint">读取失败：' + escapeHtml(e.message) + '</td></tr>';
+  }
+}
+
+function memArchAgentsFill() {
+  // 归档抽屉的提交方下拉：矩阵里 archive_active>0 或 manual/hub 恒列。懒填充——
+  // 每次拉矩阵后同步一次，不单独发请求（一个数据源一个出口）。
+  const sel = $('memArchAgent');
+  if (!sel) return;
+  const cur = sel.value;
+  const opts = ['<option value="">全部提交方</option>'].concat(
+    MX_MATRIX_AGENTS.filter(a => (a.archive_active || 0) > 0 || a.id === 'manual' || a.id === 'hub')
+      .map(a => '<option value="' + escapeHtml(a.id) + '">' + escapeHtml(a.id) +
+        '（' + (a.archive_active || 0) + '）</option>'));
+  sel.innerHTML = opts.join('');
+  sel.value = cur;
+}
+
+async function memManualSubmit(btn) {
+  const box = $('memManNew');
+  const content = box ? box.value.trim() : '';
+  if (!content) { toast('内容不能为空', 'err'); if (box) box.focus(); return; }
+  const cat = ($('memManCat') && $('memManCat').value) || 'fact';
+  const note = ($('memManNote') && $('memManNote').value.trim()) || '';
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
+  try {
+    const d = await api('/api/memory/archive', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: content, category: cat, agent: 'manual',
+                             kind: 'manual', note: note })
+    });
+    if (d.status === 'duplicate') {
+      toast('已存在相同记忆（#' + d.id + '），未重复入库', 'warn');
+    } else if (d.status === 'superseded') {
+      toast('已入库，旧版被标取代（#' + d.id + '）', 'ok');
+    } else {
+      toast('已补齐（#' + d.id + '）', 'ok');
+    }
+    if (box) box.value = '';
+    const nt = $('memManNote'); if (nt) nt.value = '';
+    memMatrixLoad();          // 矩阵计数与取代率即时刷新——刚写的必须看得见
+    if ($('mxLegacyBox') && $('mxLegacyBox').open) memArchList();
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally { if (btn) { btn.disabled = false; btn.textContent = old; } }
+}
+
+async function memArchList() {
+  const p = new URLSearchParams();
+  const ag = $('memArchAgent'), ct = $('memArchCat');
+  if (ag && ag.value) p.set('agent', ag.value);
+  if (ct && ct.value) p.set('category', ct.value);
+  // 取代行必须进抽屉：降噪 + 「已被 #N 取代」标记是给浏览器看的证据，
+  // 不带 include_superseded 后端只回活跃行，标记就成死代码（UI 探针实测抓到）。
+  p.set('include_superseded', '1');
+  boxBusy('memArchList');
+  try {
+    const d = await api('/api/memory/archive?' + p.toString());
+    const hint = $('memArchHint');
+    if (hint) {
+      const all = (typeof d.total_unfiltered === 'number') ? d.total_unfiltered : d.total;
+      hint.textContent = (ag && ag.value) || (ct && ct.value)
+        ? '筛选结果 ' + d.count + ' 条 / 全部 ' + all + ' 条'
+        : '共 ' + d.total + ' 条' + (d.truncated ? '，当前显示最近 ' + d.count + ' 条（上限 ' + d.limit + '）' : '');
+    }
+    $('memArchList').innerHTML = (d.memories || []).map(m => {
+      const sup = m.status === 'superseded';
+      return '<div class="mem-item"' + (sup ? ' style="opacity:.55"' : '') + '>' +
+        '<span class="tag ' + escapeHtml(m.category || 'fact') + '" style="align-self:flex-start">' +
+        escapeHtml(m.category || 'fact') + '</span>' +
+        '<p>' + escapeHtml(m.content || '') + '<br><span class="hint">' +
+        escapeHtml(m.source || '') + (m.kind === 'manual' ? ' · 手动补齐' : '') +
+        (sup ? ' · 已被 #' + (m.superseded_by || '?') + ' 取代' : '') +
+        ' · ' + escapeHtml(String(m.created_at || '').slice(0, 10)) + '</span></p></div>';
+    }).join('') || '<div class="hint">' +
+      ((ag && ag.value) || (ct && ct.value)
+        ? '当前筛选零命中。'
+        : '归档还是空的——上方「手动补齐」或 agent 经统一接口提交。') + '</div>';
+  } catch (e) { boxFail('memArchList', e, 'memArchList'); }
 }
 
 function mvRender(d) {

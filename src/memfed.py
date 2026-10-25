@@ -133,6 +133,17 @@ REGISTRY: Dict[str, FedSource] = {
         id="experiences", label="经验库（Dreaming）", kind="hub_sqlite", weight=0.65,
         desc="hub data/agents.db 的 experiences 表（P0-1：情况→处理 + 适用条件，只召回活跃条）",
         timeout_s=1.0),
+    # v0.13.161 统一归档（PT-20261025-11）：agent 提炼提交 + 用户手动补齐的**单一**
+    # 在役存储（memories 表 layer='ARCH'）。与 experiences 同 kind（同进程 sqlite，
+    # 毫秒级），但语义不同：经验库是 hub 自己蒸馏的，归档层是**外部提交**的——
+    # 所以权重取 0.7（人工/agent 成文，高于原始会话 0.5，低于权威库 0.8），
+    # 且**不并入 experiences 的检索函数**（两个表、两套排序口径，合并会让
+    # 「谁提交的」这个第一等属性在结果里消失）。
+    "unified_archive": FedSource(
+        id="unified_archive", label="统一归档（agent 提交+手动补齐）", kind="hub_sqlite",
+        weight=0.7,
+        desc="hub memories 表 layer='ARCH'（统一写入口：agent 身份+溯源+去重后的活跃归档）",
+        timeout_s=1.0),
     "archived_sessions": FedSource(
         id="archived_sessions", label="归档会话备份", kind="rg_text", weight=0.4,
         desc=f"{WORKSPACE}/会话备份/**（含 claude/pi/codex/codebuddy/grok/hermes 归档）",
@@ -452,6 +463,65 @@ def _recent_experiences(limit: int, timeout: float) -> Dict:
                 "ms": round((time.monotonic() - t0) * 1000, 1)}
 
 
+# ── 统一归档源（v0.13.161，PT-20261025-11）──────────────────────────────
+# 与 experiences 同 kind 不同表：ARCH 层是外部提交的统一存储，「谁提交的」
+# （source/origin）必须随 item 带回——检索结果里看不到提交者的记忆不可追责。
+
+def _arch_item(r: dict) -> dict:
+    return {"id": r.get("id"), "content": r.get("content") or "",
+            "source": "unified_archive", "origin": r.get("source"),
+            "kind": r.get("kind"), "category": r.get("category"),
+            "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
+            "score": None}
+
+
+def _arch_sort(rows: List[dict]) -> List[dict]:
+    """源内排序：manual（人工权威）优先，其余按 updated_at 新→旧。
+
+    两级排序用「先按时间倒序、再按 manual 稳定排序」实现——Python sort 稳定，
+    一次 reverse 排序加一次稳定排序即可得「组间 manual 优先、组内时间倒序」。
+    ⚠ import 必须在**本函数内**：它被 _search_archive/_recent_archive 调用，而
+    memory_archive 不在本模块顶层导入名单里（memfed 的既有惯例是重依赖函数内
+    导入，保持启动顺序不变）。漏了它就是 NameError——冒烟实测抓到过。
+    """
+    import memory_archive
+    rows = sorted(rows, key=lambda r: str(r.get("updated_at") or ""), reverse=True)
+    rows.sort(key=lambda r: 0 if r.get("source") == memory_archive.MANUAL_SOURCE else 1)
+    return rows
+
+
+def _search_archive(q: str, limit: int, timeout: float) -> Dict:
+    """归档关键词检索（LIKE + ESCAPE 转义，与 list_l1 同口径——通配符必须转义）。"""
+    t0 = time.monotonic()
+    try:
+        import memory_archive
+        d = memory_archive.list_rows(q=q, limit=min(limit, RG_ITEM_CAP))
+        items = [_arch_item(r) for r in _arch_sort(d["memories"])]
+        return {"ok": True, "count": len(items), "items": items,
+                "total": d["total"], "truncated": d["truncated"],
+                "ms": round((time.monotonic() - t0) * 1000, 1)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "count": 0, "items": [],
+                "error": tdai_client.scrub(f"{type(e).__name__}: {e}")[:160],
+                "ms": round((time.monotonic() - t0) * 1000, 1)}
+
+
+def _recent_archive(limit: int, timeout: float) -> Dict:
+    """最新归档（RECENT_Q 哨兵：会话开局无查询词时，给「各 agent 刚记下什么」）。"""
+    t0 = time.monotonic()
+    try:
+        import memory_archive
+        d = memory_archive.list_rows(limit=min(limit, RG_ITEM_CAP))
+        items = [_arch_item(r) for r in _arch_sort(d["memories"])]
+        return {"ok": True, "count": len(items), "items": items,
+                "total": d["total"], "truncated": d["truncated"],
+                "ms": round((time.monotonic() - t0) * 1000, 1)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "count": 0, "items": [],
+                "error": tdai_client.scrub(f"{type(e).__name__}: {e}")[:160],
+                "ms": round((time.monotonic() - t0) * 1000, 1)}
+
+
 def _rg_item(source_id: str, line: str) -> Optional[dict]:
     """`path:line:content` → 统一 item。path 用绝对路径（前端直接可溯源），行号做 id。
 
@@ -717,11 +787,19 @@ def _build_tasks(q: str, limit: int, want: set) -> Dict:
             else:
                 tasks[sid] = asyncio.to_thread(_search_claude_mem, q, limit)
         elif src.kind == "hub_sqlite":
-            # hub 自己的库（经验库）：同进程连接，无需 rg/sqlite 外部句柄
-            if recent:
-                tasks[sid] = asyncio.to_thread(_recent_experiences, limit, src.timeout_s)
+            # hub 自己的库（经验库 / 统一归档）：同进程连接，无需 rg/sqlite 外部句柄。
+            # 同 kind 两个源按 sid 分发——不合并成一个「hub 源」：两个表、两套排序
+            # 口径、两组权重，合并会让 backends 诊断分不清是哪一路慢了/挂了。
+            # ⚠ search 与 recent 签名不同（前者带 q）：to_thread 的参数表必须分开写，
+            # 合并成一次调用会漏 q——冒烟实测抓到 TypeError。
+            if sid == "unified_archive":
+                sfn, rfn = _search_archive, _recent_archive
             else:
-                tasks[sid] = asyncio.to_thread(_search_experiences, q, limit, src.timeout_s)
+                sfn, rfn = _search_experiences, _recent_experiences
+            if recent:
+                tasks[sid] = asyncio.to_thread(rfn, limit, src.timeout_s)
+            else:
+                tasks[sid] = asyncio.to_thread(sfn, q, limit, src.timeout_s)
         elif src.kind == "rg_text":
             if recent:
                 # 「取最新」一律扫实时树：投影库是关键词 FTS 且可能陈旧

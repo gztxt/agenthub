@@ -104,7 +104,24 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.160"
+VERSION = "0.13.161"
+#   v0.13.161：记忆中心统一化（2026-10-25 用户令「所有 agent 能够使用统一接口自动调用
+#   记忆中心记忆数据；所有 agent 的记忆数据统一归档；数据无需重复保存，按既有数据统一
+#   归档；前端 UI 重设计为看板 + 手动记忆提交框」）。
+#   ① **统一写入口** `POST /api/memory/archive` + MCP `hub_memory_archive`：agent 身份
+#      必填（body.agent 或 X-Agent-ID），过质量门——scrub 脱敏 → 精确 hash 去重 →
+#      simhash 近似 supersede（64 位海明 ≤10，同 agent 同 category）→ 每 agent 活跃
+#      上限 1000（超限最旧软删可审计）。零第三方依赖（blake2b 稳定哈希）。
+#   ② **不重复保存**：新提交落 hub sqlite 的 layer='ARCH' 单一存储；既有 13 路 agent
+#      记忆源仍由 memfed 只读抽取、各自权威。ARCH 登记为第 14 个联邦源（weight 0.7，
+#      manual 行源内优先），自动进 FED_FAST_SOURCES / 注入包 / 白名单。
+#   ③ **看板矩阵** `GET /api/memory/archive/matrix`：agent ×（既有源/读写状态/归档
+#      计数/MCP 接线现探）零内容拷贝；`GET /api/memory/archive` 列表回 total/truncated。
+#   ④ **UI 重设计**：记忆中心改看板——运行逻辑状态（源健康/接入矩阵/投影/质量门计数）
+#      + 统一检索 + 手动补齐框；旧层 L1/L2/L3 收进归档抽屉。P1 判据不变（首屏 0 按钮）。
+#   ⑤ 取证：性能基线（影子 :3210 共享生产投影只读）search P50 16.4ms / vitals 23.9ms /
+#      context 83.2ms；改后同法 A/B 配对差复测。
+#   闸门：tests/test_memory_archive_l0.py、scripts/build_hubjs.sh。
 #   v0.13.160：记忆存储并入记忆中心（2026-10-25 用户令「设置菜单中的记忆存储模块合并融合
 #   到系统的记忆中心；优化完善操作逻辑、完善功能、优化前端 UI」）。
 #   ① **入口合并**：「设置 · 记忆存储」整页移入 #page-memory 的「本机旧层」折叠块，侧栏

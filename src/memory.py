@@ -25,6 +25,7 @@ import ctxmanifest
 import db
 import llm
 import memfed
+import memory_archive
 import memvitals
 import runlog
 import tdai_client
@@ -52,7 +53,7 @@ PROFILE_CHARS = int(os.getenv("MEMORY_PROFILE_CHARS", "1200"))
 #: 为何把 experiences（P0-1 D18）加进来：它查的是 hub **自己的** agents.db（同进程连接，
 #: 毫秒级，无 rg 扫树成本），且是**蒸馏过**的可复用单元 —— 默认召回它才是「经验接入联邦」
 #: 的实际含义（只登记不默认召＝注册了但没人用）。
-FED_FAST_SOURCES = "local,tdai,claude_mem,workbuddy_memory,claude_projects,experiences"
+FED_FAST_SOURCES = "local,tdai,claude_mem,workbuddy_memory,claude_projects,experiences,unified_archive"
 #: 注入段里单条记忆的截断长度（与 pi 扩展 fmtMem 的 160 字同口径，跨入口看起来一致）。
 FED_ITEM_CHARS = 160
 
@@ -280,6 +281,22 @@ class MemoryPatchIn(BaseModel):
     category: Optional[str] = None
 
 
+class ArchiveIn(BaseModel):
+    """统一归档写入口的请求体（v0.13.161）。
+
+    `agent` 是**必填身份**（body 或 X-Agent-ID 头二选一）——统一接口的意义就在
+    「谁写的能追回去」；不标识身份的写入会被 400 拒绝并列出现在册值。
+    `kind=manual` 时 `agent` 必须为 'manual'（手动补齐的归属就是manual，
+    不允许冒充某个 agent——审计要能追责到人）。
+    """
+    content: str = Field(min_length=1, max_length=8000)
+    category: str = "fact"
+    agent: str = ""
+    kind: str = "distilled"
+    session_id: Optional[str] = None
+    note: str = ""
+
+
 class MemoryBatchIn(BaseModel):
     items: list[MemoryIn] = Field(max_length=200)
 
@@ -313,9 +330,15 @@ async def list_l1(category: Optional[str] = None, q: Optional[str] = None,
         where += " AND content LIKE ? ESCAPE '\\'"
         params.append(_like_pat(q))
     total = (db.query("SELECT COUNT(*) AS n " + where, tuple(params)) or [{"n": 0}])[0]["n"]
+    # total_unfiltered = 不带筛选的全库条数（v0.13.161，与归档列表同口径）：
+    # 前端「筛选结果 X / 全部 Y」的 Y 用它，total 是筛选后的不能当「全库」。
+    total_unfiltered = (db.query("SELECT COUNT(*) AS n FROM memories "
+                                 "WHERE status='active' AND layer='L1'")
+                        or [{"n": 0}])[0]["n"]
     rows = db.query("SELECT * " + where + " ORDER BY id DESC LIMIT ?",
                     tuple(params + [limit]))
     return {"memories": rows, "count": len(rows), "total": int(total or 0),
+            "total_unfiltered": int(total_unfiltered or 0),
             "limit": limit, "truncated": int(total or 0) > len(rows)}
 
 
@@ -352,6 +375,86 @@ async def update_l1(mid: int, body: "MemoryPatchIn", request: Request):
                         "chars": len(body.content) if body.content is not None else None,
                         "category": body.category})
     return {"status": "updated", "id": mid}
+
+
+# ── 统一归档层（v0.13.161，PT-20261025-11）────────────────────────────────
+# 用户令「所有 agent 的记忆数据统一归档到记忆中心供统一接口自动调用」的写侧落点。
+# 与 L1 旧层的分工：L1 = 被 TDAI 取代的旧便签（vitals 的 note 已判）；ARCH = 在役
+# 归档，同表不同 layer。质量门（scrub/精确去重/近似 supersede/每 agent 上限）
+# 全部在 memory_archive.submit —— 路由层只做参数装配与审计，不重复实现门逻辑
+# （接缝唯一，define-design B3）。写鉴权由 main.py 的 write_gate 中间件统一负责。
+
+@router.post("/api/memory/archive")
+async def archive_create(body: ArchiveIn, request: Request):
+    agent = (body.agent or request.headers.get("x-agent-id") or "").strip()
+    try:
+        out = memory_archive.submit(
+            body.content, body.category, agent, body.kind,
+            session_id=body.session_id, note=body.note,
+            actor=writeauth.actor_of(request))
+    except ValueError as e:
+        # 400 必须把「合法值有哪些」说全——调用方（可能是 agent）看不到我们的文档，
+        # 一条「未知 agent: foo」不带可用值等于让它盲猜。
+        raise HTTPException(400, str(e))
+    db.log_asset_event("memory_archive", str(out["id"]), "create",
+                       writeauth.actor_of(request),
+                       {"agent": agent, "kind": body.kind, "category": body.category,
+                        "status": out["status"], "chars": out["chars"],
+                        "session_id": body.session_id, "note": body.note})
+    return out
+
+
+@router.get("/api/memory/archive")
+async def archive_list(agent: str = "", category: str = "", q: str = "",
+                       include_superseded: bool = False, limit: int = 50):
+    """归档列表。口径与 /api/memory/l1 对齐：total/count/truncated 三者分开回，
+    截断不再静默（v0.13.160 同款修复）。"""
+    return memory_archive.list_rows(agent=agent, category=category, q=q,
+                                    include_superseded=include_superseded, limit=limit)
+
+
+@router.get("/api/memory/archive/matrix")
+async def archive_matrix():
+    """看板矩阵：agent ×（既有记忆源 / 读写状态 / 归档计数）。**零内容拷贝**——
+    源状态现取 memfed 注册表与探针，归档计数现取 memories 表，都不复制正文。"""
+    import profiles
+    agents = [{"id": p["id"], "name": p.get("name") or p["id"]}
+              for p in profiles.PROFILES if p.get("kind") == "agent"]
+    counts = memory_archive.counts_by_agent(active_only=False)
+    last_write = memory_archive.last_write_by_agent()
+    out_agents = []
+    for a in agents:
+        src_ids = memory_archive.AGENT_SOURCE_MAP.get(a["id"], [])
+        srcs = []
+        for sid in src_ids:
+            fs = memfed.REGISTRY.get(sid)
+            srcs.append({"id": sid, "label": fs.label if fs else sid,
+                         "enabled": bool(fs and fs.enabled)})
+        c = counts.get(a["id"], {})
+        out_agents.append({
+            "id": a["id"], "name": a["name"], "sources": srcs,
+            "archive_active": c.get("active", 0),
+            "archive_superseded": c.get("superseded", 0),
+            "last_write": last_write.get(a["id"], ""),
+            "mcp_wired": a["id"] in memory_archive.mcp_wired_agents(),
+        })
+    # manual/hub 两个非 agent 提交方也进矩阵（手动补齐框的归属人）
+    for sid in (memory_archive.MANUAL_SOURCE, "hub"):
+        c = counts.get(sid, {})
+        out_agents.append({
+            "id": sid, "name": "手动补齐" if sid == memory_archive.MANUAL_SOURCE else "hub 自身",
+            "sources": [], "archive_active": c.get("active", 0),
+            "archive_superseded": c.get("superseded", 0),
+            "last_write": last_write.get(sid, ""), "mcp_wired": True,
+        })
+    return {"schema": 1, "agents": out_agents,
+            "unified_api": {"rest": "/api/memory/archive",
+                            "mcp_tool": "hub_memory_archive",
+                            "read_tools": ["hub_memory_search", "hub_memory_context"]},
+            "stats": memory_archive.stats(),
+            "fed_sources": [{"id": s.id, "label": s.label, "enabled": s.enabled,
+                             "weight": s.weight}
+                            for s in memfed.REGISTRY.values()]}
 
 
 @router.post("/api/memory/l1")

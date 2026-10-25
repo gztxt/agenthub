@@ -279,5 +279,76 @@ class TestMemoryLegacyMerged(unittest.TestCase):
         self.assertIn("/api/memory/l1/' + id", m.group(0))
 
 
+class TestUnifiedArchiveUi(unittest.TestCase):
+    """L0：记忆中心统一化看板（v0.13.161，PT-20261025-11 用户令）。
+
+    判据（全部可证伪，不靠文案）：
+      ① 矩阵卡与手动补齐卡真的在 #page-memory 首屏（不是藏在折叠 details 里）；
+      ② 矩阵/提交/列表三个前端函数分别打三个不同的端点（一个数据源一个出口，
+         不许前端自己算计数——那是「界面编数」）；
+      ③ 手动提交必须带 agent='manual' 且 kind='manual'（后端会 400 校验，
+         前端发错就是死按钮）；
+      ④ 进页钩子必须同时拉 vitals 与矩阵（P1 判据更新为 2 请求的理由见注释）；
+      ⑤ 归档列表的提交方下拉从矩阵回包填（不单独发第三次请求）。
+    """
+
+    def setUp(self):
+        self.html = (_REPO / "templates" / "index.html").read_text(encoding="utf-8")
+        self.w04 = (_REPO / "static" / "hub" / "04-terminal-ws.js").read_text(encoding="utf-8")
+        self.w01 = (_REPO / "static" / "hub" / "01-core-boot.js").read_text(encoding="utf-8")
+        start = self.html.index('id="page-memory"')
+        end = self.html.index("</section>", start)
+        self.mem_page = self.html[start:end]
+
+    def test_matrix_and_manual_cards_on_first_screen(self):
+        for dom_id in ("mxMatrixTable", "mxMatrixBody", "memManNew", "memManCat",
+                       "memManNote", "memManBtn", "memArchList", "memArchAgent"):
+            self.assertIn(f'id="{dom_id}"', self.mem_page,
+                          f"{dom_id} 必须在记忆中心页内（看板/补齐/归档浏览三件套）")
+        # 两卡必须是**首屏可见**的 sp-card，不能包在 details 里（用户令：看板+提交框）。
+        # 判据用「最近的容器开口」：表格 id 之前最后一次出现的是 <div class="sp-card">
+        # 还是 <details——后者说明它在折叠块里（首屏不可见）。
+        for dom_id in ("mxMatrixTable", "memManBtn"):
+            i = self.mem_page.index(f'id="{dom_id}"')
+            last_card = self.mem_page.rfind('<div class="sp-card">', 0, i)
+            last_det = self.mem_page.rfind("<details", 0, i)
+            self.assertGreater(last_card, last_det,
+                               f"{dom_id} 包在折叠 details 里 ⇒ 首屏看不到（用户令要可见）")
+
+    def test_three_functions_three_endpoints(self):
+        fns = {
+            "memMatrixLoad": "/api/memory/archive/matrix",
+            "memManualSubmit": "/api/memory/archive",
+            "memArchList": "/api/memory/archive?",
+        }
+        for fn, ep in fns.items():
+            m = re.search(r"async function %s\(.*?\n\}" % fn, self.w04, re.S)
+            self.assertTrue(m, f"{fn} 必须存在")
+            self.assertIn(ep, m.group(0), f"{fn} 必须打 {ep}（一个数据源一个出口）")
+
+    def test_manual_submit_sends_manual_identity(self):
+        m = re.search(r"async function memManualSubmit\(.*?\n\}", self.w04, re.S)
+        self.assertIn("agent: 'manual'", m.group(0))
+        self.assertIn("kind: 'manual'", m.group(0),
+                      "手动补齐必须自报 manual 身份（后端 400 校验会拦死按钮）")
+
+    def test_page_load_fetches_vitals_and_matrix(self):
+        m = re.search(r"if \(page === 'memory'\).*?\n", self.w01)
+        self.assertIn("memVitals()", m.group(0))
+        self.assertIn("memMatrixLoad()", m.group(0),
+                      "P1 判据 v0.13.161 起为 2 请求：vitals 落盘快照 + matrix 实时 COUNT")
+
+    def test_archive_agent_filter_filled_from_matrix(self):
+        self.assertIn("function memArchAgentsFill(", self.w04)
+        m = re.search(r"function memArchAgentsFill\(.*?\n\}", self.w04, re.S)
+        self.assertIn("MX_MATRIX_AGENTS", m.group(0),
+                      "提交方下拉必须从矩阵回包填，不单独发请求")
+
+    def test_fed_source_select_includes_unified_archive(self):
+        m = re.search(r'<select id="memFedSrcs"[^>]*>(.*?)</select>', self.html, re.S)
+        self.assertIn('value="unified_archive"', m.group(1),
+                      "联邦检索源选择框必须含统一归档（前后端源清单同源契约）")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

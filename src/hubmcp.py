@@ -8,6 +8,10 @@
   （streamable_http_app 自带 /mcp 子路由，故不能挂到 /mcp，否则与 mcpgw 的 /mcp/* REST 冲突）。
 
 注册工具：hub_list_agents / hub_list_ports / hub_memory_search / hub_memory_context
+          / hub_memory_archive（v0.13.161 PT-20261025-11：统一归档写入口，POST 但
+          默认注册——它是用户令「所有 agent 统一接口写记忆」的唯一 sanctioned 通道：
+          身份必填 + 质量门 + 审计，与 l1 写端点同等鉴权。不占 ALLOW_WRITE 门的理由
+          同 invoke：门管的是「顺手写配置」类工具，不是产品明要的统一写入口）
           / hub_kb_search / hub_kb_status / hub_skill_list / hub_skill_read / hub_skill_status
           / hub_skill_invoke / hub_skill_catalog（后两个 v0.13.127 PT-20261019-01：
           统一调用入口。invoke 是 POST 但**不算写工具**——只写 hub 自己的遥测账本，
@@ -194,6 +198,38 @@ def hub_memory_search(q: str, limit: int = 10,
         "backends": data.get("backends") or [],
         "took_ms": data.get("took_ms"),
     }, ensure_ascii=False)
+
+
+@server.tool()
+def hub_memory_archive(content: str, agent: str, category: str = "fact",
+                      kind: str = "distilled", session_id: str = "",
+                      note: str = "") -> str:
+    """统一归档写入口（v0.13.161，PT-20261025-11）：把一条记忆提交进记忆中心。
+
+    **所有 agent 都该用这个入口**往记忆中心写——提交即带 agent 身份与溯源，
+    过质量门（脱敏 → 精确去重 → 近似 supersede → 每 agent 上限），并留审计。
+    参数：
+      content  记忆正文（必填，≤8000 字符）
+      agent    提交方标识（必填；在册 agent id 或 'hub'。手动补齐用 REST 端点的
+              agent='manual', kind='manual'——MCP 是 agent 通道，不代人工署名）
+      category fact|decision|constraint|preference
+      kind     distilled（agent 提炼，默认）| manual
+    返回 status：created（新入库）| duplicate（精确重复，返回已存在 id）|
+    superseded（近似重复，新行入库、旧行标 superseded 并列出 id）。
+    **不复制**你本地已有的记忆库——本入口只收新提交；读请用 hub_memory_search。
+    """
+    if not content or not content.strip():
+        return json.dumps({"error": "content 不能为空"}, ensure_ascii=False)
+    if not agent or not agent.strip():
+        return json.dumps({"error": "agent 不能为空（统一接口要能追责到提交方）"},
+                          ensure_ascii=False)
+    body = {"content": content.strip(), "agent": agent.strip(), "category": category,
+            "kind": kind}
+    if session_id:
+        body["session_id"] = session_id
+    if note:
+        body["note"] = note
+    return json.dumps(_post("/api/memory/archive", body=body), ensure_ascii=False)
 
 
 @server.tool()

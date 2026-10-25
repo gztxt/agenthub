@@ -1,3 +1,63 @@
+## v0.13.161 — 记忆中心统一化：统一读写接口 + 归档登记看板 + 手动补齐
+
+> 来源：2026-10-25 用户令「所有 agent 能够使用统一接口自动调用记忆中心记忆数据；
+> 所有 agent 的记忆数据能够统一归档到记忆中心供统一接口自动调用；数据无需重复保存，
+> 按现有 agent 既有数据统一归档；前端 UI 重设计为看板 + 手动记忆提交框」。
+
+### 改了什么
+
+1. **统一写入口**：`POST /api/memory/archive`（REST）+ `hub_memory_archive`（MCP，
+   默认注册）。agent 身份必填（body `agent` 或 `X-Agent-ID` 头，不在册即 400 并列
+   可用值）。落 `layer='ARCH'` 单一存储，与 L1 旧便签同表不同层、口径互不污染。
+2. **质量门**（全部在 `src/memory_archive.py` 一个接缝里）：scrub 脱敏 →
+   sha256 精确去重 → **simhash 64 位近似去重**（海明 ≤10、同 agent 同 category，
+   旧行标 `superseded` 并指回新 id）→ 每 agent 活跃上限 1000（触顶最旧**软删**，
+   `superseded_by` 留空以区分「容量淘汰」与「矛盾取代」）。manual 行双向不参与
+   自动 supersede（人工措辞是权威层）。零第三方依赖（blake2b 稳定哈希）。
+3. **不重复保存**：既有 13 路 agent 记忆源仍由 memfed **只读抽取、各自权威**；
+   统一归档只收**新提交**。ARCH 登记为第 14 个联邦源（weight 0.7，manual 行源内
+   优先），自动进 `FED_FAST_SOURCES` / 注入包 / sources 白名单。
+4. **接入矩阵看板**：`GET /api/memory/archive/matrix` —— agent ×（既有源 / 归档
+   活跃·取代计数 / 最近写入 / MCP 接线现探）零内容拷贝；`GET /api/memory/archive`
+   列表回 `total/count/truncated`。MCP 接线现读配置文件（claude/codex 两家实测
+   已接），不维护会漂移的静态清单。
+5. **前端重设计**：记忆中心改看板——首屏「接入矩阵」卡 + 「手动补齐」卡（正文 +
+   分类 + 理由 + Ctrl+Enter），旧层抽屉新增 ARCH 浏览段（按提交方/分类过滤，
+   取代行降噪并标 `已被 #N 取代`）。P1 判据随之更新为「进页 2 请求
+   （vitals 落盘快照 + matrix 实时 COUNT）、首屏按钮=手动提交框 1 个」——
+   用户令明要写入入口可见，折叠它等于没有。
+
+### 顺带修掉的既有缺陷（均可确定性复现）
+
+| 缺陷 | 表现 | 修法 |
+|---|---|---|
+| `db.execute` 当 lastrowid 用 | INSERT 回的是影响行数 1 ⇒ `superseded_by` 恒指向 1 | 游标 `lastrowid`（L0 钉死） |
+| simhash 无符号 64 位入库 | ≥2^63 必 `OverflowError: Python int too large` | `_to_signed/_to_unsigned` 双向转换 |
+| `_arch_sort` 漏 import | `NameError: memory_archive is not defined` ⇒ 归档源恒 ok=False | 函数内 import（memfed 重依赖惯例） |
+| `_build_tasks` 分发漏 q | `_search_archive() missing 1 required positional argument` | search/recent 签名分开传 |
+| ARCH 抽屉不回取代行 | 前端没传 `include_superseded` ⇒「已被 #N 取代」标记是死代码（UI 探针实测） | `memArchList` 固定带 `include_superseded=1` |
+| 「全库 N 条」显示筛选后数 | `total` 是筛选后的全量，前端拿它当「全库」⇒「筛选 1 条 / 全库 1 条」（L1 同病，v0.13.160 注释明说意图是全库） | 后端补 `total_unfiltered`，两处措辞改「全部 N 条」 |
+
+### 取证
+
+- **性能基线**（改前，影子 :3210 共享生产投影只读，24 轮交替）：search P50
+  16.4ms / P95 67.6ms；vitals P50 23.9ms；context P50 83.2ms（range 28.9 最稳）。
+- **改后配对差复测**（2026-10-25 15:57，方法：worktree 旧码 :3211 vs 工作树新码
+  :3210，共享只读投影，24 轮同刻交替，判据取配对差中位）：
+  search **−1.6ms**（p95 +2.4，无退化；p05 −169.5 是单侧离群非系统性）、
+  context **−3.7ms**（无退化）、vitals **+22.2ms**（p05 +21.6 / p95 +23.0，
+  24 例中 23 例落在 21.6~23.0 ⇒ 系统性成本：多一路 `unified_archive` 源探针
+  与计数，属功能预期开销，非回归缺陷）。
+- L0 hermetic 全量 + 新增 `tests/test_memory_archive_l0.py` 23 例（simhash 稳定/
+  距离可分辨、创建-重复-取代链、manual 保护、身份校验、容量软删、路由鉴权、
+  检索带回 origin）。
+- 隔离库冒烟 13 项 + Chromium/CDP 双宽度 UI 探针 **22 项判据 PASS**
+  （`work/ab-new/ui_probe2.py`，影子 :3210 隔离 DATA_DIR）：矩阵 16 行 / MCP 接线列、
+  首屏可见按钮=1、手动补齐 created→duplicate 两种 toast 与输入框清空、REST 近似对
+  superseded（`superseded_ids` 指回被取代行）、矩阵计数即时刷新、ARCH 抽屉
+  共/筛选/全部三种计数与取代标记、390 宽零横向溢出 + 矩阵两列收起、零 JS 异常。
+  探针两轮抓出上表后两处缺陷，修复后复跑 PASS。
+
 ## v0.13.160 — 记忆存储并入记忆中心：读写同页 + L1 可编辑 + 折叠真的折叠
 
 > 来源：2026-10-25 用户令「设置菜单中的记忆存储模块合并融合到系统的记忆中心；

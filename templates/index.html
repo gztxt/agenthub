@@ -1221,6 +1221,10 @@
              Block 4 本机旧层 gap --mx-3  密度 低   降级为档案，陈旧标识前置
            密度自上而下递减，与 hallmark「逐块递增」相反 —— 有意取舍：
            上三块无人操作（宜密），下两块是人工输入区（宜疏）。
+           2026-10-18：Block 4 曾按裁定①整体移到「设置 · 记忆存储」（当时理由是
+           「4 条便签不是查看需求」）；2026-10-25 用户令并回本页 —— 读与写分居两个
+           菜单，实际用起来是「看记忆在这里、改记忆在那里」，且设置组为 4 条便签
+           单占一个一级项。现在它作为最后一个折叠块留在本页，折叠态不破坏上述节奏。
 
            Spacing scale（基数 4px，限定在 .mx-* 子作用域，不外溢其他页）
            --mx-1:4px --mx-2:8px --mx-3:12px --mx-4:16px --mx-5:24px --mx-6:32px
@@ -1274,6 +1278,12 @@
         }
 
         /* 折叠区：summary 即可点区域，不另设按钮（首屏 0 个 <button> 的落地方式） */
+        /* ⚠ 必须显式隐藏闭合态内容（2026-10-25 实测）：`.sp-card` 是 display:flex，
+           Chrome 对「display 被改成 flex 的 <details>」不再套用原生的
+           content-visibility 隐藏 ⇒ 子节点仍有布局、按钮可点、屏幕阅读器可读，
+           所谓"折叠"只是视觉错觉（实测 mvToolsBox 的 16 个按钮 y 坐标全部有效）。
+           这条不是补丁而是把不变量写实：闭合 = 只显示 summary。 */
+        .mv-det:not([open]) > *:not(summary) { display: none; }
         .mv-det > .mv-sum {
             display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
             padding: var(--mx-3) var(--mx-4); cursor: pointer; list-style: none;
@@ -1806,6 +1816,92 @@
                     </div>
 
 
+                </details>
+
+                <!-- ═══ 本机旧层（L1/L2/L3）· 2026-10-25 由「设置 · 记忆存储」并回 ═══════
+                     为什么并回来：它和上面三块是**同一份本机记忆**的写入口，分居两个菜单时
+                     用户要在「设置 → 记忆存储」和「系统 → 记忆中心」之间来回跳；而设置组
+                     为这 4 条便签多占一个一级菜单项，语义上也放错了位置（这是记忆，不是配置）。
+                     为什么仍折叠：日常只读上方遥测 / 联邦检索，写是低频动作。折叠既保住
+                     「进页 1 个请求、首屏 0 按钮」的 P1 判据，也让展开时才拉 L1/L2/L3。
+                     与上面的关系：上面是**在役**记忆（TDAI + 各 agent 源，只读），
+                     这里是 hub 自有 SQLite 的**档案层**（可写），两套存储互不影响 ——
+                     这一点由 #mxStale 用实测数字说清，不靠文案暗示。 -->
+                <details class="sp-card mv-det" id="mxLegacyBox" ontoggle="mxLegacyToggle(this)">
+                    <summary class="mv-sum">
+                        <span>本机旧层</span>
+                        <span class="hint" id="mxLegacyHint">L1 便签（可写）· L2 近 30 天压缩 · L3 长期画像（草稿→确认制）</span>
+                    </summary>
+                    <div class="sp-bd">
+                        <div class="mx-stale" id="mxStale">展开后读取本机旧层实测口径…</div>
+                        <div class="sp-grid">
+                            <!-- L1：唯一可增删改的一层。搜索是**本层过滤**，不是联邦检索 -->
+                            <div class="sp-cell">
+                                <div class="sp-sub">L1 · 本地便签</div>
+                                <div class="hint" style="margin-bottom:8px">hub 自有 SQLite 的手写便签。全局检索请用上方
+                                「联邦检索」，这里只过滤本层。</div>
+                                <div class="toolbar">
+                                    <input id="memQ" placeholder="在 L1 便签内过滤…" aria-label="过滤 L1 便签"
+                                           onkeydown="if(event.key==='Enter')loadMemories()">
+                                    <select id="memCat" onchange="loadMemories()" aria-label="按分类过滤" style="max-width:120px">
+                                        <option value="">全部分类</option>
+                                        <option value="fact">fact · 事实</option>
+                                        <option value="decision">decision · 决策</option>
+                                        <option value="constraint">constraint · 约束</option>
+                                        <option value="preference">preference · 偏好</option>
+                                    </select>
+                                    <button class="btn ghost sm" onclick="loadMemories()" title="重新读取本页列表">
+                                        <svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+                                </div>
+                                <div class="hint" id="memListHint" style="margin:2px 0 6px">展开后加载…</div>
+                                <div class="sp-bd box flush tscroll" style="border-top:1px solid var(--divider)">
+                                    <div class="sp-list" id="memList"></div>
+                                </div>
+                                <div class="toolbar" style="margin-top:10px">
+                                    <textarea id="memNew" class="doc" style="min-height:56px" aria-label="新增便签正文"
+                                              placeholder="新增一条便签（Ctrl+Enter 提交）…"
+                                              onkeydown="if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();addMemory();}"></textarea>
+                                </div>
+                                <div class="toolbar" style="margin-top:6px">
+                                    <select id="memNewCat" aria-label="新便签分类" style="max-width:120px">
+                                        <option value="fact">fact · 事实</option>
+                                        <option value="decision">decision · 决策</option>
+                                        <option value="constraint">constraint · 约束</option>
+                                        <option value="preference">preference · 偏好</option>
+                                    </select>
+                                    <button class="btn sm" id="memAddBtn" onclick="addMemory(this)">添加</button>
+                                    <span class="hint">手写便签归人工维护，自动流程不会改动。</span>
+                                </div>
+                            </div>
+                            <!-- L2：content 由 L1 压缩而来（只读），manual 独立保存、重建不覆盖 -->
+                            <div class="sp-cell">
+                                <div class="sp-sub">L2 · 近 30 天工作记忆</div>
+                                <div class="hint" id="l2Status" style="margin-bottom:6px">未加载</div>
+                                <textarea class="doc" id="l2content" readonly placeholder="（尚无生成内容）"></textarea>
+                                <div class="hint" style="margin:6px 0">手写补充 manual（自动重建不覆盖）：</div>
+                                <textarea class="doc" id="l2manual" style="min-height:80px" oninput="mxDocDirty('l2')"></textarea>
+                                <div class="toolbar" style="margin-top:8px;margin-bottom:0">
+                                    <button class="btn sm" onclick="saveDoc('l2', this)">保存</button>
+                                    <button class="btn ghost sm" id="l2RebuildBtn" onclick="rebuildL2(this)"
+                                            title="只压缩近 30 天的 L1；L1 全是旧便签时会如实报错，不写空串">用 LLM 重建（约 10–60s）</button>
+                                </div>
+                            </div>
+                            <!-- L3：人工确认制 —— 自动流程永不写这里 -->
+                            <div class="sp-cell">
+                                <div class="sp-sub">L3 · 长期 Profile</div>
+                                <div class="hint" id="l3Status" style="margin-bottom:6px">未加载</div>
+                                <textarea class="doc" id="l3content" placeholder="人工确认后写入的稳定长期偏好（草稿→确认制）"
+                                          oninput="mxDocDirty('l3')"></textarea>
+                                <div class="hint" style="margin:6px 0">手写补充 manual：</div>
+                                <textarea class="doc" id="l3manual" style="min-height:80px" oninput="mxDocDirty('l3')"></textarea>
+                                <div class="toolbar" style="margin-top:8px;margin-bottom:0">
+                                    <button class="btn sm" onclick="saveDoc('l3', this)">保存</button>
+                                    <button class="btn ghost sm" onclick="previewCtx(this)"
+                                            title="按 L1 过滤框里的词预检真正会注入给 Agent 的上下文">在注入包中预览</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </details>
             </div>
         </section>
@@ -2562,62 +2658,6 @@
              profile_events 全量 source（既有的「运行日志」页只看 rest，这里互补）。
              形态纪律同另三个设置页：正文出页（无浮层）、按钮一律 data-settings-act 走委托、
              筛选是页内 select + 关键字框（关键字在服务端 Python 里过滤，绝不进命令行）。 -->
-        <!-- 记忆存储（设置）：本机旧层 L1/L2/L3 的写入口。
-             2026-10-18 按 PT-20261018-08 裁定①从「记忆中心」移出——4 条 2026-09 便签
-             不是「查看」需求，但写入口必须留；日常看记忆只去「记忆中心」。 -->
-        <section class="page sys" id="page-settings-memory">
-            <div class="sp">
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>记忆存储（本机旧层）</h3>
-                        <div class="sp-r"><span class="hint">L1 便签（可写）· L2 近 30 天压缩 · L3 长期画像（草稿→确认制）</span></div>
-                    </div>
-                    <div class="sp-bd">
-                        <div class="mx-stale" id="mxStale">本机旧层实测口径加载中…</div>
-                        <div class="sp-grid">
-                            <div class="sp-cell">
-                                <div class="sp-sub">L1 · 本地便签</div>
-                                <div class="hint" style="margin-bottom:8px">hub 自有 SQLite 的演示/手写便签（当前为陈旧样例），
-                                <b>主记忆检索请去「记忆中心」</b>。</div>
-                                <div class="toolbar">
-                                    <input id="memQ" placeholder="搜索…" onkeydown="if(event.key==='Enter')loadMemories()">
-                                    <select id="memCat" onchange="loadMemories()" style="max-width:130px">
-                                        <option value="">全部分类</option><option>fact</option><option>decision</option><option>constraint</option><option>preference</option>
-                                    </select>
-                                </div>
-                                <div class="sp-bd box flush tscroll" style="border-top:1px solid var(--divider)"><div class="sp-list" id="memList"></div></div>
-                                <div class="toolbar" style="margin-top:10px">
-                                    <input id="memNew" placeholder="新增一条记忆…">
-                                    <button class="btn sm" onclick="addMemory()" title="写入本机 SQLite">添加</button>
-                                </div>
-                                <div class="hint">L2 由 L1 经 LLM 压缩生成；manual 手写区自动流程永不触碰（与上游语义一致）。</div>
-                            </div>
-                            <div class="sp-cell">
-                                <div class="sp-sub">L2 · 近 30 天工作记忆</div>
-                                <textarea class="doc" id="l2content" readonly placeholder="（尚无生成内容）"></textarea>
-                                <div class="hint" style="margin:6px 0">手写补充 manual：</div>
-                                <textarea class="doc" id="l2manual" style="min-height:80px"></textarea>
-                                <div class="toolbar" style="margin-top:8px;margin-bottom:0">
-                                    <button class="btn sm" onclick="saveDoc('l2')">保存</button>
-                                    <button class="btn ghost sm" onclick="rebuildL2()" title="调云端 LLM 压缩近 30 天 L1，约 10–60s">用 LLM 重建（约 10–60s）</button>
-                                </div>
-                            </div>
-                            <div class="sp-cell">
-                                <div class="sp-sub">L3 · 长期 Profile</div>
-                                <textarea class="doc" id="l3content" placeholder="人工确认后写入的稳定长期偏好（草稿→确认制）"></textarea>
-                                <div class="hint" style="margin:6px 0">手写补充 manual：</div>
-                                <textarea class="doc" id="l3manual" style="min-height:80px"></textarea>
-                                <div class="toolbar" style="margin-top:8px;margin-bottom:0">
-                                    <button class="btn sm" onclick="saveDoc('l3')">保存</button>
-                                    <button class="btn ghost sm" onclick="previewCtx()">注入预览</button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
         <section class="page sys" id="page-settings-logs">
             <div class="sp">
                 <div class="sp-card">
@@ -2884,6 +2924,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=0135bfce"></script>
+    <script src="/static/hub.js?v=2b1b6939"></script>
 </body>
 </html>

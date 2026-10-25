@@ -104,16 +104,27 @@ class TestP1BackgroundTaskRefs(unittest.TestCase):
 
 
 class TestP1MemoryLikeEscape(unittest.TestCase):
-    """P1-9：LIKE 的 % / _ 未转义 ⇒ 查询词与结果无关。"""
+    """P1-9：LIKE 的 % / _ 未转义 ⇒ 查询词与结果无关。
 
-    def test_has_escape_clause_and_escapes_wildcards(self):
+    v0.13.160 起转义逻辑抽成 `_like_pat()`（两个入口共用，避免再次分叉），断言跟着
+    落点走：① 转义本体在 helper 里；② **两个**调用点都真的走 helper 且 SQL 带 ESCAPE。
+    """
+
+    def test_helper_escapes_wildcards(self):
         s = _src("memory.py")
-        seg = s.split("def _local_l1", 1)[1].split("\ndef ", 1)[0]
-        self.assertIn("ESCAPE", seg, "必须显式声明 ESCAPE 字符")
+        seg = s.split("def _like_pat", 1)[1].split("\ndef ", 1)[0]
         self.assertRegex(seg, r'replace\("%"', "% 未转义")
         self.assertRegex(seg, r'replace\("_"', "_ 未转义")
         # 反斜杠本身必须先转义，否则 50\% 会被二次转义吃掉
         self.assertIn('q.replace("\\\\", "\\\\\\\\")', seg, "反斜杠未先转义")
+
+    def test_both_entrypoints_use_helper_with_escape_clause(self):
+        s = _src("memory.py")
+        for fn in ("def _local_l1", "async def list_l1"):
+            self.assertIn(fn, s)
+            seg = s.split(fn, 1)[1].split("\ndef ", 1)[0].split("\nasync def ", 1)[0]
+            self.assertIn("_like_pat(", seg, f"{fn} 未走 _like_pat()（口径会再次分叉）")
+            self.assertIn("ESCAPE", seg, f"{fn} 必须显式声明 ESCAPE 字符")
 
 
 class TestP1ResourcesReCache(unittest.TestCase):

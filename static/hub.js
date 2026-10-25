@@ -231,7 +231,7 @@ var ghLoaded = false;
 var setModelPageLoaded = false;
 var setGithubPageLoaded = false;
 var setLogsPageLoaded = false;   // v0.13.46：日志页（进页才拉，日志量级大不能每次导航都拉）
-var setMemPageLoaded = false;    // v0.13.126：设置·记忆存储（L1/L2/L3 已移出记忆中心）
+/* 2026-10-25：setMemPageLoaded 随「设置 · 记忆存储」页一并删除（并入记忆中心折叠块）。 */
 var resLoaded = false;           // v0.13.52：资源监控页懒加载标志（同 lpLoaded/ghLoaded 纪律）
 /* v0.13.32 TDZ 补丁（真事故驱动的修复）：06 顶层 go(lsGet('hub.page')) 在
    09/10 分片顶层初始化**之前**就能调到 loadLocalProjects()/loadGithubRepos()
@@ -500,7 +500,8 @@ function go(page) {
   if (page === 'settings-model' && !setModelPageLoaded) { setModelPageLoaded = true; settingsModelsLoad(); }
   if (page === 'settings-github' && !setGithubPageLoaded) { setGithubPageLoaded = true; settingsGithubLoad(); }
   if (page === 'settings-logs' && !setLogsPageLoaded) { setLogsPageLoaded = true; settingsLogsLoad(); }
-  if (page === 'settings-memory' && !setMemPageLoaded) { setMemPageLoaded = true; loadMemories(); loadDoc('l2'); loadDoc('l3'); }
+  /* 2026-10-25：settings-memory 页已并入「记忆中心」（#page-memory 的本机旧层折叠块），
+     不再有独立的进页钩子 —— 折叠块展开时才由 mxLegacyToggle() 拉 L1/L2/L3。 */
   if (page === 'ports' && !portsLoaded) { portsLoaded = true; loadPorts(); }
   if (page === 'telemetry') loadTelemetry();
   if (page === 'resources' && !resLoaded) { resLoaded = true; loadResources(); }
@@ -944,7 +945,7 @@ const SET_WRITE_MODE = {
 };
 /* 设置页 id —— 委托与 go() 懒加载共用这一份清单，别再各处写字面量 */
 const SET_PAGE_IDS = ['page-settings-model', 'page-settings-github', 'page-settings-token',
-                      'page-settings-memory', 'page-settings-logs'];
+                      'page-settings-logs'];   // 2026-10-25：settings-memory 并入记忆中心
 
 async function settingsModelsLoad(force) {
   const box = $('setAgentList');
@@ -4134,45 +4135,158 @@ function memFedClear() {
   /* 注意：CENTER_HEALTH 故意不清（见函数头注释③） */
 }
 
+/* ── 本机旧层（L1/L2/L3）· 2026-10-25 由「设置 · 记忆存储」并回本页 ─────────
+ * 三条与本页其它块的关系，改代码前先读：
+ * ① **在役记忆 ≠ 本机旧层**：上面 vitals / 联邦检索读的是 TDAI + 各 agent 源，
+ *    这里是 hub 自有 SQLite 的档案层。两者互不同步，谁也不许把对方的数字当自己。
+ * ② **CENTER_HEALTH 只归 memVitals 写**：旧版 loadMemories 成功就写 'ok'、失败写
+ *    'err'，于是展开/收起这个折叠块会把侧栏「记忆中心」健康点从探针结论洗成
+ *    「上一次列表查询是否成功」—— 体检态与操作态混成一个信号。已删除。
+ * ③ **展开才加载**：判据「进页 1 个请求、首屏 0 按钮」不变（P1 / PT-20261018-08）。
+ */
+let MX_L1_ROWS = [];        // 最近一次列表回包（编辑/取消只重渲染，不重发查询）
+let MX_L1_TOTAL = null;     // 全库条数（与 count 区分：count 受 limit 截断）
+let MX_L1_LIMIT = 50;
+let MX_EDIT_ID = 0;         // 正在编辑的 L1 id（0 = 无）
+const MX_CAT_LABEL = { fact: 'fact · 事实', decision: 'decision · 决策',
+                       constraint: 'constraint · 约束', preference: 'preference · 偏好' };
+
+function mxLegacyToggle(el) {
+  if (!el.open || el.dataset.loaded) return;
+  el.dataset.loaded = '1';
+  loadMemories(); loadDoc('l2'); loadDoc('l3');
+}
+function mxCatOptions(cur) {
+  return Object.keys(MX_CAT_LABEL).map(k =>
+    '<option value="' + k + '"' + (k === cur ? ' selected' : '') + '>' +
+    MX_CAT_LABEL[k] + '</option>').join('');
+}
+function memRowHtml(m) {
+  const id = Number(m.id);
+  const cat = String(m.category || 'fact');
+  const catLabel = MX_CAT_LABEL[cat] || cat;
+  if (id === MX_EDIT_ID) {
+    return '<div class="mem-item" data-edit="1">' +
+      '<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:6px">' +
+      '<textarea class="doc" id="memEditBox" style="min-height:64px">' + escapeHtml(m.content || '') + '</textarea>' +
+      '<div class="toolbar" style="margin:0">' +
+      '<select id="memEditCat" aria-label="分类" style="max-width:120px">' + mxCatOptions(cat) + '</select>' +
+      '<button class="btn sm" onclick="saveMemoryEdit(' + id + ', this)">保存</button>' +
+      '<button class="btn ghost sm" onclick="cancelMemoryEdit()">取消</button>' +
+      '</div></div></div>';
+  }
+  return '<div class="mem-item">' +
+    '<span class="tag ' + escapeHtml(cat) + '" style="align-self:flex-start">' + escapeHtml(catLabel) + '</span>' +
+    '<p>' + escapeHtml(m.content || '') +
+    '<br><span class="hint">' + escapeHtml(m.source || '') + ' · ' +
+    escapeHtml(String(m.created_at || '').slice(0, 10)) + '</span></p>' +
+    '<div style="display:flex;gap:4px;flex:none">' +
+    '<button class="btn ghost sm" onclick="startMemoryEdit(' + id + ')" title="编辑这条便签">' + ico('pencil') + '</button>' +
+    '<button class="btn sm danger" onclick="delMemory(' + id + ')" title="删除这条便签（软删）">' + ico('x') + '</button>' +
+    '</div></div>';
+}
+function renderMemRows() {
+  const box = $('memList');
+  if (!box) return;
+  const filtered = ($('memQ') && $('memQ').value.trim()) || ($('memCat') && $('memCat').value);
+  box.innerHTML = MX_L1_ROWS.map(memRowHtml).join('') ||
+    '<div class="hint">' + (filtered ? '当前筛选零命中。' : '空空如也。可手动添加，或由指挥官/外部 Hook 写入。') + '</div>';
+}
+function startMemoryEdit(id) {
+  MX_EDIT_ID = Number(id);
+  renderMemRows();
+  const t = $('memEditBox');
+  if (t) { t.focus(); t.setSelectionRange(t.value.length, t.value.length); }
+}
+function cancelMemoryEdit() { MX_EDIT_ID = 0; renderMemRows(); }
+async function saveMemoryEdit(id, btn) {
+  const box = $('memEditBox'), cat = $('memEditCat');
+  const content = box ? box.value.trim() : '';
+  if (!content) { toast('内容不能为空', 'err'); return; }
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  try {
+    await api('/api/memory/l1/' + id, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: content, category: cat ? cat.value : 'fact' })
+    });
+    MX_EDIT_ID = 0;
+    toast('已更新', 'ok');
+    loadMemories();
+  } catch (e) {
+    toast(e.message, 'err');
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
 async function loadMemories() {
   const p = new URLSearchParams();
-  if ($('memQ').value.trim()) p.set('q', $('memQ').value.trim());
-  if ($('memCat').value) p.set('category', $('memCat').value);
+  const q = ($('memQ') && $('memQ').value.trim()) || '';
+  if (q) p.set('q', q);
+  if ($('memCat') && $('memCat').value) p.set('category', $('memCat').value);
   boxBusy('memList');
   try {
     const d = await api('/api/memory/l1?' + p.toString());
-    CENTER_HEALTH.memory = 'ok';
-    $('memList').innerHTML = (d.memories || []).map(m =>
-      '<div class="mem-item"><span class="tag ' + m.category + '" style="align-self:flex-start">' + m.category + '</span>' +
-      '<p>' + escapeHtml(m.content) + '<br><span class="hint">' + escapeHtml(m.source || '') + ' · ' + (m.created_at || '').slice(0, 10) + '</span></p>' +
-      '<button class="btn sm danger" onclick="delMemory(' + m.id + ')">' + ico('x') + '</button></div>').join('') ||
-      '<div class="hint">空空如也。可手动添加，或由指挥官/外部 Hook 写入。</div>';
-    memStaleNote(d.memories || []);   // C：用实测口径刷新「本机旧层档案」陈旧标识
+    MX_L1_ROWS = d.memories || [];
+    MX_L1_TOTAL = (typeof d.total === 'number') ? d.total : MX_L1_ROWS.length;
+    MX_L1_LIMIT = d.limit || 50;
+    MX_EDIT_ID = 0;
+    const hint = $('memListHint');
+    if (hint) {
+      const shown = MX_L1_ROWS.length;
+      hint.textContent = (q || p.get('category'))
+        ? '筛选结果 ' + shown + ' 条 / 全库 ' + MX_L1_TOTAL + ' 条'
+        : '共 ' + MX_L1_TOTAL + ' 条' +
+          (d.truncated ? '，当前显示最近 ' + shown + ' 条（上限 ' + MX_L1_LIMIT + '）' : '');
+    }
+    renderMemRows();
+    memStaleNote();   // C：用实测口径刷新「本机旧层档案」陈旧标识
   } catch (e) {
-    CENTER_HEALTH.memory = 'err';
     boxFail('memList', e, 'loadMemories');   // 失败上屏（不再只 toast——列表区停旧内容=分不清挂没挂）
   }
 }
-async function addMemory() {
-  const c = $('memNew').value.trim();
-  if (!c) return;
+async function addMemory(btn) {
+  const el = $('memNew');
+  const c = el ? el.value.trim() : '';
+  if (!c) { toast('内容不能为空', 'err'); return; }
+  const cat = ($('memNewCat') && $('memNewCat').value) || 'fact';
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '写入中…'; }
   try {
-    await api('/api/memory/l1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: c, category: 'fact', source: 'web' }) });
-    $('memNew').value = ''; toast('已保存', 'ok'); loadMemories();
+    await api('/api/memory/l1', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: c, category: cat, source: 'web' }) });
+    el.value = ''; toast('已保存', 'ok'); loadMemories();
   } catch (e) { toast(e.message, 'err'); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = old; } }
 }
 async function delMemory(id) {
-  if (!confirm('删除这条记忆？')) return;
+  if (!confirm('删除这条记忆？（软删，可在审计里追溯）')) return;
   try { await api('/api/memory/l1/' + id, { method: 'DELETE' }); loadMemories(); } catch (e) { toast(e.message, 'err'); }
 }
 
 async function loadDoc(lv) {
+  const st = $(lv + 'Status');
   try {
     const d = await api('/api/memory/' + lv);
     $(lv + 'content').value = d.content || '';
     $(lv + 'manual').value = d.manual || '';
-    memStaleNote(window.__mxL1Rows || []);   // C：L2/L3 也参与陈旧口径
-  } catch (e) { /* 首次为空 */ }
+    if (st) {
+      st.style.color = '';
+      st.textContent = d.updated_at
+        ? '更新于 ' + String(d.updated_at).slice(0, 16).replace('T', ' ') +
+          ' · 正文 ' + ((d.content || '').length) + ' 字符 · manual ' + ((d.manual || '').length) + ' 字符'
+        : '尚无内容（保存后会显示更新时间）';
+    }
+    memStaleNote();   // C：L2/L3 也参与陈旧口径
+  } catch (e) {
+    // 旧版这里 `catch (e) { /* 首次为空 */ }` —— 读失败与"首次为空"长得一模一样，
+    // 用户对着空 textarea 点保存就会把服务端内容覆盖成空串。失败必须上屏。
+    if (st) { st.style.color = 'var(--danger)'; st.textContent = '读取失败：' + e.message; }
+  }
+}
+function mxDocDirty(lv) {
+  const st = $(lv + 'Status');
+  if (st) { st.style.color = 'var(--warn)'; st.textContent = '有未保存的修改'; }
 }
 
 /* ═══ 记忆中心 P1（PT-20261018-08）：只读 /api/memory/vitals ═══════════════
@@ -4321,25 +4435,31 @@ function mvRender(d) {
 }
 
 /* 工具区展开才拉注入包 ⇒ 首屏请求数保持 1（判据①）。
-   L1/L2/L3 已按裁定①移到「设置 · 记忆存储」，此页不再碰旧层数据。 */
+   本机旧层的 L1/L2/L3 在下方独立折叠块里，这里只管在役记忆的注入包；
+   两个块各自展开各自加载，互不当对方的副作用。 */
 function mvToolsToggle(el) {
   if (!el.open || el.dataset.loaded) return;
   el.dataset.loaded = '1';
   memCtxPreview();
 }
 
-async function memCtxPreview() {
+async function memCtxPreview(q) {
   const body = $('ctxBody');
   if (!body) return;
+  const qq = typeof q === 'string' ? q.trim() : '';
+  const url = '/api/memory/context?sources=' + encodeURIComponent(MX_FAST_SOURCES) +
+    (qq ? '&q=' + encodeURIComponent(qq) : '');
+  body.textContent = qq ? '按「' + qq + '」预检注入包…' : '读取注入包…';
   try {
-    const d = await api('/api/memory/context?sources=' + encodeURIComponent(MX_FAST_SOURCES));
+    const d = await api(url);
     /* 实测形状（2026-10-03）：fed.sources 是**数字**不是数组（对数字取 .length ⇒ undefined）；
        总字符数在顶层 d.chars，fed.chars 只是联邦段贡献量（可为 0）；
        d.context 才是正文（无 d.text）。三处都按实测取，不猜。 */
     const fed = d.fed || {};
     const nSrc = (typeof fed.sources === 'number') ? fed.sources : ((fed.sources || []).length || 0);
     const failed = fed.failed || [];
-    const head = '快路请求 ' + MX_FAST_SOURCES.split(',').length + ' 路 · 命中 ' + nSrc + ' 路 · 注入 ' +
+    const head = (qq ? '查询「' + qq + '」· ' : '无查询词（注入最近记忆）· ') +
+      '快路请求 ' + MX_FAST_SOURCES.split(',').length + ' 路 · 命中 ' + nSrc + ' 路 · 注入 ' +
       (typeof d.chars === 'number' ? d.chars : '—') + ' 字符（联邦段 ' +
       (typeof fed.chars === 'number' ? fed.chars : '—') + '）· 墙钟 ' + mxMs(d.took_ms) +
       (failed.length ? '\n注意：本次失败 ' + failed.length + ' 路 → ' + failed.join(', ') : '') +
@@ -4351,39 +4471,66 @@ async function memCtxPreview() {
   }
 }
 
-/* C：陈旧标识 —— 只报实测到的量，绝不写「已更新」这类无据结论 */
-function memStaleNote(rows) {
-  window.__mxL1Rows = rows;
+/* C：陈旧标识 —— 只报实测到的量，绝不写「已更新」这类无据结论
+ * 条数用 **total（全库）** 而不是当前列表条数：带筛选时列表是子集，
+ * 拿子集冒充全库会让"L1 共 2 条"这种假结论出现在页面上（旧版就是这么写的）。 */
+function memStaleNote() {
   const el = $('mxStale'); if (!el) return;
   const l2 = ($('l2content') && $('l2content').value || '').trim();
   const l3 = ($('l3content') && $('l3content').value || '').trim();
-  const dates = rows.map(r => String(r.created_at || '').slice(0, 10)).filter(Boolean).sort();
+  const dates = MX_L1_ROWS.map(r => String(r.created_at || '').slice(0, 10)).filter(Boolean).sort();
   const newest = dates.length ? dates[dates.length - 1] : '无';
   el.classList.toggle('is-stale', dates.length > 0 && dates[dates.length - 1] < MX_STALE_BEFORE);
-  el.innerHTML = '本机旧层与在役联邦记忆是<b>两套独立存储</b>：L1 共 <b>' + rows.length + '</b> 条，最新 <b>' +
-    newest + '</b>；L2 自动内容 <b>' + l2.length + '</b> 字符（仅由 L1 压缩而来）；L3 人工确认区 <b>' + l3.length +
-    '</b> 字符。在役记忆以上方「源健康 / 注入上下文包 / 联邦检索」为准 —— 点「用 LLM 重建」只会重新压缩这 ' +
-    rows.length + ' 条旧便签，不会更新此处显示。';
+  const total = (MX_L1_TOTAL === null) ? '—' : MX_L1_TOTAL;
+  const shown = MX_L1_ROWS.length;
+  el.innerHTML = '本机旧层与在役联邦记忆是<b>两套独立存储</b>：L1 共 <b>' + total + '</b> 条' +
+    (shown !== Number(total) ? '（当前列表 ' + shown + ' 条）' : '') + '，最新 <b>' + newest + '</b>；' +
+    'L2 自动内容 <b>' + l2.length + '</b> 字符（仅由 L1 压缩而来）；L3 人工确认区 <b>' + l3.length +
+    '</b> 字符。上方「源健康 / 注入上下文包 / 联邦检索」展示的是在役记忆，不受这里改动影响；' +
+    '「用 LLM 重建」只压缩<b>近 30 天</b>的 L1，不会更新此处显示。';
 }
 const MX_STALE_BEFORE = '2026-09-07';
-async function saveDoc(lv) {
+async function saveDoc(lv, btn) {
   const body = {};
   if (lv === 'l3') body.content = $(lv + 'content').value;
   body.manual = $(lv + 'manual').value;
-  try { await api('/api/memory/' + lv, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); toast(lv.toUpperCase() + ' 已保存', 'ok'); }
-  catch (e) { toast(e.message, 'err'); }
-}
-async function rebuildL2() {
-  toast('LLM 压缩近30天 L1 → L2，请稍候…');
-  try { const d = await api('/api/memory/l2/rebuild', { method: 'POST' }); toast('L2 重建完成（' + d.items + ' 条，LLM: ' + d.llm + '）', 'ok'); loadDoc('l2'); }
-  catch (e) { toast(e.message, 'err'); }
-}
-async function previewCtx() {
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
   try {
-    const d = await api('/api/memory/context?q=' + encodeURIComponent($('memQ').value.trim()));
-    $('ctxPanel').style.display = '';   // v0.13.40：卡是 flex 列，显隐只切 inline 值，别写死 block
-    $('ctxBody').textContent = d.context || '（空）';
+    await api('/api/memory/' + lv, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    toast(lv.toUpperCase() + ' 已保存', 'ok');
+    await loadDoc(lv);            // 回读 updated_at/字符数，避免状态行停在上一次
   } catch (e) { toast(e.message, 'err'); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = old; } }
+}
+async function rebuildL2(btn) {
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '重建中…（10–60s）'; }
+  toast('LLM 压缩近 30 天 L1 → L2，请稍候…');
+  try {
+    const d = await api('/api/memory/l2/rebuild', { method: 'POST' });
+    toast('L2 重建完成（' + d.items + ' 条，LLM: ' + d.llm + '）', 'ok');
+    await loadDoc('l2');
+  } catch (e) {
+    toast('重建失败：' + e.message, 'err');
+  } finally { if (btn) { btn.disabled = false; btn.textContent = old; } }
+}
+/* 注入预览：旧版写的是 `$('ctxPanel').style.display`，而 ctxPanel 早在 v0.13.40
+   改版时就不存在了 ⇒ 点「注入预览」必抛 TypeError（按钮看起来是死的）。
+   现在复用「工具与维护」里真正的注入包面板：先把它展开，再把按当前 L1 过滤词
+   预检的结果写进 #ctxBody。`dataset.loaded` 先置 1 是为了让 toggle 回调不要
+   再发一次无查询词的请求覆盖这次结果（两者会互相盖）。 */
+async function previewCtx(btn) {
+  const q = ($('memQ') && $('memQ').value.trim()) || '';
+  const box = $('mvToolsBox');
+  if (box) { box.dataset.loaded = '1'; if (!box.open) box.open = true; }
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '预检中…'; }
+  try {
+    await memCtxPreview(q);
+    const body = $('ctxBody');
+    if (body && body.scrollIntoView) body.scrollIntoView({ block: 'nearest' });
+  } finally { if (btn) { btn.disabled = false; btn.textContent = old; } }
 }
 
 
@@ -6557,13 +6704,14 @@ const MODE_LABEL = { embed: '嵌入', term: '终端', chat: '对话', detail: '�
 /* v0.13.43 设置子菜单：与系统页同形态（data-sys → go(page) ⇒ 正文出页、窄屏自动收侧栏），
    只是单独成组挂在「系统」之下；这三项此前是右侧抽屉里的三个 tab。 */
 const SET_PAGES = [['settings-model', '模型', 'cpu'], ['settings-github', 'GitHub', 'globe'],
-                   ['settings-memory', '记忆存储', 'database'],
                    ['settings-token', '终端口令', 'terminal'], ['settings-logs', '日志', 'activity']];
+/* 2026-10-25：「设置 · 记忆存储」并入「系统 · 记忆中心」（同一份本机记忆的读写入口
+   不该分居两个菜单，设置组也不该为 4 条便签单占一个一级项）。 */
 const PAGE_LABELS = { classroom: '总览', chat: '统一对话', tasks: '协同', jobs: '定时',
                       memory: '记忆中心', skills: '技能中心', kb: '知识库', mcp: '工具', ports: '端口', telemetry: '遥测',
                       assets: '资产', localprojects: '本机项目', github: 'GitHub 项目', resources: '资源监控',
                       'settings-model': '设置 · 模型', 'settings-github': '设置 · GitHub',
-                      'settings-token': '设置 · 终端口令', 'settings-memory': '设置 · 记忆存储',
+                      'settings-token': '设置 · 终端口令',
                       'settings-logs': '设置 · 日志' };
 const navOpenStored = lsGet('hub.nav.open');
 let navOpen = navOpenStored === null ? 'agents' : navOpenStored;   // 首屏默认展开 AGENTS；'' = 用户主动全收起

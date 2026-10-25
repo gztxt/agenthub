@@ -57,16 +57,25 @@ FED_FAST_SOURCES = "local,tdai,claude_mem,workbuddy_memory,claude_projects,exper
 FED_ITEM_CHARS = 160
 
 
+def _like_pat(q: str) -> str:
+    """LIKE 模式转义（含 ESCAPE 子句所需的显式反斜杠）。
+
+    LIKE 的通配符 % / _ 未转义时，用户查 "50%" 会匹配全表、查 "a_b" 会命中 "axb"
+    ⇒ 检索结果与查询词无关。转义 + 显式 ESCAPE 是唯一正解（加 \ 本身也需转义）。
+    抽成函数是因为**两个入口**都要用：`_local_l1`（联邦检索）与 `list_l1`
+    （本机旧层列表）。2026-10-25 合并记忆存储页时发现后者一直没转义 —— 同一个库
+    两个端点给两种答案，正是 09-24 复核在 `_local_l1` 上修过一次的同款分叉。
+    """
+    return "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
 def _local_l1(q: str, limit: int) -> list:
     # `layer='L1'` 不是多余过滤：`list_l1` 一直按 layer='L1' 取数，而检索路此前把全表混入
     # 融合，两个端点口径不一致（同一个库给两个答案）。09-24 独立复核发现。
-    # LIKE 的通配符 % / _ 未转义时，用户查 "50%" 会匹配全表、查 "a_b" 会命中 "axb"
-    # ⇒ 检索结果与查询词无关。转义 + 显式 ESCAPE 是唯一正解（加 \ 本身也需转义）。
-    pat = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
     rows = db.query(
         "SELECT * FROM memories WHERE status='active' AND layer='L1' "
         "AND content LIKE ? ESCAPE '\\' "
-        "ORDER BY updated_at DESC LIMIT ?", (pat, limit))
+        "ORDER BY updated_at DESC LIMIT ?", (_like_pat(q), limit))
     for r in rows:
         r["source"] = "local"
     return rows
@@ -265,6 +274,12 @@ class MemoryIn(BaseModel):
     session_id: Optional[str] = None
 
 
+class MemoryPatchIn(BaseModel):
+    """L1 局部更新：两个字段都可省，但都省等于空操作 ⇒ 端点回 400（见 update_l1）。"""
+    content: Optional[str] = Field(default=None, min_length=1, max_length=8000)
+    category: Optional[str] = None
+
+
 class MemoryBatchIn(BaseModel):
     items: list[MemoryIn] = Field(max_length=200)
 
@@ -283,18 +298,60 @@ def _now() -> str:
 @router.get("/api/memory/l1")
 async def list_l1(category: Optional[str] = None, q: Optional[str] = None,
                   limit: int = Query(default=50, le=200)):
-    sql = "SELECT * FROM memories WHERE status='active' AND layer='L1'"
+    """本机 L1 便签列表（记忆中心「本机旧层」块的读入口）。
+
+    `total` 与 `count` 分开：`count` 是本次回包条数（受 limit 截断），`total` 是
+    同一筛选条件下的全量条数。旧版只回 count，前端无法区分「只有 4 条」与
+    「有 80 条但只显示 50 条」—— 截断静默，用户以为记忆丢了。
+    """
+    where = "FROM memories WHERE status='active' AND layer='L1'"
     params: list = []
     if category:
-        sql += " AND category=?"
+        where += " AND category=?"
         params.append(category)
     if q:
-        sql += " AND content LIKE ?"
-        params.append(f"%{q}%")
-    sql += " ORDER BY id DESC LIMIT ?"
-    params.append(limit)
-    rows = db.query(sql, tuple(params))
-    return {"memories": rows, "count": len(rows)}
+        where += " AND content LIKE ? ESCAPE '\\'"
+        params.append(_like_pat(q))
+    total = (db.query("SELECT COUNT(*) AS n " + where, tuple(params)) or [{"n": 0}])[0]["n"]
+    rows = db.query("SELECT * " + where + " ORDER BY id DESC LIMIT ?",
+                    tuple(params + [limit]))
+    return {"memories": rows, "count": len(rows), "total": int(total or 0),
+            "limit": limit, "truncated": int(total or 0) > len(rows)}
+
+
+@router.put("/api/memory/l1/{mid}")
+async def update_l1(mid: int, body: "MemoryPatchIn", request: Request):
+    """改一条 L1 便签（正文 / 分类）。
+
+    为什么补这个端点：合并前只有「新增 + 删除」，改一个字要删了重加 —— 而删除是
+    软删（status='deleted'），旧条目留在表里、新条目换 id，审计链上看起来像
+    「删了 1 条又加了 1 条」，追不到是同一条被修过。
+    """
+    if body.content is None and body.category is None:
+        raise HTTPException(400, "content 与 category 至少给一个")
+    if body.category is not None and body.category not in CATEGORIES:
+        raise HTTPException(400, f"category must be one of {sorted(CATEGORIES)}")
+    sets, params = [], []
+    if body.content is not None:
+        sets.append("content=?")
+        params.append(body.content)
+    if body.category is not None:
+        sets.append("category=?")
+        params.append(body.category)
+    sets.append("updated_at=?")
+    params.append(_now())
+    n = db.execute(
+        "UPDATE memories SET " + ",".join(sets) +
+        " WHERE id=? AND status='active' AND layer='L1'", tuple(params + [mid]))
+    if not n:
+        raise HTTPException(404, "memory not found")
+    # 与 create/delete 同口径：只记字段与字符数，不记正文（正文已在 memories 表）
+    db.log_asset_event("memory_l1", str(mid), "update", writeauth.actor_of(request),
+                       {"touched": [k for k in ("content", "category")
+                                    if getattr(body, k) is not None],
+                        "chars": len(body.content) if body.content is not None else None,
+                        "category": body.category})
+    return {"status": "updated", "id": mid}
 
 
 @router.post("/api/memory/l1")

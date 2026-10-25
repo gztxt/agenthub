@@ -104,7 +104,24 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.158"
+VERSION = "0.13.160"
+#   v0.13.160：记忆存储并入记忆中心（2026-10-25 用户令「设置菜单中的记忆存储模块合并融合
+#   到系统的记忆中心；优化完善操作逻辑、完善功能、优化前端 UI」）。
+#   ① **入口合并**：「设置 · 记忆存储」整页移入 #page-memory 的「本机旧层」折叠块，侧栏
+#      设置组不再有这一项。读（vitals/联邦检索）与写（L1/L2/L3）同页，折叠态保住
+#      P1 判据「进页 1 个请求、首屏 0 个按钮」，展开时才拉旧层数据。
+#   ② **操作逻辑**：L1 支持就地编辑（新增 `PUT /api/memory/l1/{id}`；旧版改一个字要删了
+#      重加，而删除是软删 ⇒ 审计上看起来像"删一条又加一条"）；新增时可选分类（旧版写死
+#      fact）；列表回 `total/truncated`（旧版只回 count，50 条上限截断得静默）；保存/重建
+#      按钮带进行中态；`loadMemories` 不再写 CENTER_HEALTH（体检态只归 memVitals，旧写法
+#      会把侧栏健康点洗成"上次列表查询是否成功"）。
+#   ③ **顺带修掉的既有缺陷**（都是"改到这里才发现，且都能确定性复现"）：
+#      · `list_l1` 的 LIKE 未转义 —— 查 `50%` 命中全表，与 `_local_l1` 的转义口径分叉；
+#      · `previewCtx` 引用早已删除的 `#ctxPanel` —— 点「注入预览」必抛 TypeError；
+#      · `loadDoc` 的 catch 注释是「首次为空」—— 读失败与真空看起来一样，用户保存就覆盖；
+#      · `.sp-card` 是 display:flex，Chrome 对这类 `<details>` 不再隐藏闭合内容 ⇒
+#        「折叠」只是视觉错觉（实测 mvToolsBox 的 16 个按钮仍有布局、可聚焦）。
+#   闸门：`tests/test_center_ui_l0.py::TestMemoryLegacyMerged`、`scripts/build_hubjs.sh`。
 #   v0.13.158：dsh 原生界面「起不来」（2026-10-25 用户报「之前都能正常启动运行，现在故障」）。
 #   两层根因，都在 v0.13.153 引入的 `ui-status` 上：
 #   ① **判活漏了绑定地址**：dsh 拒绝通配地址，只 `--host 192.168.5.102`，其 3080

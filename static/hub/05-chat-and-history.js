@@ -201,13 +201,14 @@ const MODE_LABEL = { embed: '嵌入', term: '终端', chat: '对话', detail: '�
 /* v0.13.43 设置子菜单：与系统页同形态（data-sys → go(page) ⇒ 正文出页、窄屏自动收侧栏），
    只是单独成组挂在「系统」之下；这三项此前是右侧抽屉里的三个 tab。 */
 const SET_PAGES = [['settings-model', '模型', 'cpu'], ['settings-github', 'GitHub', 'globe'],
-                   ['settings-memory', '记忆存储', 'database'],
                    ['settings-token', '终端口令', 'terminal'], ['settings-logs', '日志', 'activity']];
+/* 2026-10-25：「设置 · 记忆存储」并入「系统 · 记忆中心」（同一份本机记忆的读写入口
+   不该分居两个菜单，设置组也不该为 4 条便签单占一个一级项）。 */
 const PAGE_LABELS = { classroom: '总览', chat: '统一对话', tasks: '协同', jobs: '定时',
                       memory: '记忆中心', skills: '技能中心', kb: '知识库', mcp: '工具', ports: '端口', telemetry: '遥测',
                       assets: '资产', localprojects: '本机项目', github: 'GitHub 项目', resources: '资源监控',
                       'settings-model': '设置 · 模型', 'settings-github': '设置 · GitHub',
-                      'settings-token': '设置 · 终端口令', 'settings-memory': '设置 · 记忆存储',
+                      'settings-token': '设置 · 终端口令',
                       'settings-logs': '设置 · 日志' };
 const navOpenStored = lsGet('hub.nav.open');
 let navOpen = navOpenStored === null ? 'agents' : navOpenStored;   // 首屏默认展开 AGENTS；'' = 用户主动全收起

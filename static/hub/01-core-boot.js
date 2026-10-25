@@ -231,7 +231,7 @@ var ghLoaded = false;
 var setModelPageLoaded = false;
 var setGithubPageLoaded = false;
 var setLogsPageLoaded = false;   // v0.13.46：日志页（进页才拉，日志量级大不能每次导航都拉）
-var setMemPageLoaded = false;    // v0.13.126：设置·记忆存储（L1/L2/L3 已移出记忆中心）
+/* 2026-10-25：setMemPageLoaded 随「设置 · 记忆存储」页一并删除（并入记忆中心折叠块）。 */
 var resLoaded = false;           // v0.13.52：资源监控页懒加载标志（同 lpLoaded/ghLoaded 纪律）
 /* v0.13.32 TDZ 补丁（真事故驱动的修复）：06 顶层 go(lsGet('hub.page')) 在
    09/10 分片顶层初始化**之前**就能调到 loadLocalProjects()/loadGithubRepos()
@@ -500,7 +500,8 @@ function go(page) {
   if (page === 'settings-model' && !setModelPageLoaded) { setModelPageLoaded = true; settingsModelsLoad(); }
   if (page === 'settings-github' && !setGithubPageLoaded) { setGithubPageLoaded = true; settingsGithubLoad(); }
   if (page === 'settings-logs' && !setLogsPageLoaded) { setLogsPageLoaded = true; settingsLogsLoad(); }
-  if (page === 'settings-memory' && !setMemPageLoaded) { setMemPageLoaded = true; loadMemories(); loadDoc('l2'); loadDoc('l3'); }
+  /* 2026-10-25：settings-memory 页已并入「记忆中心」（#page-memory 的本机旧层折叠块），
+     不再有独立的进页钩子 —— 折叠块展开时才由 mxLegacyToggle() 拉 L1/L2/L3。 */
   if (page === 'ports' && !portsLoaded) { portsLoaded = true; loadPorts(); }
   if (page === 'telemetry') loadTelemetry();
   if (page === 'resources' && !resLoaded) { resLoaded = true; loadResources(); }
@@ -944,7 +945,7 @@ const SET_WRITE_MODE = {
 };
 /* 设置页 id —— 委托与 go() 懒加载共用这一份清单，别再各处写字面量 */
 const SET_PAGE_IDS = ['page-settings-model', 'page-settings-github', 'page-settings-token',
-                      'page-settings-memory', 'page-settings-logs'];
+                      'page-settings-logs'];   // 2026-10-25：settings-memory 并入记忆中心
 
 async function settingsModelsLoad(force) {
   const box = $('setAgentList');

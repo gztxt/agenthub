@@ -212,11 +212,71 @@ class TestCenterUi(unittest.TestCase):
             self.assertIn(cls, self.html, f"{cls} CSS 变体缺失")
 
     def test_kb_results_have_path_row(self):
-        """kb 结果卡必须有路径行（溯源）+ 下钻按钮（workspace/archived 命中四根时）。"""
+        """kb 结果卡必须有路径行（溯源）+ 下钻按钮（kbBrowse）。"""
         m = re.search(r"async function kbSearch\(.*?\n\}", self.w04, re.S)
         body = m.group(0)
         self.assertIn("r.path", body, "路径行必须取 r.path")
         self.assertIn("kbBrowse(", body, "下钻按钮必须接 kbBrowse()")
+
+
+class TestMemoryLegacyMerged(unittest.TestCase):
+    """L0：本机旧层（L1/L2/L3）已并入记忆中心（2026-10-25 用户令）。
+
+    合并的判据不是「文案写了合并」，而是四条可证伪的东西：
+      ① 写入口真的在同一页（DOM id 在 #page-memory 段落内）；
+      ② 独立设置页真的没了（防止两份 DOM 并存 → 一份没人维护）；
+      ③ 展开才加载（首屏 1 请求 / 0 按钮的 P1 判据不许被合并破坏）；
+      ④ 列表加载不许再写 CENTER_HEALTH（体检态只归 memVitals）。
+    """
+
+    def setUp(self):
+        self.html = (_REPO / "templates" / "index.html").read_text(encoding="utf-8")
+        self.w04 = (_REPO / "static" / "hub" / "04-terminal-ws.js").read_text(encoding="utf-8")
+        self.w01 = (_REPO / "static" / "hub" / "01-core-boot.js").read_text(encoding="utf-8")
+        self.w05 = (_REPO / "static" / "hub" / "05-chat-and-history.js").read_text(encoding="utf-8")
+        start = self.html.index('id="page-memory"')
+        end = self.html.index("</section>", start)
+        self.mem_page = self.html[start:end]
+
+    def test_legacy_controls_live_in_memory_page(self):
+        for dom_id in ("mxLegacyBox", "memQ", "memList", "memNew", "memNewCat",
+                       "l2content", "l2manual", "l3content", "l3manual", "mxStale"):
+            self.assertIn('id="%s"' % dom_id, self.mem_page,
+                          f"#{dom_id} 不在记忆中心页内 ⇒ 写入口又分居两处")
+
+    def test_settings_memory_page_removed(self):
+        self.assertNotIn('id="page-settings-memory"', self.html,
+                         "设置 · 记忆存储页仍在 ⇒ 两份 DOM 并存")
+        self.assertNotIn("settings-memory", self.w05,
+                         "侧栏仍在渲染设置 · 记忆存储")
+        self.assertNotIn("page-settings-memory", self.w01,
+                         "go() 仍挂 settings-memory 的进页钩子")
+
+    def test_legacy_block_is_lazy(self):
+        """进页不得拉旧层：只在 mxLegacyToggle 里加载。"""
+        m = re.search(r"function mxLegacyToggle\(.*?\n\}", self.w04, re.S)
+        self.assertTrue(m, "mxLegacyToggle 缺失 ⇒ 折叠块展开后不加载")
+        body = m.group(0)
+        for ref in ("loadMemories()", "loadDoc('l2')", "loadDoc('l3')"):
+            self.assertIn(ref, body, "折叠块展开必须拉 %s" % ref)
+        go_mem = re.search(r"page === 'memory'.*?\n", self.w01)
+        self.assertTrue(go_mem)
+        self.assertNotIn("loadMemories", go_mem.group(0),
+                         "go('memory') 不得自动加载本机旧层（首屏 1 请求）")
+
+    def test_load_memories_does_not_write_center_health(self):
+        m = re.search(r"async function loadMemories\(.*?\n\}", self.w04, re.S)
+        self.assertTrue(m)
+        code = re.sub(r"/\*.*?\*/", "", m.group(0), flags=re.S)
+        self.assertNotIn("CENTER_HEALTH", code,
+                         "loadMemories 不许写真假健康点（探针结论只归 memVitals）")
+
+    def test_update_endpoint_wired(self):
+        """编辑功能必须真的落到 PUT /api/memory/l1/{id}（不是只画了个铅笔图标）。"""
+        self.assertIn("async function saveMemoryEdit(", self.w04)
+        m = re.search(r"async function saveMemoryEdit\(.*?\n\}", self.w04, re.S)
+        self.assertIn("method: 'PUT'", m.group(0))
+        self.assertIn("/api/memory/l1/' + id", m.group(0))
 
 
 if __name__ == "__main__":

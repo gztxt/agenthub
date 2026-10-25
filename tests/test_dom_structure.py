@@ -52,7 +52,7 @@ PAGE_IDS = [
     "page-resources", "page-memory", "page-tasks", "page-jobs", "page-mcp",
     "page-ports", "page-telemetry", "page-skills", "page-kb", "page-assets",
     "page-settings-model", "page-settings-github", "page-settings-token",
-    "page-settings-memory", "page-settings-logs",
+    "page-settings-logs",
 ]
 
 

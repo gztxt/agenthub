@@ -98,8 +98,8 @@ class NavIconCollisionTest(unittest.TestCase):
         """备案：全表撞车列出来（不判红，但必须被记录下来，不能悄悄存在）。
 
         当前已知且**有意保留**的：遥测/日志 同为 activity（不同组，不相邻）；
-        GitHub 项目/设置-GitHub 同为 globe（同理）；记忆中心/设置-记忆存储 同为
-        database（同一领域的主页与其设置页，不同组、不同屏，不构成并排误读）。
+        GitHub 项目/设置-GitHub 同为 globe（同理）。2026-10-25「设置 · 记忆存储」
+        并入记忆中心后，database 这一对撞车已消灭（白名单保留只为不误报历史形态）。
         这条测试的价值是：将来新增项若撞车，会在这里显形，由 owner 决定要不要处理。
         """
         from collections import Counter

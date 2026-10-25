@@ -238,7 +238,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.158"
+    #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
+    #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
+    CURRENT_VERSION = "0.13.160"
+    VERSION_ROOT_CAUSES["0.13.160"] = (
+        "设置 · 记忆存储", "PUT /api/memory/l1", "total", "truncated",
+        "CENTER_HEALTH", "#ctxPanel", "display:flex", "折叠",
+    )
 
     #: v0.13.158：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「dsh 拒绝通配地址、只 bind 192.168.5.102」「_ui_port_open 只探回环 ⇒

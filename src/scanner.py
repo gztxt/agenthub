@@ -169,7 +169,6 @@ def scan_cli_installed() -> List[Dict]:
             installed.append({"name": cli, "path": p})
     return installed
 
-
 def add_boundary(prod: Dict) -> Dict:
     """给扫描产物挂 P0-5 的纳管边界四维（原地补字段并返回同一对象）。
 
@@ -178,6 +177,20 @@ def add_boundary(prod: Dict) -> Dict:
     import boundary
     prod["boundary"] = boundary.observed_product()
     return prod
+
+
+def scan_cli_discovered(db=None, register: bool = False) -> Dict:
+    """枚举式安装态扫描（v0.13.155）：不依赖名单，发现名单外新装的 CLI Agent。
+
+    与 `scan_cli_installed()` 的区别是**判据**：那个按 `CLI_WATCHLIST` 逐个 `which`，
+    只回答「表里的东西在不在」；本函数枚举安装目录，回答「这台机器上装了什么」。
+    用户令（2026-10-25）的落点就在这条 —— 装了新 agent 不该再回代码里加白名单。
+    """
+    import agentscan
+    try:
+        return agentscan.scan(db=db, register=register)
+    except Exception as e:  # noqa: BLE001  扫描失败只降级成空结果，不能毁掉整轮
+        return {"found": [], "added": [], "unknown": [], "dirs": 0, "error": f"{type(e).__name__}: {e}"}
 
 
 def run_scan(auto_register: bool = False, db=None) -> Dict:
@@ -195,6 +208,14 @@ def run_scan(auto_register: bool = False, db=None) -> Dict:
         add_boundary(c)
     result = {"found": deduped, "added": [], "skipped_existing": [],
               "cli_installed": scan_cli_installed()}
+    # 安装态扫描（v0.13.155）：auto_register 时直接登记，回包多两条口径 ——
+    # cli_registered = 本轮新登记/更新的 agent id；cli_unknown = 有可执行文件但
+    # 没有判据说是 Agent 的清单（只上报，绝不入菜单）。
+    disc = scan_cli_discovered(db=db, register=bool(auto_register and db is not None))
+    result["cli_discovered"] = [{"name": i["cli"], "path": i["command"],
+                                 "id": i["id"]} for i in disc.get("found", [])]
+    result["cli_registered"] = disc.get("added", [])
+    result["cli_unknown"] = disc.get("unknown", [])[:30]
     if auto_register and db is not None:
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()

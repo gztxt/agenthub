@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 
 import aiohttp
 
+import agentscan
 import boundary
 import profiles
 import vitals
@@ -119,6 +120,10 @@ class AgentDiscovery:
 
     async def discover_all(self) -> List[AgentInfo]:
         procs, units, dockers = await asyncio.to_thread(self._probe_env)
+        # 安装态扫描（v0.13.155）：10 分钟 TTL，命中即落库，下一行就能读到。
+        # 放线程里是为了让 `--version` 这类子进程不卡事件循环；失败静默 ——
+        # 扫描挂了不影响既有画像出卡。
+        await asyncio.to_thread(self._scan_refresh)
         # 第一遍：全部状态（供跨画像联动，如 claude 的 Web UI 宿主 cloudcli）
         prof_list = profiles.all_profiles()
         status_map: Dict[str, str] = {}
@@ -190,7 +195,7 @@ class AgentDiscovery:
                 bool(p.get("panel") and re.search(r"18083|12700", str(p.get("panel")))),
                 description=p.get("desc", ""),
                 config_path=self._find_config_path(p["id"]),
-                last_seen=self._iso_now(), builtin=True,
+                last_seen=self._iso_now(), builtin=not p.get("dynamic_scan"),
                 working_dir=(p.get("terminal") or {}).get("cwd"),
                 entries=entries,
                 usable=vv["usable"], verdict=vv["verdict"],
@@ -222,11 +227,21 @@ class AgentDiscovery:
                 profiles.running_systemd_units(),
                 profiles.docker_states())
 
+    def _scan_refresh(self) -> None:
+        """安装态扫描的节流入口（10 分钟一次）。异常一律吞掉：扫描是增强，
+        不是出卡前提 —— 它挂了不该让 `/api/agents` 500。"""
+        try:
+            agentscan.scan_if_due(self.db)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _custom_agents(self) -> List[Dict]:
         if not self.db:
             return []
         try:
-            rows = self.db.query("SELECT * FROM custom_agents ORDER BY created_at")
+            rows = self.db.query(
+                "SELECT * FROM custom_agents "
+                "WHERE COALESCE(kind,'service')<>'agent' ORDER BY created_at")
         except Exception:  # noqa: BLE001
             return []
         # 与画像去重：端口命中任一画像 port/panel 端口的 scan 项跳过

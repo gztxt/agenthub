@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS custom_agents (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     type TEXT NOT NULL DEFAULT 'custom',
+    kind TEXT DEFAULT 'service',     -- agent|service：agent 才出「终端/对话」入口（v0.13.155）
     command TEXT,
     args TEXT,                       -- JSON array
     working_dir TEXT,
@@ -237,6 +238,10 @@ def init_db(path: Path) -> None:
         _add_column_if_missing(_conn, "telemetry_events", "duration_ms", "INTEGER")
         _add_column_if_missing(_conn, "telemetry_events", "status", "TEXT")
         _add_column_if_missing(_conn, "custom_agents", "source", "TEXT DEFAULT 'manual'")
+        # v0.13.155（2026-10-25 用户令「装了新 agent 不许再手动补」）：扫描登记的
+        # CLI Agent 与 docker/systemd 扫码项共用一张表，靠 kind 分流。
+        # 存量行一律 service（它们原本就按 service 渲染），不回填不改语义。
+        _add_column_if_missing(_conn, "custom_agents", "kind", "TEXT DEFAULT 'service'")
         # P0-4（v0.13.105）：asset_audit 研判三列。存量库交给 ALTER 幂等补，
         # **不动任何既有行**（旧行的 verdict 保持 NULL = 未研判，这是诚实的，
         # 比回填一个 confirmed 强 —— 回填等于替历史编证据）。

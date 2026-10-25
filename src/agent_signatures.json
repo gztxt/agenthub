@@ -1,0 +1,30 @@
+[
+  {
+    "id": "zcode",
+    "display": "ZCode",
+    "names": ["zcode"],
+    "verify_re": "(?i)\\bzcode\\b",
+    "desc": "Z.AI 编码 Agent（源码构建，无官方 npm 包）；CLI + 本机 Web UI，模型走自定义 provider"
+  },
+  {
+    "id": "crush",
+    "display": "Crush",
+    "names": ["crush"],
+    "verify_re": "(?i)\\bcrush\\b",
+    "desc": "Charm 出品终端编码 Agent（自动发现，未实测应答）"
+  },
+  {
+    "id": "amp",
+    "display": "Amp",
+    "names": ["amp"],
+    "verify_re": "(?i)\\bamp\\b.{0,80}(agent|cli)",
+    "desc": "Sourcegraph Amp 编码 Agent（自动发现，未实测应答）"
+  },
+  {
+    "id": "goose",
+    "display": "Goose",
+    "names": ["goose"],
+    "verify_re": "(?i)goose.{0,80}(agent|ai|subcommand|session)",
+    "desc": "本地编码 Agent（自动发现，未实测应答）"
+  }
+]

@@ -1031,9 +1031,18 @@ def _registry_agent_ids() -> List[str]:
     （可设置，或带实测理由的置灰）。动态发现自带 30s 缓存，成本可接受。"""
     try:
         import profiles
-        return [p["id"] for p in profiles.all_profiles() if p.get("kind") == "agent"]
+        ids = [p["id"] for p in profiles.all_profiles() if p.get("kind") == "agent"]
     except Exception:  # noqa: BLE001 —— 注册表读取失败不能把设置页搞垮
-        return []
+        ids = []
+    # v0.13.155：扫描登记进 custom_agents 的 agent 也要出现（否则「菜单有了、
+    # 模型页没有」—— 这正是 2026-10-25 用户报障的第二半）。
+    try:
+        rows = db.query("SELECT id FROM custom_agents "
+                        "WHERE COALESCE(kind,'service')='agent'")
+        ids += [str(r["id"]) for r in rows]
+    except Exception:  # noqa: BLE001
+        pass
+    return list(dict.fromkeys(ids))
 
 
 def agent_state(agent_id: str) -> dict:

@@ -648,11 +648,28 @@ def invalidate_cli_cache() -> None:
     _cli_dyn_cache.clear()
 
 
+def _registry_profiles() -> List[dict]:
+    """扫描登记进 `custom_agents(kind='agent')` 的条目 → 画像（v0.13.155）。
+
+    **为什么并进 all_profiles 而不是让 discovery 自己拼接**：菜单、模型设置、体检、
+    发布清单、资源页全部消费 `all_profiles()`。注册表并在这里，新装的 agent 才算
+    「所有模块一起对齐」（用户 2026-10-25 口径）；并在下游任何一处都是漏一处。
+    形状的唯一实现是 `agentscan.registered_profiles()`，这里只做去重与异常兜底。
+    """
+    try:
+        import agentscan
+        items = agentscan.registered_profiles()
+    except Exception:  # noqa: BLE001  DB 未就绪/注册表坏了都不能把菜单搞空
+        return []
+    seen = {str(p.get("id")) for p in PROFILES} | set(CLI_ALIASES)
+    return [p for p in items if p.get("id") not in seen]
+
+
 def all_profiles(include_blocked: bool = False) -> List[dict]:
     """include_blocked=True：被判定为假卡的候补也要给出。
     体检必须覆盖它们，否则「今日判为未安装」会被永久固化：被摘掉的卡再也不会被
     重新探测，用户装好了也不会自动回来。菜单（discovery）走带门版的默认值。"""
-    out = list(PROFILES) + _dynamic_cli_agents(gate=not include_blocked)
+    out = list(PROFILES) + _dynamic_cli_agents(gate=not include_blocked) + _registry_profiles()
     if os.getenv("TERM_ALLOW_BASH", "1") != "0":
         out.append(SHELL_PROFILE)
     return [_enrich(p) for p in out]

@@ -129,7 +129,7 @@ def _fts_rank(con: sqlite3.Connection, fts: str, match: str,
            "bm25(%s) AS bm FROM %s f "
            "JOIN chunk c ON c.cid = f.rowid "
            "JOIN obj o ON o.oid = c.oid JOIN src s ON s.src_id = o.src_id "
-           "WHERE %s MATCH ? " % (fts, fts, fts))
+           "WHERE %s MATCH ? AND c.oid = o.oid " % (fts, fts, fts))
     args: List[Any] = [match]
     if want_domains:
         sql += "AND o.domain IN (%s) " % ",".join("?" * len(want_domains))

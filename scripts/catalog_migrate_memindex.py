@@ -100,8 +100,10 @@ def migrate_memindex(memindex_path: str, catalog_path: str,
     # 打开两个数据库
     memcon = sqlite3.connect(memindex_path)
     memcon.row_factory = sqlite3.Row
-    catstore = cat_store.CatalogStore(catalog_path)
+    catstore = cat_store.CatalogWriter(catalog_path)
+    catstore.open()
     catcon = catstore._require()
+    catcon.execute("PRAGMA busy_timeout = 60000")
 
     # 检查 memindex 表结构
     tables = [r[0] for r in memcon.execute(
@@ -114,10 +116,9 @@ def migrate_memindex(memindex_path: str, catalog_path: str,
         src_id="memindex.fed_proj",
         domain="doc",
         kind="file",
-        authority=0,  # memindex 是投影，不是权威
         uri=f"file://{memindex_path}:fed_proj",
+        adapter="migrate",
         scan_mode="full",
-        lag_warn_s=0,
         enabled=1,
     )
 
@@ -233,8 +234,10 @@ def run_reconciliation(catalog_path: str, memindex_path: str) -> Dict[str, Any]:
     print(f"[recon] 查询数: {len(RECON_QUERIES)}")
 
     # 打开 catalog
-    catstore = cat_store.CatalogStore(catalog_path)
+    catstore = cat_store.CatalogWriter(catalog_path)
+    catstore.open()
     catcon = catstore._require()
+    catcon.execute("PRAGMA busy_timeout = 60000")
 
     # 打开 memindex 的 FTS
     memcon = sqlite3.connect(memindex_path)

@@ -21,6 +21,8 @@ WorkingDirectory=/fs/1000/ftp/技术文档/agenthub
 # 改为由 run_dualstack.py 自建 V6ONLY=0 的双栈 socket 并把 fd 交给 uvicorn，v4/v6 同一监听。
 # 端口真值仍只在 .env（PORT），unit 不留第二份。
 ExecStart=/fs/1000/ftp/技术文档/agenthub/venv/bin/python3 /fs/1000/ftp/技术文档/agenthub/run_dualstack.py
+# 2026-10-25：启用统一编目（PT-20261025-12）。catalog.db 为只读投影，不引入单点风险。
+Environment=HUB_CATALOG=1
 # 注意：.env 由应用自身加载（src/config.py 覆盖模式），此处不重复注入，避免双份真值
 Restart=always
 RestartSec=3

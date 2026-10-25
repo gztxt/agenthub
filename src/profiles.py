@@ -439,6 +439,23 @@ PROFILES: List[dict] = [
      "desc": "OpenCode：TUI 终端按需拉起；原生 Web 界面 :4096 由卡片「启动原生界面」"
              "按需起（`opencode web --hostname 0.0.0.0 --port 4096`，不长驻）"},
 
+    # ZCode（2026-10-25 用户报「有原生界面就要修复」）：官方 CLI 发行包自带
+    # `zcode --web`（Web client + Agent 同一命令）；本机 `~/.local/bin/zcode` 是
+    # **源码 CLI 入口** dist/zcode.cjs，不含 --web 分流 ⇒ 扫描判 tui_only，卡片只剩终端。
+    # 修复用源码仓自带的官方 runner 按发行包布局搭出 dist/zcode-web（web/server/agent
+    # 三个链接 + 官方 bin/zcode.mjs），实测 `--web` 起服务后 / 返 200 text/html。
+    # 静态卡压掉扫描登记的同 id 卡（_registry_profiles 的 seen 含 PROFILES id）。
+    # detect 双路：runner（UI 起）与 zcode.cjs（TUI 会话）都算 running。
+    {"id": "zcode", "name": "ZCode", "kind": "agent",
+     "detect": {"proc": [r"zcode-web/bin/zcode\.mjs", r"zcode\.cjs"]},
+     "cli": "zcode", "port": 3030, "ui": "http://127.0.0.1:3030",
+     "terminal": {"cmd": "/home/gztxt/.local/bin/zcode",
+                  "cwd": "/fs/1000/ftp/技术文档"},
+     "chat": None,
+     "desc": "ZCode（Z.AI 编码 Agent）：原生 Web 界面 :3030 由卡片「启动原生界面」"
+             "按需起（官方 `zcode --web` 等价入口，源码仓 runner，不长驻）；"
+             "TUI 终端同命令按需拉起；模型走自定义 provider"},
+
     # ── Gateways（非 Agent，仅快捷方式）──────────────────────
     {"id": "ccr", "name": "CCR Gateway", "kind": "gateway",
      "detect": {"proc": [r"claude-code-router", r"ccr( |$)", "MainThread"]},

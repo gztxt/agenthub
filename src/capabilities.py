@@ -64,6 +64,22 @@ UI_RECIPES: Dict[str, dict] = {
                                    "--port", "4096"],
                            "cwd": "/fs/1000/ftp/技术文档", "port": 4096},
                  "label": "OpenCode"},
+    # zcode（2026-10-25 实测 + 官方文档核对）：官方 CLI **发行包**自带 Web 模式
+    # `zcode --web`（README：Web client + Agent 一个命令，默认 127.0.0.1、自动选端口）。
+    # ⚠ 本机 `~/.local/bin/zcode` 指向源码 CLI 入口 dist/zcode.cjs，**不含 --web 分流**
+    # （官方 README 明写该入口不经发行包分流）⇒ `--help` 无 web/serve，扫描只能判
+    # tui_only。修复不是自造界面：用源码仓自带的官方 runner
+    # （scripts/zcode-distribution/runner.mjs）按发行包布局搭出 dist/zcode-web，
+    # 实测 / 返 200 text/html。绑 0.0.0.0 与 opencode 同口径；**必须 --no-token**，
+    # 否则非回环地址会自动生成 token，嵌页 401。
+    "zcode": {"url": "http://127.0.0.1:3030", "port": 3030,
+              "start": {"cmd": ["node",
+                                "/fs/1000/ftp/技术文档/zcode/dist/zcode-web/bin/zcode.mjs",
+                                "--web", "--host", "0.0.0.0", "--port", "3030",
+                                "--workspace", "/fs/1000/ftp/技术文档",
+                                "--no-open", "--no-token"],
+                        "cwd": "/fs/1000/ftp/技术文档", "port": 3030},
+              "label": "ZCode"},
     # codebuddy：常驻豁免（WorkBuddy 小程序通道依赖它），所以有界面但**没有起法**。
     # resident=True 是给闸门的判据：常驻项允许 start 为空。
     "codebuddy": {"url": "http://127.0.0.1:35431", "port": 35431,

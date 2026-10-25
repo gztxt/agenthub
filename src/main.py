@@ -104,7 +104,15 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.156"
+VERSION = "0.13.157"
+#   v0.13.157：v0.13.156 上线后复验，线上点 reasonix「启动原生界面」报 `binary_not_found`。
+#   根因：ui-start 只补 `~/.npm-global/bin`、`~/.local/bin`，而 reasonix 装在 **nvm** 的
+#   `~/.nvm/versions/node/*/bin`；影子实例从交互 shell 起、PATH 自带 nvm 所以一直是绿的
+#   （**开发环境假绿**），只有 systemd 拉起的生产进程才暴露。修法：`_ui_spawn_env()`
+#   把 `profiles.extra_path_dirs()`（nvm 新版优先 + bun）**前置**进子进程 PATH，再补
+#   用户级 bin，与 `term.child_env()` 同口径；`exe` 用 `profiles.which()` 解析成绝对路径。
+#   必须前置而非追加：这类 CLI 的 shebang 是 `#!/usr/bin/env node`，子进程自己还要再
+#   找 node，PATH 尾部同样会拿系统 node 跑 Node22+ 的 bundle。
 #   v0.13.156：**能力矩阵**（2026-10-25 用户第三次报同一事：「新增 agent 后没有原生界面
 #   按钮，设置项也不同步；每次都是发现问题再修」）。机制上不是某处写错，而是空白的
 #   `ui 写死 None`：`agentscan.registered_profiles()` 与 `profiles._dynamic_cli_agents()`

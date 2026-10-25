@@ -184,6 +184,22 @@ def _ui_port_open(port) -> bool:
     return vitals_mod.port_open(port) or vitals_mod.port_open(port, "::1")
 
 
+def _ui_spawn_env() -> Dict[str, str]:
+    """原生界面子进程的 env。
+
+    PATH 必须**前置** `profiles.extra_path_dirs()`（nvm 各版本 bin + bun），
+    再补 npm-global/local：hub 由 systemd 拉起，自身 PATH 里这三处都没有；
+    而这些 CLI 的 shebang 是 `#!/usr/bin/env node|bun`，子进程自己还要再找解释器，
+    追加在尾部同样会拿系统 node 跑 Node22+ 的 bundle。与 `term.child_env()` 同口径。
+    """
+    env = dict(os.environ)
+    extra = profiles_mod.extra_path_dirs() + [
+        str(Path.home() / ".npm-global" / "bin"),
+        str(Path.home() / ".local" / "bin"), "/usr/local/bin"]
+    env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
+    return env
+
+
 @router.get("/api/agents/{agent_id}/ui-status")
 async def agent_ui_status(agent_id: str):
     """原生界面就绪态（**服务端**判定）。
@@ -229,18 +245,17 @@ async def start_agent_ui(agent_id: str):
     if not cmd:
         raise HTTPException(500, {"error": "bad_ui_start_spec", "agent_id": agent_id})
     # ★ hub 由 systemd --user 拉起，PATH 只有 /usr/{local/,}{s,}bin:/bin（实测
-    #   /proc/<hub>/environ）⇒ `opencode` 这类装在 ~/.npm-global/bin 的工具
-    #   在服务进程里**找不到**，Popen 直接 FileNotFoundError。补用户级 bin 目录：
-    #   只影响本端点的子进程，不改全局 env。
-    env = dict(os.environ)
-    extra_bins = [str(Path.home() / ".npm-global" / "bin"),
-                  str(Path.home() / ".local" / "bin"), "/usr/local/bin"]
-    path_env = ":".join([env.get("PATH", "")] + extra_bins)
-    exe = shutil.which(cmd[0], path=path_env)
+    #   /proc/<hub>/environ）⇒ 装在 ~/.npm-global/bin、~/.local/bin、nvm 里的工具
+    #   在服务进程里**找不到**，Popen 直接 FileNotFoundError。
+    #
+    #   2026-10-25 实测补第二处：reasonix 只存在于 `~/.nvm/versions/node/*/bin`，
+    #   旧实现只补 npm-global/local ⇒ 线上点「启动原生界面」报 binary_not_found，
+    #   而影子实例（从交互 shell 起、PATH 自带 nvm）是绿的 —— 典型的「开发环境假绿」。
+    env = _ui_spawn_env()
+    exe = profiles_mod.which(cmd[0]) or shutil.which(cmd[0], path=env["PATH"])
     if not exe:
         raise HTTPException(500, {"error": "binary_not_found", "agent_id": agent_id,
-                                  "binary": cmd[0], "path": path_env[-200:]})
-    env["PATH"] = path_env
+                                  "binary": cmd[0], "path": env["PATH"][-240:]})
     cmd = [exe] + list(cmd[1:])
     log_dir = Path(config.log_dir) / "ui-start"
     try:

@@ -238,11 +238,15 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.156"
+    CURRENT_VERSION = "0.13.157"
 
     #: v0.13.156：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「能力矩阵」「ui 写死 None 的两条注册路径」「UI_RECIPES/UI_TUI_ONLY」
     #: 「missing_recipe 三态」「探测失败不许当没有界面」「caps 口径版本」
+    VERSION_ROOT_CAUSES["0.13.157"] = (
+        "binary_not_found", "nvm", "开发环境假绿", "_ui_spawn_env", "前置",
+        "#!/usr/bin/env node", "extra_path_dirs",
+    )
     VERSION_ROOT_CAUSES["0.13.156"] = (
         "能力矩阵", "ui 写死 None", "UI_RECIPES", "UI_TUI_ONLY",
         "missing_recipe", "探测失败", "caps",

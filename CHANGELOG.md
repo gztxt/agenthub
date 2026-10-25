@@ -1,3 +1,25 @@
+## v0.13.157 — 拉起原生界面的子进程 PATH 前置 nvm/bun（reasonix 线上点不动）
+
+> 来源：v0.13.156 上线后复验，线上点 reasonix「启动原生界面」报
+> `binary_not_found`（`path` 里只有 systemd 的
+> `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` + npm-global + local）。
+
+- 根因：v0.13.156 的 `ui-start` 只补 `~/.npm-global/bin`、`~/.local/bin`，
+  而 reasonix 是 npm 全局包装在 **nvm** 的 `~/.nvm/versions/node/v24.18.0/bin`。
+  影子实例是从交互 shell 起的、PATH 自带 nvm ⇒ 一直是绿的（**开发环境假绿**），
+  只有 systemd 拉起的生产进程才暴露。
+- 修法：`api_agents._ui_spawn_env()` 抽出，PATH **前置**
+  `profiles.extra_path_dirs()`（nvm 各版本 bin 新版优先 + bun）再补用户级 bin，
+  与 `term.child_env()` 同口径；`exe` 走 `profiles.which()` 解析成绝对路径再 Popen。
+  必须前置而非追加：这类 CLI 的 shebang 是 `#!/usr/bin/env node`，子进程自己
+  还要再找 node，PATH 尾部同样会拿系统 node 跑 Node22+ 的 bundle。
+- 闸门：`tests/test_registry_capability_matrix.py::TestSpawnEnv` 两例——
+  `extra_path_dirs()` 必须在 PATH 最前、三处用户 bin 必须在列。
+- 取证：影子 :3207 用 `env -i PATH=<systemd 默认>` 起（复刻生产环境），
+  `POST /api/agents/reasonix/ui-start` → `{"status":"started","pid":…}` →
+  `:8787` 200 `text/html` → `/api/agents` 出 `embed/open` 且 URL 带
+  `#token=…`、`start` 为 true。
+
 ## v0.13.156 — 能力矩阵：新增 agent 不再「又没有原生界面按钮」
 
 > 来源：2026-10-25 用户第三次报同一件事——「zcode 是否有 web ui 原生界面？如果有为什么

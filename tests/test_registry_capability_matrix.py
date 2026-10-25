@@ -169,5 +169,30 @@ class TestTokenUrl(unittest.TestCase):
                          "取不到 token 时必须降级成裸地址（打开 401），不许编一个")
 
 
+class TestSpawnEnv(unittest.TestCase):
+    """拉起原生界面时的 PATH 口径（2026-10-25 线上 reasonix binary_not_found 回归）。"""
+
+    def test_nvm_bins_are_prepended(self):
+        import os
+        import api_agents
+        import profiles
+        env = api_agents._ui_spawn_env()
+        extra = profiles.extra_path_dirs()
+        self.assertTrue(extra, "本机应能解析出 nvm/bun 目录；解析不到说明 extra_path_dirs 坏了")
+        parts = env["PATH"].split(os.pathsep)
+        self.assertEqual(parts[:len(extra)], extra,
+                         "extra_path_dirs 必须**前置**：这些 CLI 的 shebang 是 "
+                         "#!/usr/bin/env node，node 不在 PATH 就会拿系统 node 跑 Node22+ 包")
+
+    def test_dev_and_user_bins_present(self):
+        import os
+        from pathlib import Path
+        import api_agents
+        parts = api_agents._ui_spawn_env()["PATH"].split(os.pathsep)
+        for d in (str(Path.home() / ".npm-global" / "bin"),
+                  str(Path.home() / ".local" / "bin"), "/usr/local/bin"):
+            self.assertIn(d, parts, f"拉起原生界面的 PATH 缺 {d}")
+
+
 if __name__ == "__main__":
     unittest.main()

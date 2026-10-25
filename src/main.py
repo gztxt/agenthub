@@ -104,7 +104,14 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.153"
+VERSION = "0.13.154"
+#   v0.13.154：拉起成功后嵌页仍是**空白**（2026-10-25 复验 v0.13.153 时实测）。
+#   根因：`applyChatMode()` 只在 `dataset.src != url` 时才给 iframe 赋值，而启动前后
+#   URL 没变 ⇒ 启动前那次「连接被拒」的失败导航一直留在框里；探活与标题都显示活的，
+#   用户看到的还是一片白。修法：就绪分支里显式 `f.src = f.src` 重载一次
+#   （dsh 那种 token 随启动变化的场景，applyChatMode 已换新 URL，多刷一次无害）。
+#   同批：`cmd` 式拉起不回收子进程，停掉 opencode 后进程表留 [defunct] 僵尸
+#   （hub 自己不退、没人 wait）⇒ 加 daemon 线程 wait + 关日志句柄。
 #   v0.13.153：**点「原生界面」没有拉起，只弹「目标界面未响应 / 启动失败：缺少凭据」**
 #   （2026-10-25 用户报「有 web ui 原生界面的 agent 点击原生界面应该是正常拉起并运行，
 #   但是现在点击原生界面没有拉起 显示错误」）。三层根因：

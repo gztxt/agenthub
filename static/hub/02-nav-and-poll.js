@@ -309,6 +309,11 @@ async function startNativeUI(btn) {
       if (await _uiReady(a, e, e.url)) {
         await loadAgents();          // dsh 的 token/端口可能随启动变化，先取新 entries
         applyChatMode();             // 重建 embed（含新 URL）并重新探活
+        /* 同一 URL 不会被重新导航（applyChatMode 只在 dataset.src != url 时才赋值），
+           而**启动前那一次失败加载的嵌页会一直白在那儿**——2026-10-25 实测 qwenpaw
+           自动拉起成功后 iframe 仍是空白，必须显式重载一次。 */
+        const f = $('embedFrame');
+        if (f) f.src = f.src;
         return;
       }
     }

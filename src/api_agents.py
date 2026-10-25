@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -253,6 +254,18 @@ async def start_agent_ui(agent_id: str):
         raise HTTPException(500, {"error": "spawn_failed", "agent_id": agent_id,
                                   "detail": "%s: %s" % (type(e).__name__, str(e)[:160])})
     print(f"[ui-start] {agent_id} pid={proc.pid} cmd={' '.join(cmd)}", flush=True)
+    # 回收僵尸：hub 自己不退，子进程退出后没人 wait ⇒ 进程表里留一个 [defunct]
+    # （2026-10-25 实测 opencode 停掉后 808366 变 Zs，父进程仍是 hub）。线程里 wait
+    # 顺便关掉日志句柄；daemon 线程不拖住 hub 退出。
+    def _reap() -> None:
+        try:
+            proc.wait()
+        finally:
+            try:
+                logf.close()
+            except Exception:  # noqa: BLE001
+                pass
+    threading.Thread(target=_reap, daemon=True, name=f"ui-start-reap-{agent_id}").start()
     return {"status": "started", "kind": "cmd", "pid": proc.pid, "agent_id": agent_id}
 
 

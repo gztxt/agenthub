@@ -1,3 +1,30 @@
+## v0.13.154 — 拉起成功后嵌页空白：URL 没变时 iframe 不会重新导航
+
+> 来源：2026-10-25 复验 v0.13.153（停 qwenpaw → 点原生界面）时实测：服务确实被拉起
+> （`ui-status.ready=true`、`systemctl is-active qwenpaw` 为 active），但框里**一片白**。
+
+### 根因
+
+`applyChatMode()` 只在 `dataset.src != url` 时才给 `#embedFrame` 赋值，而启动前后 URL
+完全一样（qwenpaw 的 UI 固定走 hub 注入代理 :3103）⇒ iframe **保留着启动前那次
+「连接被拒」的失败导航**，永远不会自己重试。判活、标题、服务状态全绿，用户看到的
+仍是空白。上一版只在覆盖层可见时才有重试入口（`embedRefresh()`），自动拉起这条路径
+绕过它。
+
+### 修法
+
+就绪分支里显式 `f.src = f.src` 重载一次。dsh 那种「token 随启动变化」的场景
+`applyChatMode()` 已换上新 URL，多刷一次无害。
+
+同批修：`cmd` 式拉起（opencode）用 `Popen(start_new_session=True)` 起进程却没回收，
+停掉之后进程表留下 `[defunct]` 僵尸（hub 常驻不退、没人 `wait`，实测停掉 808366 后
+变 `Zs`）。加 daemon 线程 `proc.wait()` 并在返回后关日志句柄。
+
+### 验证
+
+清空 `.embed-dead` 后截图：qwenpaw 页面正文正常渲染（不再白板）。版本闸门
+`VERSION_ROOT_CAUSES["0.13.154"]` 钉住这五句。
+
 ## v0.13.153 — 点「原生界面」即拉起：凭据只问一次、判活用服务端双栈
 
 > 来源：2026-10-25 用户报「有 web ui 原生界面的 agent 点击原生界面应该是正常

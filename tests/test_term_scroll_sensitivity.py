@@ -238,7 +238,15 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.153"
+    CURRENT_VERSION = "0.13.154"
+
+    #: v0.13.154：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「拉起成功后嵌页仍空白」「applyChatMode 只在 URL 变时才赋值」
+    #: 「启动前失败导航留在框里」「显式 f.src = f.src 重载」。
+    VERSION_ROOT_CAUSES["0.13.154"] = (
+        "嵌页仍是", "空白", "applyChatMode", "dataset.src", "f.src = f.src",
+        "defunct", "僵尸",
+    )
 
     #: v0.13.153：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「点击原生界面没有拉起」「ui-status 双栈判活」「termHeaders 二次弹窗」

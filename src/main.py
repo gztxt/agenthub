@@ -104,7 +104,20 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.157"
+VERSION = "0.13.158"
+#   v0.13.158：dsh 原生界面「起不来」（2026-10-25 用户报「之前都能正常启动运行，现在故障」）。
+#   两层根因，都在 v0.13.153 引入的 `ui-status` 上：
+#   ① **判活漏了绑定地址**：dsh 拒绝通配地址，只 `--host 192.168.5.102`，其 3080
+#      **不监听回环**；而 `_ui_port_open()` 只探 `127.0.0.1`/`::1` ⇒ 恒 `ready=false`
+#      ⇒ 覆盖层永远盖着「原生界面未运行，正在拉起…」，服务其实 active、iframe 也是 200。
+#      修法：`_ui_targets()` 先按**画像/配方声明的绑定地址**探，再回环双栈兜底；配方里的
+#      `probe` 优先于 `url`（qwenpaw 的 url 是 hub 注入代理 :3103，拿它判活永远假活）。
+#   ② **token 缓存不随进程失效**：`_dsh_web_url()` 有 30s 缓存，拉起后前端复取 entries
+#      仍是旧 token ⇒ 嵌页 401 白屏。修法：`POST /ui-start` 成功后立刻
+#      `profiles.invalidate_ui_url()`（dsh 的 30s + capabilities 的 10s 一起丢）。
+#   另：新增 `ui_pin_host`（dsh 专用）——前端 `lanUrl()` 会把卡片地址改写成"当前访问名"，
+#      用 127.0.0.1 打开 hub 时就变成 `http://127.0.0.1:3080` ⇒ 连接被拒（影子实测）。
+#      绑定具体网卡的入口一律原样给出。闸门 `tests/test_ui_probe_targets.py`。
 #   v0.13.157：v0.13.156 上线后复验，线上点 reasonix「启动原生界面」报 `binary_not_found`。
 #   根因：ui-start 只补 `~/.npm-global/bin`、`~/.local/bin`，而 reasonix 装在 **nvm** 的
 #   `~/.nvm/versions/node/*/bin`；影子实例从交互 shell 起、PATH 自带 nvm 所以一直是绿的

@@ -12,13 +12,15 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 import appstate
+import capabilities
 import db
 import modelcfg
 import profiles as profiles_mod
@@ -172,16 +174,84 @@ async def unregister_agent(agent_id: str):
 # 安全边界：执行目标**只能**取自 `profiles.UI_START`（服务端常量，按 agent id 白名单），
 # 请求体不参与命令构造 ⇒ 本端点不提供任意命令执行。与 /api/term/sessions 的权限同级
 # （同一个写闸门，需要 x-hub-token / ?token=）。
-def _ui_port_open(port) -> bool:
+def _ui_targets(agent_id: str, spec: Optional[dict], p: dict) -> List[tuple]:
+    """探活目标 `[(host, port), …]`，按可信度排序、去重保序。
+
+    为什么不能只看回环：**dsh 拒绝通配地址**（只能 `--host 192.168.5.102`），
+    它的 3080 **不监听 127.0.0.1** ⇒ 回环探活恒失败。2026-10-25 实测后果：
+    服务 `active`、iframe 已 200、卡片地址带 token 全对，但 `/ui-status` 恒回
+    `ready=false` ⇒ 前端覆盖层一直盖着「原生界面未运行，正在拉起…」，
+    用户看到的就是「dsh 原生界面起不来了」（v0.13.153 引入 ui-status 时的回归，
+    此前用的是浏览器侧 `_embedAlive`，能连通所以一直是好的）。
+
+    配方里的 `probe` 优先于 `url`：qwenpaw 的 `url` 是 hub 进程内代理 :3103
+    （hub 活着它就永远 listening），拿它探活会把停着的后端显示成活的，
+    真后端在 `probe`（:8088）里。
+    """
+    # `ui_start_for()` 只回配方里的 `start` 子字典（url/probe 不在里面）⇒ 地址必须
+    # 另取 `capabilities.recipe_for()`；否则 qwenpaw 的 `probe: 8088` 永远读不到，
+    # 会用 hub 代理 :3103 判活 —— 后端停着也显示「活的」。
+    recipe = capabilities.recipe_for(agent_id) or {}
+    port = recipe.get("port") or (spec or {}).get("port") or p.get("port")
+    urls: List[str] = []
+    if recipe.get("probe"):
+        # 有 probe ⇒ **只探它**，不掺 url/画像地址：那是 hub 的进程内代理，
+        # hub 活着它就永远 listening，掺进来等于把 `probe` 作废。
+        urls.append(recipe["probe"])
+    else:
+        for src in (recipe.get("url"), (spec or {}).get("url"), p.get("ui")):
+            if isinstance(src, dict):
+                src = src.get("url")
+            if isinstance(src, str) and src:
+                urls.append(src)
+    out: List[tuple] = []
+    for u in urls:
+        try:
+            sp = urlsplit(u)
+            h, pt = sp.hostname, sp.port or port
+        except ValueError:
+            continue
+        if h and pt:
+            out.append((h, int(pt)))
+            # 声明的地址可能只覆盖一个协议族（qwenpaw 后端只监听 [::]），
+            # 同一端口补另一族，避免「地址写 IPv4、后端只听 IPv6」被误判成未运行。
+            for alt in (("::1", "127.0.0.1") if ":" in h else ("::1",)):
+                if (alt, int(pt)) not in out:
+                    out.append((alt, int(pt)))
+    if port and not recipe.get("probe"):
+        out.append(("127.0.0.1", int(port)))
+        out.append(("::1", int(port)))
+    seen = set()
+    uniq = []
+    for t in out:
+        if t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    return uniq
+
+
+def _ui_port_open(port, host: Optional[str] = None) -> bool:
     """双栈探活，与 `discovery._sync_check_port` 同口径。
 
     **必须双栈**：qwenpaw 2.2.1 实测只监听 `[::]:8088`，`127.0.0.1:8088` 拒连不等于没起
     （2026-09-21 判例）。单栈判活会把它永远报成「未运行」——2026-10-25 实测：
     服务已 active、UI 经 hub 代理 :3103 返 200，单栈探活仍判死并回「已启动，但界面仍未响应」。
+    `host` 给了就只探它（端口已按画像绑定地址算好），否则回环双栈。
     """
     if not port:
         return False
+    if host:
+        return vitals_mod.port_open(port, host)
     return vitals_mod.port_open(port) or vitals_mod.port_open(port, "::1")
+
+
+def _ui_ready(agent_id: str, spec: Optional[dict], p: dict) -> tuple:
+    """(就绪?, 命中的 host, port)。任一目标通即就绪。"""
+    port = (spec or {}).get("port") or p.get("port")
+    for host, pt in _ui_targets(agent_id, spec, p):
+        if _ui_port_open(pt, host):
+            return True, host, pt
+    return False, None, port
 
 
 def _ui_spawn_env() -> Dict[str, str]:
@@ -213,8 +283,8 @@ async def agent_ui_status(agent_id: str):
     if not p:
         raise HTTPException(404, {"error": "no_agent", "agent_id": agent_id})
     spec = profiles_mod.ui_start_for(agent_id)
-    port = (spec or {}).get("port") or p.get("port")
-    return {"agent_id": agent_id, "ready": _ui_port_open(port), "port": port}
+    ready, host, port = _ui_ready(agent_id, spec, p)
+    return {"agent_id": agent_id, "ready": ready, "port": port, "host": host}
 
 
 @router.post("/api/agents/{agent_id}/ui-start")
@@ -224,8 +294,8 @@ async def start_agent_ui(agent_id: str):
     if not p or not spec:
         raise HTTPException(404, {"error": "no_ui_start", "agent_id": agent_id,
                                   "hint": "该 agent 未登记原生界面启动方式（TUI-only 或卡不存在）"})
-    port = spec.get("port") or p.get("port")
-    if port and _ui_port_open(port):
+    ready, _host, port = _ui_ready(agent_id, spec, p)
+    if ready:
         return {"status": "already_running", "agent_id": agent_id, "port": port}
     unit = spec.get("unit")
     if unit:
@@ -239,6 +309,8 @@ async def start_agent_ui(agent_id: str):
         if r.returncode != 0:
             raise HTTPException(502, {"error": "unit_start_failed", "unit": unit,
                                       "detail": ((r.stderr or "") + (r.stdout or ""))[-400:]})
+        # 进程刚起来 ⇒ 进程级 token 已换新，旧缓存必须立刻作废（否则嵌页 401 白屏）
+        profiles_mod.invalidate_ui_url(agent_id)
         return {"status": "started", "kind": "unit", "unit": unit, "agent_id": agent_id}
 
     cmd = spec.get("cmd")
@@ -281,6 +353,7 @@ async def start_agent_ui(agent_id: str):
             except Exception:  # noqa: BLE001
                 pass
     threading.Thread(target=_reap, daemon=True, name=f"ui-start-reap-{agent_id}").start()
+    profiles_mod.invalidate_ui_url(agent_id)   # 同上：新进程 = 新 token
     return {"status": "started", "kind": "cmd", "pid": proc.pid, "agent_id": agent_id}
 
 

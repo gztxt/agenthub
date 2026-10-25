@@ -238,8 +238,16 @@ class TestScrollSensitivityPinned(unittest.TestCase):
         "0.13.101": ("trg_termrec_ins", "ensure_counted", "idx_termrec_ts",
                      "等于没优化", "term_rec_meta"),
     }
-    CURRENT_VERSION = "0.13.157"
+    CURRENT_VERSION = "0.13.158"
 
+    #: v0.13.158：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「dsh 拒绝通配地址、只 bind 192.168.5.102」「_ui_port_open 只探回环 ⇒
+    #: ui-status 恒 ready=false」「_ui_targets 按绑定地址探、probe 优先」「拉起后
+    #: invalidate_ui_url 必须作废 token 缓存」「ui_pin_host 让 lanUrl 不改写」。
+    VERSION_ROOT_CAUSES["0.13.158"] = (
+        "拒绝通配地址", "_ui_port_open", "ready=false", "_ui_targets",
+        "probe", "invalidate_ui_url", "ui_pin_host", "lanUrl",
+    )
     #: v0.13.156：关键词取自版本注释里**实际写下的字句**。
     #: 核心是「能力矩阵」「ui 写死 None 的两条注册路径」「UI_RECIPES/UI_TUI_ONLY」
     #: 「missing_recipe 三态」「探测失败不许当没有界面」「caps 口径版本」

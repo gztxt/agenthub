@@ -165,6 +165,16 @@ def url_for(agent_id: str) -> Optional[str]:
     return out
 
 
+def invalidate_url(agent_id: str) -> None:
+    """丢掉该 agent 的 URL 缓存 —— 进程刚被拉起时必须调用。
+
+    token 是**进程级随机**：服务重启后旧 token 立即失效，而缓存 TTL 还有几十秒。
+    不失效就会出现「点了启动、服务确实起来了、嵌页却 401 白屏」
+    （2026-10-25 实测：shadow 里 POST ui-start 200 → 前端复取 entries 仍是旧 token）。
+    """
+    _URL_CACHE.pop(str(agent_id or ""), None)
+
+
 def probe_web(cmd: str, timeout: float = 4.0) -> Tuple[str, str]:
     """跑一次 `<cmd> --help`，判「有没有 Web 界面」。返回 (state, note)。
 

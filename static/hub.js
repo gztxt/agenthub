@@ -1957,7 +1957,7 @@ function applyChatMode(opts) {
   $('chatPane').classList.toggle('on', chatMode === 'chat');
   if (chatMode === 'embed') {
     const e = (a.entries || []).find(x => x.type === 'embed');
-    const url = e ? lanUrl(e.url) : '';
+    const url = entryUrl(e);
     $('embedTitle').textContent = a.name;   // 用户 09-20：删掉「原生界面」后缀（宽屏要把地址并进同一行，标题越短越好）
     // 地址行：#embedUrlHint 现为 <button><span>URL</span><svg/></button>，直接写 textContent 会把图标抹掉
     const hintEl = $('embedUrlHint');
@@ -2008,6 +2008,14 @@ function switchMode(m) {
   applyChatMode({ auto: m === 'embed' });
 }
 
+/* 嵌入地址：默认按当前访问名改写（lanUrl），但 `pin_host` 的入口必须原样。
+   dsh 只能 bind 具体网卡（192.168.5.102），lanUrl 会把地址改写成 127.0.0.1
+   ⇒ 嵌页 ERR_CONNECTION_REFUSED（2026-10-25 影子实测）。改写到"当前访问名"
+   只对绑 0.0.0.0 的 agent 成立。 */
+function entryUrl(e) {
+  if (!e) return '';
+  return e.pin_host ? (e.url || '') : lanUrl(e.url);
+}
 /* 嵌入存活探测：no-cors fetch 失败=目标端口无响应 → 覆盖层引导切换 */
 async function _embedAlive(url) {
   try {
@@ -2119,7 +2127,7 @@ async function startNativeUI(btn) {
 }
 
 async function embedRefresh() { const f = $('embedFrame'); f.src = f.src; probeEmbed(f.dataset.src || ''); }
-function embedNewTab() { const a = entityById(chatPick); const e = (a.entries || []).find(x => x.type === 'embed'); if (e) window.open(lanUrl(e.url), '_blank'); }
+function embedNewTab() { const a = entityById(chatPick); const e = (a.entries || []).find(x => x.type === 'embed'); if (e) window.open(entryUrl(e), '_blank'); }
 /* 地址行点击复制（非安全上下文无 navigator.clipboard，降级用 execCommand）*/
 function embedCopyUrl() {
   const raw = $('embedFrame').dataset.src || $('embedUrlHint').textContent || '';

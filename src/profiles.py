@@ -197,6 +197,17 @@ def _dsh_web_url() -> Optional[str]:
     return url
 
 
+def invalidate_ui_url(agent_id: str) -> None:
+    """进程级 token 的地址缓存作废（dsh 的 30s 缓存 + capabilities 的 10s 缓存）。"""
+    if agent_id == "dsh":
+        _DSH_URL_CACHE["ts"] = 0.0
+        _DSH_URL_CACHE["url"] = None
+    try:
+        capabilities.invalidate_url(agent_id)
+    except Exception:  # noqa: BLE001  缓存失效失败不该拦住启动流程
+        pass
+
+
 def docker_states(*, force_fresh: bool = False) -> Dict[str, str]:
     """{容器名: running|exited}"""
     def _produce() -> Dict[str, str]:
@@ -317,6 +328,11 @@ PROFILES: List[dict] = [
     {"id": "dsh", "name": "DSH", "kind": "agent",
      "detect": {"systemd": ["dsh"], "proc": [r"(^|/)dsh( |$)"]},
      "cli": "dsh", "port": 3080, "ui": "http://192.168.5.102:3080",
+     # ui_pin_host：地址里的主机名**不许**被前端 lanUrl() 换成"当前访问名"。
+     # dsh 拒绝通配地址，只 bind `DSH_HOST=192.168.5.102`；访问 hub 用 127.0.0.1
+     # 时 lanUrl 会把卡片地址改写成 http://127.0.0.1:3080 ⇒ 嵌页 ERR_CONNECTION_REFUSED
+     # （2026-10-25 影子实例实测）。其余 agent 都绑 0.0.0.0，改写无害，故只标这一张卡。
+     "ui_pin_host": True,
      "terminal": {"cmd": "/home/gztxt/.local/bin/dsh --profile tui",
                   "cwd": "/fs/1000/ftp/技术文档"},
      "chat": None,
@@ -800,6 +816,9 @@ def entries_for(p: dict, status: str) -> List[dict]:
                 e["start"] = start
             if health:
                 e["health_url"] = health
+            # 绑定具体网卡的 agent（dsh）：地址原样给出，前端不得按访问名改写。
+            if p.get("ui_pin_host"):
+                e["pin_host"] = True
             return e
         if isinstance(ui, str):
             # dsh 的访问 token 是进程级随机、只在启动横幅出现一次（见 _dsh_web_url）：

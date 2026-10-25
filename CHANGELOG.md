@@ -1,3 +1,44 @@
+## v0.13.158 — dsh 原生界面判活漏了「绑定地址」+ token 缓存不随启动失效
+
+> 来源：2026-10-25 用户报「dsh 的原生界面之前都可以正常启动运行，现在故障」。
+> 现象：点 DSH → 覆盖层「原生界面未运行，正在拉起…」一直不消失；服务其实 active，
+> `curl` 带 token 打 3080 返回 200。
+
+### 根因两层（都是 v0.13.153 引入 `ui-status` 时埋的）
+
+1. **判活只探回环**：dsh 拒绝通配地址（`--host 192.168.5.102`，`--help` 明写
+   wildcard rejected），3080 **不监听 127.0.0.1**；`_ui_port_open()` 只探
+   `127.0.0.1`/`::1` ⇒ `/ui-status` 恒 `ready=false` ⇒ 前端覆盖层永不撤。
+   此前用的是浏览器侧 `_embedAlive`（能连通），所以「以前一直正常」。
+2. **token 缓存不失效**：`_dsh_web_url()` 缓存 30s；拉起新进程后前端复取 entries
+   仍拿旧 token ⇒ 嵌页 401 白屏（影子实测：POST 200、服务在跑、框里 401）。
+
+### 修法
+
+- `api_agents._ui_targets()`：按 **画像/配方声明的绑定地址** 探（`p["ui"]`、`recipe.url`），
+  `recipe.probe` 优先（qwenpaw 的 url 是 hub 进程内代理 :3103，拿它判活永远假活），
+  最后回环双栈兜底；`/ui-status` 与 `/ui-start` 的 `already_running` 共用同一判据。
+- `POST /ui-start` 成功后 `profiles.invalidate_ui_url()`：dsh 的 30s 缓存 +
+  `capabilities` 的 10s 缓存一起作废（新进程 = 新 token）。
+- `profiles` 新增 `ui_pin_host`（仅 dsh）：前端 `entryUrl()` 对 `pin_host` 入口
+  不做 `lanUrl()` 改写 —— 用 127.0.0.1 打开 hub 时，改写会把地址变成
+  `127.0.0.1:3080`（dsh 没监听）⇒ 嵌页 ERR_CONNECTION_REFUSED。
+
+### 取证（影子 :3207，`env -i` 复刻 systemd PATH，生产未动）
+
+| 场景 | 结果 |
+|---|---|
+| `GET /api/agents/dsh/ui-status`（服务在跑） | `ready=true, host=192.168.5.102`（修前恒 false） |
+| 浏览器（LAN 入口）打开 DSH 嵌入 | `.embed-dead` 数量 **0**，iframe 子帧 = `192.168.5.102:3080/`，截图见 dsh 界面 |
+| 停掉 dsh 再点 DSH（点开即拉起） | POST 200 → 18s 后 `.embed-dead`=0、iframe token **已换新**、界面正常 |
+| 全量原生界面巡检（8 家，逐个拉起+取标题） | cloudcli/pi/qwenpaw/qoder/opencode/reasonix/codebuddy/dsh 全通 |
+| `pytest tests/` | 3128 passed |
+
+### 闸门
+
+`tests/test_ui_probe_targets.py`：绑定地址必须在探活目标里、`probe` 优先于 `url`、
+回环/IPv6 单栈仍判活、拉起后 URL 缓存必须被清空。
+
 ## v0.13.157 — 拉起原生界面的子进程 PATH 前置 nvm/bun（reasonix 线上点不动）
 
 > 来源：v0.13.156 上线后复验，线上点 reasonix「启动原生界面」报

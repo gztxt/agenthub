@@ -247,9 +247,11 @@ def classify(name: str, path: str, sigs: List[dict], prober=None) -> Optional[di
 
     拆成纯函数是为了 L0 可测：不扫目录，`prober` 可注入假实现。
 
-    **名字命中不算证据**（2026-10-25 实测教训）：本机 `~/.local/bin/goose` 是
-    Go 数据库迁移工具，与 Goose Agent 同名；只按名字登记就会多一张永远起不来的假卡。
-    签名条目必须再过一道 `verify_re`（`--version`/`--help` 输出自证）或包名核对。
+    **名字命中不算证据**：`zcode --version` 只回 `0.17.0`、`goose --version` 只回
+    `1.47.0` —— 版本串里没有身份信息；而 `amp`/`crush`/`goose` 这类短名在别的生态里
+    也有同名工具（Go 生态就有一个 goose 迁移工具）。只按名字登记就会多一张永远
+    起不来的假卡（同族：2026-09-21 那批 fcc-* 假卡）。签名条目必须再过
+    `verify_re`（`--version`+`--help` 自证）或包名核对，才许登记。
     """
     low = name.lower()
     meta = _package_meta(path)

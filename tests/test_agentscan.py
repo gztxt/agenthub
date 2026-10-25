@@ -64,7 +64,12 @@ class TestClassify(_Base):
         self.assertEqual(item["command"], path)
 
     def test_name_collision_without_selfproof_is_rejected(self):
-        """goose 实测：同名但 --version 只有版本号、--help 是数据库迁移工具。"""
+        """同名但自证不过 ⇒ 不登记（构造：一个 `--version` 只回版本号的同名工具）。
+
+        现实依据：`goose` 在 Go 生态里是数据库迁移工具，与 Goose Agent 同名；
+        `--version` 只回 `1.47.0`，光看名字与版本串分辨不出来。本机装的确实是
+        Agent（`--help` 首行 "An AI agent"），但判据不能建立在「名字对上了」上。
+        """
         path = self.exe("bin/goose")
         sigs = [{"id": "goose", "display": "Goose", "names": ["goose"],
                  "verify_re": "(?i)goose.{0,80}(agent|ai)"}]

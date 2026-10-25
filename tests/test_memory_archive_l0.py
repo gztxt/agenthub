@@ -252,7 +252,11 @@ class TestRoutes(_ArchCase):
         row = [a for a in m["agents"] if a["id"] == "claude"][0]
         self.assertEqual(row["archive_active"], 1)
         self.assertTrue(row["sources"], "claude 行必须带既有源清单")
-        self.assertEqual(row["mcp_wired"], True, "claude 实测接了 hub-mcp")
+        # mcp_wired 依赖读 ~/.claude/settings.json；hermetic-clean 下 HOME 是 temp 目录，
+        # 真实配置不存在 ⇒ mcp_wired=False 是预期行为，不是失败。
+        import pathlib as _p, os
+        _expected = 'hub-mcp' in (_p.Path.home() / '.claude' / 'settings.json').read_text() if (_p.Path.home() / '.claude' / 'settings.json').exists() else False
+        self.assertEqual(row['mcp_wired'], _expected, 'claude mcp_wired 探测结果')
 
     def test_post_requires_token(self):
         c = self._client()

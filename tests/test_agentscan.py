@@ -20,6 +20,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
@@ -125,7 +126,11 @@ class TestScan(_Base):
             calls.append(p)
             return "zcode 0.17.0"
 
-        r = agentscan.scan(dirs=[zdir], register=False, prober=prober)
+        # 必须屏蔽「已在册」过滤：本条判的是**未知二进制不执行**，与画像里有哪些卡无关。
+        # 2026-10-25 反例：zcode 一进 PROFILES 静态卡，_covered() 就把它当已覆盖，
+        # found 变空、这条闸门红在「样本选得脆」上，而不是被测行为坏了。
+        with mock.patch.object(agentscan, "_covered", return_value=(set(), set())):
+            r = agentscan.scan(dirs=[zdir], register=False, prober=prober)
         self.assertEqual([i["id"] for i in r["found"]], ["zcode"])
         self.assertEqual(calls, [str(zdir / "zcode")])
         self.assertIn("randomtool", [u["name"] for u in r["unknown"]])

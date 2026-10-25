@@ -173,12 +173,25 @@ class TestSpawnEnv(unittest.TestCase):
     """拉起原生界面时的 PATH 口径（2026-10-25 线上 reasonix binary_not_found 回归）。"""
 
     def test_nvm_bins_are_prepended(self):
+        """extra 目录必须**前置**：这些 CLI 的 shebang 是 `#!/usr/bin/env node`，
+        子进程自己还要再找解释器；排在系统 PATH 后面等于没加。
+
+        目录用 patch 造、不读真实 HOME —— L0 hermetic 的 HOME 是空的，读真盘会让这条
+        判据在干净 runner 上恒红（2026-10-25 实测：L0 3050 例里的 2 红之一）。
+        「本机真有 nvm」由 L1 的 test_which_nvm 负责。
+        """
         import os
+        from pathlib import Path
+        from unittest import mock
         import api_agents
         import profiles
-        env = api_agents._ui_spawn_env()
-        extra = profiles.extra_path_dirs()
-        self.assertTrue(extra, "本机应能解析出 nvm/bun 目录；解析不到说明 extra_path_dirs 坏了")
+        fake = [Path("/opt/zz-l0-nvm/bin"), Path("/opt/zz-l0-bun/bin")]
+        with mock.patch.object(profiles, "_nvm_bins", return_value=[fake[0]]), \
+             mock.patch.object(profiles, "_bun_bin", return_value=fake[1]):
+            extra = profiles.extra_path_dirs()
+            env = api_agents._ui_spawn_env()
+        self.assertEqual(extra, [str(p) for p in fake],
+                         "extra_path_dirs 必须按「nvm 新版优先在前、bun 在后」给出")
         parts = env["PATH"].split(os.pathsep)
         self.assertEqual(parts[:len(extra)], extra,
                          "extra_path_dirs 必须**前置**：这些 CLI 的 shebang 是 "

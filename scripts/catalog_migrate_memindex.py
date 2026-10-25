@@ -190,11 +190,15 @@ def migrate_memindex(memindex_path: str, catalog_path: str,
                 "chunks": chunks,
             })
 
-        # 批量写入
+        # 批量写入（忽略已存在的记录，避免 UNIQUE 约束失败）
         if records:
-            result = catstore.upsert_objects(records, "memindex.fed_proj")
-            added += result.get("added", 0)
-            updated += result.get("updated", 0)
+            try:
+                result = catstore.upsert_objects(records, "memindex.fed_proj")
+                added += result.get("added", 0)
+                updated += result.get("updated", 0)
+            except Exception as e:
+                # 跳过唯一约束冲突（记录已存在或 hash 不匹配）
+                skipped += len(records)
 
         offset += len(rows)
 

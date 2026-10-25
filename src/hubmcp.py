@@ -623,6 +623,32 @@ def hub_cloudcli_projects() -> str:
     }, ensure_ascii=False)
 
 
+if os.getenv("HUB_CATALOG", "0") == "1":
+    @server.tool()
+    def hub_query(q: str, domains: str = "", types: str = "",
+                  k: int = 10, since: str = "") -> str:
+        """跨 agent/技能/项目等编目域统一检索。只查可重建索引，不改原生数据。
+        domains/types 用逗号分隔；since 接受 epoch 秒或 ISO-8601。
+        count=0 时必须同时看 degraded 与 backends，区分无命中和索引不可用。"""
+        data = _get("/api/catalog/query", q=q, domains=domains, types=types,
+                    k=max(1, min(int(k), 100)), since=since)
+        return json.dumps(data, ensure_ascii=False)
+
+    @server.tool()
+    def hub_get(oid: str = "", domain: str = "", native_key: str = "",
+                src_id: str = "") -> str:
+        """按 oid 取编目对象详情；也可传 domain+native_key，跨源重名时补 src_id。"""
+        data = _get("/api/catalog/get", oid=oid, domain=domain,
+                    native_key=native_key, src_id=src_id)
+        return json.dumps(data, ensure_ascii=False)
+
+    @server.tool()
+    def hub_status(domain: str = "") -> str:
+        """查看统一编目各源的扫描时间、滞后、对象数和失败原因；domain 可选。"""
+        return json.dumps(_get("/api/catalog/status", domain=domain),
+                          ensure_ascii=False)
+
+
 if ALLOW_WRITE:
     @server.tool()
     def hub_memindex_rebuild(scope: str = "dry_run") -> str:

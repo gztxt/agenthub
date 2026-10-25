@@ -408,6 +408,9 @@ app.include_router(admission_mod.router)        # P2 C7：/api/admission（外�
 app.include_router(hublog_mod.router)
 app.include_router(refscout_mod.router)          # PT-20261021-04：/api/ref/*（情报卡）
 app.include_router(intake_mod.router)            # PT-20261022-01：/api/intake/task（四查一简报）
+if os.getenv("HUB_CATALOG", "0") == "1":
+    import api_catalog as api_catalog_mod
+    app.include_router(api_catalog_mod.router)    # PT-20261025-12：统一编目只读门面
 
 # D2：Hub MCP Server —— 把本机事实源以 MCP 暴露给 Hermes 等外部 Agent。
 # 端点为 /hub-mcp/mcp（streamable_http_app 自带 /mcp 子路由，故挂在 /hub-mcp 下，避免与 mcpgw 的 /mcp/* REST 冲突）。

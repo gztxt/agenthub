@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -75,10 +76,24 @@ RECON_QUERIES = [
 
 
 def _hash_obj(nkey: str, content_preview: str) -> str:
-    """计算对象级哈希（用于增量判重）。"""
+    """计算对象级哈希（用于增量判重）。
+
+    ⚠ 入参必须是**全文**，不是前缀：只看前 N 字时，正文被截断/改动而前缀未变
+    ⇒ digest 不变 ⇒ 增量判重误判「未变」⇒ 缺陷永远自愈不了。
+    """
     h = hashlib.sha256()
-    h.update(f"{nkey}|{content_preview[:500]}".encode())
+    h.update(f"{nkey}|{content_preview}".encode())
     return h.hexdigest()[:16]
+
+
+#: 每文件正文上限（字符）。**按全文算，不按文件算**。
+#:
+#: ⚠ 原实现把正文截到 50000 字符 ⇒ 语料 946MB 只落进 164MB（覆盖率 17.4%）。
+#: 截断点在**每文件**而非**总量**，于是「大文件正文被砍光、小文件全留」——
+#: 生产实测：10,804 个文件里 6,858 个字节数与源端不符，单文件最大差 20MB。
+#: 现改为：**总量上限**（与 catalog 体积预算对齐，见方案 §8.4 catalog ≤4.5GB），
+#: 大文件优先保留（超限的按源端行顺序截断，保留块内完整内容）。
+MAX_FILE_CHARS = 2_000_000
 
 
 def migrate_memindex(memindex_path: str, catalog_path: str,
@@ -158,7 +173,11 @@ def migrate_memindex(memindex_path: str, catalog_path: str,
             nkey = realpath
             mtime = chunks_list[0]["mtime"]
             size = chunks_list[0]["size"]
-            digest = _hash_obj(nkey, all_text[:1000])
+            # ⚠ digest 必须覆盖**全文**，不能只看前 1000 字符：
+            #   原实现 `all_text[:1000]` ⇒ 正文被截断（存量 82.6% 语料丢失）时
+            #   digest 不变 ⇒ 增量判重命中 ⇒ 截断永远自愈不了（rerun 假绿）。
+            #   改成对全文取 digest ⇒ 内容变了必然重写，截断能被 rerun 修掉。
+            digest = _hash_obj(nkey, all_text)
 
             # 检查是否已存在（使用预加载的字典，O(1) 查找）
             if nkey in existing:
@@ -167,8 +186,9 @@ def migrate_memindex(memindex_path: str, catalog_path: str,
                     skipped += 1
                     continue
 
-            # 生成分块
-            chunks = cat_schema.chunk_text(all_text[:50000])
+            # 生成分块：**不截断**（原实现截 50000 字符 ⇒ 82.6% 语料丢失）。
+            # chunk_text 自身带 max_chunks 上限（防御巨物），正文按全文切。
+            chunks = cat_schema.chunk_text(all_text)
 
             records.append({
                 "domain": "doc",
@@ -226,8 +246,25 @@ def migrate_memindex(memindex_path: str, catalog_path: str,
     }
 
 
+def _fts_phrase(query: str) -> str:
+    """把查询包成 FTS5 短语（与 memindex._fts_term 同口径：整包引号 = 字面包含）。"""
+    inner = re.sub(r'["\s]+', " ", query or "").strip()
+    return '"' + inner.replace('"', "") + '"'
+
+
 def run_reconciliation(catalog_path: str, memindex_path: str) -> Dict[str, Any]:
     """双跑对账：同一批查询在两套库间的 top10 重合率。
+
+    ⚠ **两侧必须落在同一对象空间**（都是「文件路径」）：
+      原实现拿 catalog 的 **oid**（内容哈希）去和 memindex 的 **realpath**
+      （文件路径）求交集 ⇒ 两个不同对象空间 ⇒ 交集恒为空 ⇒ 重合率恒 0，
+      门槛 0.95 永远不可能通过，判据恒假。
+    现两侧统一取 **native_key/realpath（文件路径）**。
+
+    ⚠ **两侧必须用同一套召回语义**：
+      原实现 memindex 侧用 `text LIKE '%前6字%'` 全表扫（27s/条、30 条 ≈ 13min），
+      且 LIKE 前缀 ≠ trigram FTS ⇒ 两边根本不是同一套召回，重合率无意义。
+      现 memindex 侧走真 trigram FTS（fed_proj_fts MATCH），与 catalog 侧同族。
 
     Args:
         catalog_path: catalog.db 路径
@@ -239,14 +276,12 @@ def run_reconciliation(catalog_path: str, memindex_path: str) -> Dict[str, Any]:
     print(f"\n[recon] 开始对账")
     print(f"[recon] 查询数: {len(RECON_QUERIES)}")
 
-    # 打开 catalog
-    catstore = cat_store.CatalogWriter(catalog_path)
-    catstore.open()
-    catcon = catstore._require()
+    # 打开 catalog（只读：对账不该建表/建索引，更不该跟生产抢写锁）
+    catcon = cat_store.connect(Path(catalog_path), readonly=True)
     catcon.execute("PRAGMA busy_timeout = 60000")
 
-    # 打开 memindex 的 FTS
-    memcon = sqlite3.connect(memindex_path)
+    # 打开 memindex 的 FTS（只读）
+    memcon = sqlite3.connect("file:%s?mode=ro" % memindex_path, uri=True)
     memcon.row_factory = sqlite3.Row
 
     results = []
@@ -254,25 +289,22 @@ def run_reconciliation(catalog_path: str, memindex_path: str) -> Dict[str, Any]:
         if not query.strip():
             continue
 
-        # catalog 查询
+        # catalog 侧：走统一查询门面，取 top-k 的 **native_key（文件路径）**
         cat_result = cat_query.query(catcon, query, k=10)
-        cat_hits = [h["oid"] for h in cat_result.get("hits", [])]
+        cat_hits = [h.get("native_key") for h in cat_result.get("items", [])]
+        cat_hits = [h for h in cat_hits if h]
 
-        # memindex 查询（直接 SQL）
-        # 注意：memindex 只有 trigram FTS，没有双 FTS
+        # memindex 侧：真 trigram FTS，取 top-k 的 **realpath（文件路径）**
         try:
-            mem_hits = []
-            # 简单模拟：用 LIKE 匹配路径
-            rows = memcon.execute(
-                "SELECT DISTINCT realpath FROM fed_proj "
-                "WHERE text LIKE ? LIMIT 10",
-                (f"%{query[:6]}%",),
-            ).fetchall()
-            mem_hits = [r["realpath"] for r in rows]
-        except Exception as e:
+            mem_hits = [r["realpath"] for r in memcon.execute(
+                "SELECT DISTINCT f.realpath AS realpath FROM fed_proj_fts "
+                "JOIN fed_proj f ON f.rowid = fed_proj_fts.rowid "
+                "WHERE fed_proj_fts MATCH ? ORDER BY rank LIMIT 10",
+                (_fts_phrase(query),)).fetchall()]
+        except sqlite3.OperationalError:
             mem_hits = []
 
-        # 计算重合率
+        # 计算重合率（同一对象空间：文件路径）
         if cat_hits and mem_hits:
             overlap = len(set(cat_hits) & set(mem_hits))
             max_possible = min(len(cat_hits), len(mem_hits))
@@ -284,12 +316,17 @@ def run_reconciliation(catalog_path: str, memindex_path: str) -> Dict[str, Any]:
             "query": query,
             "cat_hits": len(cat_hits),
             "mem_hits": len(mem_hits),
+            "overlap": len(set(cat_hits) & set(mem_hits)),
             "hit_rate": hit_rate,
         })
+        print("  [%2d/%2d] %-34s cat=%2d mem=%2d 交集=%2d 重合=%.0f%%"
+              % (i + 1, len(RECON_QUERIES), query[:34], len(cat_hits),
+                 len(mem_hits), results[-1]["overlap"], hit_rate * 100))
 
-    # 汇总
-    avg_hit_rate = sum(r["hit_rate"] for r in results) / len(results) if results else 0
-    pass_count = sum(1 for r in results if r["hit_rate"] >= 0.95)
+    # 汇总（只对「两侧都有命中」的查询打分——单侧空的查询不构成对照）
+    scored = [r for r in results if r["cat_hits"] and r["mem_hits"]]
+    avg_hit_rate = sum(r["hit_rate"] for r in scored) / len(scored) if scored else 0
+    pass_count = sum(1 for r in scored if r["hit_rate"] >= 0.95)
 
     catcon.close()
     memcon.close()
@@ -297,8 +334,9 @@ def run_reconciliation(catalog_path: str, memindex_path: str) -> Dict[str, Any]:
     return {
         "ok": True,
         "total_queries": len(results),
+        "scored_queries": len(scored),
         "avg_hit_rate": avg_hit_rate,
-        "pass_rate": pass_count / len(results) if results else 0,
+        "pass_rate": pass_count / len(scored) if scored else 0,
         "threshold": 0.95,
         "results": results,
     }

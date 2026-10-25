@@ -23,8 +23,15 @@ class MemoryAdapter(BaseAdapter):
     def probe(self) -> Dict[str, Any]:
         try:
             import db
-            n = (db.query("SELECT COUNT(*) AS n FROM memories WHERE layer=? AND status='active'",
-                          ("ARCH",)) or [{"n": 0}])[0]["n"]
+            # 确保 db 已初始化（使用 memindex.db 路径）
+            from pathlib import Path
+            data_dir = Path(__file__).resolve().parents[3] / "data"
+            db.init_db(data_dir / "memindex.db")
+            result = db.query(
+                "SELECT COUNT(*) AS n FROM memories WHERE layer=? AND status='active'",
+                ("ARCH",),
+            )
+            n = (result or [{"n": 0}])[0]["n"]
             return {"ok": True, "reason": None, "error": None, "count": n}
         except Exception as e:
             return {"ok": False, "reason": "db_err", "error": str(e)}

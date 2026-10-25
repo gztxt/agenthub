@@ -203,7 +203,7 @@ def watch(cache: SessionCache) -> None:
     consume(proc.stdout, cache)
 
 
-def handle(rec: dict, cache: SessionCache, last_stop: dict | None) -> dict | None:
+def handle(rec: dict, cache: SessionCache, last_stop: dict | None, source: str = "live") -> dict | None:
     msg = _msg(rec)
     if msg.startswith("Stopping " + UNIT) or msg.startswith("Stopping Agent Hub"):
         snap = cache.snapshot()
@@ -211,6 +211,7 @@ def handle(rec: dict, cache: SessionCache, last_stop: dict | None) -> dict | Non
         primary = culprits[0] if culprits else {}
         out = {
             "event": "stop_detected",
+            "source": source,
             "unit": UNIT,
             "job_type": rec.get("JOB_TYPE"),
             "pid": rec.get("_PID"),
@@ -232,6 +233,7 @@ def handle(rec: dict, cache: SessionCache, last_stop: dict | None) -> dict | Non
         emit(
             {
                 "event": "started",
+                "source": source,
                 "unit": UNIT,
                 "job_type": rec.get("JOB_TYPE"),
                 "downtime_s": (
@@ -250,7 +252,7 @@ def handle(rec: dict, cache: SessionCache, last_stop: dict | None) -> dict | Non
     return last_stop
 
 
-def consume(lines, cache: SessionCache) -> None:
+def consume(lines, cache: SessionCache, source: str = "live") -> None:
     """逐行处理 journal JSON。心跳文件用于自证「真的在读这个单元的流」。"""
     last_stop: dict | None = None
     seen = 0
@@ -264,7 +266,7 @@ def consume(lines, cache: SessionCache) -> None:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
-        last_stop = handle(rec, cache, last_stop)
+        last_stop = handle(rec, cache, last_stop, source)
         if time.time() - beat_at >= 15:
             beat_at = time.time()
             with open(HEARTBEAT, "w", encoding="utf-8") as fh:
@@ -285,7 +287,7 @@ def main() -> int:
         cache.n, cache.state = cache._read()
         cache.at = time.time()
         with open(args.replay, encoding="utf-8") as fh:
-            consume(fh, cache)
+            consume(fh, cache, source="replay")
         return 0
 
     if args.once:
@@ -301,7 +303,7 @@ def main() -> int:
         cache.at = time.time()
         snap = cache.snapshot()
         culprits = find_culprits()
-        rec = {"event": "selftest", "unit": UNIT, "violation": False, "culprits_found": len(culprits)}
+        rec = {"event": "selftest", "source": "selftest", "unit": UNIT, "violation": False, "culprits_found": len(culprits)}
         rec.update(snap)
         rec["culprits"] = culprits
         emit(rec)

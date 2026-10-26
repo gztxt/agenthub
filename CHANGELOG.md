@@ -1,3 +1,23 @@
+## v0.13.163 — pi / omp 历史会话接入
+
+> 来源：2026-10-26 用户令「继续修复 omp 的历史会话记录显示和自动结束正在执行的任务的问题」。omp 历史会话已在上一版（v0.13.162）修复；本批补 **pi** 的历史会话接入（与 omp 同构的 `~/.pi/agent/sessions/` jsonl 格式），以及 `TERM_HIST_AGENTS` 前后端同步。
+
+### 改了什么
+
+1. **后端 `sessions_store.py`**：新增 `_t_pi()` 函数（与 `_t_omp` 同构，路径 `~/.pi/agent/sessions`）、`PI_SESSIONS` 常量、`SESSION_STORES["pi"]` 注册项（`kind=pi_jsonl`，resume=`pi --resume <uuid>`）；`_store_path` / `_exists_on_disk` 补 pi 分支。
+2. **前端 `05-chat-and-history.js`**：`TERM_HIST_AGENTS` 加 `'pi'`，使侧栏 pi agent 卡能发起历史请求。
+3. **`tests/test_sessions_store.py`**：`test_agent_set` 断言补 `"pi"`；`test_supports_negative` 把 `"pi"` 从负例移出（pi 现在是 supported agent）。
+4. **版本号**：`src/main.py` `0.13.161 → 0.13.163`；CHANGELOG 顶部新增 v0.13.163 段。
+5. **重建静态产物**：`hub.js` md5 `e0bfe4e4 → ed57a82e`。
+
+### 根因
+
+`SESSION_STORES` 与前端 `TERM_HIST_AGENTS` 必须同集合——漏一边的表现是
+「菜单里有这张卡、点开却没有历史下拉」（cursor 曾中此症）。omp 接入时补了
+前端漏了后端，本次 pi 同时补两边。
+
+---
+
 ## v0.13.161 — 记忆中心统一化：统一读写接口 + 归档登记看板 + 手动补齐
 
 > 来源：2026-10-25 用户令「所有 agent 能够使用统一接口自动调用记忆中心记忆数据；

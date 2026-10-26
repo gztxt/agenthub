@@ -104,7 +104,11 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.161"
+VERSION = "0.13.163"
+
+# v0.13.163: pi/omp 历史会话接入
+# 根因：SESSION_STORES 与 TERM_HIST_AGENTS 不同步，新增 agent 必须两边一起改
+# SESSION_STORES / TERM_HIST_AGENTS / pi_jsonl / omp_jsonl / 同构
 #   v0.13.161：记忆中心统一化（2026-10-25 用户令「所有 agent 能够使用统一接口自动调用
 #   记忆中心记忆数据；所有 agent 的记忆数据统一归档；数据无需重复保存，按既有数据统一
 #   归档；前端 UI 重设计为看板 + 手动记忆提交框」）。

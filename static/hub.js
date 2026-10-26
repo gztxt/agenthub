@@ -6934,7 +6934,7 @@ hub.js 当场死亡 ⇒ 菜单空白 + initSidebar 从未执行 + 抽屉停在�
 的真判据（不是缓存、不是网络、不是 origin 的 IP 段）。
 闸门：tests/test_tdz_order.py（静态扫同类顺序违规；红基线取修复前的 git 版本）。 */
 let _navHtml = '';   // 上一次渲染的菜单 HTML，用于跳过无变化的重写
-const TERM_HIST_AGENTS = ['grok', 'claude', 'jcode', 'hermes', 'codex', 'qoder', 'opencode', 'cursor', 'codebuddy', 'dsh', 'omp'];   // 与后端 SESSION_STORES 同集合（tests/test_sessions_store.py 对账）
+const TERM_HIST_AGENTS = ['grok', 'claude', 'jcode', 'hermes', 'codex', 'qoder', 'opencode', 'cursor', 'codebuddy', 'dsh', 'omp', 'pi'];   // 与后端 SESSION_STORES 同集合（tests/test_sessions_store.py 对账）
 // ★窄屏首屏**不恢复**上次的历史展开项。`hub.hist` 是按 origin 隔离的存量，一旦参与
 // 首屏判定，同一个动作在不同入口（局域网 IP / Tailscale IP）就会走出不同结果：
 // 09-23 23:3x 四格实测 —— hist 空 ⇒ 点 agent 名称只展开列表、侧栏不收起；

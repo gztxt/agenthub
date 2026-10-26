@@ -713,6 +713,45 @@ def _t_omp(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
     return items, ("" if items else "omp 暂无可续会话")
 
 
+# ── pi（earendil-works/pi-coding-agent）专用助手 ────────────────────────────────
+#: pi 会话仓库：``~/.pi/agent/sessions/<compressed-cwd>/<iso-timestamp>_<uuid>.jsonl``
+#: 与 omp 同构：文件名格式 `<timestamp>_<uuid>.jsonl`，UUID 在文件名末尾。
+#: resume 命令：`pi --resume <uuid>`（官方支持 UUID 前缀匹配）。
+PI_SESSIONS = HOME / ".pi" / "agent" / "sessions"
+PI_FILENAME_UUID_RE = OMP_FILENAME_UUID_RE  # 同构格式，复用正则
+
+
+def _t_pi(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
+    """pi 历史：``~/.pi/agent/sessions/<桶>/<时间戳>_<uuid>.jsonl``，**跳目录**按 mtime 倒序。"""
+    if not PI_SESSIONS.is_dir():
+        return [], "pi 无会话目录"
+    items: List[dict] = []
+    for p in sorted(PI_SESSIONS.rglob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True):
+        if time.time() - p.stat().st_mtime > HARD_BUDGET_S * 1000:
+            continue
+        sid = _omp_uuid_from_filename(p.name)  # 同构格式，复用 omp 提取函数
+        if not sid or not UUID_RE.match(sid):
+            continue
+        objs = _head_lines(p, 400)
+        title = ""
+        for d in objs:
+            if d.get("type") == "title":
+                title = d.get("title") or ""
+                break
+        ts = 0
+        for d in objs:
+            if d.get("type") == "session":
+                ts = _iso(d.get("timestamp"))
+                break
+        items.append({"agent": "pi", "id": sid,
+                      "title": mask_title(title) or "未命名会话",
+                      "ts": ts, "msgs": None, "cwd": cwd})
+        if len(items) >= limit + 10:
+            break
+    items = items[:limit]
+    return items, ("" if items else "pi 暂无可续会话")
+
+
 SESSION_STORES: Dict[str, dict] = {
     "grok":     {"kind": "grok_dir",       "id_re": UUID_RE,      "resume": ["grok", "--resume", "{id}"],             "fn": _t_grok},
     "claude":   {"kind": "claude_dir",     "id_re": UUID_RE,      "resume": ["claude", "--resume", "{id}"],           "fn": _t_claude},
@@ -741,6 +780,9 @@ SESSION_STORES: Dict[str, dict] = {
     # omp（oh-my-pi）：~/.omp/agent/sessions/<桶>/<时间戳>_<uuid>.jsonl，UUID 在文件名末尾。
     # resume 接裸 uuid（`omp --resume <uuid>`），与 dsh 同形。
     "omp":      {"kind": "omp_jsonl",    "id_re": UUID_RE,      "resume": ["/home/gztxt/.local/bin/omp", "--resume", "{id}"], "fn": _t_omp},
+    # pi（@earendil-works/pi-coding-agent）：~/.pi/agent/sessions/<桶>/<时间戳>_<uuid>.jsonl
+    # resume 接裸 uuid（`pi --resume <uuid>`），与 omp 同形。
+    "pi":       {"kind": "pi_jsonl",     "id_re": UUID_RE,      "resume": ["pi", "--resume", "{id}"],      "fn": _t_pi},
 }
 
 _CACHE: Dict[tuple, Tuple[float, dict]] = {}
@@ -812,6 +854,12 @@ def _store_path(agent_id: str, sid: str):
     if agent_id == "omp":
         # omp：文件名是 <timestamp>_<uuid>.jsonl，UUID 在末尾。
         hits = list(OMP_SESSIONS.rglob(f"*_{sid}.jsonl"))
+        if not hits:
+            return None
+        return max(hits, key=lambda p: p.stat().st_mtime)
+    if agent_id == "pi":
+        # pi：同 omp 同构格式，文件名是 <timestamp>_<uuid>.jsonl。
+        hits = list(PI_SESSIONS.rglob(f"*_{sid}.jsonl"))
         if not hits:
             return None
         return max(hits, key=lambda p: p.stat().st_mtime)

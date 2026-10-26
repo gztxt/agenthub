@@ -43,6 +43,7 @@ SOURCES: Tuple[str, ...] = (
     "ctx_manifest",   # P1-1：上下文清单
     "resilience",     # P1-6：出站重试的逐次尝试
     "action",         # P2 A10：统一 Action Plane 的请求/裁决/结论三拍
+    "scan",           # v0.13.164：技能调用第二数据源（扫会话转录，补 hub 看不到的直读）
 )
 
 #: 跨 source 的执行结果语义闭集（**结果怎样**）。
@@ -71,6 +72,9 @@ STATUS_MAP: Dict[str, Dict[str, str]] = {
                "settled:success": "ok", "settled:failed": "failed",
                "settled:denied": "blocked", "settled:error": "failed",
                "settled:unknown": "unknown"},
+    # scan：转录采集只落「读到/调用了」这一种事实，没有失败态；出现别的词说明
+    # 生产者写错了，宁可 mapping 查不到（unknown）也不要被通配吃掉。
+    "scan": {"success": "ok"},
     "resilience": {"ok": "ok", "rate_limit": "degraded", "auth": "failed",
                    "not_found": "failed", "invalid_request": "failed",
                    "server": "failed", "timeout": "failed", "network": "failed",

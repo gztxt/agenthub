@@ -76,14 +76,16 @@ class TestZombies(unittest.TestCase):
         self.assertEqual(z[0]["confidence"], "medium")
         self.assertEqual(z[0]["days_idle"], 7)
 
-    def test_never_report_high_when_direct_not_implemented(self):
+    def test_never_report_high_even_with_second_source(self):
         z = U.zombies([{"name": "a", "routes": []}], {}, days=7)
         self.assertNotEqual(z[0]["confidence"], "high")
 
     def test_every_zombie_row_declares_direct_source(self):
         z = U.zombies([{"name": "a", "routes": ["claude"]}], {}, days=7)
         self.assertEqual(z[0]["direct_source"], U.DIRECT_SOURCE)
-        self.assertEqual(U.DIRECT_SOURCE, "not-implemented")
+        # 2026-10-27：第二数据源已落地（skill_direct 扫 pi/claude/codebuddy/codex 转录）。
+        # 覆盖只到「读取 SKILL.md / Skill 工具调用」，写盘与纯提及仍不计 ⇒ 置信度继续封顶 medium。
+        self.assertEqual(U.DIRECT_SOURCE, "transcript")
 
     def test_injects_alone_also_disqualifies_from_zombie(self):
         """只注入过也算被用上——注入是给人/agent 看一眼，正是注入面在起作用。"""
@@ -171,21 +173,27 @@ class TestCounts(unittest.TestCase):
                 sys.modules["db"] = old
 
     def test_query_params_pin_source_and_subjects(self):
-        """source='rest' + 全部 subject + 时间窗——形状错了就记不上账或记错账。"""
+        """两个 source（hub 通道 + 转录采集）+ 全部 subject + 时间窗。
+
+        2026-10-27 改判：原判据钉的是 `source = ?` 单源，第二源落地后必须改成
+        `source IN (?,?)` 并同时钉住两个取值——否则「扫描通道被漏掉」这类回归
+        在单源断言下永远是绿的。
+        """
         fake = _FakeDB([])
         with _PatchDB(fake):
             U.counts(days=7)
         sql, params = fake.calls[0]
-        self.assertIn("source = ?", sql)
-        self.assertEqual(params[0], "rest")
+        self.assertIn("source IN (?,?)", sql)
+        self.assertEqual(U._SOURCES, ("rest", "scan"))
+        self.assertEqual(params[0:len(U._SOURCES)], U._SOURCES)
         # subject 集合钉死（含 skill.relevant：注入链唯一可见事件，见模块 docstring；
         # 含 skill.invoke：v0.13.127 统一调用入口的显式激活，比 read 更强的使用证据）。
         self.assertEqual(U._SUBJECTS,
                          ("skill.read", "skill.inject", "skill.relevant", "skill.invoke"))
-        self.assertEqual(params[1:1 + len(U._SUBJECTS)], U._SUBJECTS)
-        # SQL 里的 ? 个数必须与「source + N 个 subject + 时间窗」一致——
-        # 写死 `(?, ?)` 会在加 subject 时错位，是历史 bug 的形态。
-        self.assertEqual(sql.count("?"), 1 + len(U._SUBJECTS) + 1)
+        self.assertEqual(params[len(U._SOURCES):len(U._SOURCES) + len(U._SUBJECTS)], U._SUBJECTS)
+        # SQL 里的 ? 个数必须与「source 数 + N 个 subject + 时间窗」一致——
+        # 写死个数会在加 source/subject 时错位，是历史 bug 的形态。
+        self.assertEqual(sql.count("?"), len(U._SOURCES) + len(U._SUBJECTS) + 1)
         self.assertTrue(params[-1].endswith("+00:00"), params[-1])
 
     def test_relevant_row_counts_as_inject(self):
@@ -256,7 +264,7 @@ class TestSnapshot(unittest.TestCase):
         self.assertEqual(s["zombies_count"], 1)
         self.assertEqual(s["zombies"][0]["name"], "a")
         self.assertEqual(s["confidence"], "medium")
-        self.assertEqual(s["direct_source"], "not-implemented")
+        self.assertEqual(s["direct_source"], "transcript")
         self.assertEqual(s["counted"], 1)     # 账里只有 b ⇒ 前端能区分「没人用」与「没记账」
 
     def test_counted_zero_when_db_unreachable_marks_everything(self):
@@ -275,10 +283,16 @@ class TestSnapshot(unittest.TestCase):
         self.assertEqual(s["days"], 3)
 
     def test_note_states_the_ceiling(self):
+        """口径必须写在面板上：两源合并 ≠ 全覆盖，置信度仍封顶 medium。
+
+        2026-10-27 改判：原来这句话是「未取证」，第二源落地后改成「仍不计」——
+        判据从「第二源不存在」变成「第二源覆盖有边界」，两者都必须显式写出来。
+        """
         with _PatchDB(_FakeDB([])):
             s = U.snapshot([])
         self.assertIn("medium", s["note"])
-        self.assertIn("未取证", s["note"])
+        self.assertIn("仍不计", s["note"])
+        self.assertIn("scan", s["note"])
 
 
 class TestRedDirection(unittest.TestCase):

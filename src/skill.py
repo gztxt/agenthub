@@ -165,6 +165,7 @@ ARCHIVE_ROOTS: Dict[str, str] = {
     "/fs/1000/ftp/技术文档/crawl4ai": "1 条 · 自研抓页技能（c4ai），早于本表已装，软链长期被拒",
     "/fs/1000/ftp/技术文档/hallmark": "1 条 · 09-25 用户点名评估并安装的技能仓",
     "/fs/1000/ftp/技术文档/Agent-Reach": "1 条 · 09-25 用户点名评估并安装的技能仓",
+    "/fs/1000/ftp/技术文档/i-have-adhd": "1 条 · i-have-adhd 输出风格技能（ADHD Mode），软链在 ~/.claude/skills 但 realpath 落在本归档根，此前未登记导致被越界闸门拒读",
 }
 
 # ── v0.13.127 PT-20261019-01：路由级注记（B3 证伪事实的落点）────────────────
@@ -1389,10 +1390,10 @@ async def skill_invocations(name: str = Query(default="", max_length=200),
     fetch_cap = min(max(limit * 20, 500), 5000)
     try:
         rows = db.query(
-            "SELECT id, status, duration_ms, detail, created_at FROM profile_events "
-            "WHERE source = ? AND subject = 'skill.invoke' AND created_at >= ? "
+            "SELECT id, source, status, duration_ms, detail, created_at FROM profile_events "
+            "WHERE source IN (?, ?) AND subject = 'skill.invoke' AND created_at >= ? "
             "ORDER BY id DESC LIMIT ?",
-            (skill_usage._SOURCE, since, fetch_cap))
+            skill_usage._SOURCES + (since, fetch_cap))
     except Exception as e:  # noqa: BLE001 — 读不到账要表态，不装成空流水
         raise HTTPException(500, tdai_client.scrub(f"查询调用流水失败：{type(e).__name__}: {e}")[:200])
 
@@ -1412,6 +1413,9 @@ async def skill_invocations(name: str = Query(default="", max_length=200),
             continue
         parsed.append({
             "id": r.get("id"),
+            # rest=hub 显式调用；scan=转录采集（agent 自己读了 SKILL.md）。
+            # 面板必须能分开看：两类证据的可信度与补齐方式不同。
+            "source": r.get("source"),
             "name": str(det.get("name") or "").strip(),
             # 技能来自哪一路（哪个 agent 的发现点）——同名技能可存在于多路，
             # 只记名字无法回答「用了谁的技能」，也无法按来源做权重。

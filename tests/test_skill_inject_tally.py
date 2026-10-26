@@ -210,10 +210,11 @@ class TestRedDirection(unittest.TestCase):
 class TestNoRegressOnReadPath(unittest.TestCase):
     """不回归：`skill_usage.py` 的口径不许被这次改动顺手改掉。"""
 
-    def test_second_source_still_declared_missing(self):
-        """第二数据源**确实**仍未实现（各家直读磁盘）——
-        这次补的是 hub 通道的名字，不是第二源。别把它悄悄改成 high。"""
-        self.assertIn('DIRECT_SOURCE = "not-implemented"', USAGE_SRC)
+    def test_second_source_declared_but_confidence_still_capped(self):
+        """2026-10-27：第二数据源已实现（`skill_direct` 扫各家会话转录），
+        但覆盖只到「读取 SKILL.md / Skill 工具调用」——写盘、纯提及都不计，
+        所以**置信度必须继续封顶 medium**，别因为有了第二源就改成 high。"""
+        self.assertIn('DIRECT_SOURCE = "transcript"', USAGE_SRC)
         self.assertIn('"confidence": "medium"', USAGE_SRC)
 
     def test_never_auto_delete(self):

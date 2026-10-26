@@ -520,8 +520,13 @@ class TestInlineTabsAndInteraction(unittest.TestCase):
         self.assertNotIn('onclick="loadSkills()"><svg', HTML)
 
     def test_invocations_empty_state_explains_zero_and_401(self):
-        """调用记录 0 条时必须解释口径与下一步（2026-10-19 用户报障）。"""
-        self.assertIn("agent 直接读磁盘", JS, "空状态未解释直读旁路不可见")
+        """调用记录 0 条时必须解释口径与下一步（2026-10-19 用户报障）。
+
+        2026-10-27 改判：第二数据源（转录采集）落地后，「agent 直接读磁盘看不到」
+        这句话已成假话。判据改成必须写清**两个源**，且行内要能分辨 scan 记录。
+        """
+        self.assertIn("转录采集", JS, "空状态/行内未说明第二数据源（转录采集）")
+        self.assertIn("hub 通道", JS, "空状态未说明 hub 通道这一源")
         self.assertIn("TERM_TOKEN", JS, "空状态未说明 401 凭据失效这一常见原因")
         self.assertIn("skillInvTabBadge", HTML, "调用记录 tab 缺少数量徽标")
 

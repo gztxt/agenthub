@@ -49,13 +49,19 @@ class ArchiveRootsTest(unittest.TestCase):
         return any(rp == a or rp.startswith(a + os.sep) for a in (allowed or self.allowed))
 
     # ── 正向：放宽生效 ──
-    def test_four_archive_roots_are_allowed(self):
-        """4 个归档根逐个断言。少一个就红——PT-13 的缺口是 62 条，缺一个都算没修完。"""
+    def test_every_archive_root_is_allowed(self):
+        """归档根逐个断言。少一个就红——PT-13 的缺口是 62 条，缺一个都算没修完。
+
+        2026-10-27 新增 `i-have-adhd`：它的软链在 `~/.claude/skills`，realpath 落在
+        本归档根，未登记时被越界闸门拒读（技能中心搜不到该技能）。原测试名里的
+        「four」随集合增长已不成立，改成不含数量的名字，避免下次加根又要改函数名。
+        """
         self.assertEqual(set(_ARCHIVE), {
             "/fs/1000/ftp/技术文档/mattpocock-skills",
             "/fs/1000/ftp/技术文档/crawl4ai",
             "/fs/1000/ftp/技术文档/hallmark",
             "/fs/1000/ftp/技术文档/Agent-Reach",
+            "/fs/1000/ftp/技术文档/i-have-adhd",
         }, "归档根集合变了：新增/删除都要在本文件与 CHANGELOG 里说清理由")
         # 用 monkeypatch 把假根换成真路径，验证「进了表就会被放进白名单」
         skill.ARCHIVE_ROOTS_ACTIVE = dict(_ARCHIVE)

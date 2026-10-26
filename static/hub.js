@@ -5959,6 +5959,11 @@ function renderSkillInvocations() {
         '<div class="sk-inv-head">' +
           '<span class="sk-inv-name">' + escapeHtml(who || '（无名次）') + '</span>' +
           (route ? '<span class="sk-inv-route">' + escapeHtml(route) + '</span>' : '') +
+          // 两源必须可分辨：hub 显式调用 vs 转录采集（agent 自己读了 SKILL.md）。
+          // 混成一色会让「记账坏了」和「扫描没跑」在面板上长得一样。
+          (x.source === 'scan'
+            ? '<span class="sk-inv-route" title="从会话转录采集：该 agent 读过此技能的 SKILL.md">转录采集</span>'
+            : '') +
           '<span class="sk-inv-caller">由 <b>' + escapeHtml(String(x.caller || 'anonymous')) +
             '</b> 调用' + (x.caller_reported ? '（自报）' : '') + '</span>' + st +
         '</div>' +
@@ -5971,10 +5976,11 @@ function renderSkillInvocations() {
       '<div class="sk-inv-side">' + viewBtn + '</div></div>';
   }).join('') || ('<div class="sk-empty"><b>这个窗口内没有调用记录</b>（近 ' +
     (SKILL_INV_VIEW.days || 7) + ' 天）。<br>' +
-    '这里只统计 <b>hub 通道</b>的显式调用（POST /api/skill/invoke 或 MCP hub_skill_invoke）；' +
-    'agent 直接读磁盘的 SKILL.md 不经过 hub，因此不会出现在这里。' +
+    '本页合并两个数据源：<b>hub 通道</b>（POST /api/skill/invoke、MCP hub_skill_invoke）' +
+    '与<b>会话转录采集</b>（每 10 分钟扫 pi/claude/codebuddy/codex 的会话，认「读 SKILL.md」' +
+    '与 Skill 工具调用，行内标「转录采集」）。' +
     (wantName || wantCaller ? '<br>当前有过滤条件，也可能是被过滤掉了。' : '') +
-    '<br>想验证记账正常：到「技能目录」点任一技能，在抽屉里点「试调用（记账）」。' +
+    '<br>想验证 hub 通道记账正常：到「技能目录」点任一技能，在抽屉里点「试调用（记账）」。' +
     '<br><span class="hint">若刚点过试调用仍为 0，多半是浏览器 TERM_TOKEN 与服务端不一致（401）——' +
     '旧凭据会被自动清空，重试时按提示输入当前 token 即可。</span>' +
     '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">' +

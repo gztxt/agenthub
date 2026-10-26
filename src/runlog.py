@@ -37,7 +37,7 @@ router = APIRouter()
 #: 本模块管理的 subject 枚举——与 track() 调用点一一对应。查询侧可枚举才做得出下拉。
 SUBJECTS = ("mem.search", "mem.context", "kb.search", "kb.browse",
             "kb.status", "skill.list", "skill.read", "skill.relevant",
-            "skill.inject", "cc.start")
+            "skill.inject", "skill.invoke", "cc.start")
 
 #: 埋点 source（与 hub_chat/task_exec/cron_run/mcp_call 并列）。hook.py 的画像聚合
 #: 会排除它，防止高频检索事件把 agent 画像挤出前 50（见批1 连带项）。

@@ -21,9 +21,10 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List
 
-#: 第二数据源（各家会话日志 / 直读磁盘旁路）未实现。出现在每个零调用条目上，
-#: 也出现在 /api/skill/zombies 的顶层，供前端与测试直接断言。
-DIRECT_SOURCE = "not-implemented"
+#: 第二数据源：各家 agent 会话转录（`skill_direct.scan` 采集，落 `source='scan'`）。
+#: 2026-10-27 之前这里是 "not-implemented" —— 面板上「调用记录」只有 hub 自己那三个
+#: 显式路由，agent 真读 SKILL.md 的用法一条都看不到（判例 228 只改了文案没改生产者）。
+DIRECT_SOURCE = "transcript"
 
 #: 计入记账的 subject。读库用 IN 展开，故须是 tuple 而非集合（sqlite3 接收序列）。
 #:
@@ -48,6 +49,11 @@ _SUBJECTS = ("skill.read", "skill.inject", "skill.relevant", "skill.invoke")
 #: 也就是说 'rest' 正是「hub 自己干的事」——技能门面的读写走这里。
 _SOURCE = "rest"
 
+#: 计入统计的两个 source：hub 显式通道 + 转录采集通道（`skill_direct`）。
+#: 两者必须分开保留 provider 字段（`via`），否则「机器记账」与「事后扫描」混成一桶，
+#: 出问题时无法判断是记账坏了还是采集坏了。
+_SOURCES = ("rest", "scan")
+
 MAX_DAYS = 365
 
 
@@ -71,13 +77,14 @@ def counts(days: int = 7) -> Dict[str, Dict[str, Any]]:
     # 占位符按 _SUBJECTS 长度现算：写死 `(?, ?)` 会在增 subject 时静默错位
     #（sqlite3 参数个数不符会抛，但「少写一个 ? 却多传一个值」这类迟早发生）。
     holders = ",".join("?" * len(_SUBJECTS))
+    sholders = ",".join("?" * len(_SOURCES))
     try:
         import db
         rows = db.query(
-            "SELECT subject, detail, created_at FROM profile_events "
-            "WHERE source = ? AND subject IN (%s) AND created_at >= ? "
-            "ORDER BY id" % holders,
-            (_SOURCE,) + _SUBJECTS + (since,))
+            "SELECT source, subject, detail, created_at FROM profile_events "
+            "WHERE source IN (%s) AND subject IN (%s) AND created_at >= ? "
+            "ORDER BY id" % (sholders, holders),
+            _SOURCES + _SUBJECTS + (since,))
     except Exception:
         # 面板要能开：查不到记账就当没人被调用过，僵尸榜会偏大但**方向是保守的**
         #（多列嫌疑而不是漏列嫌疑）。宁可多提醒也不漏提醒。
@@ -102,8 +109,11 @@ def counts(days: int = 7) -> Dict[str, Dict[str, Any]]:
         at = str(row.get("created_at") or "")
         if at > e["last_at"]:
             e["last_at"] = at
-        if "hub" not in e["via"]:
-            e["via"].append("hub")
+        # via 用真实来源标注：hub 通道 vs 转录采集。混成一个 'hub' 会让
+        # 「记账坏了」和「扫描没跑」在面板上长得一模一样。
+        via = "scan" if row.get("source") == "scan" else "hub"
+        if via not in e["via"]:
+            e["via"].append(via)
     return out
 
 
@@ -178,6 +188,7 @@ def snapshot(items: Iterable[Dict[str, Any]], days: int = 7) -> Dict[str, Any]:
         "counted": len(cmap),          # 账里有痕迹的技能数；0 = 无记账
         "confidence": "medium",
         "direct_source": DIRECT_SOURCE,
-        "note": "仅 hub 通道记账；各家直读磁盘未取证 ⇒ 置信度封顶 medium",
+        "note": "两源合并：hub 通道（rest）+ 会话转录采集（scan）；"
+                "写盘/纯提及仍不计 ⇒ 置信度封顶 medium",
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }

@@ -52,6 +52,7 @@ import memfed as memfed_mod
 import kb as kb_mod
 import skill as skill_mod
 import skill_store as skill_store_mod
+import skill_direct as skill_direct_mod   # 第二数据源：从会话转录采集真实技能调用
 import dataset as dataset_mod
 import tasks as tasks_mod
 import mcpgw as mcpgw_mod
@@ -104,7 +105,19 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.163"
+VERSION = "0.13.164"
+
+# v0.13.164：技能调用记账补上第二数据源（2026-10-27 用户令「调用记录没显示所有技能调用，
+# 每次都只修被点出来的那个错」）。根因：记账点只挂 hub 三个显式路由，而真实使用发生在
+# agent 自己 Read 磁盘的 SKILL.md——那一步不经过 hub；注入链只推名字、只打 skill.relevant。
+# 判例 228 补的是 401 文案与空状态，**数据生产者一个字没动**，所以看起来「修过了还是 0」。
+# ① skill_direct：扫 pi/claude/codebuddy/codex 会话转录，认 Skill 工具与「读 SKILL.md」，
+#   落 source='scan' 的 skill.invoke；grep/ls/find/写盘一律不计（防把检索当使用）。
+# ② 按文件增量（byte offset）+ 去重键(caller+call_id) ⇒ 幂等，文件截断重写也不重复记。
+# ③ skill_usage 口径改 source IN ('rest','scan')，DIRECT_SOURCE=transcript；
+#   置信度**仍封顶 medium**（覆盖只到读取，写盘与纯提及仍不计）。
+# ④ runlog.SUBJECTS 补 skill.invoke（原先在运行日志页筛这个 subject 直接 400）。
+# 闸门：tests/test_skill_direct.py、tests/test_skill_usage.py、test_execsem_p2_c3_l0。
 
 # v0.13.163: pi/omp 历史会话接入
 # 根因：SESSION_STORES 与 TERM_HIST_AGENTS 不同步，新增 agent 必须两边一起改
@@ -692,6 +705,36 @@ async def wal_checkpoint_loop():
             print(f"[db] WAL 检查点异常（下轮重试）{type(e).__name__}: {str(e)[:160]}", flush=True)
 
 
+#: 技能调用转录采集周期（秒）。默认 600；≤0 关闭本条循环。
+#: 为什么不做成「打开页面时现扫」：首次全扫 800+ 个转录文件要几秒到十几秒，
+#: 挂在 GET 上等于用一个仪表盘拖住主线程；后台慢拍 + 页面读现成账，互不干扰。
+HUB_SKILL_SCAN_SEC = int(os.getenv("HUB_SKILL_SCAN_SEC", "600"))
+
+
+async def skill_scan_loop():
+    """第二数据源：从 pi/claude/codebuddy/codex 的会话转录里补采真实技能调用。
+
+    背景（根因）：hub 只在自己那三个显式路由上记账，而 agent 真实用技能的动作是
+    「自己 Read SKILL.md」——完全不经过 hub。只补文案不改生产者，面板永远只有测试
+    caller（判例 228）。本循环按文件增量扫，只认读取类动作与 Skill 工具调用。
+
+    首轮延后 30s：先让 hub 开接请求；异常不打死循环（否则一次偶发采集永久停摆）。
+    """
+    if HUB_SKILL_SCAN_SEC <= 0:
+        return
+    await asyncio.sleep(30)
+    while True:
+        try:
+            r = await asyncio.to_thread(skill_direct_mod.scan)
+            if r.get("events"):
+                print("[skill-scan] 采到 %s 条调用 %s（扫 %s 文件，跳过 %s）" % (
+                    r.get("events"), r.get("by_caller"),
+                    r.get("files"), r.get("skipped")), flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[skill-scan] 采集异常（下轮重试）{type(e).__name__}: {str(e)[:160]}", flush=True)
+        await asyncio.sleep(HUB_SKILL_SCAN_SEC)
+
+
 MODEL_DRIFT_SWEEP_SEC = int(os.getenv("HUB_MODEL_DRIFT_SWEEP_SEC", "300"))
 #: 漂移写回开关（用户 09-28 授权默认开；置 0/false/no ⇒ 退回 v0.13.50 的只读告警）
 MODEL_DRIFT_REPAIR = os.getenv("HUB_MODEL_DRIFT_REPAIR", "1") not in ("0", "false", "no")
@@ -801,6 +844,7 @@ async def startup():
     # 就是「前端空白最长 60 秒」的同义词。
     _spawn(term_mod.fast_reap_loop())
     _spawn(wal_checkpoint_loop())   # WAL 周期检查点（把自动检查点从逐帧写路径挪走）
+    _spawn(skill_scan_loop())   # 技能调用第二数据源（转录采集，补 hub 看不到的直读）
     _spawn(refscout_mod.refresh_loop())   # 情报卡到期自动重跑（30 天/次，REF_AUTO_REFRESH=0 可关）
     # PT-20261024-08 B3/B4：保留期清理必须有独立心跳。
     # 为什么必须有（实测）：`term_recordings` 258.7 万行 / 597MB，而 `sweep()`

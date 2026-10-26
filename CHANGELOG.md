@@ -1,3 +1,43 @@
+## v0.13.164 — 技能调用记账补上第二数据源（转录采集）
+
+> 来源：2026-10-27 用户令「技能调用记录要显示所有技能调用的数据，并没有达到预期效果；
+> 每次都是哪个错误修哪个，没有找根因」。本批按根因改：**补数据生产者**，不是再改文案。
+
+### 根因（一句话）
+
+记账点只挂在 hub 的三个显式路由上，而真实使用发生在「agent 自己读磁盘 SKILL.md」——
+那一步完全不经过 hub。注入层（`hub_skill_inject.py` / `hub-facade.ts`）只推技能名、
+只打 `skill.relevant`，于是生产账上只有 probe / 测试 caller。判例 228 补的是 401 文案
+与空状态，数据生产者一个字没动。
+
+### 改了什么
+
+1. **新增 `src/skill_direct.py`**：扫 pi / claude / codebuddy / codex 的会话转录，
+   认「Skill 工具调用」与「Read / cat|head|tail|less|bat 打开 `.../skills/<name>/SKILL.md`」，
+   落 `source='scan'` 的 `skill.invoke`。**不认** grep/ls/find/echo 与写盘动作（防虚高）。
+   按文件增量（byte offset）+ 去重键（caller+call_id）→ 幂等；文件被截断重写也不重复记。
+2. **`src/skill_usage.py`**：`DIRECT_SOURCE` 由 `not-implemented` 改为 `transcript`；
+   统计口径由 `source = 'rest'` 改为 `source IN ('rest','scan')`；`via` 标真实来源。
+   置信度**仍封顶 medium**——覆盖只到读取，写盘与纯提及仍不计。
+3. **`src/skill.py`**：`/usage` 流水查询同时取两源，回包每条带 `source` 供前端区分。
+4. **`src/main.py`**：新增 `skill_scan_loop()`（默认 600s，`HUB_SKILL_SCAN_SEC=0` 关），
+   首轮延后 30s，异常不打死循环。
+5. **`src/runlog.py`**：`SUBJECTS` 补 `skill.invoke`——运行日志页原先筛这个 subject 直接 400。
+6. **前端**：流水行加「转录采集」徽标；空状态与标题从「直读磁盘不经过 hub、看不到」
+   改为两源口径（旧文案已成假话）。
+7. 版本号 `0.13.163 → 0.13.164`；重建 `static/hub.js`（md5 `ed57a82e → c1af4946`）。
+
+### 验证
+
+- `tests/test_skill_direct.py` 7 例：四格式识别、检索/写盘不记、幂等、增量、
+  截断重写不重复、dry-run、坏 JSON 行不打断。
+- 既有闸门改判 3 处（`direct_source` 值、SQL 单源断言、note 文案），并加注释说明
+  为什么改——都是「第二源落地」这一事实的下游，不是放宽。
+- 生产实测：首轮扫 814 个转录文件 / 采 163 条（pi 126、codebuddy 26、claude 11），
+  `skill.invoke` 由 47 条（全是测试 caller）变为 210 条；49 个技能首次有 `scan` 证据。
+
+---
+
 ## v0.13.163 — pi / omp 历史会话接入
 
 > 来源：2026-10-26 用户令「继续修复 omp 的历史会话记录显示和自动结束正在执行的任务的问题」。omp 历史会话已在上一版（v0.13.162）修复；本批补 **pi** 的历史会话接入（与 omp 同构的 `~/.pi/agent/sessions/` jsonl 格式），以及 `TERM_HIST_AGENTS` 前后端同步。

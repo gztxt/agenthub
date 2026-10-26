@@ -546,7 +546,7 @@ class TestRealStores(unittest.TestCase):
             self.assertEqual({"agent", "id", "title", "ts", "cwd"} - set(i), set(), "条目字段不齐")
 
     def test_unknown_agent_degrades(self):
-        self.assertEqual(ss.list_history("pi", CWD, 3)["items"], [])
+        self.assertEqual(ss.list_history("shell", CWD, 3)["items"], [])
 
     def test_sqlite_readonly_mtime_unchanged(self):
         for agent, p in (("hermes", Path.home() / ".hermes/state.db"),

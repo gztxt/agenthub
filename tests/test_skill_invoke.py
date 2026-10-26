@@ -314,7 +314,7 @@ class TestInvocations(_InvokeCase):
         self.assertTrue(row["caller_reported"])
 
     def test_auto_inject_bucket_is_separate_and_carries_caller(self):
-        """自动下发（subject=skill.relevant + via=hook）必须与指名调用分桶并带 caller。
+        """自动下发（via=hook）必须与指名调用分桶并带 caller；2026-10-27 起落 skill.inject。
 
         2026-10-20 用户要求：「要记录哪个 agent 调用了哪个技能，还要能分辨是执行任务时
         自动用的、还是人手动指定的」。端点不同只是实现细节——**判据是 via=hook**。
@@ -343,8 +343,11 @@ class TestInvocations(_InvokeCase):
         self.assertEqual(b["auto"]["unknown_caller"], 0)
         self.assertEqual(b["items"][0]["mode"], "explicit_invoke")
 
+        # 2026-10-27：注入链改落 skill.inject（与人工查询互斥，不双记）。
         modes = [json.loads(e["detail"]).get("mode") for e in self._events("skill.relevant")]
-        self.assertEqual(sorted(modes), ["auto_inject", "query"])
+        self.assertEqual(modes, ["query"], "人工查询仍是 skill.relevant")
+        imodes = [json.loads(e["detail"]).get("mode") for e in self._events("skill.inject")]
+        self.assertEqual(imodes, ["auto_inject"], "via=hook 必须落 skill.inject 而不是 relevant")
 
     def test_bad_detail_rows_are_counted_not_fatal(self):
         """坏 detail 行不许打挂面板——逐行 try、跳过并计数（与 skill_usage 同纪律）。"""
@@ -488,6 +491,13 @@ class TestPickExtra(unittest.TestCase):
         self.assertEqual(runlog._mode_of("skill.relevant", {"via": "hook"}), "auto_inject")
         self.assertEqual(runlog._mode_of("skill.relevant", {"via": ""}), "query")
         self.assertEqual(runlog._mode_of("skill.relevant", {}), "query")
+        self.assertEqual(runlog._mode_of("skill.inject", {"via": "hook"}), "auto_inject")
+        # subject 改判：只有 via=hook 且有候选才叫注入；人工查询仍是 relevant。
+        self.assertEqual(runlog._subject_for("skill.relevant", {"via": "hook"}, True),
+                         "skill.inject")
+        self.assertEqual(runlog._subject_for("skill.relevant", {"via": "hook"}, False),
+                         "skill.relevant")
+        self.assertEqual(runlog._subject_for("skill.relevant", {}, True), "skill.relevant")
         self.assertEqual(runlog._mode_of("skill.invoke", {"caller": "codex"}),
                          "explicit_invoke")
         self.assertEqual(runlog._mode_of("skill.list", {}), "")

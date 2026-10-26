@@ -240,7 +240,15 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.164"
+    CURRENT_VERSION = "0.13.165"
+    #: v0.13.165：关键词取版本注释里**实际写下的字句**——三条根因各取两词：
+    #: ① 三家转录（chat_history.jsonl / part.data / 三种增量口径）
+    #: ② skill.inject 有生产者（不再只剩桶标签）
+    #: ③ 四个端点有入口（links 供逐路卸载、dry_run 默认预演、can_check=false 显原因）
+    VERSION_ROOT_CAUSES["0.13.165"] = (
+        "chat_history.jsonl", "part.data", "rowid", "skill.inject", "有生产者",
+        "links", "dry_run", "can_check",
+    )
     VERSION_ROOT_CAUSES["0.13.164"] = (
         "skill_direct", "source='scan'", "数据生产者", "幂等",
         "transcript", "medium", "skill.invoke",

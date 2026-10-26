@@ -273,6 +273,10 @@ class TestDedup(unittest.TestCase):
         self.assertEqual(sorted(out[0]["routes"]), ["pi", "techdocs"])
         self.assertEqual(len(aliases), 1)
         self.assertEqual(aliases[0]["name"], "agent-dispatch")
+        # v0.13.165：逐路事实（哪一路是软链）必须随条目回给前端，
+        # 否则 DELETE /remove 在页面上无从判断「这一路能不能卸」。
+        links = {l["route"]: l["via_symlink"] for l in out[0]["links"]}
+        self.assertEqual(links, {"pi": True, "techdocs": False})
 
     def test_canonical_entry_prefers_the_real_file_route(self):
         """规范条目必须是"真实文件那一路"，软链路只当别名 —— 否则门面会指着一个

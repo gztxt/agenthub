@@ -65,8 +65,13 @@ def _mode_of(subject: str, kwargs: Dict[str, Any], forced: str = "") -> str:
     查询虽然也打同一端点，却是人在问。故不能按端点分，只能按调用方显式声明分：
       · skill.invoke + via=auto/hook → auto_invoke（服务端/注入链选出来的技能被激活）
       · skill.invoke 其它             → explicit_invoke（有人点了这个技能的名字）
-      · skill.relevant + via=hook     → auto_inject（机器选出来的候选，未激活）
+      · skill.inject                 → auto_inject（注入链**确实把候选塞进了 agent 上下文**）
       · skill.relevant 其它            → query（人工检索，不是使用证据）
+
+    ⚠ 2026-10-27 起注入链不再记 `skill.relevant`：同一个动作以前叫「查询」（query），
+    于是「注入」这件事在账上不存在（`skill.inject` 恒 0，只剩桶标签）。现在
+    `/relevant?via=hook` 的成功响应改落 `skill.inject`，人工查询仍落 `skill.relevant`。
+    两个 subject 互斥（同一请求只会落一个），不会重复计数。
     未声明 `via` 的旧客户端**不推断**为 auto：把它们算进自动桶会把「UI 里试一下」
     当成「agent 主动用了」，权重直接失真。
 
@@ -78,9 +83,26 @@ def _mode_of(subject: str, kwargs: Dict[str, Any], forced: str = "") -> str:
     if subject == "skill.invoke":
         via = str(kwargs.get("via") or "").strip().lower()
         return "auto_invoke" if via in ("auto", "hook") else "explicit_invoke"
+    if subject == "skill.inject":
+        return "auto_inject"
     if subject == "skill.relevant":
         return "auto_inject" if str(kwargs.get("via") or "").strip().lower() == "hook" else "query"
     return ""
+
+
+def _subject_for(subject: str, kwargs: Dict[str, Any], has_names: bool) -> str:
+    """把「注入链的查询」改记成 `skill.inject`；其它情况原样返回。
+
+    为什么不在端点上换装饰器：`/api/skill/relevant` 同时服务**人工检索**（相关性实验室）
+    与**注入链**（pi `hub-facade.ts` / claude `hub_skill_inject.py`），只有后者才是
+    「候选被塞进 agent 上下文」。判据是调用方显式声明的 `via=hook`——与 `_mode_of`
+    同一根依据，不另造一套。
+    `has_names=False`（本轮没有候选）时不算注入：什么都没塞进去。
+    """
+    if subject == "skill.relevant" and has_names and \
+            str(kwargs.get("via") or "").strip().lower() == "hook":
+        return "skill.inject"
+    return subject
 
 
 def _pick_extra(kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -352,6 +374,8 @@ def track(subject: str, skip_when=None, mode: str = ""):
                     # 否则面板会把自报身份显示成已取证，权重统计的来源就带毒。
                     base["caller_reported"] = True
                 names = _pick_names(data)
+                # 注入链的候选一旦有名字，就是**真被塞进 agent 上下文**了 ⇒ 改记 skill.inject。
+                fire_subject = _subject_for(subject, kwargs, bool(names))
                 if not names:
                     _fire(subject, "success", int((time.monotonic() - t0) * 1000), base)
                 else:
@@ -365,7 +389,7 @@ def track(subject: str, skip_when=None, mode: str = ""):
                         _rt = _routes.get(nm)
                         if _rt:
                             ev["route"] = _rt
-                        _fire(subject, "success", int((time.monotonic() - t0) * 1000), ev)
+                        _fire(fire_subject, "success", int((time.monotonic() - t0) * 1000), ev)
                 return data
             except HTTPException as e:
                 # 失败路径同样留痕（查询词 scrub 后截 200），然后原样 re-raise——

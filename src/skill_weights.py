@@ -7,7 +7,8 @@
 
 【公式】
     使用量 use = 2×explicit + 1×read + 1×auto_use
-    曝光量 auto = skill.relevant 中 mode=auto_inject 的条数
+    曝光量 auto = skill.inject（注入链，2026-10-27 起）
+                + skill.relevant 中 mode=auto_inject 的旧账
     score = use² / (use + auto)      （use+auto=0 时为 0）
 
 `auto_use`（v0.13.138）＝ `/api/skill/auto` 自己按任务描述选中并**激活**的技能。
@@ -46,8 +47,10 @@ import db
 #: 与 `skill_usage._SOURCE` 同义：hub 自己产生的门面事件。
 SOURCE = "rest"
 
-#: 计入权重的 subject。`skill.list` 是浏览目录，不是使用；`skill.inject` 目前无生产者。
-SUBJECTS = ("skill.read", "skill.invoke", "skill.relevant")
+#: 计入权重的 subject。`skill.list` 是浏览目录，不是使用。
+#: `skill.inject` = 注入链真把候选塞进了上下文（2026-10-27 起由 `/relevant?via=hook`
+#: 落账）；`skill.relevant` 只剩人工检索。两者都是曝光，进同一桶。
+SUBJECTS = ("skill.read", "skill.invoke", "skill.relevant", "skill.inject")
 
 #: 使用强度。点名 invoke 拿走指令正文（要执行）＝2；read 只是查看＝1；
 #: auto_use 是服务端选出来并激活（不是人点的）＝1，与 read 同权而已——它比 read
@@ -114,6 +117,12 @@ def classify(subject: str, det: Dict[str, Any]) -> Tuple[str, str]:
         return "explicit", name
     if subject == "skill.read":
         return "read", name
+    if subject == "skill.inject":
+        # 只有注入链会产出这个 subject，语义就是「自动下发」⇒ 直接进曝光桶。
+        # 仍允许 detail 显式写 mode=query（未来若有人手工回写注入记录），按声明走。
+        if str(det.get("mode") or "").strip().lower() == "query":
+            return "query", name
+        return "auto", name
     if subject == "skill.relevant":
         mode = str(det.get("mode") or "").strip().lower()
         via = str(det.get("via") or "").strip().lower()

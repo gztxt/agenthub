@@ -397,7 +397,8 @@ class TestStoreView(unittest.TestCase):
 
     def test_auth_entry_is_password_input_and_delegated(self):
         """账号入口：Token 输入必须 type=password，且走 data-* 委托（值不进事件属性）。"""
-        body = re.search(r"function _renderStoreMeta\(.*?\n\}", JS, re.S).group(0)
+        # v0.13.165：账号渲染拆成 _renderStoreAuth（/store/status 与 /store/auth 共用）
+        body = re.search(r"function _renderStoreAuth\(.*?\n\}", JS, re.S).group(0)
         self.assertIn('type="password"', body)
         self.assertIn("data-store-login", body)
         self.assertNotIn("onclick=", body)
@@ -798,6 +799,46 @@ class TestUsageView(unittest.TestCase):
             self.assertIn("data-usage-filter", m.group(0), sid + " 没挂委托标记")
             self.assertNotIn("onchange=", m.group(0), sid + " 用了 inline onchange")
         self.assertIn("bindUsageFilters", strip_js_comments(JS))
+
+
+class TestBackendEndpointsHaveEntries(unittest.TestCase):
+    """2026-10-27：四个「后端有、页面零入口」的端点必须真的接上。
+
+    沿用本仓既有判据：**剥注释后**再断言端点字符串——否则文档里提一句就假绿
+    （同族于 `assertIn("d.error")` 那次）。
+    """
+
+    @staticmethod
+    def _code():
+        return strip_js_comments(JS)
+
+    def test_catalog_entry(self):
+        self.assertIn('id="skillCatalogBtn"', HTML)
+        self.assertIn('id="skillCatalogDrawer"', HTML)
+        self.assertIn("/api/skill/catalog", self._code(), "L1 目录按钮没有真打端点")
+        # digest/est_tokens 是 catalog 与 list 的差别，页面必须把它们摆出来
+        self.assertIn("est_tokens", HTML + self._code())
+
+    def test_remove_entry(self):
+        self.assertIn("/api/skill/remove", self._code(), "卸载软链没接 DELETE 端点")
+        self.assertRegex(self._code(), r"method:\s*['\"]DELETE['\"]")
+        # 可卸载的判据必须来自后端 links，不在前端猜路径
+        self.assertIn("s.links", self._code(), "逐路软链事实没读后端 links")
+        self.assertIn("data-sk-unbind", self._code())
+
+    def test_store_acquire_entry(self):
+        self.assertIn('id="storeAcqBox"', HTML)
+        self.assertIn('id="storeTask"', HTML)
+        self.assertIn("/api/skill/store/acquire", self._code(), "自动取技能没接端点")
+        # 默认预演：不勾「只评估不安装」才允许真装
+        self.assertIn("dry_run", self._code())
+        self.assertIn("allow_install", self._code())
+
+    def test_store_auth_entry(self):
+        self.assertIn("/api/skill/store/auth", self._code(), "刷新账号态没接 GET 端点")
+        self.assertIn("data-store-auth", self._code())
+        # can_check=false 必须显示原因，不能画成「未登录」
+        self.assertIn("can_check", self._code())
 
 
 if __name__ == "__main__":

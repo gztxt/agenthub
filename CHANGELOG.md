@@ -1,3 +1,72 @@
+## v0.13.165 — 补三家转录 / 补 skill.inject 生产者 / 补四个 UI 入口
+
+> 来源：2026-10-27 用户复查 v0.13.164 后点出的三条缺口，原文：
+> 「1. opencode / grok / jcode 的转录格式未接入采集。2. skill.inject 仍无生产者（只剩桶标签）。
+> 3. 四个后端端点仍无前端入口：/catalog、DELETE /remove、/store/acquire、/store/auth」。
+
+### 1. 转录采集扩到 7 家（补 opencode / grok / jcode）
+
+| caller | 位置 | 形态 | 工具调用位置 |
+|---|---|---|---|
+| grok | `~/.grok/sessions/**/chat_history.jsonl` | JSONL | `assistant.tool_calls[]` |
+| jcode | `~/.jcode/sessions/*.json` | 单文件 JSON | `messages[].content[].tool_use` |
+| opencode | `~/.local/share/opencode/opencode.db` | SQLite | `part.data` 的 `type=tool.state.input` |
+
+- **grok 只扫 `chat_history.jsonl`**：同目录还有 `events.jsonl` / `updates.jsonl` /
+  `rewind_points.jsonl`，扫全部 `*.jsonl` 会把同一次调用记三遍（实测 `events.jsonl`
+  里带同样的工具 id）。
+- **jcode 按消息数增量**，size 变了从最后一条重读——流式写会改写末条消息
+  （先出 text 块，后补 tool_use 块）；实测 2745 次 bash 里确有 `cd .../skills/<n> && head SKILL.md`
+  的读法，路径不连续，新增 `_skill_from_command` 识别。
+- **opencode 按 `part.rowid` 水位增量**，只读打开（`mode=ro`）；首次按 30 天截断，
+  库被重建（max rowid 变小）时归零重扫，去重键兜住。
+- 工具名补 grok 的 `run_terminal_command` / `run_termial_command`（真实转录里存在这个
+  历史拼写错）与 `read_file`；opencode/jcode 的 `read` / `bash` / `skill` 复用原表。
+- 干跑实测（30 天、不落库）：**226 条事件**（pi 160 / codebuddy 36 / opencode 15 /
+  claude 14 / grok 1；jcode 0）。jcode 的 0 是**真 0**：近 30 天转录里没有读
+  `SKILL.md` 的工具调用（skill 字样只出现在 bash 的单元测试名与文档正文里）。
+
+### 2. `skill.inject` 从「只有桶标签」变成有生产者
+
+- 根因：注入链（pi `hub-facade.ts` / claude `hub_skill_inject.py`）打
+  `/api/skill/relevant?via=hook`，服务端把它记成 `skill.relevant` + `mode=auto_inject`
+  ⇒ `skill.inject` **恒 0**，只在 `skill_usage` 的桶里当标签。
+- 修法：`runlog._subject_for()` —— `via=hook` **且有候选返回**时改落
+  `skill.inject`；无候选不记（什么都没塞进上下文）；人工查询仍落 `skill.relevant`。
+  同一请求只落一种，**不双记**。
+- 下游口径同步：`skill_weights.SUBJECTS` 补 `skill.inject`（classify → auto 曝光）；
+  `/invocations` 的 auto 段同时读 `skill.relevant` + `skill.inject`（灰度期两边都要看得见）；
+  `skill_usage` 注释与 `_mode_of` 更新。
+- 闸门：`test_skill_invoke.test_auto_inject_bucket_is_separate_and_carries_caller`
+  改判——`skill.relevant` 只剩人工查询，`skill.inject` 必须是 `auto_inject`。
+
+### 3. 四个「后端有、页面零入口」的端点接上
+
+- **`GET /api/skill/catalog`** → 技能目录工具条「L1 目录」按钮 + 独立抽屉：
+  显示 total/count/took_ms 与完整 JSON（含 `digest` / `pkg_files` / `pkg_bytes` /
+  `est_tokens`），可一键复制。这一面是 agent 启动时的发现面，不是另一份技能列表。
+- **`DELETE /api/skill/remove`** → 技能详情抽屉「分布路由」逐路按钮：只有
+  `via_symlink=true` 的路才有「卸载软链」；判据来自 `_dedup()` 新增的
+  `item.links[]`（此前只有规范条目的 `via_symlink`，前端无从知道**哪一路**能卸）。
+  真目录 409 的拒绝原样显示，前端不另造一套判据。
+- **`POST /api/skill/store/acquire`** → 技能商店「按任务自动取技能」一行：
+  默认 `dry_run=true`（只评估不安装），取消勾选才写盘；结果区只渲染后端字段
+  （`ok/reason/would_install/local.candidates/store.ranking`），不在前端重算分数。
+- **`GET /api/skill/store/auth`** → 账号行「刷新」按钮；`can_check=false` 时显示
+  原因（CLI 不可用），不再画成「未登录」骗用户填 Token。
+
+### 验证
+
+- `tests/test_skill_direct.py` 7 → 15 例：grok tool_calls / 只扫 chat_history /
+  grep 不算读、jcode 单文件 JSON / 末条流式补全、opencode 首扫 / rowid 增量。
+- `tests/test_skill_center_ui.py` 新增 `TestBackendEndpointsHaveEntries` 4 例
+  （剥注释后断言，防「文档提一句」假绿）。
+- `tests/test_skill_facade.py` 钉住 `links` 的逐路 `via_symlink`。
+- 版本号 `0.13.164 → 0.13.165`；重建 `static/hub.js`（md5 `7d892d5b`）。
+- L0 hermetic 全量：**3168 例 / 0 失败 / 0 跳过**，收集器对账 `unittest=3243 = pytest=3243`。
+
+---
+
 ## v0.13.164 — 技能调用记账补上第二数据源（转录采集）
 
 > 来源：2026-10-27 用户令「技能调用记录要显示所有技能调用的数据，并没有达到预期效果；

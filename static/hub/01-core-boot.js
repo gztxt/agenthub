@@ -350,7 +350,9 @@ var CENTER_HEALTH = { memory: '', skills: '', kb: '' };
    ② 导航 = 清抽屉（go 里做，不留给调用方自觉）；
    ③ 遮罩只有一个计算出口（06 的 syncOverlayMask），且点它一定关干净 ——
       手机上没有 ESC 键，点空白是唯一逃生路径。 */
-const OVERLAY_IDS = ['detailDrawer', 'skillDocDrawer'];   // v0.13.43：设置抽屉已拆，改走正文页
+// v0.13.165：skillCatalogDrawer（L1 目录）也是浮层 ⇒ 必须登记，否则
+// 抽屉唯一性 / 导航清收 / Esc / inert 四条红线对它全部失效。
+const OVERLAY_IDS = ['detailDrawer', 'skillDocDrawer', 'skillCatalogDrawer'];   // v0.13.43：设置抽屉已拆，改走正文页
 const overlayOpen = id => { const el = $(id); return !!(el && el.classList.contains('on')); };
 window.overlayAnyOpen = () => OVERLAY_IDS.some(overlayOpen);
 

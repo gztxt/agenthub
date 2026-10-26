@@ -1005,6 +1005,8 @@ let STORE_STATE = { items: [], q: '', busy: false, targets: null, error: '' };
  * 就成了第二个真相。`caller` 过滤也必须打服务端：它是「先过滤再算分」，
  * 前端后过滤会把别人的曝光留在分母里。 */
 let SKILL_USAGE = null, SKILL_USAGE_LOADED = false, SKILL_USAGE_BUSY = false;
+/* L1 目录抽屉的数据（GET /api/skill/catalog）。只在打开抽屉时拉，首屏零请求。 */
+let SKILL_CATALOG = null;
 
 /* v0.13.69 D7 技能门面：一份数据源、一个扫描口径。
  * 主列表 + 三张诊断卡（自检 / 相关性实验室 / 注入预算）都读同一批后端字段，
@@ -1110,6 +1112,39 @@ function renderSkillStats() {
     tabBadge.hidden = !SKILL_INV;
   }
   el.innerHTML = html;
+}
+
+/* L1 目录：GET /api/skill/catalog 的只读呈现（v0.13.165）。
+ * 与 /list 共用同一批扫描缓存，但**不混记账数据**：catalog 只给静态发现面
+ * （digest/pkg_files/pkg_bytes/est_tokens），调用次数走 /invocations。
+ * 懒加载：点按钮才发请求，首屏请求数不增加。 */
+async function skillShowCatalog() {
+  const hint = $('skillCatalogHint'), body = $('skillCatalogBody');
+  if (!hint || !body) return;
+  openOverlay('skillCatalogDrawer');
+  hint.textContent = '读取中…';
+  body.textContent = '读取中…';
+  try {
+    const d = await api('/api/skill/catalog?limit=1000');
+    SKILL_CATALOG = d;
+    hint.innerHTML = '共 <b>' + (d.total != null ? d.total : 0) + '</b> 条 · 本次返回 ' +
+      (d.count != null ? d.count : 0) + ' 条 · ' + escapeHtml(String(d.took_ms || 0)) + 'ms' +
+      '<br>这一面给 agent 启动时发现技能：digest 可比对是否被改过，est_tokens 是读它的成本。';
+    body.textContent = JSON.stringify(d.items || [], null, 2);
+  } catch (e) {
+    SKILL_CATALOG = null;
+    hint.textContent = '读取失败：' + (e.message || e);
+    body.textContent = '';
+  }
+}
+
+function closeSkillCatalog() { closeOverlay('skillCatalogDrawer'); }
+
+async function skillCopyCatalog() {
+  if (!SKILL_CATALOG) { toast('目录还没加载', 'err'); return; }
+  const txt = JSON.stringify(SKILL_CATALOG.items || [], null, 2);
+  if (await settingsLogsCopyText(txt)) toast('已复制 ' + (SKILL_CATALOG.count || 0) + ' 条', 'ok');
+  else toast('复制失败：浏览器不给剪贴板权限（局域网 http 地址常见）', 'err');
 }
 
 /* 视图切换（Grill 裁定 5：技能目录 / 调用记录两视图）。
@@ -1220,19 +1255,40 @@ function _renderStoreMeta(d) {
     }
     a.innerHTML = '<b>自动兜底</b><span>' + text + '</span>';
   }
-  const au = (d && d.auth) || {};
+  _renderStoreAuth((d && d.auth) || {});
+}
+
+/* 账号态单独一个渲染器：`/store/status` 与 `GET /store/auth`（刷新按钮）共用。
+ * `can_check=false` 必须显示原因——把「CLI 缺失」画成「未登录」会让用户白填 Token。 */
+function _renderStoreAuth(au) {
   const b = $('storeAuthLine');
   if (!b) return;
-  if (au.logged_in) {
+  const refresh = '<button class="btn ghost sm" data-store-auth="1" title="GET /api/skill/store/auth：重新查一次账号态">刷新</button>';
+  if (au && au.can_check === false) {
+    b.innerHTML = '<b>账号</b><span class="sk-store-token">无法查询：' +
+      escapeHtml(String(au.detail || 'SkillHub CLI 不可用')) + refresh + '</span>';
+    return;
+  }
+  if (au && au.logged_in) {
     b.innerHTML = '<b>账号</b><span class="sk-store-token">已登录（' +
-      escapeHtml(String(au.detail || '')) + '）' +
+      escapeHtml(String(au.detail || '')) + '）' + refresh +
       '<button class="btn ghost sm" data-store-logout="1">退出</button></span>';
   } else {
     b.innerHTML = '<b>账号</b><span class="sk-store-token">未登录 · ' +
-      '搜索/下载免登录；发布、评论、在线运行需 skh_ Token' +
+      '搜索/下载免登录；发布、评论、在线运行需 skh_ Token' + refresh +
       '<input id="storeToken" type="password" placeholder="skh_…" autocomplete="off"' +
       ' aria-label="SkillHub API Token">' +
       '<button class="btn sm" data-store-login="1">保存 Token</button></span>';
+  }
+}
+
+async function storeRefreshAuth() {
+  try {
+    const d = await api('/api/skill/store/auth');
+    _renderStoreAuth(d || {});
+    toast('账号态已刷新', 'ok');
+  } catch (e) {
+    toast('刷新账号态失败：' + (e.message || e), 'err');
   }
 }
 
@@ -1291,6 +1347,74 @@ async function searchStore(q) {
     if (btn) btn.disabled = false;
     renderStore();
   }
+}
+
+/* 按任务自动取技能：POST /api/skill/store/acquire（v0.13.165 的 UI 入口）。
+ * 默认 `dry_run=true`：面板只做**预演**，把「将会装什么、为什么」摆出来；
+ * 用户取消勾选才会真安装（写盘）。agent 侧同一端点默认允许安装，差别在这里。 */
+async function storeAcquire() {
+  const box = $('storeTask');
+  const task = String((box && box.value) || '').trim();
+  if (!task) { toast('先写一句任务（不是技能名）', 'err'); return; }
+  const dry = !($('storeAcqDry') && $('storeAcqDry').checked === false);
+  const btn = $('storeAcqBtn'), out = $('storeAcqResult');
+  if (btn) { btn.disabled = true; btn.textContent = '评估中…'; }
+  if (out) out.textContent = '本地匹配 + 商店打分中…';
+  try {
+    const d = await api('/api/skill/store/acquire', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: task, task: task, caller: 'web',
+                             dry_run: dry, allow_install: !dry }),
+    });
+    if (out) out.innerHTML = _storeAcqHtml(d, dry);
+    if (!dry && d.ok) {
+      STORE_STATE.installed = STORE_STATE.installed || {};
+      if (d.slug) STORE_STATE.installed[d.slug] = d.route;
+      toast('已取用 ' + (d.name || d.slug || '') + ' → ' + (d.route || ''), 'ok');
+      loadSkills();
+    }
+  } catch (e) {
+    if (out) out.innerHTML = '<span class="sk-inv-bad">取用失败：' + escapeHtml(String(e.message || e)) + '</span>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '自动取'; }
+  }
+}
+
+/* 只渲染后端字段：ok/reason/would_install/local.candidates/store.ranking。
+ * **不在这里重算分数**，也不把「预演」写成「已安装」。 */
+function _storeAcqHtml(d, dry) {
+  d = d || {};
+  const who = d.name
+    ? '<b>' + escapeHtml(String(d.name)) + '</b>' +
+      (d.route ? ' → ' + escapeHtml(String(d.route)) : '') +
+      (d.source ? ' · 来源 ' + escapeHtml(String(d.source)) : '')
+    : '';
+  let html = (d.ok ? '已交付：' + who : '未取到' + (who ? '：' + who : '')) +
+    (d.reason ? ' · ' + escapeHtml(String(d.reason)) : '');
+  if (d.would_install) {
+    const w = d.would_install;
+    html += '<br>将会安装：<b>' + escapeHtml(String(w.name || w.slug || '')) + '</b>' +
+      (w.route ? ' → ' + escapeHtml(String(w.route)) : '') +
+      (w.security ? ' · 安全报告 ' + escapeHtml(String(w.security)) : '') +
+      (w.needs_key ? ' · <span class="sk-inv-bad">需自带 Key</span>' : '') +
+      (w.how_to_proceed ? '<br><span class="hint">' + escapeHtml(String(w.how_to_proceed)) + '</span>' : '');
+  }
+  const cands = ((d.local || {}).candidates || []).slice(0, 3);
+  if (cands.length) {
+    html += '<br>本地候选：' + cands.map(c =>
+      escapeHtml(String(c.name || '')) + (c.norm != null ? '（' + Number(c.norm).toFixed(2) + '）' : ''))
+      .join('、');
+  }
+  const rank = ((d.store || {}).ranking || []).slice(0, 3);
+  if (rank.length) {
+    html += '<br>商店排行：' + rank.map(r =>
+      escapeHtml(String(r.name || r.slug || '')) +
+      (r.quality != null ? '（quality ' + Number(r.quality).toFixed(2) + '）' : '') +
+      (r.veto ? ' <span class="sk-inv-bad">否决：' + escapeHtml(String(r.veto)) + '</span>' : ''))
+      .join('；');
+  }
+  if (dry) html += '<br><span class="hint">本次是预演（dry_run），未写盘。</span>';
+  return html;
 }
 
 function fmtCount(n) {
@@ -1400,6 +1524,15 @@ function bindStoreActions() {
     meta.addEventListener('click', e => {
       if (e.target.closest('[data-store-login]')) storeLogin();
       else if (e.target.closest('[data-store-logout]')) storeLogout();
+      else if (e.target.closest('[data-store-auth]')) storeRefreshAuth();
+    });
+  }
+  // 自动取技能：按钮在 #storeAcqBox（不在 #storeList 里），单独挂委托。
+  const acq = $('storeAcqBox');
+  if (acq && !acq.__skAcq) {
+    acq.__skAcq = true;
+    acq.addEventListener('click', e => {
+      if (e.target.closest('[data-store-acquire]')) storeAcquire();
     });
   }
 }
@@ -1969,6 +2102,12 @@ function bindSkillViewDelegation() {
     if (!el || el.__skDeleg) return;
     el.__skDeleg = true;
     el.addEventListener('click', e => {
+      const un = e.target.closest('[data-sk-unbind]');
+      if (un && el.contains(un)) {
+        e.stopPropagation();
+        skillUnbind(un.dataset.name || '', un.dataset.route || '');
+        return;
+      }
       const b = e.target.closest('[data-sk-view]');
       if (b && el.contains(b)) {
         e.stopPropagation();
@@ -2055,10 +2194,20 @@ function skillRenderDocMeta() {
       escapeHtml(String(s.pkg_digest || '—').slice(0, 12)) + '</span>') +
     kv('到达方式', s.via_symlink ? '软链' : '实体目录') +
     kv('编码', escapeHtml(String(s.encoding || '—')));
-  const routes = s.routes || [s.route];
-  routesEl.innerHTML = routes.map(r => {
-    const kind = (r === 'local') ? '项目本地' : '全局';
-    return kv(escapeHtml(String(r)), kind + (s.via_symlink ? ' · 软链到达' : ''));
+  // 逐路事实优先用后端 v0.13.165 的 `links`（每路自己的 path/via_symlink）。
+  // 旧响应没有 links 时退回 routes（只说明「在哪几路」，不谎称可卸载）。
+  const links = (s.links && s.links.length)
+    ? s.links
+    : (s.routes || [s.route]).map(r => ({ route: r, path: '', via_symlink: false }));
+  routesEl.innerHTML = links.map(l => {
+    const r = String(l.route || '');
+    const kind = (r === 'local') ? '项目本地' : (l.via_symlink ? '软链到达' : '实体目录');
+    const un = l.via_symlink
+      ? ' <button class="btn ghost sm" data-sk-unbind="1" data-name="' +
+        escapeHtml(SKILL_DOC.name) + '" data-route="' + escapeHtml(r) +
+        '" title="DELETE /api/skill/remove：只删这条软链，真实目录（本体）不动">卸载软链</button>'
+      : '';
+    return '<div>' + escapeHtml(r) + '：<b>' + kind + '</b>' + un + '</div>';
   }).join('') || '<span class="hint">—</span>';
   function kv(k, v) { return '<div>' + k + '：<b>' + v + '</b></div>'; }
 }
@@ -2493,6 +2642,22 @@ function bindUsageFilters() {
 function switchToCatalog() { switchSkillView('catalog'); }
 
 function closeSkillDoc() { closeOverlay('skillDocDrawer'); }
+
+/* 卸载一条**软链**（DELETE /api/skill/remove）。真实目录是权威本体，后端 409 拒绝——
+ * 前端不做第二套判据，把后端的拒绝原样摆出来。 */
+async function skillUnbind(name, route) {
+  if (!name || !route) return;
+  if (!confirm('卸载 ' + route + '/' + name + ' 的软链？\n\n只删这条软链，真实目录（本体）不动。')) return;
+  try {
+    await api('/api/skill/remove?name=' + encodeURIComponent(name) +
+      '&route=' + encodeURIComponent(route), { method: 'DELETE' });
+    toast('已卸载 ' + route + '/' + name + '（本体未动）', 'ok');
+    await loadSkills();
+    skillRenderDocMeta();
+  } catch (e) {
+    toast('卸载失败：' + (e.message || e), 'err');
+  }
+}
 
 async function skillInstall() {
   const name = $('instName').value;

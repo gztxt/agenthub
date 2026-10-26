@@ -105,7 +105,24 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.164"
+VERSION = "0.13.165"
+
+# v0.13.165（2026-10-27 用户复查三缺口）：补三家转录 + 补一个 subject 生产者 + 补四个 UI 入口。
+# ① skill_direct 扩到 **7 家**：grok（chat_history.jsonl 的 assistant.tool_calls[]）、
+#    jcode（~/.jcode/sessions/*.json 的 messages[].content[].tool_use）、
+#    opencode（opencode.db 的 part.data type=tool）。三种存储形态各自的增量口径：
+#    JSONL 字节 offset / JSON 消息数（末条重读）/ SQLite rowid 水位；共用去重键。
+#    grok 只扫 chat_history.jsonl——events/updates 会重复记同一次调用。
+# ② `skill.inject` 从此**有生产者**：注入链 `/api/skill/relevant?via=hook` 且有候选时，
+#    runlog 改落 skill.inject（以前落 skill.relevant+auto_inject ⇒ inject 恒 0，
+#    只剩桶标签）。人工查询仍落 skill.relevant，同一请求只落一种，不双记。
+#    usage / 权重榜 / `/invocations.auto` 同步认这个 subject。
+# ③ 四个「后端有、页面零入口」的端点接上：`GET /api/skill/catalog`（L1 目录抽屉）、
+#    `DELETE /api/skill/remove`（抽屉逐路「卸载软链」，判据来自新增的 item.links）、
+#    `POST /api/skill/store/acquire`（按任务自动取技能，默认 dry_run 预演）、
+#    `GET /api/skill/store/auth`（刷新账号态，can_check=false 显示原因）。
+# 闸门：tests/test_skill_direct.py（15 例）、test_skill_center_ui（四入口）、
+#       test_skill_invoke（subject 改判）、test_skill_weights（inject 计入曝光）。
 
 # v0.13.164：技能调用记账补上第二数据源（2026-10-27 用户令「调用记录没显示所有技能调用，
 # 每次都只修被点出来的那个错」）。根因：记账点只挂 hub 三个显式路由，而真实使用发生在

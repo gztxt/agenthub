@@ -805,6 +805,10 @@
         .sk-store-meta-line .sk-store-token { display: inline-flex; align-items: center;
                                               gap: 6px; flex-wrap: wrap; }
         .sk-store-token input { max-width: 220px; }
+        /* /store/acquire：任务一句话 + 预演开关 + 执行。 */
+        .sk-store-acq { display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+                        margin: 0 0 6px; }
+        .sk-store-acq input[type=text], .sk-store-acq #storeTask { flex: 1 1 240px; }
         /* 抽屉分区：元信息 / 分布路由 / 调用统计 / 操作 / 正文 */
         .sk-sec { margin-top: 14px; }
         .sk-sec > .sp-sub { margin-bottom: 6px; }
@@ -825,8 +829,8 @@
         .modal .row input { flex: 1; }
 
         /* ── 实体详情/设置抽屉（右侧滑出）── */
-        #detailDrawer, #skillDocDrawer { position: fixed; top: 0; right: -440px; width: min(400px, 92vw); height: 100vh; background: var(--surface); border-left: 1px solid var(--border); box-shadow: -8px 0 24px var(--shadow-lg); transition: right .2s; z-index: 60; padding: 18px; overflow-y: auto; }
-        #detailDrawer.on, #skillDocDrawer.on { right: 0; }
+        #detailDrawer, #skillDocDrawer, #skillCatalogDrawer { position: fixed; top: 0; right: -440px; width: min(400px, 92vw); height: 100vh; background: var(--surface); border-left: 1px solid var(--border); box-shadow: -8px 0 24px var(--shadow-lg); transition: right .2s; z-index: 60; padding: 18px; overflow-y: auto; }
+        #detailDrawer.on, #skillDocDrawer.on, #skillCatalogDrawer.on { right: 0; }
         .token-box { font-family: var(--font-mono); font-size: var(--fs-sm); word-break: break-all; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 8px 0; }
         /* ── 设置面板（v0.13.41 起；v0.13.43：宿主由抽屉换成正文页 ────────────
            四条约束（与 v0.13.40 系统页骨架同源）：
@@ -2305,6 +2309,11 @@
                                 <span class="chip pick" id="skillZombieOnly" role="button" tabindex="0"
                                       onclick="toggleSkillZombieOnly()"
                                       title="只看近 7 天零调用的技能（数据源 /api/skill/zombies）">只看零调用</span>
+                                <!-- v0.13.165：/api/skill/catalog 的入口。它和 /list 的差别不是
+                                     「另一份数据」，而是 agent 启动时真正看到的**发现面**：
+                                     整包 digest / 文件数 / 字节数 / 估算 token，用来判断「值不值得读」。 -->
+                                <button class="btn ghost sm" id="skillCatalogBtn" onclick="skillShowCatalog()"
+                                        title="给 agent 启动时用的 L1 目录（/api/skill/catalog）：含整包指纹与估算 token">L1 目录</button>
                                 <span class="hint sk-cnt" id="skillCount"></span>
                                 <span class="hint" id="skillRouteHint">只读门面：点行或「查看」读正文（脱敏）</span>
                             </div>
@@ -2354,6 +2363,19 @@
                                 <div class="sk-store-meta-line" id="storeAutoLine">自动兜底：查询中…</div>
                                 <div class="sk-store-meta-line" id="storeAuthLine">账号：查询中…</div>
                             </div>
+                            <!-- v0.13.165：/api/skill/store/acquire 的入口。这是 agent 侧
+                                 「本地没有就补货」的同一套能力；页面给的是**预演**：
+                                 默认只评估不安装，用户看清会装什么再决定。 -->
+                            <div class="sk-store-acq" id="storeAcqBox">
+                                <input id="storeTask" placeholder="按任务自动取技能（如：把 PDF 转成 markdown）"
+                                       style="flex:1;min-width:220px"
+                                       onkeydown="if(event.key==='Enter'){event.preventDefault();storeAcquire();}">
+                                <label class="hint" title="只跑本地匹配与商店打分并报「将会装什么」，不落盘">
+                                    <input type="checkbox" id="storeAcqDry" checked> 只评估不安装
+                                </label>
+                                <button class="btn sm" id="storeAcqBtn" data-store-acquire="1">自动取</button>
+                            </div>
+                            <div class="hint" id="storeAcqResult" style="margin:2px 0 12px"></div>
                         </div>
                         <div class="sp-bd box"><div id="storeList" class="sp-list">输入关键词后按回车或点「搜索」。</div></div>
                     </div>
@@ -2883,6 +2905,21 @@
         </div>
     </aside>
 
+    <!-- L1 目录抽屉（v0.13.165）：GET /api/skill/catalog 的只读呈现。
+         这一面不是「另一份技能列表」，而是 agent 启动时真正拿到的发现面：
+         name/description/digest/pkg_files/pkg_bytes/est_tokens。 -->
+    <aside id="skillCatalogDrawer" role="dialog" aria-modal="false" aria-label="L1 技能目录" tabindex="-1">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+            <b style="font-size:var(--fs-lg)">L1 技能目录</b>
+            <button class="btn ghost sm" aria-label="关闭 L1 目录" onclick="closeSkillCatalog()"><svg class="i xs" aria-hidden="true"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="hint" id="skillCatalogHint">读取中…</div>
+        <div class="toolbar" style="margin:8px 0">
+            <button class="btn sm ghost" onclick="skillCopyCatalog()">复制 JSON</button>
+        </div>
+        <pre class="code" id="skillCatalogBody" style="white-space:pre-wrap;word-break:break-word;max-height:60vh;overflow:auto">未加载</pre>
+    </aside>
+
     <!-- 实体详情抽屉 -->
     <aside id="detailDrawer" role="dialog" aria-modal="false" aria-label="实体详情" tabindex="-1">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -3035,6 +3072,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=c1af4946"></script>
+    <script src="/static/hub.js?v=7d892d5b"></script>
 </body>
 </html>

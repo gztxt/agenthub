@@ -63,11 +63,16 @@ class TestCenterUi(unittest.TestCase):
     def test_skill_doc_drawer_in_overlay_ids(self):
         self.assertIn("'skillDocDrawer'", self.boot,
                       "OVERLAY_IDS 必须含 skillDocDrawer（唯一性/遮罩/导航清收才接管）")
+        # v0.13.165：新抽屉同样必须登记，否则四条浮层红线对它全部失效。
+        self.assertIn("'skillCatalogDrawer'", self.boot,
+                      "OVERLAY_IDS 必须含 skillCatalogDrawer（L1 目录抽屉）")
 
     def test_skill_doc_drawer_html_and_css(self):
         self.assertIn('id="skillDocDrawer"', self.html)
-        self.assertIn("#skillDocDrawer.on { right: 0; }", self.html,
-                      "skillDocDrawer 需复用抽屉滑出 CSS")
+        # v0.13.165：选择器扩成三抽屉共用一张规则（detail/skillDoc/skillCatalog），
+        # 断言改为「规则里含该选择器且 right:0」，不再钉死整行文本。
+        self.assertRegex(self.html, r"#skillDocDrawer\.on[^{}]*\{[^}]*right:\s*0",
+                         "skillDocDrawer 需复用抽屉滑出 CSS")
 
     def test_render_skill_list_has_view_button(self):
         """技能行必须有「查看」入口。

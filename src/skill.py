@@ -763,10 +763,20 @@ def _backend(name: str, r: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _dedup(items: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """按 realpath 去重，返回 (去重后清单, 别名表)。见模块 docstring 事实②。"""
+    """按 realpath 去重，返回 (去重后清单, 别名表)。见模块 docstring 事实②。
+
+    `links` 是 v0.13.165 新增的**逐路事实**：同一条技能在哪几路存在、哪几路是软链。
+    以前只有 `routes`（路名）与规范条目的 `via_symlink`（**只描述规范那一路**），
+    前端因此没有「这一路可不可以卸载」的判据 —— `DELETE /remove` 就没有入口。
+    """
     by_rp: Dict[str, Dict[str, Any]] = {}
+    links_by_rp: Dict[str, List[Dict[str, Any]]] = {}
     for it in items:
         rp = it.get("realpath") or it.get("path") or f"__nopath__{it.get('name')}"
+        links_by_rp.setdefault(rp, []).append({
+            "route": it.get("route"), "path": it.get("path"), "realpath": rp,
+            "via_symlink": bool(it.get("via_symlink")),
+        })
         cur = by_rp.get(rp)
         if cur is None:
             by_rp[rp] = dict(it, routes=[it["route"]])
@@ -776,6 +786,9 @@ def _dedup(items: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict
         # 规范条目优先取「真实文件那一路」（path == realpath），软链路只当别名
         if it.get("path") == rp and cur.get("path") != rp:
             by_rp[rp] = dict(it, routes=cur["routes"])
+    for rp, x in by_rp.items():
+        x["links"] = sorted(links_by_rp.get(rp) or [],
+                            key=lambda l: (str(l.get("route") or ""), str(l.get("path") or "")))
     out = sorted(by_rp.values(), key=lambda x: (x.get("route") or "", x.get("name") or ""))
     aliases = [{"name": x["name"], "canonical_route": x["route"], "routes": x["routes"],
                 "realpath": x.get("realpath"),
@@ -1424,7 +1437,7 @@ async def skill_invocations(name: str = Query(default="", max_length=200),
             "task": tdai_client.scrub(str(det.get("task") or ""))[:200],
             "channel": det.get("channel"),
             "caller_reported": bool(det.get("caller_reported")),
-            # 这条是「有人点名要这个技能」；与自动下发（subject=skill.relevant）分开计，
+            # 这条是「有人点名要这个技能」；与自动下发（skill.inject / 旧账 skill.relevant）分开计，
             # 否则「机器推的」和「人点的」在同一张表里无法区分。
             "mode": str(det.get("mode") or "explicit_invoke"),
             "status": r.get("status"),
@@ -1434,17 +1447,19 @@ async def skill_invocations(name: str = Query(default="", max_length=200),
     hit = [p for p in parsed
            if (not want_name or p["name"].lower() == want_name)
            and (not want_caller or p["caller"].lower() == want_caller)]
-    # 自动下发（subject=skill.relevant）单独一桶：它是「机器把哪些技能推给了谁」，
+    # 自动下发（skill.inject；灰度期也读旧账 skill.relevant）单独一桶：
     # 与「谁点名要了哪个技能」是两种证据。权重若把两者混加，等于把曝光当使用。
     # 读不到就报 auto_error，不静默当 0——「0 次自动下发」和「查询失败」必须可区分。
     auto: Dict[str, Any] = {"total": 0, "by_caller": {}, "by_skill": {}, "unknown_caller": 0,
                             "query": 0, "legacy": 0}
     auto_error = ""
     try:
+        # skill.inject = 注入链（2026-10-27 起；以前混记在 skill.relevant 里）。
+        # 两个 subject 都读，否则灰度期内新账看不见——「今天注入 0 次」是假话。
         arows = db.query(
-            "SELECT detail FROM profile_events "
-            "WHERE source = ? AND subject = 'skill.relevant' AND created_at >= ? "
-            "ORDER BY id DESC LIMIT ?",
+            "SELECT subject, detail FROM profile_events "
+            "WHERE source = ? AND subject IN ('skill.relevant','skill.inject') "
+            "AND created_at >= ? ORDER BY id DESC LIMIT ?",
             (skill_usage._SOURCE, since, fetch_cap))
     except Exception as e:  # noqa: BLE001
         arows = []
@@ -1463,7 +1478,7 @@ async def skill_invocations(name: str = Query(default="", max_length=200),
         # 用与权重榜**同一个**分类函数：这个端点过去把整张 skill.relevant 都算成
         # 「自动下发」，于是 653 条无 mode 的旧账 + 人工查询全被计入，界面显示 656 次
         # 而权重榜只有 6 次——同一个词在两处指两件事。判据只留一份。
-        bucket, nm = skill_weights.classify("skill.relevant", det)
+        bucket, nm = skill_weights.classify(str(r.get("subject") or ""), det)
         if bucket == "query":
             auto["query"] += 1
             continue
@@ -1482,8 +1497,9 @@ async def skill_invocations(name: str = Query(default="", max_length=200),
     auto["by_skill"] = dict(sorted(auto["by_skill"].items(), key=lambda kv: -kv[1])[:20])
     auto["bad_detail"] = a_bad
     auto["error"] = auto_error
-    auto["scope"] = ("同一抓取窗口内**声明为自动下发**（mode=auto_inject 或 via=hook）的 "
-                     "skill.relevant 事件；query=人工检索、legacy=旧客户端未自报 mode，两者单列不计入")
+    auto["scope"] = ("同一抓取窗口内的自动下发：`skill.inject`（注入链，2026-10-27 起）"
+                     "+ `skill.relevant` 中声明 mode=auto_inject/via=hook 的旧账；"
+                     "query=人工检索、legacy=旧客户端未自报 mode，两者单列不计入")
     by_caller: Dict[str, int] = {}
     by_route: Dict[str, int] = {}
     by_skill: Dict[str, int] = {}
@@ -1788,8 +1804,10 @@ async def skill_relevant(request: Request,
     要真改排序有 `llm_rerank`（显式开启、把选中项提第一），不在这里夹带。
 
     `caller` / `via` 只进埋点，不参与检索：`via=hook` 表示这是 agent 输入钩子
-    自动打的（机器选候选），其它值/缺省表示人在查。两者在 `profile_events` 里
-    落成 `mode=auto_inject` / `query`，权重统计必须按这个分桶，不能混加。
+    自动打的（机器选候选），其它值/缺省表示人在查。**落库的 subject 不同**
+    （2026-10-27 起）：`via=hook` 且确有候选 ⇒ `skill.inject`（真注入），
+    其它 ⇒ `skill.relevant`（人工检索）。同一请求只落一种，不会双记；
+    两者在权重统计里分属「曝光」与「查询」，不能混加。
     """
     t0 = time.monotonic()
     routes = disk_routes()

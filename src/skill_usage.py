@@ -1,11 +1,11 @@
 """D3：技能调用记账与「零调用僵尸榜」。
 
-**只认 hub 通道**（`profile_events` 里 `source='rest'` 且 subject ∈ {`skill.read`, `skill.inject`,
-`skill.relevant`, `skill.invoke`}）。各家 agent 直接读自己技能目录的旁路统计**本批未实现** ⇒ 置信度封顶 `medium`。
+**两源合并**：hub 通道（`source='rest'`）+ 会话转录采集（`source='scan'`，见
+`skill_direct`），subject ∈ {`skill.read`, `skill.inject`, `skill.relevant`, `skill.invoke`}。
 
-军规落地（禁把 SKIP 当 PASS）：**不取证的第二数据源绝不能报 `high`**。设计书 §7 定的口径是
-「两源皆零 → high；仅 hub 源为零 → medium」；`DIRECT_SOURCE = "not-implemented"` 就是把
-「第二源没接」这件事变成返回值里可断言的字段，而不是一句注释。
+军规落地（禁把 SKIP 当 PASS）：**第二数据源只覆盖「读取 SKILL.md / Skill 工具调用」**，
+写盘与纯提及仍不计 ⇒ 置信度**仍封顶 `medium`**，不因有了第二源就报 `high`。
+`DIRECT_SOURCE = "transcript"` 把「第二源是什么、覆盖到哪」变成返回值里可断言的字段。
 
 **绝不自动删技能**：只出 `suggested_action`。理由同设计书 §7——hub 是唯一权威门面，
 自动退役等于让「没被我的仪表盘看见」直接等价于「该删」，而第二源缺席时这个等价是错的。
@@ -34,8 +34,11 @@ DIRECT_SOURCE = "transcript"
 #: 就是 `skill.relevant` 事件**。原先只认 read/inject ⇒ 注入被静默丢弃 ⇒ 生产 `counted`
 #: 恒为 0，把全机最热的 `agent-dispatch`（实测被用 166 次）都列成僵尸（判例 103/104）。
 #:
-#: ⚠ `skill.inject` 保留但**当前无生产者**——它是给「将来某端点显式回写注入」预留的口子，
-#:   不是死 subject。真正在产出的是 `skill.relevant`（注入链）与 `skill.read`（读全文）。
+#: 【`skill.inject` 的生产者（2026-10-27 补）】注入链（pi `hub-facade.ts` / claude
+#: `hub_skill_inject.py`）打 `/api/skill/relevant?via=hook` 时，服务端把**实际返回的
+#: 候选**逐条落成 `skill.inject`（`runlog._subject_for`）。此前这件事被记成
+#: `skill.relevant` ⇒ 「注入」在账上不存在，`skill.inject` 恒 0。现在两者互斥：
+#: 注入链 = inject，人工检索 = relevant，同一请求不会双记。
 #:
 #: 【为什么含 `skill.invoke`（2026-10-19 PT-20261019-01 补）】统一调用入口
 #: （POST /api/skill/invoke + MCP hub_skill_invoke）是**显式激活**：agent/用户点名

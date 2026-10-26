@@ -719,6 +719,35 @@ PI_SESSIONS = HOME / ".pi" / "agent" / "sessions"
 PI_FILENAME_UUID_RE = OMP_FILENAME_UUID_RE  # 同构格式，复用正则
 
 
+def _pi_first_user(objs: List[dict]) -> str:
+    """从 pi jsonl 取首句用户提问。
+
+    ⚠️ pi 形状与 `_first_user_text` 不兼容：消息是
+    `{"type":"message","message":{"role":"user","content":[...]}}`
+    ——`type` 恒为 `message`，真正判据在 `message.role`，正文在
+    `message.content`。所以不能复用 `_first_user_text`（它查顶层 `type=='user'`）。
+    复用 `_cursor_first_user` 的解析逻辑（role 在 message 里、content 是数组）。"""
+    for d in objs:
+        if d.get("type") != "message":
+            continue
+        msg = d.get("message") or {}
+        if msg.get("role") != "user":
+            continue
+        s = _text_of(msg.get("content"))
+        if not s:
+            continue
+        m = _UQ.search(s)
+        if m:
+            got = m.group(1).strip()
+            if got:
+                return got
+            continue
+        if s.startswith(_INJECT_PREFIX) or s.startswith("<"):
+            continue
+        return s
+    return ""
+
+
 def _t_pi(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
     """pi 历史：``~/.pi/agent/sessions/<桶>/<时间戳>_<uuid>.jsonl``，**跳目录**按 mtime 倒序。"""
     if not PI_SESSIONS.is_dir():
@@ -734,6 +763,8 @@ def _t_pi(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
             if d.get("type") == "title":
                 title = d.get("title") or ""
                 break
+        if not title:
+            title = _pi_first_user(objs)
         ts = 0
         for d in objs:
             if d.get("type") == "session":

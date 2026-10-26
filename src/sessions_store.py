@@ -665,6 +665,52 @@ def _t_cursor(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
                       "msgs": None, "cwd": m.get("cwd") or ""})
     items.sort(key=lambda x: x["ts"], reverse=True)
     return items[:limit], ""
+# ── omp（oh-my-pi）专用助手 ────────────────────────────────────────────────────
+#: omp 会话仓库：``~/.omp/agent/sessions/<compressed-cwd>/<iso-timestamp>_<uuid>.jsonl``
+#: 文件名格式：`2026-10-26T10-04-24-907Z_01a177ab-1bcb-7000-b474-2b93755c5670.jsonl`
+#: UUID 是文件名中最后一个 `_` 之后的部分（不含 .jsonl 后缀）。
+#: 标题在第一行的 {"type":"title","title":"..."} 字段；cwd 在 {"type":"session",...} 行。
+#: resume 命令：`omp --resume <uuid>`（官方支持 UUID 前缀匹配）。
+OMP_SESSIONS = HOME / ".omp" / "agent" / "sessions"
+OMP_FILENAME_UUID_RE = re.compile(
+    r"[_-]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl\Z", re.I)
+
+
+def _omp_uuid_from_filename(name: str) -> Optional[str]:
+    """从 omp 文件名提取 UUID。失败返回 None。"""
+    m = OMP_FILENAME_UUID_RE.search(name)
+    return m.group(1) if m else None
+
+
+def _t_omp(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
+    """omp 历史：``~/.omp/agent/sessions/<桶>/<时间戳>_<uuid>.jsonl``，**跳目录**按 mtime 倒序。"""
+    if not OMP_SESSIONS.is_dir():
+        return [], "omp 无会话目录"
+    items: List[dict] = []
+    for p in sorted(OMP_SESSIONS.rglob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True):
+        if time.time() - p.stat().st_mtime > HARD_BUDGET_S * 1000:
+            continue
+        sid = _omp_uuid_from_filename(p.name)
+        if not sid or not UUID_RE.match(sid):
+            continue
+        objs = _head_lines(p, 400)
+        title = ""
+        for d in objs:
+            if d.get("type") == "title":
+                title = d.get("title") or ""
+                break
+        ts = 0
+        for d in objs:
+            if d.get("type") == "session":
+                ts = _iso(d.get("timestamp"))
+                break
+        items.append({"agent": "omp", "id": sid,
+                      "title": mask_title(title) or "未命名会话",
+                      "ts": ts, "msgs": None, "cwd": cwd})
+        if len(items) >= limit + 10:
+            break
+    items = items[:limit]
+    return items, ("" if items else "omp 暂无可续会话")
 
 
 SESSION_STORES: Dict[str, dict] = {
@@ -692,6 +738,9 @@ SESSION_STORES: Dict[str, dict] = {
     # 已覆盖，不必写绝对路径；但**必须带 `--profile tui`**——裸 dsh 会变成 `dsh web`（判例 252 §四.2）。
     # `--resume` 接裸 uuid（TUI 自己的退出提示就是这个形状）。
     "dsh":      {"kind": "dsh_json",       "id_re": UUID_RE,      "resume": ["dsh", "--profile", "tui", "--resume", "{id}"], "fn": _t_dsh},
+    # omp（oh-my-pi）：~/.omp/agent/sessions/<桶>/<时间戳>_<uuid>.jsonl，UUID 在文件名末尾。
+    # resume 接裸 uuid（`omp --resume <uuid>`），与 dsh 同形。
+    "omp":      {"kind": "omp_jsonl",    "id_re": UUID_RE,      "resume": ["/home/gztxt/.local/bin/omp", "--resume", "{id}"], "fn": _t_omp},
 }
 
 _CACHE: Dict[tuple, Tuple[float, dict]] = {}
@@ -760,6 +809,12 @@ def _store_path(agent_id: str, sid: str):
         # 投影缓存文件名带 `session-` 前缀，但 id 对外是裸 uuid（resume 用）。
         f = DSH_SESSIONS / f"session-{sid}.json"
         return f if (f.is_file() and f.stat().st_size > 0) else None
+    if agent_id == "omp":
+        # omp：文件名是 <timestamp>_<uuid>.jsonl，UUID 在末尾。
+        hits = list(OMP_SESSIONS.rglob(f"*_{sid}.jsonl"))
+        if not hits:
+            return None
+        return max(hits, key=lambda p: p.stat().st_mtime)
     return None
 
 
@@ -1090,6 +1145,26 @@ def _title_of_session(agent: str, sid: Optional[str], cwd: Optional[str] = None)
             return mask_title(_dsh_title_and_cwd(f)[0])
         except Exception:  # noqa: BLE001
             return ""
+    if agent == "omp":
+        # omp：从 .jsonl 文件第一行的 title 字段取标题。
+        f = _store_path("omp", sid)
+        if not f:
+            return ""
+        try:
+            for line in open(f, "r", errors="ignore"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                    if d.get("type") == "title":
+                        return mask_title(d.get("title") or "")
+                    break
+                except Exception:
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
     return ""
 
 

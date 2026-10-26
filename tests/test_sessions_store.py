@@ -69,7 +69,7 @@ class TestTable(unittest.TestCase):
            因为前端白名单不含它 ⇒ 根本不发历史请求）。"""
         self.assertEqual(set(ss.SESSION_STORES),
                          {"grok", "claude", "qoder", "jcode", "hermes", "codex", "opencode",
-                          "cursor", "codebuddy", "dsh"})
+                          "cursor", "codebuddy", "dsh", "omp"})
 
     def test_hist_agents_front_back_same_set(self):
         """hub.js 的 TERM_HIST_AGENTS 与后端 SESSION_STORES 必须同集合——

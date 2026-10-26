@@ -688,8 +688,6 @@ def _t_omp(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
         return [], "omp 无会话目录"
     items: List[dict] = []
     for p in sorted(OMP_SESSIONS.rglob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True):
-        if time.time() - p.stat().st_mtime > HARD_BUDGET_S * 1000:
-            continue
         sid = _omp_uuid_from_filename(p.name)
         if not sid or not UUID_RE.match(sid):
             continue
@@ -727,8 +725,6 @@ def _t_pi(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
         return [], "pi 无会话目录"
     items: List[dict] = []
     for p in sorted(PI_SESSIONS.rglob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True):
-        if time.time() - p.stat().st_mtime > HARD_BUDGET_S * 1000:
-            continue
         sid = _omp_uuid_from_filename(p.name)  # 同构格式，复用 omp 提取函数
         if not sid or not UUID_RE.match(sid):
             continue

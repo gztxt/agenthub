@@ -74,6 +74,11 @@ class TestChildEnvPrependsNvm(unittest.TestCase):
         self.assertEqual(env["TERM"], "xterm-256color")
         self.assertEqual(env["COLORTERM"], "truecolor")
 
+    def test_omp_skip_setup(self):
+        """omp 嵌入式终端跳过 setup wizard：否则每次新建会话都会弹 provider/model 选择界面。"""
+        env = term.child_env()
+        self.assertEqual(env.get("OMP_SKIP_SETUP"), "1")
+
     def test_no_nvm_means_untouched_path(self):
         """没有 nvm **也没有 bun** 的机器上不得凭空造目录（PATH 里不能出现空串段）"""
         self.patcher.stop()

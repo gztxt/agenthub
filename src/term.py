@@ -458,6 +458,10 @@ def child_env() -> Dict[str, str]:
     env = dict(os.environ)
     env["TERM"] = "xterm-256color"
     env["COLORTERM"] = "truecolor"
+    # omp 嵌入式终端跳过首次启动向导（setup wizard），否则每次新建会话都会
+    # 弹「选择 provider / 选择模型」交互界面，无法直接进入对话框。omp 的 models.yml
+    # 已配置 ccr provider，无需向导。
+    env["OMP_SKIP_SETUP"] = "1"
     extra = profiles.extra_path_dirs()
     if extra:
         env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])

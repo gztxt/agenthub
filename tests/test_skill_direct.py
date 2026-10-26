@@ -160,7 +160,23 @@ class SkillDirectScanTest(unittest.TestCase):
         self.assertEqual(r["events"], 1)
         self.assertEqual(self.rec.events, [])
 
-    # ── 7. 坏 JSON 行不打断整文件 ───────────────────────────────────
+    # ── 7. 半行（agent 正在写）不吞事件 ─────────────────────────────
+    def test_partial_last_line_is_retried(self):
+        """活跃会话的最后一行可能是半截 JSON。不能因为解析失败就把 offset 推过去——
+        推过去这条调用就永久丢了。"""
+        p = os.path.join(self.roots["pi"], "half.jsonl")
+        full = json.dumps({"type": "message", "message": {"content": [
+            {"type": "toolCall", "id": "h1", "name": "read",
+             "arguments": {"file_path": "/x/skills/half/SKILL.md"}}]}})
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(full[:20])          # 没有换行 = 半行
+        self.assertEqual(self._scan()["events"], 0)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(full + "\n")       # 写完整
+        self.assertEqual(self._scan()["events"], 1)
+        self.assertEqual([e["detail"]["name"] for e in self.rec.events], ["half"])
+
+    # ── 8. 坏 JSON 行不打断整文件 ───────────────────────────────────
     def test_bad_json_line(self):
         p = os.path.join(self.roots["pi"], "bad.jsonl")
         with open(p, "w", encoding="utf-8") as fh:

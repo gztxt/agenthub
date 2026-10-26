@@ -238,7 +238,16 @@ def scan(roots: Dict[str, str] | None = None, days: int = DEFAULT_DAYS,
                 # "telling position disabled by next() call"），而增量 offset 必须是字节位。
                 with open(path, "rb") as fh:
                     fh.seek(offset)
-                    for raw in fh:
+                    processed = offset
+                    while True:
+                        raw = fh.readline()
+                        if not raw:
+                            break
+                        if not raw.endswith(b"\n"):
+                            # 半行：agent 正在写这个文件。**不推进 offset**，
+                            # 否则这半行被跳过一次就永久丢了（只在 EOF 出现，代价是下轮重读）。
+                            break
+                        processed = fh.tell()
                         line = raw.decode("utf-8", "replace").strip()
                         if not line:
                             continue
@@ -261,7 +270,7 @@ def scan(roots: Dict[str, str] | None = None, days: int = DEFAULT_DAYS,
                             result["by_caller"][caller] = result["by_caller"].get(caller, 0) + 1
                             if not dry_run:
                                 _record(name, caller, evidence, os.path.basename(path), cid)
-                    offset = fh.tell()
+                    offset = processed
             except Exception:
                 result["errors"] += 1
                 continue

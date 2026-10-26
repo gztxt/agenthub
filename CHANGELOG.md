@@ -16,6 +16,7 @@
    认「Skill 工具调用」与「Read / cat|head|tail|less|bat 打开 `.../skills/<name>/SKILL.md`」，
    落 `source='scan'` 的 `skill.invoke`。**不认** grep/ls/find/echo 与写盘动作（防虚高）。
    按文件增量（byte offset）+ 去重键（caller+call_id）→ 幂等；文件被截断重写也不重复记。
+   **末尾半行（agent 正在写）不推进 offset**，否则那半截 JSON 被跳过一次就永久丢事件。
 2. **`src/skill_usage.py`**：`DIRECT_SOURCE` 由 `not-implemented` 改为 `transcript`；
    统计口径由 `source = 'rest'` 改为 `source IN ('rest','scan')`；`via` 标真实来源。
    置信度**仍封顶 medium**——覆盖只到读取，写盘与纯提及仍不计。

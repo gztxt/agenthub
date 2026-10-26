@@ -44,8 +44,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import db
 
-#: 与 `skill_usage._SOURCE` 同义：hub 自己产生的门面事件。
-SOURCE = "rest"
+#: 计入权重的两个事件通道：`rest`＝hub 自己产生的门面事件；`scan`＝转录采集
+#: （`skill_direct`，agent 直读磁盘/调 Skill 工具，不经过 hub）。
+#: **只读 rest 会让扫描到的使用在页面榜上完全不可见**（v0.13.165 实测：7 天 180 条
+#: scan 事件、agent-dispatch 42 条，`/api/skill/usage` 仍报 explicit=0）。
+SOURCES = ("rest", "scan")
 
 #: 计入权重的 subject。`skill.list` 是浏览目录，不是使用。
 #: `skill.inject` = 注入链真把候选塞进了上下文（2026-10-27 起由 `/relevant?via=hook`
@@ -114,6 +117,13 @@ def classify(subject: str, det: Dict[str, Any]) -> Tuple[str, str]:
         via = str(det.get("via") or "").strip().lower()
         if mode in ("auto_invoke", "auto") or (not mode and via in ("auto", "hook")):
             return "auto_use", name
+        if mode == "direct_read":
+            # 转录采集（`skill_direct`）统一写 mode=direct_read、真实取证在 evidence：
+            # 只有真调了 Skill 工具才是「拿走正文去执行」(explicit=2)，
+            # 读 SKILL.md / 命令行里出现技能名只是「看了一眼」(read=1)。
+            # 不区分会在接入 scan 源后把读盘按 2 分计，系统性抬高榜单。
+            ev = str(det.get("evidence") or "").strip().lower()
+            return ("explicit" if ev == "skill_tool" else "read"), name
         return "explicit", name
     if subject == "skill.read":
         return "read", name
@@ -313,10 +323,12 @@ def load(days: int = 30, route: str = "", caller: str = "",
     d = _clamp_days(days)
     since = (datetime.now(timezone.utc) - timedelta(days=d)).isoformat()
     holders = ",".join("?" * len(SUBJECTS))
+    src_holders = ",".join("?" * len(SOURCES))
     rows = db.query(
         "SELECT id, subject, detail, created_at FROM profile_events "
-        "WHERE source = ? AND subject IN (%s) AND created_at >= ? ORDER BY id DESC" % holders,
-        (SOURCE,) + SUBJECTS + (since,))
+        "WHERE source IN (%s) AND subject IN (%s) AND created_at >= ? ORDER BY id DESC"
+        % (src_holders, holders),
+        SOURCES + SUBJECTS + (since,))
     now = datetime.now(timezone.utc)
     # route 与 caller 同口径：**先过滤再统计**。原先 route 是在 build 之后筛 items，
     # 于是列表是这一路的、顶部 totals 是全机的（同一屏两份真相）。
@@ -341,7 +353,8 @@ def load(days: int = 30, route: str = "", caller: str = "",
         "weights": {"explicit": W_EXPLICIT, "read": W_READ, "auto_use": W_AUTO_USE,
                     "auto": "denominator-only"},
         "formula": "use = 2*explicit + read + auto_use; score = use^2 / (use + auto)",
-        "scope": "仅 hub 通道（source=rest）；agent 直读磁盘的旁路不计入 ⇒ 置信度封顶 medium",
+        "scope": "两源合并：hub 通道（source=rest）+ 会话转录采集（source=scan）；"
+                 "agent 直读磁盘的写盘与纯提及仍不计 ⇒ 置信度封顶 medium",
         "legacy_note": "mode/via 缺失的 skill.relevant 记 legacy，不进 use 也不进 auto",
         "stale_after_days": STALE_AFTER_DAYS,
         "usage_classes": {

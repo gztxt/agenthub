@@ -1,3 +1,43 @@
+## v0.13.166 — 第二数据源接到页面真正读的那个函数上
+
+> 来源：2026-10-27 01:15 重启 v0.13.165 后按台账验收①跑 `GET /api/skill/usage?days=7`，
+> 榜单上**看不到任何 scan 来源的使用**。原文验收条件：「`source=scan` 行出现」。
+
+### 实测证据（生产库 `data/agents.db`，窗口 7 天）
+
+| 检查 | 结果 |
+|---|---|
+| `profile_events` 里 scan 事件 | **180** 条，全是 `skill.invoke` |
+| 其中 `agent-dispatch` | **42** 条（bash 19 / read 23） |
+| `GET /api/skill/usage` 对 agent-dispatch 报的 | `explicit=0, read=0`，只有 `auto=2`（来自 rest） |
+| 响应里 `scope` 字段自述 | 「仅 hub 通道（source=rest）」 |
+
+### 根因：同一模块里两套取数实现，只有没人用的那套接了新源
+
+- `skill_usage.counts()` 已改成 `source IN ('rest','scan')` —— 但**只被 `/api/skill/zombies` 用**。
+- 前端 `static/hub.js:6163` 读的 `/api/skill/usage` 走 `skill.py:1549` → `skill_weights.load()`，
+  那里是硬编码 `WHERE source = ?` + `SOURCE = "rest"`。**看板上的调用榜根本没接第二源。**
+
+这正是用户 10-27 说的「不要哪个错修哪个，要找根因」的反例：v0.13.164 修了生产者、
+修了一处口径，验收点却落在另一条没改的读路径上。
+
+### 修复
+
+1. `skill_weights.SOURCES = ("rest", "scan")`，`load()` 改 `source IN (?,?)`。
+2. `classify()` 识别 scan 的 `mode=direct_read`：**只有 `evidence=skill_tool` 才算 explicit(2)**
+   （真调 Skill 工具拿走正文），`read` / `bash` 记 read(1)。
+   不加这条，180 条读盘会按 2 分计成 360 分，整榜顺序被抬高。
+3. `scope` 文案改成两源，并保留「写盘/纯提及仍不计 ⇒ 置信度封顶 medium」。
+4. 闸门 `tests/test_skill_weights.py::test_scan_source_counted_and_direct_read_is_read`
+   （4 断言：explicit=1 / read=1 / by_caller=opencode / route 留空不编）。
+
+### 已知遗留
+
+- scan 事件不带 `route`（转录里没有发现点信息）⇒ 榜上 `route` 为空。按「不造数据」原则留空，
+  `by_name` 汇总层会把同名多路合并展示。
+- `skill.inject` 近 7 天仍 0 条：生产者已就位（`runlog._subject_for`），但要等一次真实的
+  hook 注入才会落账，验收②需在注入发生后复查。
+
 ## v0.13.165 — 补三家转录 / 补 skill.inject 生产者 / 补四个 UI 入口
 
 > 来源：2026-10-27 用户复查 v0.13.164 后点出的三条缺口，原文：

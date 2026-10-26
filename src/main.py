@@ -105,7 +105,18 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.165"
+VERSION = "0.13.166"
+
+# v0.13.166（2026-10-27 重启后验收发现）：第二数据源只接在了没人看的那个函数上。
+# 症状：scan 事件已落库（7 天 180 条 `skill.invoke`，agent-dispatch 单名 42 条），
+#   `/api/skill/usage` 仍报 explicit=0——**页面上的技能调用榜完全看不到 agent 直读**。
+# 根因：`skill_usage.counts()` 已改 `source IN ('rest','scan')`，但该函数只被 `/zombies`
+#   用；前端 `hub.js` 读的 `/api/skill/usage` 走的是 `skill_weights.load()`，那里
+#   硬编码 `WHERE source = 'rest'`（`SOURCE` 常量）。**两套并行实现，只有一套被接了新源。**
+# 修复：`skill_weights.SOURCES = ('rest','scan')`；`classify()` 识别 scan 的
+#   `mode=direct_read`——只有 `evidence=skill_tool` 才算「拿走正文去执行」(explicit=2)，
+#   读 SKILL.md / 命令行命中按 read=1，否则 180 条读盘会被当 360 分计。
+# 闸门：`tests/test_skill_weights.py::test_scan_source_counted_and_direct_read_is_read`。
 
 # v0.13.165（2026-10-27 用户复查三缺口）：补三家转录 + 补一个 subject 生产者 + 补四个 UI 入口。
 # ① skill_direct 扩到 **7 家**：grok（chat_history.jsonl 的 assistant.tool_calls[]）、

@@ -188,6 +188,31 @@ class TestUsageEndpoint(_WeightsCase):
         claude = next(x for x in self._usage(caller="claude")["items"] if x["name"] == "demo")
         self.assertEqual((claude["explicit"], claude["auto"], claude["score"]), (0, 1, 0.0))
 
+    def test_scan_source_counted_and_direct_read_is_read(self):
+        """v0.13.166：转录采集（`source=scan`）必须进榜单。
+
+        回退点（2026-10-27 生产实测）：只读 `source='rest'` 时，7 天里 180 条 scan
+        `skill.invoke`（`agent-dispatch` 一条就 42 条）在 `/api/skill/usage` 上仍报
+        `explicit=0`——agent 直读磁盘的使用在页面上完全不可见。
+        同时：scan 一律写 `mode=direct_read`，只有 `evidence=skill_tool` 才是真调工具
+        （explicit=2），读盘/命令行命中按 read=1 计，否则整榜权重被系统性抬高。
+        """
+        import datetime as _dt
+        _mk_skill(self.a, "demo", "权重技能演示")
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        for cid, ev in (("c1", "skill_tool"), ("c2", "read")):
+            db.execute(
+                "INSERT INTO profile_events(source,subject,status,duration_ms,detail,created_at)"
+                " VALUES('scan','skill.invoke','success',1,?,?)",
+                (json.dumps({"name": "demo", "caller": "opencode", "via": "transcript",
+                             "evidence": ev, "session": "s.jsonl", "call_id": cid,
+                             "mode": "direct_read"}), now))
+        row = next(x for x in self._usage(days=7)["items"] if x["name"] == "demo")
+        self.assertEqual((row["explicit"], row["read"]), (1, 1), row)
+        self.assertEqual(row["by_caller"]["explicit"], {"opencode": 1})
+        self.assertEqual(row["use"], 3)          # 2*1 + 1*1
+        self.assertEqual(row["route"], "", "转录采集不带 route，榜上留空而不是编一个")
+
     def test_identity_is_name_and_route(self):
         """同名两路必须是两行；by_name 汇总列出两条 route（合并会掩盖死链）。"""
         _mk_skill(self.a, "dup", "权重技能演示")

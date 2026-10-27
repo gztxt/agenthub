@@ -240,7 +240,12 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.169"
+    CURRENT_VERSION = "0.13.170"
+    #: v0.13.170：Botboy（DS Bot 团队只读投影）。关键词取自 main.py 版本注释实际字句：
+    #: 读 state.json 而不是调 POST api/bot、state.lock 单写者、两种「没有」分开渲染。
+    VERSION_ROOT_CAUSES["0.13.170"] = (
+        "只读投影", "state.json", "state.lock", "ok=false", "found=false",
+    )
     #: v0.13.169：v0.13.168 的实弹复验——三处假绿（装配层不存在的属性 / 派发池含不可执行
     #: agent / 验收把拒答与审核标签判 pass）。关键词取自 main.py 版本注释实际写下的字句。
     VERSION_ROOT_CAUSES["0.13.169"] = (

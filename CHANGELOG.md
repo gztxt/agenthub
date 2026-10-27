@@ -1,3 +1,36 @@
+## v0.13.170 — Botboy：系统菜单第十项（DS Bot 团队只读投影）
+
+> 来源：用户要 hub 菜单加 Botboy 子菜单，对应 DeepSeek Harness 的 DS Bot 团队模式
+> （Bot / 群聊 / 任务协作）。选了「B 全量对接」，但不是调对端 HTTP。
+
+### 一、数据面走文件，不走 `POST api/bot`
+
+`ds-harness-remote` 把 DS Bot 的能力封在 Host 本机路由 `POST api/bot`（`plugin.route.call`
+白名单里 20 个 endpoint）。那条路要 dsh web 在跑 + 进程级随机 token（得从 journal 抠），
+而本机 dsh 按 2026-10-24 裁定是**按需拉起、常态 inactive**。
+
+读对端源码发现 `ds-bot@0.2.2` 的 `src/host/store.js` 头注释自己写明：roster / rooms /
+exchange log 全在 `$DSH_HOME/bot/state.json` 一个文件里。于是 `src/botboy.py` 只做
+**只读投影**（`GET /api/botboy/overview`）：不依赖 dsh 在跑、不碰 token、不耦合插件版本。
+记录形状取自 `roster.js::buildBot/buildRoom`、`delivery.js::deliver`，不是猜的。
+
+不写盘是硬边界：ds-bot 用 `state.lock` 保证同一份数据只有一个写者，hub 越权改写会
+制造「另一个 dsh 正在编辑」的假锁冲突。建 Bot / 发消息一律回 dsh 原生界面。
+
+### 二、三种「没有」分开渲染
+
+`ok=false`（文件在但坏）→ 打 code+message；`found=false`（没装/没建）→ 给装法；
+`ok && found && 0` → 真·空团队。前两种被渲染成空团队，用户会以为团队被清空。
+
+### 三、闸门
+
+`tests/test_botboy.py`（18 例）覆盖两件「没有」、排序稳定性（Main 置顶 + 活跃倒序）、
+坏时间戳不落 1970、坏子对象不整页 500、安装态只做文件探测、前端四件套 + bundle 同步。
+`test_sys_pages_layout` 的系统页清单加 `botboy`（.sp 骨架 / 无 .panel / 不新增断点）。
+
+写测试时就抓到一个真 bug：`_names()` 假定 bots 值都是 dict，`{"bad": "str"}` 直接
+`AttributeError` ⇒ 整页 500。已修（非 dict 兜底成 id）。
+
 ## v0.13.169 — 全链路派发的实弹复验：三处「测试全绿、线上必挂」
 
 > 来源：v0.13.168 交付后用户令「实弹验证刚刚完成的任务」。主会话不重启生产

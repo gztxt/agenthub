@@ -517,6 +517,8 @@ function go(page) {
   if (page === 'jobs') { fillAgentSelect($('jobAgent'), false); loadJobs(); }
   if (page === 'mcp') { loadMcp(); loadAcl(); }
   if (page === 'assets') loadAssets();   // P4 资产面板（只读门面聚合，07-asset-panel.js）
+  // v0.13.170：Botboy 页每次进页都重读（state.json 是活文件），由 14-botboy.js 负责渲染
+  if (page === 'botboy') loadBotboy(false);
 }
 
 function fillAgentSelect(sel, withAuto) {

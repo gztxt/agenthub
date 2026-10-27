@@ -2653,6 +2653,55 @@
                 </div>
             </div>
         </section>
+        <!-- Botboy（v0.13.170）：DS Bot 团队模式的只读投影。
+             数据源 = ~/.dsh/bot/state.json（ds-bot 的权威落盘面），不调 POST api/bot
+             ⇒ 不依赖 dsh 在跑、不碰进程级 token。写动作一律回 dsh 原生界面做。 -->
+        <section class="page sys" id="page-botboy">
+            <div class="sp">
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>DS Bot 团队</h3>
+                        <div class="sp-r">
+                            <button class="btn sm ghost" data-bb="refresh" title="重读 state.json"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
+                        </div>
+                    </div>
+                    <div class="sp-tools">
+                        <div class="toolbar">
+                            <span class="hint" id="bbStatus">未加载</span>
+                        </div>
+                    </div>
+                    <div class="sp-bd" style="padding-top:0"><div class="hint" id="bbHint">进页自动读一次本机 DS Bot 团队文件。</div></div>
+                    <div class="sp-note">只读面板：不建 Bot、不发消息、不改 state.json —— ds-bot 用 state.lock
+                        保证同一份数据只有一个写者，hub 越权改写会制造假锁冲突。要动团队请回 dsh 原生界面。</div>
+                </div>
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>Bot</h3>
+                        <div class="sp-r"><span class="hint" id="bbBotCount">–</span></div>
+                    </div>
+                    <div class="sp-bd"><div class="sp-grid" id="bbBots"><div class="hint">未加载</div></div></div>
+                </div>
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>群聊</h3>
+                        <div class="sp-r"><span class="hint" id="bbRoomCount">–</span></div>
+                    </div>
+                    <div class="sp-bd"><div class="sp-grid" id="bbRooms"><div class="hint">未加载</div></div></div>
+                </div>
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>最近交接</h3>
+                        <div class="sp-r"><span class="hint">Bot 之间 / 用户与 Bot 的消息流水，最新的在上</span></div>
+                    </div>
+                    <div class="sp-bd box flush tscroll">
+                        <table>
+                            <thead><tr><th style="width:150px">时间</th><th style="width:210px">谁 → 谁</th><th>内容</th></tr></thead>
+                            <tbody id="bbEx"><tr><td colspan="3" class="hint">未加载</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
         <!-- 设置 · 模型（v0.13.43：设置子菜单改成手风琴 → 正文出页，不再有抽屉）
              内容与 v0.13.41 的面板一致，只是外套换成系统页统一骨架 .sp/.sp-card。 -->
         <section class="page sys" id="page-settings-model">
@@ -3075,6 +3124,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=70191af7"></script>
+    <script src="/static/hub.js?v=b89c680c"></script>
 </body>
 </html>

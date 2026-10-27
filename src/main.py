@@ -92,6 +92,7 @@ import modelcfg as modelcfg_mod     # 各 Agent 默认模型统一设置（v0.13
 import ghsettings as ghsettings_mod  # GitHub 地址/key/落点（v0.13.42：设置→GitHub 子菜单）
 import hublog as hublog_mod        # 日志中心（v0.13.46：设置→日志子菜单，journald + 操作事件聚合）
 import api_dataset as api_dataset_mod  # P0-1：数据集/经验库只读门面（无写端点）
+import botboy as botboy_mod         # v0.13.170：DS Bot 团队只读概览（读 ~/.dsh/bot/state.json）
 
 # C2（2026-10-12）：领域路由从本文件抽成独立 module —— main 只留组装职责。
 import appstate                     # 组装方写、领域方读的共享可变状态（discovery）
@@ -105,7 +106,16 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.169"
+VERSION = "0.13.170"
+
+# v0.13.170（2026-10-27）：Botboy —— DS Bot 团队的**只读投影**（系统菜单第十项）。
+# 为什么读文件而不调 `POST api/bot`：dsh 按 10-24 裁定按需拉起、常态 inactive，而 dsh web
+# 的鉴权 token 是进程级随机值；ds-bot 自己把 roster / rooms / exchange 写在
+# `$DSH_HOME/bot/state.json`（其 store.js 头注释明写）。
+# 不写盘是硬边界：ds-bot 用 `state.lock` 保证同一份数据只有一个写者，hub 越权改写
+# 会制造「另一个 dsh 正在编辑」的假锁冲突 ⇒ 建 Bot / 发消息回 dsh 原生界面。
+# 三种「没有」分开渲染：`ok=false`（文件在但坏 = 不可判定）/ `found=false`（没装没建）/
+# 真·空团队 —— 前两种被渲染成空团队，用户会以为团队被清空（本仓最禁的静默不可用）。
 
 # v0.13.169（2026-10-27）：v0.13.168 的**实弹复验** —— 三处「测试全绿、线上必挂」的假绿点。
 # ① 装配层调 `AgentDiscovery.all_configs()`（该类从无此方法）⇒ 每次拆解 500。单测全程
@@ -470,6 +480,7 @@ app.include_router(runlog_mod.router)
 app.include_router(cloudcli_mod.router)
 app.include_router(localprojects_mod.router)
 app.include_router(resources_mod.router)
+app.include_router(botboy_mod.router)          # v0.13.170：/api/botboy/overview（只读）
 app.include_router(github_mod.router)
 app.include_router(prefs_mod.router)
 app.include_router(modelcfg_mod.router)

@@ -1,3 +1,62 @@
+## v0.13.169 — 全链路派发的实弹复验：三处「测试全绿、线上必挂」
+
+> 来源：v0.13.168 交付后用户令「实弹验证刚刚完成的任务」。主会话不重启生产
+> （`term_sessions=1` 就是在跑的会话），改用 3198 影子实例跑真派发取证。
+
+### 一、拆解接口每次都 500
+
+`main.py` 装配 `agent_ids_fn` 时调 `appstate.discovery.all_configs()`，而
+`AgentDiscovery` **从来没有这个方法**。33 例单测全绿是因为它们全部注入假 ctx，
+那一行装配代码从未被执行。判据：修复前 `POST /api/tasks/decompose` → 500 +
+`AttributeError: 'AgentDiscovery' object has no attribute 'all_configs'`。
+
+修：改取 `registry.dispatchable_ids()`；新增 `TestWiringAttrsResolvable` 用真类
+`hasattr` 校验 main.py 引用的 discovery 属性（对旧文件可证伪：`missing=['all_configs']`）。
+
+### 二、派发池里有一半是干不了活的
+
+菜单 20 张 agent 卡，能真跑 `chat()` 的只有 claude/jcode：pi 恒回「需 Web UI」、
+TDAI 是记忆中心、dsh/cloudcli/codex 等无适配器。把菜单当派发池 ⇒ Leader 抽中 dsh
+就是一条注定失败的任务（实跑 `239b4d553a`：t1→dsh→`无可用适配器`，0 产出）。
+
+修：`registry.dispatchable_ids()` = 适配器在册且非恒失败桩（pi/tdai）+ `custom_agents`
+里登记了 port 的条目。**N 个适配器 ≠ N 个能干活的 agent。**
+
+### 三、验收把「没干活」和「审核标签」判成 pass
+
+- jcode 回「I don't have direct filesystem access…请把 find 的输出粘贴给我」→ 长度
+  非零 ⇒ `nonempty` 判 **pass**，整条 run 以成功收敛但零产出。
+- 任务要求「只输出整数」，实际回包 `User Safety: safe`（免费池路由到 content-safety
+  模型）⇒ 同样判 pass。
+
+修：`verifier._verify_nonempty` 增加两类 FAIL 判据 `refusal` / `not_a_product`
+（回包只是审核标签），皆 `repairable=True`（换模型重试是有效修复）。
+口径：**非空只证明模型说了话，不证明活干了。**
+
+### 实弹结果（3198 影子实例，DATA_DIR 隔离）
+
+| run | 场景 | 结果 |
+|---|---|---|
+| `239b4d553a` | 修复前，Leader 选 dsh | t1 failed `无可用适配器`，0 产出 |
+| `eb2922e1f3` | 修复后，单任务 | t1 success `verdict=pass`，model=`nvidia/nemotron-3.5-lightning:free` |
+| `c0636dd97d`→`c174f49176` | auto_rounds，第 1 轮空回包 | 第 1 轮 `insufficient`→子 run 第 2 轮 success→父 `stop_reason=complete` |
+| `256ac6a413` | 两任务带依赖 | t1 success → t2 success → `stop_reason=complete`，无子 run |
+| MCP | `tools/list` + `tools/call hub_dispatch` | 22 工具在册，dry_run 预览正常 |
+
+### 诚实边界（本轮取证，未修）
+
+- 派发走 **chat 适配器 = 无工具的纯文本 LLM**，文件系统类任务会拒答或编造；
+  编造的答案 `nonempty` 判不出来（实测 `256ac6a413` 的 t1 译文正确，但更早一版
+  FS 任务回了 `count=27`，真值 97）。要工具能力仍须走 agent 原生会话。
+- 实际模型由网关路由决定（免费池会换档到审核模型），与 `model_choice` 不同属正常。
+
+### 验证
+
+`tests/test_verifier.py` + `tests/test_task_rounds_l0.py` 共 60 例全绿；
+新增回归钉 5 例（装配属性 1、派发池 1、拒答 1、审核标签 1、中文拒答 1）。
+
+---
+
 ## v0.13.168 — 全链路派发：拆解 → 选型 → 派发 → 验收 → 最多 2 轮
 
 > 来源：2026-10-27 用户令「所有 agent 都可以互相派发子任务和子代理：拆解任务-评估难易度-

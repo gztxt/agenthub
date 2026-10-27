@@ -47,10 +47,44 @@ def _strip_fence(text: str) -> str:
     return re.sub(r"```(?:json)?|```", "", text).strip()
 
 
+#: 「我没干活」的显式回包。2026-10-27 实弹取证：jcode 回
+#: 「I don't have direct filesystem access… 请把 find 的输出粘贴给我」，
+#: 长度足够 ⇒ `nonempty` 判 **pass**，整条派发以「成功」收敛但零产出。
+#: 非空只证明「模型说了话」，不证明「活干了」；这层启发式专门堵这个洞。
+#: 刻意窄：只认第一人称的「无法访问/需要你粘贴」，避免把正常报告里的
+#: 「can't determine」类措辞误判成拒答。
+_PUNT_PATTERNS = (
+    r"\bi (?:do not|don't) have (?:direct )?(?:filesystem|file[ -]system|access)\b",
+    r"\bi (?:cannot|can't|can not) (?:directly )?(?:access|browse|read|run|execute)\b",
+    r"(?:请|麻烦)(?:您|你)?(?:先)?(?:粘贴|贴出|提供)(?:一下)?(?:.*?)(?:输出|内容|列表|文件)",
+    r"我无法访问",
+    r"我(?:没有|不具备)(?:直接)?(?:访问|读取|执行)(?:该|这个)?(?:文件|目录|权限)",
+)
+_PUNT_RE = re.compile("|".join(_PUNT_PATTERNS), re.I)
+
+#: 「整条回包只是审核标签」——免费池会路由到 content-safety 类模型，返回
+#: `User Safety: safe` 而不是正文（判例见 AGENTS.md §1 军规 4）。
+#: 2026-10-27 实弹取证：任务「只输出整数」回 `User Safety: safe`，
+#: 长度非零 ⇒ nonempty 判 pass，run 以 `complete` 收敛。标签不是产物。
+_JUNK_RE = re.compile(
+    r"^\s*(?:(?:user\s+)?safety|moderation|content[\s_-]*policy|policy)"
+    r"\s*[:：]\s*[\w\-]{1,20}\s*[.。]?\s*$", re.I)
+
+
 def _verify_nonempty(output: Optional[str], expect=None) -> Tuple[str, List[dict], bool, str]:
-    if not str(output or "").strip():
+    text = str(output or "").strip()
+    if not text:
         return (STATUS_FAIL, [_gap("empty_output", "产物去空白后为空")], True,
                 "执行者回包为空，不算完成")
+    if _JUNK_RE.match(text):
+        return (STATUS_FAIL,
+                [_gap("not_a_product", "回包是审核/分类标签（%r），不是结果" % text[:40])],
+                True, "回包是审核标签，换模型重试")
+    m = _PUNT_RE.search(text)
+    if m:
+        return (STATUS_FAIL,
+                [_gap("refusal", "执行者自述未执行（%r），产物不是结果" % m.group(0)[:40])],
+                True, "回包是拒答/索要输入，不是产物")
     return (STATUS_PASS, [], False, "产物非空")
 
 

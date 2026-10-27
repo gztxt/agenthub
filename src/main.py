@@ -45,7 +45,7 @@ from ports import list_listeners, port_in_use
 from sources import detect_project
 import scanner
 from writeauth import write_gate
-from registry import build_adapters, get_adapter
+from registry import build_adapters, get_adapter, dispatchable_ids
 import hook as hook_mod
 import memory as memory_mod
 import memfed as memfed_mod
@@ -105,7 +105,18 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.168"
+VERSION = "0.13.169"
+
+# v0.13.169（2026-10-27）：v0.13.168 的**实弹复验** —— 三处「测试全绿、线上必挂」的假绿点。
+# ① 装配层调 `AgentDiscovery.all_configs()`（该类从无此方法）⇒ 每次拆解 500。单测全程
+#    注入假 ctx，`agent_ids_fn=` 那一行从未被执行 ⇒ 33 例全绿也照样线上必挂。
+#    现改为 `registry.dispatchable_ids()`，并新增「拿真类校验源码引用的属性」闸门。
+# ② 派发池原本取全量画像（20 张 agent 卡），而真正能跑 `chat()` 的只有 claude/jcode
+#    （pi 需 Web UI、TDAI 不是对话 Agent、其余无适配器）⇒ Leader 抽中 dsh/cloudcli 就是
+#    一条注定「无可用适配器」的失败任务（实跑 239b4d553a：0 产出）。
+# ③ 验收 `nonempty` 把「我没权限，你把输出粘贴给我」与「User Safety: safe」（免费池路由
+#    到审核模型）都判 **pass** ⇒ 零产出以 `complete` 收敛。verifier 增 `refusal` /
+#    `not_a_product` 两类 FAIL：非空只证明模型说了话，不证明活干了。
 
 # v0.13.168（2026-10-27）：全链路派发 —— 拆解 → 选型 → 派发 → 验收 → **最多 2 轮**。
 # 此前链路三分五裂：技能 `agent-dispatch` 只有手册无编排；`tasks.py` 有 DAG 但**只选
@@ -878,7 +889,11 @@ async def startup():
     refscout_mod.ensure_schema()
     tasks_mod.set_context(
         chat_fn=lambda a, m, s=None, mo=None, tr=None: _chat_dispatch(a, m, s, mo, tr),
-        agent_ids_fn=lambda: [c["id"] for c in appstate.discovery.all_configs()])
+        # 派发目标取**可执行池**而非菜单：① `AgentDiscovery` 从来没有
+        # `all_configs()`（2026-10-27 实弹 500 的根因，单测因注入假 ctx 全绿）；
+        # ② 菜单里 20 张卡只有 claude/jcode 能真跑 chat()，把菜单当池子
+        # ⇒ Leader 抽中 dsh/cloudcli 就是必失败任务（同日实跑 239b4d553a 取证）。
+        agent_ids_fn=dispatchable_ids)
     _spawn(tasks_mod.sweep_stale_tasks())
     _spawn(vitals_loop())
     _spawn(model_drift_loop())   # 配置漂移巡检（CCR 重启会把模型改回旧值）

@@ -420,5 +420,60 @@ class TestSourceInvariants(unittest.TestCase):
         self.assertIn("min(int(max_rounds), MAX_ROUNDS)", self.code)
 
 
+class TestWiringAttrsResolvable(unittest.TestCase):
+    """装配层属性必须真实存在（2026-10-27 实弹 500 的回归钉）。
+
+    事故：`main.py` 的 `agent_ids_fn` 写的是 `appstate.discovery.all_configs()`，
+    而 `AgentDiscovery` 从来没有这个方法。单测全程注入假 ctx/假 chat_fn，走的
+    是 `_ctx["agent_ids_fn"]` 这个函数对象，**装配那一行从未被执行** ⇒ 33 例全绿、
+    线上 `POST /api/tasks/decompose` 必 500。这类 bug 只有「拿真类校验源码里引用的
+    属性名」能挡住，任何注入式测试都是假绿。
+    """
+
+    def test_discovery_attrs_used_by_main_exist(self):
+        import discovery
+        src = (_REPO / "src" / "main.py").read_text(encoding="utf-8")
+        used = set(re.findall(r"appstate\.discovery\.([A-Za-z_]\w*)", src))
+        self.assertTrue(used, "main.py 里至少要引用一次 discovery，否则本测试失去意义")
+        missing = sorted(a for a in used if not hasattr(discovery.AgentDiscovery, a))
+        self.assertEqual(missing, [],
+                         "main.py 引用了 AgentDiscovery 不存在的方法：%s" % missing)
+
+    def test_agent_ids_wiring_uses_dispatchable_pool(self):
+        src = (_REPO / "src" / "main.py").read_text(encoding="utf-8")
+        i = src.index("agent_ids_fn=")
+        block = src[i:i + 200]
+        self.assertIn("dispatchable_ids", block,
+                      "派发目标必须取 registry.dispatchable_ids()（可执行池唯一口径）")
+        self.assertNotIn("all_profiles", block,
+                         "菜单 ≠ 可执行池：20 张卡只有 claude/jcode 能真跑 chat()")
+
+
+class TestDispatchablePool(unittest.TestCase):
+    """选型池必须只含真能干活的 agent（2026-10-27 实跑 239b4d553a 的回归钉）。
+
+    事故：池子取全量画像 ⇒ Leader 抽中 dsh ⇒ `agent dsh 无可用适配器` ⇒ 整轮 0 产出。
+    """
+
+    def setUp(self):
+        import registry
+        self.registry = registry
+        self._bak = dict(registry._adapters)
+        registry._adapters.clear()
+        registry._adapters.update({"claude": object(), "jcode": object(),
+                                   "pi": object(), "tdai": object()})
+
+    def tearDown(self):
+        self.registry._adapters.clear()
+        self.registry._adapters.update(self._bak)
+
+    def test_stub_adapters_excluded(self):
+        ids = self.registry.dispatchable_ids()
+        self.assertIn("claude", ids)
+        self.assertIn("jcode", ids)
+        self.assertNotIn("pi", ids, "pi 的 chat() 恒返回需 Web UI，不是派发目标")
+        self.assertNotIn("tdai", ids, "TDAI 是记忆中心，不是对话 Agent")
+
+
 if __name__ == "__main__":
     unittest.main()

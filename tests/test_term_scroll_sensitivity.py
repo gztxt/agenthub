@@ -240,7 +240,12 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.168"
+    CURRENT_VERSION = "0.13.169"
+    #: v0.13.169：v0.13.168 的实弹复验——三处假绿（装配层不存在的属性 / 派发池含不可执行
+    #: agent / 验收把拒答与审核标签判 pass）。关键词取自 main.py 版本注释实际写下的字句。
+    VERSION_ROOT_CAUSES["0.13.169"] = (
+        "all_configs()", "dispatchable_ids", "not_a_product", "refusal", "假绿",
+    )
     #: v0.13.168：全链路派发（拆解→选型→派发→验收→最多 2 轮）。关键词取自 main.py
     #: 实际写下的字句，覆盖四条根因：三段各自存在从没串起来 / 轮次闸门 / 轮次表 / 不花钱预览。
     VERSION_ROOT_CAUSES["0.13.168"] = (

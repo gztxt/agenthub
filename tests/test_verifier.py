@@ -91,6 +91,39 @@ class TestNonempty(unittest.TestCase):
         self.assertEqual(v["status"], verifier.STATUS_PASS)
         self.assertEqual([], v["gaps"])
 
+    def test_refusal_is_not_pass(self):
+        """实弹 2026-10-27：jcode 回「I don't have direct filesystem access…请粘贴」
+        长度足够 ⇒ nonempty 判 pass，整条派发零产出却显示成功。"""
+        out = ("I don't have direct filesystem access, so I can't browse that path.\n"
+               "If you paste the output of `find ...`, I'll instantly count them.")
+        v = verifier.verify("nonempty", output=out)
+        self.assertEqual(v["status"], verifier.STATUS_FAIL)
+        self.assertEqual(v["gaps"][0]["id"], "refusal")
+        self.assertTrue(v["repairable"], "拒答应允许重试换个执行者/模型")
+
+    def test_chinese_refusal_is_not_pass(self):
+        v = verifier.verify("nonempty", output="我无法访问该目录，请把文件列表粘贴过来。")
+        self.assertEqual(v["status"], verifier.STATUS_FAIL)
+        self.assertEqual(v["gaps"][0]["id"], "refusal")
+
+    def test_normal_caveat_still_passes(self):
+        """窄口径：正常报告里出现 can't / 无法 不算拒答，别把好人判死。"""
+        v = verifier.verify("nonempty",
+                            output="src 下共 96 个 .py 文件；更精确的统计不含 .bak 副本。")
+        self.assertEqual(v["status"], verifier.STATUS_PASS)
+
+    def test_safety_label_is_not_pass(self):
+        """实弹 2026-10-27：免费池路由到 content-safety 模型，回包
+        `User Safety: safe` 长度非零 ⇒ nonempty 判 pass，run 以 complete 收敛。"""
+        v = verifier.verify("nonempty", output="User Safety: safe")
+        self.assertEqual(v["status"], verifier.STATUS_FAIL)
+        self.assertEqual(v["gaps"][0]["id"], "not_a_product")
+
+    def test_real_answer_mentioning_safety_passes(self):
+        v = verifier.verify("nonempty",
+                            output="译文：The dispatch link is up. 字符数(不含空格)=21")
+        self.assertEqual(v["status"], verifier.STATUS_PASS)
+
 
 class TestJsonArray(unittest.TestCase):
     def test_fenced_json_array_passes(self):

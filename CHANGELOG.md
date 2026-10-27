@@ -1,3 +1,36 @@
+## v0.13.168 — 全链路派发：拆解 → 选型 → 派发 → 验收 → 最多 2 轮
+
+> 来源：2026-10-27 用户令「所有 agent 都可以互相派发子任务和子代理：拆解任务-评估难易度-
+> 子任务选择合适的 agent 和模型-主模型汇总评估验证-再次派发子任务-汇总验证，根据任务完成情况
+> 最多自动执行 2 轮；本派发功能可以提炼成全局技能全链路自动调用」。台账 `PT-20261027-04`。
+
+### 病根：三段各自存在，从没串起来
+
+| 层 | 改前 | 后果 |
+|---|---|---|
+| 技能 | `skills/agent-dispatch` 616 行**手册** | 讲清了该不该派/派给谁，但**没有编排**，每个 agent 自己拆自己 curl |
+| 后端 | `tasks.py` 有拆解/DAG/并发/verifier | **只选 agent 不选模型**；只有 attempt 级重试，**没有「汇总→再拆一轮」** |
+| 入口 | `hubmcp.py` 零 tasks/dispatch | 除前端外**没有任何 agent 调得到** |
+
+### 新增
+
+- `tasks.py`：`MAX_ROUNDS`（`TASK_MAX_ROUNDS`，默认 2，**只可收紧不可放宽**）；
+  DAG 项 `difficulty` 1~3 + `model`；`_validate_dag` 三条降级口径；`task_runs` 表；
+  `replan_gate()` 六态；`_replan_once()`（闸门 → LLM → 占位 → 落库）；`/replan`；
+  `decompose` 新增 `auto_rounds` / `dry_run`；`get_run`/`list_runs` 回轮次与血缘。
+- `hubmcp.py`：`hub_dispatch`（默认 `confirm=False` 只拆解预览，**不落库不花钱**）、
+  `hub_run_status`、`hub_replan`。
+- `skills/agent-dispatch/SKILL.md` §1.4：五段判据 + 停止条件表 + 三种调法 + 三条诚实边界。
+
+### 两条容易合错的口径
+
+- `model_choice`（拆解意图）vs `model`（回包实发）：合成一列就分不清「选了没生效」与「网关换了」。
+- `round`（整条 run 重拆，≤2）vs `attempts`（同一子任务重跑，`MAX_AUTO_RETRY`）。
+
+### 验证
+
+`tests/test_task_rounds_l0.py` 33 例全绿；既有 5 个任务测试 97 例回归无损。
+
 ## v0.13.167 — 设置 → 模型：把「已生效」从一句文案变成四条判据
 
 > 来源：2026-10-27 用户令「模型配置还是需要继续优化，设置菜单里的模型设置要继续优化完善，

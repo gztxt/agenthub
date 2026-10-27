@@ -105,7 +105,18 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.167"
+VERSION = "0.13.168"
+
+# v0.13.168（2026-10-27）：全链路派发 —— 拆解 → 选型 → 派发 → 验收 → **最多 2 轮**。
+# 此前链路三分五裂：技能 `agent-dispatch` 只有手册无编排；`tasks.py` 有 DAG 但**只选
+# agent 不选模型、没有第二轮**；`hubmcp.py` 零 tasks/dispatch 入口。
+# 新增：① DAG 项 `difficulty`(1~3) + `model`（白名单校验，非法降级不报错）；
+# ② `task_runs` 表（轮次/血缘/stop_reason/child_run_id）；③ `replan_gate()` 六态闸门
+# （unfinished/complete/max_rounds/budget/same_failure/go）；④ `/replan` + `auto_rounds`；
+# ⑤ MCP `hub_dispatch`（默认 dry_run 不花钱）/`hub_run_status`/`hub_replan`；
+# ⑥ 技能 §1.4 把五段、停止条件与三条诚实边界写死。
+# 口径分离：`model_choice`=拆解意图 vs `model`=回包实发；`round`=整条 run 重拆 vs
+# `attempts`=同一子任务重跑。闸门 `tests/test_task_rounds_l0.py`（33 例）。
 
 # v0.13.167（2026-10-27）：设置 → 模型的**执行逻辑**。此前"已生效"的唯一依据是
 # HTTP 200 —— 那只证明写进去了，不证明会用上、更不证明那个模型现在还存在。

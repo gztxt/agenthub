@@ -240,7 +240,12 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.167"
+    CURRENT_VERSION = "0.13.168"
+    #: v0.13.168：全链路派发（拆解→选型→派发→验收→最多 2 轮）。关键词取自 main.py
+    #: 实际写下的字句，覆盖四条根因：三段各自存在从没串起来 / 轮次闸门 / 轮次表 / 不花钱预览。
+    VERSION_ROOT_CAUSES["0.13.168"] = (
+        "全链路派发", "replan_gate()", "task_runs", "dry_run", "model_choice",
+    )
     #: v0.13.166：关键词取版本注释里**实际写下的字句**——两条根因各取两词：
     #: ① 第二源接在没人看的函数上（两套并行实现 + 页面榜仍 explicit=0）
     #: ② scan 的 mode=direct_read 只有 evidence=skill_tool 才算 explicit

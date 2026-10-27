@@ -26,6 +26,9 @@
           不克隆、不改项目、不自动加依赖）
           / hub_intake（PT-20261022-01：接单前置四查一简报。只做组合与呈现，
           记忆/知识库走本进程端点、技能只查本地、参考库按需深查）
+          / hub_dispatch / hub_run_status / hub_replan（PT-20261027-04：全链路派发。
+          拆解 → 选型 → 派发 → 验收 → 未达标自动重拆，最多 2 轮硬上限。默认 `confirm=False`
+          只拆不落库 ⇒ 不花钱；`confirm=True` 才落库执行，`auto_rounds=True` 才自动重拆）
 """
 import json
 import os
@@ -600,6 +603,97 @@ def hub_intake(task: str, deep: bool = False, auto_deep: bool = True,
         "degraded": {"memory": (data.get("memory") or {}).get("degraded"),
                      "kb": (data.get("kb") or {}).get("degraded")},
     }, ensure_ascii=False)
+
+
+@server.tool()
+def hub_dispatch(goal: str, agent: str = "", confirm: bool = False,
+                 auto_run: bool = True, auto_rounds: bool = False,
+                 verify_kind: str = "nonempty") -> str:
+    """**全链路派发**（PT-20261027-04）：把一句目标变成 DAG → 派给各 agent 执行 →
+    验收 → 若未达标**自动重拆一轮**（最多 2 轮，硬上限不可放宽）。
+
+    这条链路治的是「派发技能只有手册、没有编排」：技能 `agent-dispatch` 讲清了
+    「该不该派、派给谁、怎么判活」，但没有任何入口把「拆解→选型→派发→汇总→再派」
+    串起来，每个 agent 只能手动拆、手动 curl。本工具是那条链路的唯一入口。
+
+    用法（两段式，**默认不花钱**）：
+      1. `hub_dispatch(goal="…")`          → 只拆解，返回 DAG 预览（不落库、不执行）
+      2. `hub_dispatch(goal="…", confirm=True)` → 真落库并执行
+      再传 `auto_rounds=True` 才允许「跑完没达标自动重拆第 2 轮」；不传就停在第一轮
+      等人工判断。为什么拆成两个开关：自动重拆会真的再花一轮 token 并自动接受产物，
+      属于「烧钱 + 改状态」，必须显式点头（与 `hub_skill_acquire` 的 allow_install 同口径）。
+
+    返回里 `tasks[].difficulty` 是 Leader 自评（1~3，只作选型依据不作判据），
+    `tasks[].model` 是**选型意图**；实际用了什么模型要看 `hub_run_status` 的 `model`
+    （回包观测值）。两者不同 = 选了没生效，不是 bug 静默。
+
+    要盯进度/取结果用 `hub_run_status(run_id)`。"""
+    body = {"goal": goal, "verify_kind": verify_kind,
+            "dry_run": not confirm,
+            "auto_run": bool(auto_run) and bool(confirm),
+            "auto_rounds": bool(auto_rounds) and bool(confirm)}
+    if agent:
+        body["default_agent"] = agent
+    data = _post("/api/tasks/decompose", body, _timeout=120)
+    if "error" in data:
+        return json.dumps(data, ensure_ascii=False)
+    return json.dumps({
+        "run_id": data.get("run_id"),
+        "dry_run": data.get("dry_run", False),
+        "round": data.get("round"),
+        "max_rounds": data.get("max_rounds"),
+        "auto_rounds": data.get("auto_rounds"),
+        "running": data.get("running"),
+        "tasks": [{"id": t.get("id"), "agent": t.get("agent_id"),
+                   "difficulty": t.get("difficulty"), "model": t.get("model"),
+                   "deps": t.get("deps"), "task": t.get("task")}
+                  for t in (data.get("tasks") or [])],
+        "note": data.get("note"),
+    }, ensure_ascii=False)
+
+
+@server.tool()
+def hub_run_status(run_id: str) -> str:
+    """看一条派发 run 的实际状态与**观测到的模型**。
+
+    判读顺序：`run.stop_reason` 先看（`complete` 完工 / `max_rounds` 到轮次上限转人工 /
+    `same_failure` 原地打转 / `budget` / `replan_error:…` 重拆失败），再看每个任务的
+    `status` + `verdict` + `error`。`model_choice`（意图）与 `model`（回包）不一致
+    是「选了没生效」的唯一可查证据，别把它当噪声。"""
+    data = _get("/api/tasks/%s" % urllib.parse.quote(run_id))
+    if "error" in data:
+        return json.dumps(data, ensure_ascii=False)
+    tasks = data.get("tasks") or []
+    return json.dumps({
+        "run_id": data.get("run_id"),
+        "goal": data.get("goal"),
+        "run": data.get("run"),
+        "max_rounds": data.get("max_rounds"),
+        "counts": {"total": len(tasks),
+                   "success": sum(1 for t in tasks if t.get("status") == "success"),
+                   "failed": sum(1 for t in tasks if t.get("status") == "failed"),
+                   "other": sum(1 for t in tasks
+                                if t.get("status") not in ("success", "failed"))},
+        "tasks": [{"id": t.get("task_id"), "status": t.get("status"),
+                   "agent": t.get("agent_id"), "verdict": t.get("verdict"),
+                   "difficulty": t.get("difficulty"),
+                   "model_choice": t.get("model_choice"), "model": t.get("model"),
+                   "error": (t.get("error") or "")[:200] or None,
+                   "output_head": (t.get("output") or "")[:400] or None}
+                  for t in tasks],
+    }, ensure_ascii=False)
+
+
+@server.tool()
+def hub_replan(run_id: str, max_rounds: int = 2) -> str:
+    """对一条**已收敛**的 run 手动重拆下一轮（与自动重拆同一套闸门）。
+
+    `max_rounds` 只能**收紧**：传 5 也会被压回 2（用户裁定的「最多自动 2 轮」）。
+    返回 `gate.kind` 即结论：`go` 已生成下一轮 / `complete` 全绿无需重拆 /
+    `max_rounds` 到上限 / `same_failure` 原地打转 / `budget` 预算耗尽。"""
+    data = _post("/api/tasks/%s/replan" % urllib.parse.quote(run_id),
+                 {"auto_run": True, "max_rounds": int(max_rounds)}, _timeout=120)
+    return json.dumps(data, ensure_ascii=False)
 
 
 @server.tool()

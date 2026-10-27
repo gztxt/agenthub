@@ -44,6 +44,10 @@ SOURCES: Tuple[str, ...] = (
     "resilience",     # P1-6：出站重试的逐次尝试
     "action",         # P2 A10：统一 Action Plane 的请求/裁决/结论三拍
     "scan",           # v0.13.164：技能调用第二数据源（扫会话转录，补 hub 看不到的直读）
+    # v0.13.168：整条 run 的重拆（拆解→派发→验收→**最多 2 轮**）。
+    # 为什么不并进 task_exec：那是**单个子任务**的执行结果，而重拆是**run 级**决策，
+    # 把它塞进 task_exec 会让「子任务成功率」被决策事件污染。
+    "task_replan",
 )
 
 #: 跨 source 的执行结果语义闭集（**结果怎样**）。
@@ -57,6 +61,10 @@ STATUS_MAP: Dict[str, Dict[str, str]] = {
     "hub_chat": {"success": "ok", "fail": "failed"},
     "task_exec": {"success": "ok", "fail": "failed", "parked": "parked",
                   "submitted": "parked"},
+    # v0.13.168：重拆只有两种写点 —— 成功生成下一轮（`replan`）、LLM/DAG 失败（`fail`）。
+    # 闸门拒绝（complete/max_rounds/same_failure/budget）**不落事件**：那是正常结论，
+    # 落成 failed 会让「重拆失败率」恒高且不可解释。
+    "task_replan": {"replan": "ok", "fail": "failed"},
     "cron_run": {"success": "ok", "fail": "failed", "skipped": "skipped"},
     "mcp_call": {"success": "ok", "fail": "failed"},
     # P2 C2：影子规则只观测不拦 ⇒ 命中即「有异常但未阻断」= degraded（不是 failed）。

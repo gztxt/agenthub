@@ -1,3 +1,69 @@
+## v0.13.167 — 设置 → 模型：把「已生效」从一句文案变成四条判据
+
+> 来源：2026-10-27 用户令「模型配置还是需要继续优化，设置菜单里的模型设置要继续优化完善，
+> **重点优化执行逻辑，要设置好了能真正有效**」；前一日同类报障原文：
+> 「新建会话成功 总是提示登录 已经在设置菜单模型子菜单里设置模型」→
+> 「并没有修复 现在新建会话 还是要求登录或者选择一个模型 … 设置好了的模型 没有用」。
+
+### 病根：保存成功 ≠ 会用上
+
+设置页历史上只把「apply 返回 200」当成生效证据。四条静默失效路径各自有案：
+
+| # | 失效路径 | 后果 |
+|---|---|---|
+| ① | 存的是**已下线的模型 ID**（网关清单人工增删/免费池轮换） | 终端照旧注入死 ID → agent 报 unknown model，页面仍显示"已生效" |
+| ② | 该 agent 无 `--model` 白名单 | 只写配置文件，而配置文件未必是它真正的取值源 |
+| ③ | argv-only（omp） | 只要不走 hub 终端就完全不生效，页面无从提示 |
+| ④ | 配置文件被别的进程改回（CCR 重写 claude env 三兄弟） | 只有巡检那一轮能修，静态状态不可见 |
+
+### 改了什么（`src/modelcfg.py` / `01-core-boot.js` / `index.html` / `writeauth.py`）
+
+1. **`catalog_ids()`**：同步拉 `CCR /v1/models`（TTL 60s，`HUB_MODEL_CATALOG=off` 可关）。
+   **取不到 ≠ 没有**：`checked=False` 时不判死（fail-open），只有真在册才放行。
+2. **`effective_state(agent_id)`**：`{model, source, write_mode, file_current, catalog,
+   channels{term_new,term_resume,chat,ui_native}, drift, warnings}`。
+   页面用它渲染「会用什么 / 哪条通道生效 / 有什么风险」，不再靠用户"改了试试看"。
+3. **`verify_model(agent_id, live=False)`**：四条判据（落点 / 清单 / 注入 / 通道）+ 可选
+   真实调用（`max_tokens=1`）。`verdict` 三档：`ok` / `fail` / `unset` ——
+   **没设过模型不是"验证失败"**，否则每个 agent 都挂红叉，红叉就不再是信号。
+4. **`apply_model` 加清单闸门**：ccr 型目标 ID 不在册 ⇒ 409，**不落笔、不留备份、不写 hub 行**。
+   native 型（qoder 原生名）跳过（拿 CCR 清单比必然误拒）；带前缀的（opencode/omp 的
+   `ccr/…`）比对前剥前缀。
+5. **`agent_state` 新增 `argv_effective`**：grok 注入的是 profile 表头键 `ccr-hub`，
+   不是模型 ID —— 页面此前显示 `--model <模型>` 与实际差一层，现在如实给出完整命令。
+6. **HTTP**：`GET /api/settings/model/verify`（静态只读）、
+   `POST /api/settings/model/verify-live`（真打网关，要口令；口令走 body 不进 URL，
+   并在 `writeauth.EXEMPT_PREFIXES` 登记理由）；`/api/settings/models` 顶层带 `catalog`。
+7. **前端**：新增「验证生效」「真实验证（会调用网关）」两个按钮；**保存后自动跑静态验证**，
+   把「✓ 验证通过 / ✗ 验证未通过 + 逐条判据」常驻在页内，并带出备份路径。
+   agent 列表的 tooltip 提前暴露风险（清单失配 / argv-only / 漂移）。
+
+### 顺带修掉的两个真缺陷
+
+- **`_ccr_api_key()` 恒返回空**：旧实现只读 `~/.claude-code-router/config.json`，
+  而本机 CCR 已迁 `config.sqlite`，该文件不存在 ⇒ grok 的 `[model.*]` 块会被写入
+  **空 api_key**（写入成功、调用 401）。改按 `config.py` 同一条链取值：
+  `CCR_OPENAI_KEY` → `~/.config/jcode/provider-ccr.env` → `CCR_AUTH_TOKEN`（不新增凭据）。
+- **pi 被算成"chat 通道生效"**：`adapters/pi.py:21` 的 `chat()` 恒返回「需通过 Web UI
+  交互」，model 传进去没人接。`_CHAT_STATIC` 收紧为 `{claude, jcode}` ——
+  能自证的前提是判据本身不许撒谎。
+
+### 验证
+
+- L0：`tests/test_modelcfg.py` **82 例全绿**（新增 `M_CatalogGuard` 5 例、
+  `NEffectiveState` 7 例）；`tests/conftest.py` 默认关掉清单校验，保证 L0 不打真网关。
+- 影子实例 :3198（隔离 `DATA_DIR` + `env -i`）：`/api/settings/models` 16~27ms；
+  清单闸门对 `dead/gone-model` 返 **409 且零落笔**；`verify-live` 对
+  `openrouter/openrouter/free` 返 **HTTP 200 / 1716ms**（真调用证据）。
+- 顺带修一颗**定时炸弹**：`test_skill_weights.test_invocations_auto_matches_usage_auto`
+  拿 `/invocations`（默认 7 天窗）与 `/usage?days=365` 比同一个量，而 fixture 的
+  `created_at` 写死为 `2026-10-20`。2026-10-27 02:0x UTC 起 7 天窗滑过该时刻 ⇒ 用例
+  开始判红，而两个端点的实现一个字没改。改法是**把窗口对齐**（`?days=365`），
+  不是改实现 —— 比两个量之前先对齐口径。
+- 全量 L0：3254 passed；3 failed 中 2 条与本次无关（`test_skill_weights` 的
+  legacy 计数、`test_sessions_store` 的 grok 标题，均为既存问题，未在本次范围内修），
+  另 1 条 `test_hubjs_split` 因未重建产物而红，`scripts/build_hubjs.sh` 重建后转绿。
+
 ## v0.13.166 — 第二数据源接到页面真正读的那个函数上
 
 > 来源：2026-10-27 01:15 重启 v0.13.165 后按台账验收①跑 `GET /api/skill/usage?days=7`，

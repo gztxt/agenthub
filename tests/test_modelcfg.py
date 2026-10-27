@@ -34,6 +34,12 @@ import tiers                     # noqa: E402
 import db                        # noqa: E402
 import modelcfg                  # noqa: E402
 
+# 清单校验（v0.13.167）在本文件里默认关闭：L0 是 hermetic 环境（假 HOME + 假模型 ID），
+# 真打 :3456 会让用例依赖网关活着。清单校验本身由 M_CatalogGuard 打桩专测。
+# ⚠ 必须写在**本文件**而不是 conftest.py：标准的 `run_tier.py hermetic` 走 unittest
+#    discover，压根不加载 conftest ⇒ 那种写法在 pytest 下绿、在 CI 层红（两套判据分叉）。
+os.environ.setdefault("HUB_MODEL_CATALOG", "off")
+
 
 def _mktmp(prefix: str) -> pathlib.Path:
     _L0_TMP.mkdir(parents=True, exist_ok=True)
@@ -894,3 +900,144 @@ class MAutoDiscovery(_HomeFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _CatalogFixture(_HomeFixture):
+    """把「网关清单」换成桩数据。
+
+    L0 不许真打 :3456（网关一挂全红，且假模型 ID 必然"不在册"）。所以清单校验的
+    正确性靠打桩 `_fetch_catalog_ids` 来测：既验证"不在册就拒写"，也验证
+    "取不到清单时不许误拒"—— 后者是 fail-open 与 fail-closed 的分界线。
+    """
+
+    IDS = {"alibaba/qwen3.8-max", "deepseek/deepseek-flash"}
+
+    def setUp(self):
+        super().setUp()
+        self._old_env = os.environ.pop("HUB_MODEL_CATALOG", None)
+        self._old_fetch = modelcfg._fetch_catalog_ids
+        modelcfg._CATALOG.update({"ts": 0.0, "ids": set(), "checked": False, "size": 0,
+                                  "error": ""})
+
+    def tearDown(self):
+        modelcfg._fetch_catalog_ids = self._old_fetch
+        modelcfg._CATALOG.update({"ts": 0.0, "ids": set(), "checked": False, "size": 0,
+                                  "error": ""})
+        if self._old_env is not None:
+            os.environ["HUB_MODEL_CATALOG"] = self._old_env
+        super().tearDown()
+
+    def _serve(self, ids=None, err=""):
+        got = set(self.IDS if ids is None else ids)
+        modelcfg._fetch_catalog_ids = lambda: (got, err)
+
+
+class MCatalogGuard(_CatalogFixture):
+    """v0.13.164：写入前先问「这个 ID 现在还活着吗」。
+
+    病根：设置页只证明"写进去了"。存着一个已经下线的模型 ID ⇒ 终端照旧注入
+    ⇒ agent 报 unknown model，而页面显示"已生效"。这条闸门挡的就是它。
+    """
+
+    def test_model_in_catalog_is_written(self):
+        self._serve()
+        modelcfg.apply_model("jcode", "deepseek/deepseek-flash")
+        self.assertEqual(modelcfg.hub_model("jcode"), "deepseek/deepseek-flash")
+
+    def test_model_not_in_catalog_is_refused_without_writing(self):
+        self._serve()
+        before = self._read(".jcode/config.toml")
+        with self.assertRaises(modelcfg.ModelCfgError) as cm:
+            modelcfg.apply_model("jcode", "dead/gone-model")
+        self.assertEqual(cm.exception.status, 409)
+        self.assertIn("不在 CCR 当前清单", cm.exception.args[0])
+        self.assertEqual(self._read(".jcode/config.toml"), before, "拒绝时不许落笔")
+        self.assertEqual(self._backups(".jcode/config.toml"), [], "拒绝时不许留备份")
+        self.assertEqual(modelcfg.hub_model("jcode"), "", "拒绝时不许写 hub 侧")
+
+    def test_catalog_unavailable_must_not_block(self):
+        """取不到清单 ≠ 清单里没有。网关抖动时把用户锁死是更坏的失败。"""
+        self._serve(ids=set(), err="URLError: refused")
+        modelcfg.apply_model("jcode", "whatever/model-x")
+        self.assertEqual(modelcfg.hub_model("jcode"), "whatever/model-x")
+
+    def test_prefix_is_stripped_before_catalog_lookup(self):
+        """opencode/omp 的值带 provider 前缀；比对必须用裸 ID，否则在册也判成不在。"""
+        self._serve()
+        modelcfg.apply_model("opencode", "ccr/deepseek/deepseek-flash")
+        self.assertEqual(modelcfg.hub_model("opencode"), "ccr/deepseek/deepseek-flash")
+
+    def test_native_mode_is_not_catalog_checked(self):
+        """qoder 的原生名（Qwen3.8-Max）天然不在 CCR 清单里，拿清单比必然误拒。"""
+        self._serve()
+        modelcfg.apply_model("qoder", "Qwen3.8-Max")
+        self.assertEqual(modelcfg.hub_model("qoder"), "Qwen3.8-Max")
+
+
+class NEffectiveState(_CatalogFixture):
+    """三通道 × 清单的单一判定（v0.13.164）。"""
+
+    def test_effective_reports_all_four_checks(self):
+        self._serve()
+        modelcfg.apply_model("claude", "alibaba/qwen3.8-max")
+        eff = modelcfg.effective_state("claude")
+        self.assertEqual(eff["model"], "alibaba/qwen3.8-max")
+        self.assertTrue(eff["catalog"]["ok"])
+        self.assertTrue(eff["channels"]["term_new"]["applies"])
+        self.assertEqual(eff["channels"]["term_new"]["argv"],
+                         ["--model", "alibaba/qwen3.8-max"])
+        self.assertTrue(eff["channels"]["chat"]["applies"], "claude 有 chat 适配器")
+        self.assertIsNone(eff["drift"])
+
+    def test_verify_passes_after_apply(self):
+        self._serve()
+        modelcfg.apply_model("claude", "alibaba/qwen3.8-max")
+        v = modelcfg.verify_model("claude")
+        self.assertEqual(v["verdict"], "ok")
+        self.assertTrue(all(c["ok"] is not False for c in v["checks"]))
+
+    def test_verify_catches_config_drift(self):
+        """配置文件被别的进程改回旧值 ⇒ 静态验证必须当场判否（不能只看 hub 侧）。"""
+        self._serve()
+        modelcfg.apply_model("claude", "alibaba/qwen3.8-max")
+        d = json.loads(self._read(".claude/settings.json"))
+        d["model"] = "old/model-a"
+        self._write(".claude/settings.json", json.dumps(d))
+        v = modelcfg.verify_model("claude")
+        self.assertEqual(v["verdict"], "fail")
+        bad = [c["name"] for c in v["checks"] if c["ok"] is False]
+        self.assertIn("配置文件落点", bad)
+        self.assertTrue(any("漂移" in w for w in v["warnings"]))
+
+    def test_verify_catches_model_removed_from_catalog(self):
+        self._serve()
+        modelcfg.apply_model("claude", "alibaba/qwen3.8-max")
+        self._serve(ids={"other/model"})          # 网关侧删了这个模型
+        modelcfg._CATALOG.update({"ts": 0.0, "checked": False})
+        v = modelcfg.verify_model("claude")
+        self.assertEqual(v["verdict"], "fail")
+        bad = [c["name"] for c in v["checks"] if c["ok"] is False]
+        self.assertIn("CCR 清单", bad)
+
+    def test_omp_argv_only_skips_file_check(self):
+        self._serve()
+        modelcfg.apply_model("omp", "ccr/deepseek/deepseek-flash")
+        v = modelcfg.verify_model("omp")
+        self.assertEqual(v["verdict"], "ok")
+        file_check = [c for c in v["checks"] if c["name"] == "配置文件落点"][0]
+        self.assertIsNone(file_check["ok"], "argv-only 无文件可落 ⇒ 该判据必须是 na 不是 fail")
+        self.assertTrue(any("argv-only" in w for w in v["warnings"]))
+
+    def test_unset_is_not_reported_as_failure(self):
+        """没设过模型 = 未配置，不是"验证失败"；否则每个 agent 都挂红叉，红叉就没信号了。"""
+        v = modelcfg.verify_model("claude")
+        self.assertEqual(v["verdict"], "unset")
+        self.assertFalse(any(c["ok"] is False for c in v["checks"]))
+
+    def test_agent_state_carries_effective_and_real_argv(self):
+        self._serve()
+        modelcfg.apply_model("grok", "alibaba/qwen3.8-max")
+        st = modelcfg.agent_state("grok")
+        self.assertEqual(st["argv_effective"], ["--model", "ccr-hub"],
+                         "grok 注入的是 profile 表头键，不是模型 ID（页面必须如实显示）")
+        self.assertEqual(st["effective"]["model"], "alibaba/qwen3.8-max")

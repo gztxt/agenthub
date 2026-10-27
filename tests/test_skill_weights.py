@@ -285,7 +285,12 @@ class TestUsageEndpoint(_WeightsCase):
                    " VALUES('rest','skill.relevant','success',1,?, '2026-10-20T00:00:00+00:00')",
                    (json.dumps({"name": "demo", "route": "src"}),))   # legacy
 
-        inv = self.client.get("/api/skill/invocations", headers=self._hdr()).json()
+        # ⚠ 窗口必须显式对齐：`/invocations` 默认 7 天，而下面那行 fixture 的
+        # created_at 是**写死的** 2026-10-20。两者不打断言就成了一颗定时炸弹 ——
+        # 2026-10-27 02:0x UTC 起，7 天窗口滑过 10-20T00:00，用例开始判红，
+        # 而两个端点的实现一个字都没改（实测：改成 days=365 立刻转绿）。
+        # 同一条纪律：**比两个量之前，先把口径（此处是时间窗）对齐**。
+        inv = self.client.get("/api/skill/invocations?days=365", headers=self._hdr()).json()
         usage = self._usage(days=365)
         self.assertEqual(inv["auto"]["total"], usage["totals"]["auto"])
         self.assertEqual(inv["auto"]["query"], usage["totals"]["query"])

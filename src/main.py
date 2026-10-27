@@ -105,7 +105,14 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.166"
+VERSION = "0.13.167"
+
+# v0.13.167（2026-10-27）：设置 → 模型的**执行逻辑**。此前"已生效"的唯一依据是
+# HTTP 200 —— 那只证明写进去了，不证明会用上、更不证明那个模型现在还存在。
+# 新增：① `catalog_ids()`（网关在册清单，同步+TTL）；② `effective_state()` 把
+# 「会用什么/从哪来/哪几条通道生效/有什么风险」算成一份可渲染的结构；
+# ③ `verify_model()` 四条判据 + 可选真实调用；④ 保存前用清单拦死 ID（409）；
+# ⑤ 页面加「验证生效 / 真实验证」两个按钮，保存后自动自证。
 
 # v0.13.166（2026-10-27 重启后验收发现）：第二数据源只接在了没人看的那个函数上。
 # 症状：scan 事件已落库（7 天 180 条 `skill.invoke`，agent-dispatch 单名 42 条），

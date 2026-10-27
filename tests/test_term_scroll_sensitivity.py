@@ -240,13 +240,18 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.166"
+    CURRENT_VERSION = "0.13.167"
     #: v0.13.166：关键词取版本注释里**实际写下的字句**——两条根因各取两词：
     #: ① 第二源接在没人看的函数上（两套并行实现 + 页面榜仍 explicit=0）
     #: ② scan 的 mode=direct_read 只有 evidence=skill_tool 才算 explicit
     VERSION_ROOT_CAUSES["0.13.166"] = (
         "explicit=0", "skill_weights.load()", "两套并行实现", "direct_read",
         "evidence=skill_tool",
+    )
+    #: v0.13.167：设置→模型的**执行逻辑**——「已生效」不再等于 HTTP 200。
+    #: 关键词取自 main.py 的版本注释（四条：清单闸门 / 三通道判定 / 四判据自证 / 拦死 ID）。
+    VERSION_ROOT_CAUSES["0.13.167"] = (
+        "执行逻辑", "catalog_ids()", "effective_state()", "verify_model()", "409",
     )
     #: v0.13.165：关键词取版本注释里**实际写下的字句**——三条根因各取两词：
     #: ① 三家转录（chat_history.jsonl / part.data / 三种增量口径）

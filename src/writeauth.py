@@ -34,6 +34,10 @@ EXEMPT_PREFIXES: Dict[str, str] = {
     "/api/settings/model/apply":
         "它自己校验 HUB_PASSCODE（错→401、未配→503），与同页的 term-token 同口径；"
         "再叠一层 token 门 = 用户在设置页永远改不动模型（自锁死）。",
+    "/api/settings/model/verify-live":
+        "v0.13.164：真实验证会真打一次网关（付费模型按量计费），端点自己校验 "
+        "HUB_PASSCODE（错→401、未配→503）。与 apply 同口径，且口令走 POST body 不进 URL；"
+        "再叠 token 门会让设置页的「真实验证」永远 401。",
     "/api/settings/github/":
         "设置→GitHub 四个写端点（test/apply/clear/refresh）各自校验 HUB_PASSCODE"
         "（错→401、未配→503）：地址与 key 只能从设置页改，再叠 token 门同样自锁死。"

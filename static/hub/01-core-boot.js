@@ -982,6 +982,14 @@ async function settingsModelsLoad(force) {
       lines.push('文件现值：' + (a.current || '（未读到）') +
         (a.provider ? '（provider ' + a.provider + '）' : ''));
       lines.push('hub 侧：' + (a.hub_model || '（未设置）'));
+      /* v0.13.164：把「会失效的风险」提前到列表里 —— 用户点进去之前就该知道
+         这个设置在这个 agent 上到底能不能生效。 */
+      const eff = a.effective || {};
+      if ((a.argv_effective || []).length) lines.push('实际注入：' + a.argv_effective.join(' '));
+      if (eff.catalog && eff.catalog.checked && eff.catalog.ok === false) {
+        lines.push('⚠ 该模型已不在 CCR 在册清单（' + eff.catalog.size + ' 条）');
+      }
+      (eff.warnings || []).forEach(w => lines.push('⚠ ' + w));
       if (a.files && a.files.length) lines.push(a.files.join('\n'));
       if (drifted.has(a.id)) {
         const d = SET_DRIFT.find(x => x.id === a.id) || {};
@@ -1353,7 +1361,14 @@ async function settingsApplyModel() {
     SET_DIFF = null;
     await settingsModelsLoad(true);
     settingsRefreshMeta(model);               // 用重载后的真值刷新状态行（不是拿入参糊一个）
-    settingsRenderApplied(d);
+    /* v0.13.164：保存后立刻做一次静态自证，把「写入成功」升级成「四条判据全过」。
+       只报 200 不叫生效 —— 清单里没这个 ID / 该 agent 不注入，界面必须当场说出来。 */
+    try {
+      const v = await api('/api/settings/model/verify?agent_id=' + encodeURIComponent(SET_AGENT));
+      if (d.mode === 'clear') settingsRenderApplied(d); else settingsRenderVerify(v, false, d.applied);
+    } catch (e) {
+      settingsRenderApplied(d);               // 验证本身失败不推翻保存结果
+    }
   } catch (e) {
     if (/401|口令/.test(e.message)) lsRemove('hub.passcode');
     clearPasscodeInput();
@@ -1364,20 +1379,91 @@ async function settingsApplyModel() {
   }
 }
 
+/* v0.13.164：执行逻辑自证。
+   用户反复报"设置好了没用"，而页面原来只有"已生效"三个字 —— 那三个字的唯一依据是
+   HTTP 200。现在把四条判据（落点/清单/注入/通道）逐条摆出来，错了就指出哪一条错。
+   live=true 会真打一次网关（付费模型计费），口令走 POST body，不进 URL。 */
+async function settingsVerifyModel(live) {
+  if (!SET_AGENT) return toast('先选一个 agent', 'err');
+  let pc = '';
+  if (live) {
+    pc = settingsPasscode();
+    if (!pc) {
+      const el = $('setPasscode');
+      if (el) el.focus();
+      settingsRenderError('验证未执行', new Error('真实验证需要口令（会真调用网关）'));
+      return toast('真实验证需要口令', 'err');
+    }
+  }
+  const box = $('setDiffBox');
+  try {
+    const v = live
+      ? await api('/api/settings/model/verify-live', {
+          method: 'POST', noToken: true,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent_id: SET_AGENT, passcode: pc })
+        })
+      : await api('/api/settings/model/verify?agent_id=' + encodeURIComponent(SET_AGENT));
+    settingsRenderVerify(v, live);
+  } catch (e) {
+    settingsRenderError('验证失败', e);
+    toast('验证失败：' + e.message, 'err');
+  }
+}
+
+function settingsRenderVerify(v, live, applied) {
+  const box = $('setDiffBox');
+  if (!box) return;
+  const bad = v.verdict !== 'ok';
+  const rows = (v.checks || []).map(c => {
+    const mark = c.ok === true ? '✓' : (c.ok === false ? '✗' : '·');
+    const style = c.ok === false ? ' style="color:var(--st-error)"' : '';
+    return '<div class="v"' + style + '>' + mark + ' ' + escapeHtml(c.name) + '：' +
+      escapeHtml(c.detail || '') + '</div>';
+  }).join('');
+  const chan = Object.keys(v.channels || {}).map(k =>
+    k + (v.channels[k].applies ? ' ✓' : ' ✗')).join('　');
+  const warn = (v.warnings || []).length
+    ? '<div class="set-diff-row">' + v.warnings.map(w =>
+        '<div class="v" style="color:var(--st-error)">⚠ ' + escapeHtml(w) + '</div>').join('') + '</div>'
+    : '';
+  /* 保存后立刻自证：把刚落盘的备份路径一并带出来，用户不必再去翻日志。 */
+  const bak = (applied || []).length
+    ? '<div class="set-diff-row">' + applied.map(a =>
+        '<div class="v">备份：' + escapeHtml(a.backup || '') + '</div>').join('') + '</div>'
+    : '';
+  box.innerHTML = '<div class="set-diff">' +
+    '<div class="set-diff-hd">' + (bad ? '✗ 验证未通过' : '✓ 验证通过') +
+    '：' + escapeHtml(v.agent_id || '') + ' → ' + escapeHtml(v.model || '（未设置）') +
+    '　' + escapeHtml(live ? '（含真实调用）' : '（静态）') + '</div>' +
+    '<div class="set-diff-row">' + rows +
+    '<div class="v">通道：' + escapeHtml(chan) + '</div></div>' + warn + bak +
+    '<div class="hint" style="margin-top:6px">静态验证只读；真实调用会按模型计费，' +
+    '且只证明"网关此刻认这个 ID"，不代替新开终端里的实际体验。</div></div>';
+  box.style.display = 'block';
+}
+
 /* 状态行渲染的**唯一出口**（选 agent 时与保存后刷新都走它，别各写一份文案）：
-   v0.13.85 起把「这个 agent 的模型字段认什么」也写进来 —— 用户报障的一半是
-   "改了不生效"，根因往往是"这个字段根本不吃 CCR ID / 这个 agent 没有配置文件"。 */
+   v0.13.85 起把「这个 agent 的模型字段认什么」写进来；v0.13.164 再把
+   「实际会追加的命令」（grok 注入的是 ccr-hub 而不是模型 ID）与「会失效的风险」摆出来。 */
 function settingsAgentMeta(a) {
   const el = $('setAgentMeta');
   if (!el || !a) return;
   const wm = SET_WRITE_MODE[a.write_mode || 'argv'] || SET_WRITE_MODE.argv;
+  const eff = a.effective || {};
   const parts = ['字段认：' + wm.label,
                  '当前：' + (a.current || '（未读到）'),
                  'hub 侧：' + (a.hub_model || '未设置')];
-  if (a.argv) parts.push('注入口径：' + a.argv + ' <模型>');
+  const argv = (a.argv_effective || []).join(' ');
+  if (argv) parts.push('实际注入：' + argv);
+  else if (a.argv) parts.push('注入口径：' + a.argv + ' <模型>');
   el.innerHTML = escapeHtml(parts.join('｜')) +
     '<div class="hint" style="margin-top:4px">' + escapeHtml(wm.hint) + '</div>' +
-    ((a.files || []).length ? '<div class="hint">配置文件：' + escapeHtml(a.files.join(' / ')) + '</div>' : '');
+    ((a.files || []).length ? '<div class="hint">配置文件：' + escapeHtml(a.files.join(' / ')) + '</div>' : '') +
+    ((eff.warnings || []).length
+      ? eff.warnings.map(w => '<div class="hint" style="color:var(--st-error)">⚠ ' +
+          escapeHtml(w) + '</div>').join('')
+      : '');
 }
 
 function settingsRefreshMeta(model) {
@@ -1748,6 +1834,8 @@ function settingsDelegates() {
     const act = e.target.closest('[data-settings-act]');
     if (act && act.dataset.settingsAct === 'preview') return settingsPreviewModel();
     if (act && act.dataset.settingsAct === 'apply') return settingsApplyModel();
+    if (act && act.dataset.settingsAct === 'verify') return settingsVerifyModel(false);
+    if (act && act.dataset.settingsAct === 'verify-live') return settingsVerifyModel(true);
     if (act) {
       const a = act.dataset.settingsAct;
       if (a === 'gh-test') return settingsGithubTest();

@@ -37,6 +37,9 @@ import json
 import os
 import re
 import shutil
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -128,13 +131,88 @@ def _ccr_api_key() -> str:
     """CCR 的本地 key 只从网关配置里现读，不在本文件里硬编码任何凭据。
 
     grok 的 [model.*] 块必须带 api_key 才能打 CCR；优先复用文件里**已有的** CCR
-    块（那把 key 是本机已在用的），没有才回落到 CCR config.json 的 APIKEY，
-    再没有就留空并在 changes 里如实标注（宁可让用户自己补，也不猜一个假 key）。"""
+    块（那把 key 是本机已在用的），没有才回落到网关凭据，再没有就留空并在 changes
+    里如实标注（宁可让用户自己补，也不猜一个假 key）。
+
+    ⚠ 2026-10-27 修：旧实现只读 `~/.claude-code-router/config.json`，而本机 CCR 已迁
+    到 `config.sqlite`，该文件不存在 ⇒ 恒返回 ""。表现是「grok 的块里 api_key 被写成
+    空串」——写入成功、调用 401。现按 config.py 的同一条解析链取值（与网关客户端同源，
+    不新增凭据）：CCR_OPENAI_KEY → ~/.config/jcode/provider-ccr.env → CCR_AUTH_TOKEN。"""
+    env_key = os.getenv("CCR_OPENAI_KEY", "")
+    if env_key:
+        return env_key
+    p = _home() / ".config" / "jcode" / "provider-ccr.env"
+    try:
+        m = re.search(r"JCODE_PROVIDER_CCR_API_KEY=(\S+)", p.read_text(encoding="utf-8"))
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    if os.getenv("CCR_AUTH_TOKEN"):
+        return os.getenv("CCR_AUTH_TOKEN", "")
     try:
         d = json.loads((_home() / ".claude-code-router" / "config.json").read_text(encoding="utf-8"))
         return str(d.get("APIKEY") or "")
     except Exception:  # noqa: BLE001
         return ""
+
+
+# ── CCR 模型清单（执行逻辑的判据源）──────────────────────────────────
+# 为什么设置页需要它：`agent_models` 里存的是**写入当时**的模型 ID，而网关清单会变
+# （人工增删模型、免费池轮换）。设置页只证明"写进去了"，证明不了"这个 ID 现在还在"。
+# 存着一个已经不在清单里的 ID ⇒ 新开终端照旧注入它，agent 报 unknown model 或上游
+# 回落，用户看到的就是"设置好了没用"。本节的 catalog_* 就是补这条。
+_CATALOG = {"ts": 0.0, "ids": set(), "checked": False, "size": 0, "error": ""}
+CATALOG_TTL_S = float(os.getenv("HUB_MODEL_CATALOG_TTL", "60"))
+
+
+def _ccr_base() -> str:
+    return os.getenv("CLAUDE_CCR_URL", "http://127.0.0.1:3456").rstrip("/")
+
+
+def _fetch_catalog_ids() -> Tuple[set, str]:
+    """真去网关拉一次清单。返回 (ids, error)。抽成独立函数是为了让 L0 用例能打桩
+    —— 单测若真打 :3456，既慢又依赖网关活着（本仓最贵的假绿灯形态）。"""
+    try:
+        req = urllib.request.Request(
+            _ccr_base() + "/v1/models",
+            headers={"Authorization": "Bearer " + _ccr_api_key()})
+        with urllib.request.urlopen(req, timeout=4) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        return {str(m.get("id")) for m in (data.get("data") or []) if m.get("id")}, ""
+    except Exception as e:  # noqa: BLE001 —— 取不到只影响判断，不许打断设置页
+        return set(), f"{type(e).__name__}: {str(e)[:120]}"
+
+
+def catalog_ids(force: bool = False) -> dict:
+    """CCR 当前模型清单（同步、带 TTL 缓存）。
+
+    返回 `{"checked": bool, "ids": set, "size": int, "error": str}`。
+    `checked=False` 表示**取不到**（网关挂着/无凭据），调用方必须把"取不到"与
+    "清单里没有"分开：前者不能判死，后者才是真问题（与 intake 的 count=0 口径同源）。
+    `HUB_MODEL_CATALOG=off` 可整条关掉（L0 单测用，生产不要关）。"""
+    if os.getenv("HUB_MODEL_CATALOG", "").lower() in ("0", "off", "false", "no"):
+        return {"ts": 0.0, "ids": set(), "checked": False, "size": 0,
+                "error": "disabled by HUB_MODEL_CATALOG"}
+    now = time.monotonic()
+    if not force and _CATALOG["checked"] and (now - _CATALOG["ts"]) < CATALOG_TTL_S:
+        return _CATALOG
+    ids, err = _fetch_catalog_ids()
+    _CATALOG.update({"ts": now, "ids": ids, "checked": bool(ids), "size": len(ids),
+                     "error": err})
+    return _CATALOG
+
+
+def bare_model_id(agent_id: str, model: str) -> str:
+    """把该 agent 的落点值还原成 CCR 裸模型 ID（用于比对清单）。
+
+    opencode/omp 的字段带 provider 前缀（`ccr/alibaba/...`），reasonix 若接入同族。
+    只剥**该 agent 登记过的**前缀，不做通用剥离 —— 通用剥离会把 `openrouter/xxx`
+    这种真 ID 的首段吃掉，造成"明明在清单里却判成不在"。"""
+    pre = VALUE_PREFIX.get(agent_id, "")
+    if pre and model.startswith(pre):
+        return model[len(pre):]
+    return model
 
 
 def _home() -> Path:
@@ -910,6 +988,211 @@ def chat_model(agent_id: str, requested: Optional[str] = None) -> str:
     return hub_model(agent_id)
 
 
+# ── 「设置好了到底有没有效」：三通道 × 清单的单一判定 ────────────────
+# 2026-10-27（用户令「重点优化执行逻辑，要设置好了能真正有效」）。
+# 病根：保存成功只证明**写进去了**，证明不了**会用上**。四条静默失效路径各自有案例：
+#   ① 存了个已经不在 CCR 清单里的 ID ⇒ 终端注入死 ID，报 unknown model；
+#   ② agent 没有 --model 白名单 ⇒ 只写配置文件，而该文件可能不是它真正的取值源；
+#   ③ argv-only（omp）没有配置文件 ⇒ 只要不走 hub 终端就完全不生效；
+#   ④ 配置文件被别的进程改回去（CCR 重写 claude env 三兄弟）⇒ 只有巡检那一轮能修。
+# 本节的 effective_state/verify_model 把"会用什么、从哪来、哪条通道生效、有没有风险"
+# 一次算齐，供设置页直接展示，而不是让用户靠"改了试试看"去猜。
+
+#: 有静态聊天适配器、且**适配器真的会把 model 传下去**的 agent。
+#: ⚠ 只列 claude/jcode：这两家用 OpenAICompatAdapter（body["model"] = 入参）。
+#: pi 的适配器 chat() 恒返回「需通过 Web UI 交互」（adapters/pi.py:21），把 model 传进去
+#: 也没人接 —— 列进来就等于骗自己"这条通道生效"。tdai 是记忆后端，不在本页范围。
+_CHAT_STATIC = {"claude", "jcode"}
+
+
+def _has_terminal(agent_id: str) -> bool:
+    try:
+        import profiles
+        p = profiles.get_profile(agent_id) or {}
+        return bool(p.get("terminal"))
+    except Exception:  # noqa: BLE001 —— 注册表读不到就按"无终端"保守处理
+        return False
+
+
+def _has_native_ui(agent_id: str) -> bool:
+    try:
+        import profiles
+        return bool(profiles.ui_start_for(agent_id))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _chat_applies(agent_id: str) -> bool:
+    if agent_id in _CHAT_STATIC:
+        return True
+    try:
+        rows = db.query("SELECT port FROM custom_agents WHERE id=?", (agent_id,))
+        return bool(rows and rows[0]["port"])
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def effective_state(agent_id: str) -> dict:
+    """该 agent 此刻「实际会用什么模型、在哪些通道生效」。
+
+    只读、不落笔。判据全部可断言，页面直接渲染，不再让用户猜。
+    """
+    want = hub_model(agent_id)
+    spec = SPECS.get(agent_id)
+    mode = WRITE_MODE.get(agent_id, "argv")
+    cat = catalog_ids()
+    bare = bare_model_id(agent_id, want) if want else ""
+    catalog = {"checked": cat["checked"], "ok": None, "size": cat["size"]}
+    if cat["checked"] and want:
+        catalog["ok"] = bare in cat["ids"]
+
+    has_term = _has_terminal(agent_id)
+    argv = terminal_argv(agent_id, want) if want else []
+    channels = {
+        "term_new": {"applies": bool(argv) and has_term, "argv": argv},
+        "term_resume": {"applies": bool(argv) and has_term, "argv": argv},
+        "chat": {"applies": _chat_applies(agent_id) and bool(want),
+                 "note": "hub 对话/协同子任务/定时任务经 chat_model 取值" if _chat_applies(agent_id)
+                         else "该 agent 无 hub 聊天适配器（对话走它自己的界面）"},
+        # 原生界面（Web）启动命令不带 --model：能生效的唯一通路是配置文件写入。
+        "ui_native": {"applies": _has_native_ui(agent_id) and bool(want) and mode in ("ccr", "native"),
+                      "note": "原生界面按配置文件取值；argv-only 型在这里不生效"},
+    }
+
+    warnings: List[str] = []
+    if not want:
+        warnings.append("hub 侧未设置：不注入 --model，各 agent 使用自己配置文件里的默认值。")
+    else:
+        if cat["checked"] and catalog["ok"] is False:
+            warnings.append(
+                f"模型 {bare} 不在 CCR 当前清单（{cat['size']} 条）中：新开终端仍会注入它，"
+                f"上游会报 unknown model 或自行回落 —— 请重新选一个在册模型。")
+        if has_term and not argv:
+            warnings.append("该 agent 没有 --model 白名单：hub 拉起终端不会注入，只写配置文件。")
+        if not has_term and mode == "argv":
+            warnings.append("该 agent 无终端入口、也无配置文件可落 ⇒ 这个设置不会生效。")
+        if mode == "argv" and has_term:
+            warnings.append("argv-only：只对 hub 拉起的终端生效；别处直接启动不受影响。")
+        if mode == "native":
+            warnings.append("本家原生名：CCR 模型不入该字段，CCR 侧只经终端 --model 注入生效。")
+    try:
+        st = spec["read"]() if spec else {}
+    except ModelCfgError:
+        st = {}
+    cur = str(st.get("current") or "")
+    drift = None
+    if want and cur and agent_id not in DRIFT_EXEMPT and cur != want:
+        drift = {"file": cur, "hub": want}
+        warnings.append(f"配置文件现值 {cur} ≠ hub 值 {want}（漂移；巡检会按 hub 值写回）。")
+
+    return {"id": agent_id, "model": want, "source": "hub" if want else "none",
+            "write_mode": mode, "file_current": cur, "bare_model": bare,
+            "catalog": catalog, "channels": channels, "drift": drift,
+            "warnings": warnings}
+
+
+def _live_probe(model: str) -> dict:
+    """真打一次 CCR（max_tokens=1），用账本级的证据判「这个模型现在能不能用」。
+
+    只在用户显式点「真实验证」时调用 —— 付费模型会产生极小额的按量计费，
+    所以 HTTP 层对它要求口令（见 settings_model_verify）。"""
+    t0 = time.monotonic()
+    body = json.dumps({"model": model, "messages": [{"role": "user", "content": "ping"}],
+                       "max_tokens": 1, "stream": False}).encode()
+    req = urllib.request.Request(
+        _ccr_base() + "/v1/chat/completions", data=body, method="POST",
+        headers={"Content-Type": "application/json",
+                 "Authorization": "Bearer " + _ccr_api_key()})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        return {"ok": True, "status": r.status, "served_model": str(data.get("model") or ""),
+                "ms": int((time.monotonic() - t0) * 1000)}
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:300]
+        except Exception:  # noqa: BLE001
+            pass
+        return {"ok": False, "status": e.code, "error": detail,
+                "ms": int((time.monotonic() - t0) * 1000)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "status": 0, "error": f"{type(e).__name__}: {str(e)[:200]}",
+                "ms": int((time.monotonic() - t0) * 1000)}
+
+
+def verify_model(agent_id: str, live: bool = False) -> dict:
+    """「设置好了能真正有效」的自证：把四条判据逐条算成 ok/na 并给结论。
+
+    判据（与 effective_state 同源，不另算一套）：
+      ① 落点：配置文件现值 == hub 值（argv-only 型为 na）
+      ② 清单：模型仍在 CCR 在册清单里（取不到清单 = unknown，不判死）
+      ③ 注入：hub 拉起终端时确实会追加 argv（无终端入口的 agent 为 na）
+      ④ 通道：至少有一条通道会用到这个值
+    `live=True` 额外真打一次网关（付费模型会计费，故 HTTP 层要求口令）。
+    """
+    eff = effective_state(agent_id)
+    want = eff["model"]
+    mode = eff["write_mode"]
+    checks: List[dict] = []
+
+    def add(name: str, ok, detail: str = "") -> None:
+        checks.append({"name": name, "ok": ok, "detail": detail})
+
+    if not want:
+        add("hub 侧取值", None, "未设置模型：不会有任何注入（agent 用自己的默认值）")
+    else:
+        add("hub 侧取值", True, want)
+
+    if mode == "argv":
+        add("配置文件落点", None, "argv-only：无配置文件可写")
+    elif not want:
+        add("配置文件落点", None, "无目标值")
+    else:
+        ok = (eff["file_current"] == want)
+        add("配置文件落点", ok,
+            (f"{eff['file_current'] or '（空）'} == {want}") if ok
+            else f"文件里是 {eff['file_current'] or '（空）'}，与 hub 值不一致")
+
+    cat = eff["catalog"]
+    add("CCR 清单", (None if (not cat["checked"] or not want) else cat["ok"]),
+        "未设置" if not want
+        else "清单不可用（网关未响应/无凭据），不判死" if not cat["checked"]
+        else (f"{eff['bare_model']} 在册（{cat['size']} 条）" if cat["ok"]
+              else f"{eff['bare_model']} 不在 {cat['size']} 条清单内"))
+
+    term_ok = eff["channels"]["term_new"]["applies"]
+    add("终端注入", (term_ok if _has_terminal(agent_id) else None) if want else None,
+        (" ".join(eff["channels"]["term_new"]["argv"]) if term_ok
+         else "无 --model 白名单" if _has_terminal(agent_id) else "该 agent 无终端入口")
+        if want else "未设置")
+
+    any_chan = any(v.get("applies") for v in eff["channels"].values())
+    add("生效通道", any_chan if want else None,
+        "、".join(k for k, v in eff["channels"].items() if v.get("applies"))
+        or ("无任何通道会用到该值" if want else "未设置"))
+
+    if live and want:
+        probe = _live_probe(bare_model_id(agent_id, want))
+        add("真实调用", probe["ok"],
+            (f"HTTP {probe['status']}，返回模型 {probe.get('served_model') or '（未回显）'}，"
+             f"{probe['ms']}ms") if probe["ok"]
+            else f"HTTP {probe['status']}：{probe.get('error') or ''}")
+    elif live:
+        add("真实调用", None, "无目标模型")
+
+    # 结论：只有明确的 False 才算不通过；None（不适用/取不到）不阻断。
+    # 没设过模型不算"验证失败"——那是"未配置"，页面文案必须能区分，否则每个没设置的
+    # agent 都挂着红叉，红叉就不再是信号。
+    if not want:
+        verdict = "unset"
+    else:
+        verdict = "ok" if all(c["ok"] is not False for c in checks) else "fail"
+    return {"agent_id": agent_id, "verdict": verdict, "model": want,
+            "checks": checks, "warnings": eff["warnings"],
+            "channels": eff["channels"], "at": _now()}
+
+
 def drift_report() -> List[dict]:
     """只读体检：列出「配置文件现值 ≠ hub 持久化值」的 agent（**不落笔**）。
 
@@ -1070,11 +1353,17 @@ def agent_state(agent_id: str) -> dict:
     # argv_only（omp）：没有配置文件可落，「writable」的语义是「hub 侧可设置」
     # （落点 = 拉起终端时的 --model 注入），不是「配置文件可写」。
     argv_only = bool(spec.get("argv_only"))
+    # 真实会追加的 argv（grok 注入的是 profile 表头键 `ccr-hub`，不是模型 ID）——
+    # 页面此前只显示 flag 名 `--model`，用户以为会注入 `--model <上面那个 ID>`，
+    # 与实际差一层。这里给出**实际命令**，避免"设置页说一套、终端跑另一套"。
+    want = hub_model(agent_id)
     return {"id": agent_id, "name": spec["name"], "supported": True,
             "writable": argv_only or (bool(files) and all(Path(f).exists() for f in files)),
             "current": st.get("current", ""), "provider": st.get("provider", ""),
             "extra": st.get("extra", {}), "note": st.get("note", ""),
             "files": files, "argv": MODEL_ARGV.get(agent_id, ""),
+            "argv_effective": terminal_argv(agent_id, want) if want else [],
+            "effective": effective_state(agent_id),
             # v0.13.86：设置页拿这两列才能摆出"点了真能写进去"的选项 ——
             # value_prefix 让选项值等于该 agent 字段真正要的形状（opencode 的 ccr/），
             # models 让只认原生名的 agent（qoder）摆原生清单而不是必然被拒的 CCR 清单。
@@ -1192,7 +1481,22 @@ def apply_model(agent_id: str, model: str) -> dict:
         return clear_model(agent_id)
     model = validate_model(model)
     spec = _spec_or_raise(agent_id)
+    # ⚠ 顺序要紧：**先让写手做它自己的形状校验，再问清单**。
+    # 反过来的话，opencode 的「缺 provider 前缀」会被清单闸门抢先报成 409
+    # （它自己的 400 更精确，且带"正确形状长什么样"）。写手是纯函数，不落盘。
     writes = spec["write"](model)
+    # 2026-10-27：写入前再问一句「这个 ID 现在还活着吗」。
+    # 只拦**明确不在册**的情况；网关取不到清单时放行（不能把"取不到"当成"没有"）。
+    # 这条挡的是最常见的"设置好了没用"：存进去的是早已下线的模型 ID，终端照旧注入，
+    # agent 报 unknown model —— 而设置页显示"已生效"。
+    cat = catalog_ids(force=True)
+    if cat["checked"] and WRITE_MODE.get(agent_id) == "ccr":
+        bare = bare_model_id(agent_id, model)
+        if bare not in cat["ids"]:
+            raise ModelCfgError(
+                f"模型 {bare} 不在 CCR 当前清单（{cat['size']} 条）中，写下去只会让 agent "
+                f"报 unknown model。请从下拉里重新选一个在册模型；"
+                f"若刚在网关侧新增，等 {int(CATALOG_TTL_S)}s 后再试", 409)
     for p, _new, _c in writes:
         if not p.exists():
             raise ModelCfgError(f"配置文件不存在，拒绝新建：{p}", 404)
@@ -1255,8 +1559,44 @@ def _guard(e: ModelCfgError) -> HTTPException:
 
 @router.get("/api/settings/models")
 async def settings_models():
-    """设置→模型子菜单的首屏数据：各 agent 现值 + CCR Router 只读视图 + 漂移体检。"""
-    return {"agents": list_agents(), "ccr": ccr_router_view(), "drift": drift_report()}
+    """设置→模型子菜单的首屏数据：各 agent 现值 + CCR Router 只读视图 + 漂移体检。
+
+    v0.13.164：每个 agent 多带 `effective`（三通道生效判定 + 风险），顶层多带 `catalog`
+    （清单是否取到、多少条）。页面据此渲染「设置好了到底有没有效」，而不是只报"已保存"。
+    """
+    cat = catalog_ids()
+    return {"agents": list_agents(), "ccr": ccr_router_view(), "drift": drift_report(),
+            "catalog": {"checked": cat["checked"], "size": cat["size"],
+                        "error": cat["error"]}}
+
+
+@router.get("/api/settings/model/verify")
+async def settings_model_verify(agent_id: str):
+    """「验证生效」（静态）：逐条判据自证，只读、不产生任何调用。
+
+    真实调用见 `POST /api/settings/model/verify-live` —— 口令不能进 URL
+    （会被访问日志/浏览器历史留存），故另立 POST 端点。"""
+    try:
+        return verify_model(agent_id, live=False)
+    except ModelCfgError as e:
+        raise _guard(e) from e
+
+
+class VerifyLiveIn(BaseModel):
+    agent_id: str
+    passcode: str = ""
+
+
+@router.post("/api/settings/model/verify-live")
+async def settings_model_verify_live(body: VerifyLiveIn, request: Request):
+    """「真实调用验证」：用当前模型真打一次 CCR（max_tokens=1）。
+
+    会计费（付费模型按量）⇒ 与保存同口径要口令；口令走 POST body，不进 URL。"""
+    _check_passcode(body.passcode, request)
+    try:
+        return verify_model(body.agent_id, live=True)
+    except ModelCfgError as e:
+        raise _guard(e) from e
 
 
 @router.get("/api/settings/model/preview")

@@ -2680,6 +2680,9 @@
                             <div id="setModelHint" class="hint" style="margin-top:4px"></div>
                             <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
                                 <button class="btn sm" type="button" data-settings-act="preview">预览变更</button>
+                                <!-- v0.13.164：执行逻辑自证。静态验证只读；真实调用要口令且会计费。 -->
+                                <button class="btn sm" type="button" data-settings-act="verify">验证生效</button>
+                                <button class="btn sm" type="button" data-settings-act="verify-live">真实验证（会调用网关）</button>
                                 <!-- v0.13.44：页内口令框。APP 内嵌 WebView 会吞掉 prompt()，
                                      那种环境里"点保存毫无反应"就是这么来的；留了缓存口令时可不填。 -->
                                 <input id="setPasscode" type="password" autocomplete="off" spellcheck="false"
@@ -3072,6 +3075,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=7d892d5b"></script>
+    <script src="/static/hub.js?v=70191af7"></script>
 </body>
 </html>

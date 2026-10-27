@@ -128,12 +128,12 @@ def overview(limit: int = DEFAULT_LIMIT) -> Dict[str, Any]:
     }
     if not read["ok"]:
         return {**base, "ok": False, "found": read["found"], "error": read["error"],
-                "counts": {"bots": 0, "mains": 0, "rooms": 0, "exchanges": 0},
-                "bots": [], "rooms": [], "exchanges": []}
+                "counts": {"bots": 0, "mains": 0, "rooms": 0, "exchanges": 0, "works": 0},
+                "bots": [], "rooms": [], "works": [], "exchanges": []}
     if not read["found"]:
         return {**base, "ok": True, "found": False,
-                "counts": {"bots": 0, "mains": 0, "rooms": 0, "exchanges": 0},
-                "bots": [], "rooms": [], "exchanges": [],
+                "counts": {"bots": 0, "mains": 0, "rooms": 0, "exchanges": 0, "works": 0},
+                "bots": [], "rooms": [], "works": [], "exchanges": [],
                 "hint": "还没有 %s —— 要么没装 ds-bot，要么还没建过团队" % p}
 
     data = read["data"]
@@ -206,8 +206,36 @@ def overview(limit: int = DEFAULT_LIMIT) -> Dict[str, Any]:
         })
     rooms.sort(key=lambda x: (-(x["lastActive"] or 0), -(x["createdAt"] or 0), x["name"]))
 
+    # 进行中的委派：ds-bot 的 handoffs.js 把每个在等回执的委派写进 state.works，
+    # 形状 {from?, to?, room?, parent?, open[], results[], at}（:101 创建、:111 关闭即删）。
+    # ⇒ works 里剩下的就是"还没收工的任务"，正好是用户要的"任务列表"。
+    rooms_by_id = {r["id"]: r for r in rooms}
+    works: List[Dict[str, Any]] = []
+    works_raw = data.get("works") if isinstance(data.get("works"), dict) else {}
+    for wid, w in works_raw.items():
+        if not isinstance(w, dict):
+            continue
+        frm, to = w.get("from"), w.get("to")
+        open_ids = w.get("open") if isinstance(w.get("open"), list) else []
+        results = w.get("results") if isinstance(w.get("results"), list) else []
+        room_id = w.get("room") or ""
+        works.append({
+            "id": wid,
+            "from": frm or "",
+            "fromName": name_of.get(frm, frm) if frm else "用户",
+            "to": to or "",
+            "toName": name_of.get(to, to) if to else "",
+            "roomId": room_id,
+            "roomName": (rooms_by_id.get(room_id) or {}).get("name", ""),
+            "parent": w.get("parent") or "",
+            "waiting": len(open_ids),
+            "results": len(results),
+            "at": _ms(w.get("at")),
+        })
+    works.sort(key=lambda x: -(x["at"] or 0))
+
     ex: List[Dict[str, Any]] = []
-    for e in ex_raw[-limit:][::-1] if isinstance(ex_raw, list) else []:
+    for e in (ex_raw[-limit:][::-1] if isinstance(ex_raw, list) else []):
         if not isinstance(e, dict):
             continue
         frm, to = e.get("from"), e.get("to")
@@ -235,9 +263,10 @@ def overview(limit: int = DEFAULT_LIMIT) -> Dict[str, Any]:
         "updated_at": mtime,
         "revision": data.get("revision") if isinstance(data.get("revision"), int) else None,
         "counts": {"bots": len(bots), "mains": len(main_ids),
-                   "rooms": len(rooms), "exchanges": len(ex_raw)},
+                   "rooms": len(rooms), "exchanges": len(ex_raw), "works": len(works)},
         "bots": bots,
         "rooms": rooms,
+        "works": works,
         "exchanges": ex,
         "readOnly": True,
         "as_of": int(time.time() * 1000),

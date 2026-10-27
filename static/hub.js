@@ -9458,10 +9458,21 @@ function bbRoomCard(r) {
     '</div>';
 }
 
+function bbWorkRow(w) {
+  const route = escapeHtml(w.fromName || '用户') + ' → ' + escapeHtml(w.toName || '—');
+  const where = w.roomName ? '群聊 ' + escapeHtml(w.roomName) : '';
+  const state = '等待 ' + (w.waiting || 0) + ' 项 · 已回 ' + (w.results || 0) + ' 项';
+  return '<div class="mem-item">' +
+    '<p>' + route + (where ? ' <span class="hint">（' + where + '）</span>' : '') +
+      '<br><span class="hint">' + state + (w.at ? ' · 开始于 ' + escapeHtml(bbStamp(w.at)) : '') + '</span></p>' +
+    '</div>';
+}
+
 function bbRender(d) {
   const status = $('bbStatus'), hint = $('bbHint');
   const botsBox = $('bbBots'), roomsBox = $('bbRooms');
   const botCount = $('bbBotCount'), roomCount = $('bbRoomCount'), exBody = $('bbEx');
+  const worksBox = $('bbWorks'), workCount = $('bbWorkCount');
 
   // ① 读不了：原样给错误，不渲染成"空团队"
   if (!d.ok) {
@@ -9472,6 +9483,8 @@ function bbRender(d) {
     if (botsBox) botsBox.innerHTML = '<div class="hint">不可判定（文件存在但解析失败）</div>';
     if (roomsBox) roomsBox.innerHTML = '<div class="hint">不可判定</div>';
     if (exBody) exBody.innerHTML = '<tr><td colspan="3" class="hint">不可判定</td></tr>';
+    if (worksBox) worksBox.innerHTML = '<div class="hint">不可判定</div>';
+    if (workCount) workCount.textContent = '—';
     if (botCount) botCount.textContent = '—';
     if (roomCount) roomCount.textContent = '—';
     return;
@@ -9493,6 +9506,8 @@ function bbRender(d) {
     if (botsBox) botsBox.innerHTML = '<div class="hint">0 个 Bot（文件不存在，不是读取失败）</div>';
     if (roomsBox) roomsBox.innerHTML = '<div class="hint">0 个群聊</div>';
     if (exBody) exBody.innerHTML = '<tr><td colspan="3" class="hint">暂无交接</td></tr>';
+    if (worksBox) worksBox.innerHTML = '<div class="hint">0 项（文件不存在，不是读取失败）</div>';
+    if (workCount) workCount.textContent = '0 项';
     if (botCount) botCount.textContent = '0 个';
     if (roomCount) roomCount.textContent = '0 个';
     return;
@@ -9505,7 +9520,7 @@ function bbRender(d) {
       'state.json 最后写入 ' + escapeHtml(bbStamp(d.updated_at)) +
       '（' + escapeHtml(bbAgo(d.updated_at)) + '）· revision ' + escapeHtml(String(d.revision)) +
       ' · ' + (c.bots || 0) + ' Bot（' + (c.mains || 0) + ' Main） / ' + (c.rooms || 0) + ' 群聊 / ' +
-      (c.exchanges || 0) + ' 条交接';
+      (c.exchanges || 0) + ' 条交接 / ' + (c.works || 0) + ' 委派中';
   }
   if (hint) {
     const inst = d.install || {}, profs = inst.profiles || {};
@@ -9527,6 +9542,12 @@ function bbRender(d) {
   }
   if (botCount) botCount.textContent = (d.bots || []).length + ' 个（' + (c.mains || 0) + ' Main）';
   if (roomCount) roomCount.textContent = (d.rooms || []).length + ' 个';
+  if (worksBox) {
+    worksBox.innerHTML = (d.works || []).length
+      ? d.works.map(bbWorkRow).join('')
+      : '<div class="hint">没有在等回执的委派（ds-bot 关闭委派时会从 state.works 删掉）。</div>';
+  }
+  if (workCount) workCount.textContent = (d.works || []).length + ' 项';
   if (exBody) {
     const list = d.exchanges || [];
     exBody.innerHTML = list.length

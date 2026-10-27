@@ -81,7 +81,7 @@ class TestMissingAndBroken(_Base):
         d = botboy.overview()
         self.assertTrue(d["ok"])
         self.assertFalse(d["found"])
-        self.assertEqual(d["counts"], {"bots": 0, "mains": 0, "rooms": 0, "exchanges": 0})
+        self.assertEqual(d["counts"], {"bots": 0, "mains": 0, "rooms": 0, "exchanges": 0, "works": 0})
         self.assertIn(str(self.path), d["hint"], "缺文件时必须指出找的是哪个路径")
 
     def test_broken_json_is_not_empty_team(self):
@@ -122,7 +122,7 @@ class TestProjection(_Base):
             ],
         ))
         d = botboy.overview()
-        self.assertEqual(d["counts"], {"bots": 3, "mains": 1, "rooms": 0, "exchanges": 2})
+        self.assertEqual(d["counts"], {"bots": 3, "mains": 1, "rooms": 0, "exchanges": 2, "works": 0})
         self.assertEqual([b["name"] for b in d["bots"]], ["Chief", "Dev", "Ops"],
                          "Main 必须置顶；其余按最近活跃倒序（Dev 最新）")
         self.assertTrue(d["bots"][0]["main"])
@@ -135,6 +135,32 @@ class TestProjection(_Base):
         d = botboy.overview(limit=5)
         self.assertEqual([e["text"] for e in d["exchanges"]], ["t49", "t48", "t47", "t46", "t45"])
         self.assertEqual(d["counts"]["exchanges"], 50, "counts 报全量，列表才按 limit 截")
+
+    def test_in_flight_works_are_the_task_list(self):
+        """state.works = 还没收工的委派（handoffs.js 关闭时 delete）⇒ 就是"任务列表"。
+
+        形状取自 handoffs.js:101 —— {from?, to?, room?, parent?, open[], results[], at}。
+        """
+        self.write(_state(
+            bots={"b1": _bot("b1", "Chief"), "b2": _bot("b2", "Dev")},
+            rooms={"r1": {"id": "r1", "name": "Chief、Dev", "members": ["b1", "b2"],
+                          "admin": "b1", "mode": "admin", "notice": "", "createdAt": 1}},
+            works={
+                "w0": {"from": "b1", "to": "b2", "at": 1761600100000, "open": [], "results": []},
+                "w1": {"from": "b1", "to": "b2", "room": "r1", "parent": "w0",
+                       "open": ["w2"], "results": [{"id": "x"}], "at": 1761600500000},
+                "bad": "not-a-dict",
+            },
+        ))
+        d = botboy.overview()
+        self.assertEqual(d["counts"]["works"], 2, "畸形条目不计入，但整页不许塌")
+        w = d["works"][0]
+        self.assertEqual(w["fromName"], "Chief")
+        self.assertEqual(w["toName"], "Dev")
+        self.assertEqual(w["roomName"], "Chief、Dev")
+        self.assertEqual(w["waiting"], 1)
+        self.assertEqual(w["results"], 1)
+        self.assertEqual(w["at"], 1761600500000, "按开始时间倒序：最新的在最前")
 
     def test_room_member_and_admin_names_resolved(self):
         self.write(_state(
@@ -240,6 +266,13 @@ class TestFrontendWiring(unittest.TestCase):
     def test_go_hook_present(self):
         self.assertIn("page === 'botboy'", self.s01)
         self.assertIn("loadBotboy(", self.s01)
+
+    def test_works_card_wired(self):
+        """「任务列表」= state.works 的投影，页面上必须有承接元素，否则数据到了画不出来。"""
+        self.assertIn('id="bbWorks"', self.html)
+        self.assertIn('id="bbWorkCount"', self.html)
+        self.assertIn("bbWorkRow", self.s14)
+        self.assertIn("d.works", self.s14)
 
     def test_server_js_is_built_from_shards(self):
         self.assertIn("/* v0.13.170 · Botboy 页", SERVED.read_text(encoding="utf-8"),

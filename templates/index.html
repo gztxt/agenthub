@@ -458,8 +458,12 @@
            `--main-pad-*` 是留白的唯一真相源：此前宽屏是裸 `padding: 12px 16px`、窄屏是
            裸 `padding: 8px`，两份独立字面量各改各的。抽成变量后窄屏只赋值对变量，
            padding 只在这里算一次。 */
+        /* 右侧内容区**不设宽度上限**：原先 `max-width: 1400px` 在高分辨率下把 main 卡在
+           1400px，剩余宽度全成右侧空白（实测 2560 视口：main x=240 w=1400 right=1640 ⇒
+           空白 920px）。要的是"随窗口长"，所以宽度只由 flex: 1 决定。
+           若将来要限阅读宽度，只能加在正文段落层，不能加在框架层。 */
         main { --main-pad-y: 4.8px; --main-pad-x: 6.4px;
-               flex: 1; min-width: 0; max-width: 1400px;
+               flex: 1; min-width: 0;
                padding: var(--main-pad-y) var(--main-pad-x);
                display: flex; flex-direction: column; overflow: hidden; }
         section.page { display: none; }
@@ -482,7 +486,9 @@
         #sideMask { display: none; }
 
         /* ── 首页：说明区（v0.10.0 起移除指挥官对话区块，回到单列概览页） ── */
-        .home-wrap { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; max-width: 1000px; }
+        /* 首页网格同样不设 1000px 上限：main 已经铺满窗口，这里再卡一道会让概览页
+           右半边照样空着（2560 视口实测内容只到 x=1246）。单列 grid 因此随 main 走。 */
+        .home-wrap { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
         .home-intro { display: flex; flex-direction: column; gap: 16px; }
         .home-brand { display: flex; align-items: center; gap: 12px; }
         .home-mark { width: 54px; height: 54px; flex: none; display: grid; place-items: center; border-radius: 14px; border: 2px solid var(--accent); background: var(--accent); color: var(--on-accent); }
@@ -512,7 +518,7 @@
         .s-badge.installed { background: transparent; border: 1.5px solid var(--st-installed); opacity: .8; }   /* 空心方块 80% */
         .s-badge.stopped { background: var(--st-stopped); }                                                   /* 实心方块 30% */
         .s-badge.error { background: var(--st-error); border: 2px solid var(--st-error); transform: rotate(45deg); }  /* 菱形 100% + 2px */
-        @media (max-width: 1000px) { .home-wrap { grid-template-columns: minmax(0, 1fr); } }
+        /* .home-wrap 原本在 1000px 断点把两列收成一列；现在基态就是单列，该断点无内容可切，已删 */
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
 
         /* ── 聊天 ── */

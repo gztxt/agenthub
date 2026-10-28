@@ -182,9 +182,9 @@ class GithubLinkTest(unittest.TestCase):
         """分档偏好不变量③：窄屏档在 JS 侧只有一个真相源，且与 CSS 同值。
 
         【为什么不扫「模板里只有一个 max-width 值」】那会假红：模板里另有
-        `max-width:1000px` / `1100px` 两个与分档**无关**的布局断点（.home-wrap /
-        .mem-grid 单列化），它们合法且早于本批存在（test_narrow_first_paint.py
-        的同名注释已记录）。真正要卡的是「窄屏档在两个不同阈值上各写一套」，
+        `max-width:1100px` 这个与分档**无关**的布局断点（`.mem-grid` 单列化），
+        它合法且早于本批存在（test_narrow_first_paint.py 的同名注释已记录）。
+        （`.home-wrap` 的 1000px 上限已于 2026-10-29 随「内容区随窗口长」一并去掉。）真正要卡的是「窄屏档在两个不同阈值上各写一套」，
         所以只数 JS侧的 matchMedia(max-width:) 定义，并要求它等于 CSS 的 767。
         """
         js_all = _strip((_REPO / "static" / "hub" / "01-core-boot.js").read_text(encoding="utf-8"))

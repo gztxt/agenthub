@@ -106,7 +106,15 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.170"
+VERSION = "0.13.171"
+
+# v0.13.171（2026-10-28）：口令桥 —— hub 子任务 → DS Bot 的**人工搬运**（不自动 send）。
+# 为什么只做复制：hub 的 chat() 是纯文本无工具，DS Bot 的 Bot 才有文件/命令能力；但 `send`
+# 是**不可重试**的 mutation（ds-harness-remote protocol.md §16.4），超时重发就是**重复派活**。
+# 文本不含 bot 名：本机未装 ds-bot，团队不存在，写死名字就是假信息。
+# 子任务正文取 `/api/tasks/{run}` 的 `prompt`（SELECT * 里本来就有），缺失时显式说明，
+# 不许把 undefined 渲染给用户。按钮走 `data-bb-copy` 委托（禁 inline onclick），
+# 并明写「hub 不会代发」，否则用户以为点了就派发出去了。
 
 # v0.13.170（2026-10-27）：Botboy —— DS Bot 团队的**只读投影**（系统菜单第十项）。
 # 为什么读文件而不调 `POST api/bot`：dsh 按 10-24 裁定按需拉起、常态 inactive，而 dsh web

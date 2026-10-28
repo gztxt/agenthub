@@ -240,7 +240,12 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.170"
+    CURRENT_VERSION = "0.13.171"
+    #: v0.13.171：口令桥（hub 子任务 → DS Bot 人工搬运）。关键词取自 main.py 版本注释：
+    #: send 不可重试 / 重复派活 / data-bb-copy 委托 / 明写「hub 不会代发」。
+    VERSION_ROOT_CAUSES["0.13.171"] = (
+        "口令桥", "不可重试", "重复派活", "data-bb-copy", "hub 不会代发",
+    )
     #: v0.13.170：Botboy（DS Bot 团队只读投影）。关键词取自 main.py 版本注释实际字句：
     #: 读 state.json 而不是调 POST api/bot、state.lock 单写者、两种「没有」分开渲染。
     VERSION_ROOT_CAUSES["0.13.170"] = (

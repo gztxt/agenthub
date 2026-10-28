@@ -2059,13 +2059,14 @@
                         <div id="dagSvg" class="tscroll"></div>
                     </div>
                     <div class="sp-bd box flush tscroll">
-                        <table><thead><tr><th>任务</th><th>Agent</th><th>依赖</th><th>状态</th><th>耗时</th><th>输出/错误（点击行展开）</th></tr></thead>
+                        <table><thead><tr><th>任务</th><th>Agent</th><th>依赖</th><th>状态</th><th>耗时</th><th>输出/错误（点击行展开）</th><th>操作</th></tr></thead>
                         <tbody id="taskBody"></tbody></table>
                     </div>
                     <div class="sp-tools" style="padding-top:12px">
                         <div class="toolbar" style="margin-bottom:0">
                             <button class="btn ghost sm" onclick="startRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-play"/></svg>启动/续跑</button>
                             <button class="btn ghost sm" onclick="retryRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>重试失败项</button>
+                            <button class="btn ghost sm" onclick="copyAllHandoff()"><svg class="i xs" aria-hidden="true"><use href="#i-copy"/></svg>复制全部派活文本</button>
                             <button class="btn danger sm" onclick="delRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-trash"/></svg>删除</button>
                         </div>
                     </div>
@@ -3131,6 +3132,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=67ac63fc"></script>
+    <script src="/static/hub.js?v=cc113dd0"></script>
 </body>
 </html>

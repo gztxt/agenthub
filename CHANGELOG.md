@@ -1,3 +1,31 @@
+## v0.13.171 — 口令桥：hub 子任务转成 DS Bot 可粘贴的派活文本
+
+> 来源：PT-20261028-01 评估的 B 方案。本机 `~/.dsh/profiles/*/node_modules/ds-bot`
+> 全空（三 profile 都没有）、`~/.dsh/bot` 不存在 ⇒ 按用户定的「没有就先做 B」。
+
+### 只做复制，不做自动发送
+
+hub 的执行器是 `chat()`，纯文本、无工具（`registry.py:40` 只有 claude/jcode）；
+DS Bot 的 Bot 才是带文件/命令的会话。但 `send` 是 **不可重试的 mutation**
+（`protocol.md` §16.4），一旦超时重发就变成**重复派活**，而 hub 现有的
+`MAX_AUTO_RETRY` 语义正好会踩这条。所以这一版只生成文本，由人粘贴。
+
+### 文本的四个口径
+
+1. **不带 bot 名** —— 本机没装 ds-bot，团队不存在；写死名字就是假信息。
+2. 子任务正文取 `/api/tasks/{run}` 的 `prompt`（`SELECT *` 本来就有），
+   取不到时写「没留存 prompt」，**不许渲染 `undefined`**。
+3. 显式写「hub 不会代发」，避免用户以为点了按钮就派出去了。
+4. 验收标准写进文本：产出必须可核（路径/命令输出/引用），只回「收到」不算完成。
+
+### 入口两处
+
+- 任务页每行「复制派活」（`data-bb-copy` 委托，禁 inline onclick）
+- run 操作栏「复制全部派活文本」
+
+新增 `tests/test_dispatch_handoff.py`：L0 静态 5 例 + L1 host 3 例（真跑 node 执行
+从 hub.js 抽出的 `handoffText`），覆盖空 prompt / 无依赖 / 全字段三种。
+
 ## v0.13.170 — Botboy：系统菜单第十项（DS Bot 团队只读投影）
 
 > 来源：用户要 hub 菜单加 Botboy 子菜单，对应 DeepSeek Harness 的 DS Bot 团队模式

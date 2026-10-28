@@ -6695,6 +6695,8 @@ async function runScan() {
 /* ── S3 协同 DAG ──────────────────────────────────── */
 
 let currentRun = null;
+let currentRunGoal = '';        // v0.13.171：口令桥要用 run 的总目标
+let currentRunTasks = {};       // task_id → task（含 prompt），供复制时取正文
 
 async function decomposeRun() {
   const goal = $('taskGoal').value.trim();
@@ -6709,6 +6711,54 @@ async function decomposeRun() {
     loadRuns(); openRun(d.run_id);
   } catch (e) { toast(e.message, 'err'); }
   btn.disabled = false; btn.textContent = '拆解并启动';
+}
+
+/* ── B 口令桥（v0.13.171）：把 hub 子任务转成 DS Bot 可粘贴的派活文本 ──
+   为什么只做复制、不做自动发送：hub 的 chat() 无工具，DS Bot 的 Bot 才有；
+   但本机未装 ds-bot，且 `send` 是不可重试的 mutation（protocol.md §16.4），
+   自动发一旦超时就会重复派活。人工粘贴一步，换零风险。
+   文本里刻意不带 bot 名：团队还没建时名字未知，写死就是假信息。 */
+let handoffBound = false;
+
+function handoffText(t) {
+  const goal = String(currentRunGoal || '').trim();
+  const prompt = String(t.prompt || '').trim();
+  const out = ['[agenthub → DS Bot] run ' + currentRun + ' / ' + t.task_id];
+  if (goal) out.push('总目标：' + goal);
+  out.push('子任务：' + (prompt || '（该任务没留存 prompt，请按任务名补全）'));
+  if ((t.deps || []).length) out.push('上游：' + t.deps.join(', '));
+  out.push('验收：产出必须可核（文件路径 / 命令输出 / 引用来源）；只回「收到」不算完成。');
+  out.push('');
+  out.push('（在 DS Bot 里 @ 一个 Bot 或进群聊粘贴；hub 不会代发。）');
+  return out.join('\n');
+}
+
+async function copyHandoff(taskId) {
+  const t = currentRunTasks[taskId];
+  if (!t) return toast('这条任务不在当前 run 里，先刷新', 'err');
+  const ok = await settingsLogsCopyText(handoffText(t));
+  toast(ok ? '已复制 ' + t.task_id + ' 的派活文本' : '复制失败：浏览器不允许写剪贴板', ok ? 'ok' : 'err');
+}
+
+async function copyAllHandoff() {
+  const ids = Object.keys(currentRunTasks);
+  if (!ids.length) return toast('先打开一个 run', 'err');
+  const text = ids.map(id => handoffText(currentRunTasks[id])).join('\n\n---\n\n');
+  const ok = await settingsLogsCopyText(text);
+  toast(ok ? '已复制 ' + ids.length + ' 条派活文本' : '复制失败：浏览器不允许写剪贴板', ok ? 'ok' : 'err');
+}
+
+function bindHandoff() {
+  if (handoffBound) return;
+  const body = $('taskBody');
+  if (!body) return;          // 页还没渲染：下次进页再绑，不能把标志位提前置 true
+  handoffBound = true;
+  body.addEventListener('click', function (ev) {
+    const btn = ev.target.closest('[data-bb-copy]');
+    if (!btn) return;
+    ev.preventDefault();
+    copyHandoff(btn.getAttribute('data-bb-copy'));
+  });
 }
 
 async function loadRuns() {
@@ -6730,6 +6780,9 @@ async function openRun(runId) {
     const d = await api('/api/tasks/' + runId);
     $('runPanel').style.display = '';   // v0.13.40：卡是 flex 列，显隐只切 inline 值
     $('runTitle').textContent = 'Run ' + runId + ' · ' + (d.goal || '').slice(0, 60);
+    currentRunGoal = d.goal || '';
+    currentRunTasks = {};
+    (d.tasks || []).forEach(t => { currentRunTasks[t.task_id] = t; });
     renderTaskTable(d.tasks);
     renderDag(d.tasks);
   } catch (e) { toast(e.message, 'err'); }
@@ -6745,11 +6798,15 @@ const TASK_COLORS = {
 };
 
 function renderTaskTable(tasks) {
-  $('taskBody').innerHTML = tasks.map(t =>
+  currentRunTasks = {};
+  (tasks || []).forEach(t => { currentRunTasks[t.task_id] = t; });
+  $('taskBody').innerHTML = (tasks || []).map(t =>
     '<tr><td><b>' + escapeHtml(t.task_id) + '</b></td><td>' + escapeHtml(t.agent_id || '-') + '</td>' +
     '<td>' + escapeHtml((t.deps || []).join(',')) + '</td><td>' + escapeHtml(t.status) + '</td>' +
     '<td>' + (t.duration_ms != null ? t.duration_ms + 'ms' : '-') + '</td>' +
-    '<td><details><summary class="hint">' + escapeHtml((t.output || t.error || '').slice(0, 50)) + '</summary><pre style="white-space:pre-wrap;font-size:var(--fs-sm);max-height:220px;overflow:auto">' + escapeHtml(t.output || t.error || '') + '</pre></details></td></tr>').join('');
+    '<td><details><summary class="hint">' + escapeHtml((t.output || t.error || '').slice(0, 50)) + '</summary><pre style="white-space:pre-wrap;font-size:var(--fs-sm);max-height:220px;overflow:auto">' + escapeHtml(t.output || t.error || '') + '</pre></details></td>' +
+    '<td><button class="btn ghost sm" data-bb-copy="' + escapeHtml(t.task_id) + '" title="生成可粘贴到 DS Bot 的派活文本">复制派活</button></td></tr>').join('');
+  bindHandoff();
 }
 
 function renderDag(tasks) {

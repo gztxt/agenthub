@@ -27,7 +27,7 @@ import dshws                                    # noqa: E402
 import term                                     # noqa: E402
 
 TERMSRC = ROOT / "src" / "term.py"
-WEB = "http://192.168.5.102:3080/?token=FfyLlZZ3Hli6Dh3tRijhFbog-26eaB_Nl8sOsAKc0SI"
+WEB = "http://192.168.5.102:3080/?token=dummy-token-for-test"
 
 
 class _FakeResponse:
@@ -75,7 +75,7 @@ class TestSplitWebUrl(unittest.TestCase):
     def test_valid_with_token(self):
         base, tok = dshws._split_web_url(WEB)
         self.assertEqual(base, "http://192.168.5.102:3080")
-        self.assertTrue(tok.startswith("Ffy"))
+        self.assertEqual(tok, "dummy-token-for-test")
 
     def test_no_token_returns_none(self):
         self.assertIsNone(dshws._split_web_url("http://192.168.5.102:3080/"))

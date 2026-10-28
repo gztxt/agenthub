@@ -15,7 +15,8 @@
 
 每组只保留**最新**那条（按 `created_at`，再按 id）。**已退役的条目不参与**。
 
-模型只用于「从轨迹抽取经验」这一步，且**非会话一律 `openrouter/free`**（复用管线的守卫）。
+模型只用于「从轨迹抽取经验」这一步，默认走 `agnes/agnes-2.5-flash`（2026-10-29：
+#   免费池不稳定，改稳质模型；仍需 free 时用 --model openrouter/free 覆盖）。
 
 CLI：`python scripts/experience_mine.py`（`--dry-run` 只出计划不落库）。
 """
@@ -35,7 +36,7 @@ import db                                   # noqa: E402
 from config import config                   # noqa: E402
 from dataset_pipeline import assert_free_model  # noqa: E402
 
-DEFAULT_MODEL = "openrouter/free"
+DEFAULT_MODEL = "agnes/agnes-2.5-flash"
 EXPIRE_DAYS = 180
 
 

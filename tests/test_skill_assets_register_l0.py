@@ -166,7 +166,8 @@ class TestRealTreeContract(unittest.TestCase):
 
     包数随盘上新增而变（2026-10-19 16:54 加 aidev 四件套 ⇒ 18→22；
     2026-10-25 加本地技能 agent-onboard ⇒ 22→23；
-    2026-10-28 11:53 加 oss-audit-lookup ⇒ 23→24）。这个断言是
+    2026-10-28 11:53 加 oss-audit-lookup ⇒ 23→24；
+    2026-10-28 13:32 加 code-security-scan ⇒ 24→25）。这个断言是
     **哨兵不是常量**：盘上变了就该红一次、催人同步，同步时只改这个数与本文档。
     """
 
@@ -174,7 +175,7 @@ class TestRealTreeContract(unittest.TestCase):
         if not reg.SKILLS_ROOT.is_dir():
             self.skipTest("本机无 技术文档/skills（运行器不在宿主机上）")
         items = reg.discover()
-        self.assertEqual(len(items), 24,
+        self.assertEqual(len(items), 25,
                          "盘上技能包数变了 ⇒ 台账与缺口注释要同步改（只改本数与本类 docstring）")
         names = {s: (f.get("name") or "") for s, _p, f in items}
         self.assertEqual(names.get("agent-browser-cli"), "agent-browser")

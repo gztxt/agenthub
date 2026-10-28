@@ -40,8 +40,9 @@ def _exp(situation, action, precondition="", created="2026-10-01T00:00:00+00:00"
 
 
 class TestModelDiscipline(unittest.TestCase):
-    def test_default_model_is_free_router(self):
-        self.assertEqual(em.DEFAULT_MODEL, "openrouter/free")
+    def test_default_model_is_agnes(self):
+        """2026-10-29 用户裁定「取消免费模型」⇒ 默认走本机 CCR 的 agnes。"""
+        self.assertEqual(em.DEFAULT_MODEL, "agnes/agnes-2.5-flash")
 
     def test_auto_router_rejected(self):
         with self.assertRaises(ValueError):

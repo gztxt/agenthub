@@ -31,8 +31,9 @@ import db               # noqa: E402
 from config import config  # noqa: E402
 import hook             # noqa: E402
 
-#: 非会话调模的**唯一**默认：免费自动路由（上游摘成员时自动换档，不受 12:00 轮换影响）。
-DEFAULT_MODEL = "openrouter/free"
+#: 非会话调模默认：agnes/agnes-2.5-flash（2026-10-29：免费池不稳定，改稳质模型）
+#    仍可通过 --model openrouter/free 或 MEMORY_LLM_MODEL 环境变量覆盖。
+DEFAULT_MODEL = "agnes/agnes-2.5-flash"
 
 #: 轨迹 → 样本的默认声明（可被 spec 覆盖）。
 DEFAULT_SPEC = {
@@ -46,20 +47,20 @@ DEFAULT_SPEC = {
 
 
 def assert_free_model(model) -> None:
-    """非会话调模只允许免费路由：`openrouter/free`、**经 CCR 的**`openrouter/openrouter/free`、
-    或显式 `*:free`。
+    """非会话调模准入检查（2026-10-29 更新）。
 
-    **严禁 `openrouter/auto`**（2026-10-04 军规）：它的语义是「自动挑最便宜的可用模型」，
-    最便宜的完全可能是**付费**模型 ⇒ 直接扣款。需要自动路由时唯一合法写法是 free 路由器。
+    允许：
+    · 免费模型：`openrouter/free`、`openrouter/openrouter/free`、`*:free`（兜底用）
+    · 稳质模型：`agnes/agnes-*`（本机 CCR 本地代理，不经过 OpenRouter 免费池）
 
-    ⚠ 为什么要同时认两种写法：工作区军规写明「经 CCR 时写 `openrouter/openrouter/free`」
-    —— 只认 `openrouter/free` 会把**按军规写的那一种**也拒掉（2026-10-15 实测发现）。
+    **严禁 `openrouter/auto`**（军规第4条）：语义是「自动挑最便宜的」，最便宜可能是付费档。
     """
     m = str(model or "")
     if m in ("openrouter/free", "openrouter/openrouter/free") or m.endswith(":free"):
         return
-    raise ValueError("非会话调模只允许 openrouter/free（经 CCR 写 openrouter/openrouter/free）"
-                     " 或 *:free，得到 %r（严禁 openrouter/auto）" % model)
+    if m.startswith("agnes/"):
+        return  # agnes 是本机 CCR 本地代理，不扣费
+    raise ValueError("非会话调模只允许 openrouter/free / *:free / agnes/*，得到 %r（严禁 openrouter/auto）" % model)
 
 
 def _sha(s: str) -> str:

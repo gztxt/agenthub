@@ -337,8 +337,9 @@ PROFILES: List[dict] = [
                   "cwd": "/fs/1000/ftp/技术文档"},
      "chat": None,
      "desc": "DeepSeek Harness：Web UI :3080 按需启动 systemctl --user start dsh"
-             "（2026-10-24 起不长驻；dsh-ts4/ts6 两个 Tailscale 转发单元同步停用，"
-             "需要时一起 start）；token 进程级随机，由卡片实时注入，取不到时打开会 401"
+             "（2026-10-24 起不长驻；dsh-ts4/ts6 转发单元 enabled 且 WantedBy=dsh.service，"
+             "start dsh 会自动带起，**不要**单独 start）；token 进程级随机，由卡片实时注入，"
+             "取不到时打开会 401"
              "+ 外置 TUI 终端（dsh --profile tui，@tomowang/dsh-tui）按需拉起"},
     {"id": "jcode", "name": "JCode", "kind": "agent",
      "detect": {"proc": [r"(^|/)jcode( |$)"]},

@@ -106,7 +106,17 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.171"
+VERSION = "0.13.172"
+
+# v0.13.172（2026-10-28）：Hub MCP **出口面**收窄 —— 白名单 + 派发闸门（PT-20261028-01 D 步）。
+# 为什么需要：把 hub MCP 挂给别的 agent 会话（dsh 的 Bot）后，「默认全给、再想扣哪个」是错的
+# 默认值 —— 每上线一个新工具就自动多一个出口，没人会发现。`HUB_MCP_ALLOW_TOOLS` 把默认反过来：
+# 设了就只留列出的名字，新工具上线不会自动外泄。
+# 派发类（`hub_dispatch`/`hub_replan`）**默认仍开**：它是已上线能力，默认摘掉＝静默少功能；
+# 要硬关用 `HUB_MCP_ALLOW_DISPATCH=0`，关掉的场景必须出现在审计行的「扣掉」里。
+# 两道闸的顺序是**先扣派发、再套白名单**：反过来的话「白名单里写了 dispatch」就能把它顶回来，
+# 安全默认被一份手写清单推翻。冲突记 `blocked`、拼错记 `unknown` —— 静默少一个工具最难查。
+# 这一刀防的是「Bot → hub → 多 agent → 回 Bot」的**自指闭环**（且能顺带烧钱）。
 
 # v0.13.171（2026-10-28）：口令桥 —— hub 子任务 → DS Bot 的**人工搬运**（不自动 send）。
 # 为什么只做复制：hub 的 chat() 是纯文本无工具，DS Bot 的 Bot 才有文件/命令能力；但 `send`
@@ -530,6 +540,14 @@ try:
     app.router.lifespan_context = _hub_lifespan
     app.mount("/hub-mcp", _mcp_app)
     print("[Agent Hub] Hub MCP server 已挂载：/hub-mcp/mcp（lifespan 已并入）")
+    # v0.13.172：出口面审计一行入日志 —— 谁被扣、白名单拼错、dispatch 是否开
+    _scope = hubmcp.TOOL_SCOPE
+    print("[Agent Hub] Hub MCP 出口：%d 个工具%s%s%s" % (
+        len(_scope.get("kept") or []),
+        "，扣掉 %s" % ",".join(_scope["removed"]) if _scope.get("removed") else "",
+        "，dispatch 闸门挡下 %s" % ",".join(_scope["blocked"]) if _scope.get("blocked") else "",
+        "，白名单里不存在 %s" % ",".join(_scope["unknown"]) if _scope.get("unknown") else "",
+    ))
 except Exception as e:  # noqa: BLE001
     print(f"[Agent Hub] Hub MCP server 挂载失败（主服务不受影响）：{type(e).__name__}: {e}")
 

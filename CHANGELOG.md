@@ -1,3 +1,38 @@
+## v0.13.172 — Hub MCP 出口面：只读白名单 + 派发闸门（D 步）
+
+> 来源：PT-20261028-01 的 D 方案（反向挂 MCP）。用户裁定「先做 1，验证合格再继续 2」。
+
+### 为什么是「出口面」而不是「多几个工具」
+
+把 hub MCP 挂给**别的 agent 会话**（dsh 的 Bot）以后，工具清单就是攻击面与成本面。
+此前的默认值是「全给」，于是**每上线一个新工具就自动多一个出口**，没人会发现。
+`HUB_MCP_ALLOW_TOOLS=hub_kb_search,hub_skill_list,...` 把默认反过来：设了白名单就
+**只留列出的名字**，新工具上线不会自动外泄。
+
+### 派发类默认仍开，但要能硬关
+
+`hub_dispatch` 会拆 DAG、派给多个 agent、还可能自动重拆第 2 轮（烧钱 + 改状态）。
+挂给 Bot 后就是「Bot → hub → 多 agent → 回 Bot」的**自指闭环**。
+但它是已上线能力（PT-20261027-04），默认摘掉＝静默少功能 —— 本仓最反对的失败形态。
+故：默认开，`HUB_MCP_ALLOW_DISPATCH=0` 硬关，**关掉的必须出现在启动审计行里**。
+
+### 两道闸的顺序
+
+**先扣派发、再套白名单**。反过来的话「白名单里写了 dispatch」就能把它顶回来 ——
+安全默认不该被一份手写清单推翻。冲突记 `blocked`、拼写错记 `unknown`，
+两者都进启动日志与 `TOOL_SCOPE`，不静默。
+
+### 验证（全部真跑，不是读代码）
+
+- `tests/test_hubmcp_scope.py` 7 例（默认面 / 硬关 / 白名单 / 闸门与白名单冲突 / 拼错 / 幂等）。
+- 影子实例 `:3195` + 白名单 7 个工具：MCP 真客户端 `list_tools` 返回 7 个、`hub_kb_search` 真返回数据。
+- **dsh 会话实调**：`dsh headless` 挂上同一个 MCP 端点后
+  1. 工具清单恰为 `mcp__hub__hub_intake/kb_search/kb_status/memory_context/memory_search/skill_list/skill_read` 七个；
+  2. 让它调 `mcp__hub__hub_kb_search q=限流 k=1`，回 `count=1`（与直接客户端调用一致）。
+- 验证后**已还原** `~/.dsh/profiles/headless/cordis.patch.yml`：条目指向影子 `:3195`，
+  影子一停就是死指针。生产重启到本版后，再按 `docs/BOTBOY-DISPATCH-FUSION-EVAL-20261028.md`
+  里的片段把 url 改成 `:3102`。
+
 ## v0.13.171 — 口令桥：hub 子任务转成 DS Bot 可粘贴的派活文本
 
 > 来源：PT-20261028-01 评估的 B 方案。本机 `~/.dsh/profiles/*/node_modules/ds-bot`

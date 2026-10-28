@@ -104,6 +104,46 @@ D 若把 `hub_dispatch` 也开出去，Bot 就会再派一层活 ⇒ 递归烧 t
 「这个 run 的子任务在 DS Bot 里的进度」。数据仍只读 `state.json`。
 **验收**：一个手工映射的 run 能显示某 Bot 的 `works` 条目与 `usage` 数；映射缺失时显示「未关联」而非 0。
 
+### P1.5 反向挂 MCP（**已实现 v0.13.172，待重启上生产**）
+
+D 方案先落地的是「出口面收窄 + 挂载验证」两件：
+
+1. `HUB_MCP_ALLOW_TOOLS`（白名单，设了就只留列出的）+
+   `HUB_MCP_ALLOW_DISPATCH`（派发闸门，**默认开**，`=0` 硬关）。
+   顺序：先扣派发、再套白名单；冲突记 `blocked`、拼错记 `unknown`，都进启动日志。
+2. dsh 侧用自带 `dsh-mcp-client`（`transport: streamable-http`）挂上去。
+
+**生产重启后把这段追加到目标 profile 的 `cordis.patch.yml`**（`insert:` 是唯一能新增条目的写法，
+直接写 `- id: mcp-hub` 会报 `patch: entry "mcp-hub" not found`）：
+
+```yaml
+- insert:
+    - id: mcp-hub
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: hub
+        transport: streamable-http
+        url: http://127.0.0.1:3102/hub-mcp/mcp
+        headers:
+          x-hub-token: !!js process.env.HUB_MCP_TOKEN
+```
+
+**已验（2026-10-28，全部真跑）**：
+
+- 影子 `:3195` 带 7 项白名单：MCP 真客户端 `list_tools` 得 7 个工具、`hub_kb_search` 返真实结果。
+- `dsh headless` 会话工具清单恰为
+  `mcp__hub__hub_intake / kb_search / kb_status / memory_context / memory_search / skill_list / skill_read`；
+  让它调 `mcp__hub__hub_kb_search(q=限流,k=1)` 回 `count=1`，与直连客户端一致。
+- 验证用的 patch 条目**已还原**（当时指向影子，影子停掉即死指针）；上生产按上面片段改回 `:3102`。
+
+**两个坑（实测）**：
+
+- token 走 `!!js process.env.HUB_MCP_TOKEN`，**不写进 yaml**（凭据不落配置）；
+  但 `dsh headless` 手动跑时不读 `dsh-src/.env`，要 `set -a; . .env; set +a` 先导出。
+- hub 的 `TERM_TOKEN` 是 `.env` 里的值（隔离变量不覆盖它）；影子实例用自定义 token 会 401，
+  别把「401 凭据不匹配」当成鉴权坏了。
+
+
 ### P2（**需裁定**，≥2 天，先 spike 后接入）
 
 30 行脚本跑通一条闭环：起 dsh → 从 journal 取 token 换 cookie → `send` 给单 Bot →

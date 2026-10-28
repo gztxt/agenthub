@@ -48,6 +48,21 @@ from mcp.server.mcpserver import MCPServer
 TIMEOUT_S = float(os.getenv("HUB_MCP_TIMEOUT", "10"))
 ALLOW_WRITE = os.getenv("HUB_MCP_ALLOW_WRITE", "0") == "1"
 
+#: 派发类工具：**默认仍是开的**（v0.13.172 / PT-20261028-01 D 步）。
+#: 为什么不默认关：`hub_dispatch` 是已上线能力（PT-20261027-04），codebuddy/claude 这些
+#: 既有 MCP 客户端在用；把它默认摘掉＝静默少一个功能，正是本仓反复吃过的「不报错的故障」。
+#: 真正防的是「挂给第三方会话后形成 Bot → hub → 多 agent → 回 Bot 的自指闭环」，
+#: 而那条边界由 `HUB_MCP_ALLOW_TOOLS` 白名单负责（D 步的挂载就用白名单，天然不含它）。
+#: 需要硬关时显式 `HUB_MCP_ALLOW_DISPATCH=0`；`hub_run_status` 是纯读，不在这一刀里。
+DISPATCH_TOOLS = ("hub_dispatch", "hub_replan")
+ALLOW_DISPATCH = os.getenv("HUB_MCP_ALLOW_DISPATCH", "1") == "1"
+
+#: 出口白名单：设了就**只留这些工具**（逗号分隔，用 `hub_` 前缀全名）。
+#: 存在理由：给外部 agent（dsh 的 Bot / 别的会话）挂 MCP 时，「默认全给、再想扣哪个」是错的
+#: 默认值 —— 以后新增一个工具就自动多一个出口，没人会发现。白名单把默认反过来：
+#: 新工具上线不会自动外泄，要用就在挂载方显式加名字。
+ALLOW_TOOLS = tuple(t.strip() for t in os.getenv("HUB_MCP_ALLOW_TOOLS", "").split(",") if t.strip())
+
 #: 自指 URL。**默认从 config.port 推导，不写死 3102**（v0.13.127 PT-20261019-01）：
 # 写死的版本在影子/隔离实例上会出一个很难看的失败模式——MCP 工具调用穿过影子
 # **直达生产 :3102**，拿着影子的 token 打生产 ⇒ 401「凭据不匹配」，而排障时
@@ -811,6 +826,43 @@ def hub_summarize(text: str, points: int = 3, style: str = "") -> str:
     return json.dumps(_post("/api/summarize", body, _timeout=300), ensure_ascii=False)
 
 
+def apply_tool_scope() -> dict:
+    """按 env 收窄对外工具面（幂等）。返回审计摘要，供启动日志与测试断言。
+
+    顺序有讲究：**先**扣派发，**再**套白名单。反过来会出现「白名单里写了 dispatch、
+    于是它被当成允许项留下」的漏口 —— 这一刀是安全默认，不该被一个手写清单推翻。
+    """
+    tm = server._tool_manager
+    have = [t.name for t in tm.list_tools()]
+    removed: list = []
+    if not ALLOW_DISPATCH:
+        for n in DISPATCH_TOOLS:
+            if n in have:
+                server.remove_tool(n)
+                removed.append(n)
+    keep = set(ALLOW_TOOLS)
+    if keep:
+        for n in have:
+            if n in keep or n in removed:
+                continue
+            server.remove_tool(n)
+            removed.append(n)
+    kept = [t.name for t in tm.list_tools()]
+    # 白名单里写了但被派发闸门扣掉的 ⇒ 必须显式报出来，否则挂载方以为它开着
+    blocked = [n for n in removed if n in keep]
+    # 写了名字但根本没这个工具 ⇒ 拼错/改名的信号。静默少一个工具＝最难查的故障
+    unknown = sorted(keep - set(have))
+    return {"kept": kept, "removed": removed, "blocked": blocked,
+            "unknown": unknown, "allow_dispatch": ALLOW_DISPATCH,
+            "whitelist": list(ALLOW_TOOLS)}
+
+
+#: 最近一次收窄的摘要（main.py 打印；测试也读它）
+TOOL_SCOPE: dict = {}
+
+
 def build_app():
     """返回可挂载到 FastAPI 的 Starlette 子应用。"""
+    global TOOL_SCOPE
+    TOOL_SCOPE = apply_tool_scope()
     return server.streamable_http_app()

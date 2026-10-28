@@ -240,9 +240,19 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.171"
-    #: v0.13.171：口令桥（hub 子任务 → DS Bot 人工搬运）。关键词取自 main.py 版本注释：
+    CURRENT_VERSION = "0.13.172"
+    #: v0.13.172：Hub MCP 出口面收窄（白名单 + 派发闸门）。关键词取自 main.py 版本注释：
+    #: 出口面 / 白名单 env / 派发闸门 env / 自指闭环 / blocked / unknown。
+    VERSION_ROOT_CAUSES["0.13.172"] = (
+        "出口面", "HUB_MCP_ALLOW_TOOLS", "HUB_MCP_ALLOW_DISPATCH",
+        "自指闭环", "blocked", "unknown",
+    )
+    #: v0.13.171：口令桥（hub 子任务 → DS Bot 人工搬运）。
     #: send 不可重试 / 重复派活 / data-bb-copy 委托 / 明写「hub 不会代发」。
+    VERSION_ROOT_CAUSES["0.13.172"] = (
+        "出口面", "HUB_MCP_ALLOW_TOOLS", "HUB_MCP_ALLOW_DISPATCH",
+        "自指闭环", "blocked", "unknown",
+    )
     VERSION_ROOT_CAUSES["0.13.171"] = (
         "口令桥", "不可重试", "重复派活", "data-bb-copy", "hub 不会代发",
     )

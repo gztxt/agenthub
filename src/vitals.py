@@ -67,9 +67,9 @@ RT_PROMPT = os.getenv("VITALS_RT_PROMPT", "只回复一个字：好")
 # 一次抖动不得写成永久结论（2026-09-21 实测：hermes 偶发 401，下一轮又是好的，
 # 而单次 L4 的负结论会被 24h 保鲜窗冻住）。负结论连错 N 次才允许改判。
 RT_NEG_STREAK = int(os.getenv("VITALS_NEG_STREAK", "2"))
-# 真请求用的测试模型（2026-09-22 用户指定 Agnes-2.0-flash）。CCR 认斜杠形态，实测可用；
-# 写成下划线形态会被 CCR 拒（军规：CCR 用 /，FCC 用 _，两者不通用）。
-RT_MODEL = os.getenv("VITALS_RT_MODEL", "agnes/agnes-2.0-flash")
+# 真请求用的测试模型（2026-09-22 用户指定 Agnes；2026-10-29 统一升到 2.5-flash）。
+# CCR 认斜杠形态，实测可用；写成下划线形态会被 CCR 拒（军规：CCR 用 /，FCC 用 _，两者不通用）。
+RT_MODEL = os.getenv("VITALS_RT_MODEL", "agnes/agnes-2.5-flash")
 # 实测一轮真请求耗时：claude 14s / jcode 9s / grok 19s / hermes 21s，40s 够宽容抖。
 RT_TIMEOUT = float(os.getenv("VITALS_RT_TIMEOUT", "90"))
 # 2026-09-24：40s → 90s。实测 claude 走 CCR 在 40s 窗口下跑出一例

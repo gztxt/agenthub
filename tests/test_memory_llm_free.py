@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""L0 hermetic：非会话工具调用的模型必须走免费档（2026-10-18 用户裁定）。
+"""L0 hermetic：非会话工具调用的模型统一 `agnes/agnes-2.5-flash`（2026-10-29 用户裁定）。
 
-口径（AGENTS.md §1 第 4 条）：
-- **会话**默认值用稳定模型；`:free` 只进可切换清单。
-- **非会话**（L2 记忆压缩、后台提炼、定时任务）一律默认 `openrouter/free`；
-  经 CCR（:3456）写 `openrouter/openrouter/free`，直连 OpenRouter 才写 `openrouter/free`。
-- 🚨 全场景禁 `openrouter/auto`：它会自动挑最便宜模型，最便宜可能是付费档。
+口径变更史：
+- 2026-10-18 裁定「非会话一律 `openrouter/free`」，理由是省钱、路由器会换掉被摘的成员。
+- 2026-10-29 用户裁定「全部改为 agnes-2.5-flash，取消 deepseek，取消免费模型」。
+  实测依据：免费池会把请求路由到审核/分类模型（HTTP 200 但正文是 `User Safety: safe`），
+  且 deepseek 账户 402 时 CCR 按 `Router.fallback.model-chain` 静默回退到 `openrouter/free`
+  ⇒ 判定链实际跑在**随机**免费模型上，结果不可复现。免费不再是「廉价可选项」，
+  而是「不确定结果」的来源。
 
-为什么这组闸门必须存在（都是可确定性命中的红向）：
-1. 把 MEMORY_LLM_MODEL 写成模块常量 ⇒ `.env` 在 config 导入后覆盖，常量被钉死；
-2. L2 压缩忘记传 model ⇒ 静默回落到交互式付费模型 `MANAGER_LLM_MODEL`（账户扣款风险）；
-3. 有人为了「效果更好」把默认改回 `alibaba/qwen3.8-flash` ⇒ 无测试就会静默复发。
+仍然成立的三条闸门：
+1. 默认值必须读函数而非常量：`.env` 覆盖发生在模块导入之后，常量会把旧值钉死；
+2. L2 压缩不得回落到交互式模型（`MANAGER_LLM_MODEL` 会被改指别的厂商/档位）；
+3. 🚨 全场景禁 `openrouter/auto`：它自动挑最便宜的可用模型，最便宜可能是付费档。
 """
 import os
 import pathlib
@@ -25,8 +27,8 @@ sys.path.insert(0, str(_REPO))
 
 import llm  # noqa: E402
 
-_FREE_CCR = "openrouter/openrouter/free"
-_FREE_DIRECT = "openrouter/free"
+#: 2026-10-29 起的唯一默认档（经 CCR 需 provider 前缀）。
+_AGNES = "agnes/agnes-2.5-flash"
 
 
 def _func_body(path: pathlib.Path, name: str) -> str:
@@ -39,11 +41,11 @@ def _func_body(path: pathlib.Path, name: str) -> str:
 
 
 class TestMemoryModelDefault(unittest.TestCase):
-    def test_default_is_ccr_free_router(self):
-        """默认值必须是经 CCR 的免费自动路由（带 provider 前缀）。"""
+    def test_default_is_agnes(self):
+        """默认值必须是 agnes-2.5-flash（经 CCR 的带前缀形态）。"""
         old = os.environ.pop("MEMORY_LLM_MODEL", None)
         try:
-            self.assertEqual(llm.memory_model(), _FREE_CCR)
+            self.assertEqual(llm.memory_model(), _AGNES)
         finally:
             if old is not None:
                 os.environ["MEMORY_LLM_MODEL"] = old
@@ -52,22 +54,22 @@ class TestMemoryModelDefault(unittest.TestCase):
         """读函数而非常量：改 env 立即生效（`.env` 覆盖发生在模块导入之后）。"""
         old = os.environ.get("MEMORY_LLM_MODEL")
         try:
-            os.environ["MEMORY_LLM_MODEL"] = _FREE_DIRECT
-            self.assertEqual(llm.memory_model(), _FREE_DIRECT)
+            os.environ["MEMORY_LLM_MODEL"] = "vendor/some-other-model"
+            self.assertEqual(llm.memory_model(), "vendor/some-other-model")
         finally:
             if old is None:
                 os.environ.pop("MEMORY_LLM_MODEL", None)
             else:
                 os.environ["MEMORY_LLM_MODEL"] = old
 
-    def test_does_not_silently_fall_back_to_paid(self):
-        """未配置时不得回落到 MANAGER_LLM_MODEL（那可能是付费档）。"""
+    def test_does_not_silently_fall_back_to_manager_model(self):
+        """未配置时不得跟着 `MANAGER_LLM_MODEL` 走（那是另一个可被改指的入口）。"""
         old_mem = os.environ.pop("MEMORY_LLM_MODEL", None)
         old_mgr = os.environ.get("MANAGER_LLM_MODEL")
         try:
             os.environ["MANAGER_LLM_MODEL"] = "alibaba/qwen3.8-flash"
             self.assertNotIn("qwen", llm.memory_model())
-            self.assertEqual(llm.memory_model(), _FREE_CCR)
+            self.assertEqual(llm.memory_model(), _AGNES)
         finally:
             if old_mem is not None:
                 os.environ["MEMORY_LLM_MODEL"] = old_mem
@@ -76,11 +78,20 @@ class TestMemoryModelDefault(unittest.TestCase):
             else:
                 os.environ["MANAGER_LLM_MODEL"] = old_mgr
 
+    def test_fallback_default_is_agnes(self):
+        """兜底位同样不得落回免费池：实测免费路由器会返审核标签。"""
+        old = os.environ.pop("MEMORY_LLM_FALLBACK_MODEL", None)
+        try:
+            self.assertEqual(llm.free_fallback_model(), _AGNES)
+        finally:
+            if old is not None:
+                os.environ["MEMORY_LLM_FALLBACK_MODEL"] = old
+
 
 class TestCallSitesWiring(unittest.TestCase):
     def test_l2_rebuild_passes_memory_model(self):
-        """L2 压缩是**非会话**提炼：必须走 complete_free（免费档+兜底），
-        不得裸调 chat_tools_loop（那会回落到交互式付费模型）。"""
+        """L2 压缩是**非会话**提炼：必须走 complete_free（记忆档+兜底），
+        不得裸调 chat_tools_loop（那会回落到交互式模型）。"""
         body = _func_body(_REPO / "src" / "memory.py", "rebuild_l2")
         self.assertIn("llm.complete_free(", body)
         self.assertNotIn("chat_tools_loop(", body)
@@ -88,14 +99,29 @@ class TestCallSitesWiring(unittest.TestCase):
         self.assertIn("机械压缩", body)
 
     def test_decompose_keeps_manager_model(self):
-        """交互式拆解（人点一下才发）不跟着降级：不得改成 complete_free/memory_model。"""
+        """交互式拆解（人点一下才发）不跟着走记忆档：不得改成 complete_free/memory_model。"""
         body = _func_body(_REPO / "src" / "tasks.py", "decompose")
         self.assertNotIn("llm.memory_model()", body)
         self.assertNotIn("llm.complete_free(", body)
 
 
 class TestCompleteFree(unittest.TestCase):
-    """免费池「200 但没货」必须换兜底，全失败返回空串（由调用方降级）。"""
+    """「200 但没货」必须换兜底，全失败返回空串（由调用方降级）。
+
+    用 env 显式造出 primary≠fallback：默认值两者同为 agnes，走的是**去重后只调一次**，
+    那是另一条测试（`test_same_primary_and_fallback_calls_once`）。
+    """
+
+    def setUp(self):
+        self._env = {k: os.environ.get(k) for k in
+                     ("MEMORY_LLM_MODEL", "MEMORY_LLM_FALLBACK_MODEL")}
+
+    def tearDown(self):
+        for k, v in self._env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     def _call(self, mapping):
         calls = []
@@ -109,31 +135,47 @@ class TestCompleteFree(unittest.TestCase):
 
         return fake, calls
 
-    def test_empty_primary_uses_specific_free_fallback(self):
+    def test_empty_primary_uses_fallback(self):
         import asyncio
-        primary, fallback = llm.memory_model(), llm.free_fallback_model()
-        fake, calls = self._call({primary: "", fallback: "这是一段正常的中文压缩结果" * 3})
+        os.environ["MEMORY_LLM_MODEL"] = "vendor/primary"
+        os.environ["MEMORY_LLM_FALLBACK_MODEL"] = "vendor/backup"
+        fake, calls = self._call({"vendor/primary": "",
+                                  "vendor/backup": "这是一段正常的中文压缩结果" * 3})
         text, used = asyncio.run(llm.complete_free("sys", "user", call=fake))
-        self.assertEqual(used, fallback)
+        self.assertEqual(used, "vendor/backup")
         self.assertIn("正常的中文压缩结果", text)
-        self.assertEqual(calls, [primary, fallback])
-        self.assertTrue(fallback.endswith(":free"))     # 兜底位必须是具体免费档
+        self.assertEqual(calls, ["vendor/primary", "vendor/backup"])
 
     def test_safety_label_counts_as_failure(self):
         import asyncio
-        primary, fallback = llm.memory_model(), llm.free_fallback_model()
-        fake, _ = self._call({primary: "User Safety: safe", fallback: "正常内容" * 8})
+        os.environ["MEMORY_LLM_MODEL"] = "vendor/primary"
+        os.environ["MEMORY_LLM_FALLBACK_MODEL"] = "vendor/backup"
+        fake, _ = self._call({"vendor/primary": "User Safety: safe",
+                              "vendor/backup": "正常内容" * 8})
         text, used = asyncio.run(llm.complete_free("sys", "user", call=fake))
-        self.assertEqual(used, fallback)
+        self.assertEqual(used, "vendor/backup")
         self.assertTrue(text)
 
-    def test_all_fail_returns_empty_not_paid_model(self):
+    def test_all_fail_returns_empty_not_third_model(self):
         import asyncio
-        primary, fallback = llm.memory_model(), llm.free_fallback_model()
-        fake, calls = self._call({primary: RuntimeError("429"), fallback: "短"})
+        os.environ["MEMORY_LLM_MODEL"] = "vendor/primary"
+        os.environ["MEMORY_LLM_FALLBACK_MODEL"] = "vendor/backup"
+        fake, calls = self._call({"vendor/primary": RuntimeError("429"),
+                                  "vendor/backup": "短"})
         text, used = asyncio.run(llm.complete_free("sys", "user", call=fake))
         self.assertEqual((text, used), ("", ""))
-        self.assertEqual(calls, [primary, fallback])   # 不得再试第三个（付费）模型
+        self.assertEqual(calls, ["vendor/primary", "vendor/backup"])   # 不得再试第三个模型
+
+    def test_same_primary_and_fallback_calls_once(self):
+        """默认值时 primary == fallback：去重后只发一次，不重复烧一次长尾。"""
+        import asyncio
+        os.environ.pop("MEMORY_LLM_MODEL", None)
+        os.environ.pop("MEMORY_LLM_FALLBACK_MODEL", None)
+        fake, calls = self._call({_AGNES: "正常的中文压缩结果" * 3})
+        text, used = asyncio.run(llm.complete_free("sys", "user", call=fake))
+        self.assertEqual(used, _AGNES)
+        self.assertTrue(text)
+        self.assertEqual(calls, [_AGNES])
 
 
 class TestNoAutoRouter(unittest.TestCase):

@@ -3,7 +3,7 @@
 
 【当前形态 · 先读这段】
 `JUDGE_BACKEND` 决定真后端，默认 **remote**（`src/remote_judge.py`，钉死
-`deepseek/deepseek-flash`）。本机 Ollama 与 `jev-decision` 技能已在 2026-10-23 删除，
+`agnes/agnes-2.5-flash`；2026-10-29 用户裁定：取消 deepseek、取消免费模型）。本机 Ollama 与 `jev-decision` 技能已在 2026-10-23 删除，
 `ollama` 分支只是保留给「某天真的把本机推理装回来」——它现在跑起来必然报
 `script_missing`，这是如实失败，不是配置错。
 
@@ -86,12 +86,12 @@ ALERT_AFTER = int(os.getenv("JUDGE_ALERT_AFTER", "3"))
 DEFAULT_SCRIPT = (Path(__file__).resolve().parents[2] / "skills" / "@user_36623aa7"
                   / "jev-decision" / "scripts" / "decision.py")
 
-#: 判定后端：`remote`（CCR deepseek-flash，默认）/ `ollama`（本机技能，已删除）。
+#: 判定后端：`remote`（CCR agnes-2.5-flash，默认）/ `ollama`（本机技能，已删除）。
 #: 切换后**必须**重启 hub：模块常量在导入时定型（与其它开关一致）。
 BACKEND = os.getenv("JUDGE_BACKEND", "remote").strip().lower()
 
-#: 判定总开关。默认值按后端给：remote 默认开（用户 2026-10-23 裁定「接 deepseek
-#: flash」），ollama 默认关（技能已删，开着只会每轮刷 script_missing 告警）。
+#: 判定总开关。默认值按后端给：remote 默认开（用户 2026-10-23 裁定接远端模型，
+#: 2026-10-29 换成 agnes-2.5-flash），ollama 默认关（技能已删，开着只会每轮刷 script_missing 告警）。
 #: `LOCAL_JUDGE=0` 仍是**一键关**——关掉后 judge() 立即抛 Unavailable，不起请求、
 #: 不计失败、不写缓存，运维看到的是「按设计关闭」而不是「判定一直坏」。
 ENABLED = os.getenv("LOCAL_JUDGE", "1" if BACKEND == "remote" else "0").strip().lower() in (
@@ -251,7 +251,9 @@ def status() -> Dict[str, Any]:
     cs = judge_cache.stats()
     remote = BACKEND == "remote"
     return {
-        "backend": "deepseek-flash" if remote else "ollama-local",
+        # backend 是**给人看的后端名**，跟 JUDGE_MODEL 走：写死字面量会在换模型后
+        # 与 `/api/vitals` 的 model 字段互相矛盾（2026-10-29 换 agnes 时正是如此）。
+        "backend": (remote_judge.MODEL.rsplit("/", 1)[-1] if remote else "ollama-local"),
         "backend_id": BACKEND,
         "enabled": ENABLED,
         # ready 只判「配置在位」：remote 看网关地址，ollama 看脚本在不在。
@@ -288,8 +290,8 @@ def status() -> Dict[str, Any]:
         "last_fail_kind": st.get("last_fail_kind"),
         "alert_path": str(alert_path()),
         "note": ("判定后端=%s；外部 jev 端点已于 2026-10-23 下线删除，本机 Ollama 与"
-                 " jev-decision 技能同批删除。remote 后端钉死 %s（不用路由器：路由会把"
-                 "请求换成审核模型）" % (BACKEND, remote_judge.MODEL)),
+                 " jev-decision 技能同批删除。remote 后端钉死 %s（不用路由器/免费池："
+                 "路由会把请求换成审核模型）" % (BACKEND, remote_judge.MODEL)),
     }
 
 

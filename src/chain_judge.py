@@ -30,7 +30,8 @@
 ## 后端（2026-10-23 晚变更）
 
 本机 Ollama 已删除，`_gen` 改为跟随 `local_judge.BACKEND`：默认 **remote**
-（`deepseek/deepseek-flash`）。上面那张 1.5b 的表是**换后端之前**的实测，保留作
+（2026-10-29 起为 `agnes/agnes-2.5-flash`，此前是 `deepseek/deepseek-flash`）。
+上面那张 1.5b 的表是**换后端之前**的实测，保留作
 「为什么不用 choice 原语」的依据；换成 flash 后位置偏置**没有重测**，所以
 `pick_candidate` 仍然跑「正序/倒序各一次、一致才采信」，不靠模型自觉。
 `CHAIN_JUDGE` 默认仍为 0：这条链没有做质量对照，开关只作预备。
@@ -54,7 +55,12 @@ from typing import Any, Dict, List, Optional
 import local_judge
 import remote_judge
 
-#: 主链判定总开关。默认开——否则又回到「接了但从不调用」的休眠态。
+#: 主链判定总开关。**默认关（`"0"`）**——这条链没做过质量对照，只作预备。
+#: 2026-10-28 核实：本行此前写「默认开——否则又回到『接了但从不调用』的休眠态」，
+#: 与下一行代码方向相反。注释说开、代码是关，恰恰把那个休眠态掩盖了：线上
+#: `local_judge.status().calls=0`、`data/agents.db` 的 `tasks.judge_json` 全为 NULL。
+#: 要启用须显式 `CHAIN_JUDGE=1` 并重启 hub；启用前先读判例 250 §4（四个落点里
+#: 模型零决策权，质量不是瓶颈）。
 ENABLED = os.getenv("CHAIN_JUDGE", "0").strip().lower() not in ("0", "false", "off", "no")
 #: 单次超时。实测 1.5~3.7s，45s 只是兜底（Ollama 冷加载 / 别的活占着）。
 TIMEOUT_S = float(os.getenv("CHAIN_JUDGE_TIMEOUT", "45"))

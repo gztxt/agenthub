@@ -76,7 +76,7 @@ class Config:
         # 「端口以实连为准：CCR API 口 3456」对齐。真值仍由 .env override，不改现有生产行为。
         self.manager_llm_base = os.getenv("MANAGER_LLM_BASE_URL", "http://127.0.0.1:3456/v1")
         self.manager_llm_key = os.getenv("MANAGER_LLM_API_KEY", "")
-        self.manager_llm_model = os.getenv("MANAGER_LLM_MODEL", "tokenrouter/qwen3.8-flash")
+        self.manager_llm_model = os.getenv("MANAGER_LLM_MODEL", "agnes/agnes-2.5-flash")
 
         # Hook 遥测写入鉴权（留空=仅回环可写）
         self.hook_auth_token = os.getenv("HOOK_AUTH_TOKEN", "")

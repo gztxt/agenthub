@@ -49,7 +49,9 @@ import llm
 MAX_CANDIDATES = 5
 #: 默认超时（秒）。**不能用 2s**：实测免费池单次 2.5s 左右，2s 必然超时。
 #: 更严重的是「超时怎么实现」——见 `choose()` 里对 `asyncio.shield` 的注释。
-DEFAULT_TIMEOUT_S = 8.0
+#: 2026-10-29 由 8s 提到 15s：换成 `agnes/agnes-2.5-flash` 后实测长尾到 8s+
+#: （8s 档三次里超时一次）。15s 仍远小于 vitals 的 180s 预算。
+DEFAULT_TIMEOUT_S = 15.0
 #: 判定缓存的 TTL（秒）。默认 7 天：判定结论很稳，而**候选集指纹变了会自动失配**
 #: （改技能描述/增删技能 ⇒ 键变 ⇒ 重新判定），所以不需要靠短 TTL 保正确性。
 #: 这条缓存是为「同样问题不重复消耗」而加的：免费池 p50 3.2~3.7s、成功率 34~44%，
@@ -125,10 +127,23 @@ def _parse(text: str, candidates: List[Dict[str, Any]]) -> Optional[Dict[str, An
     m = re.search(r"\{.*\}", s, re.S)
     if not m:
         return None
+    raw = m.group(0)
     try:
-        d = json.loads(m.group(0))
+        d = json.loads(raw)
     except Exception:  # noqa: BLE001
-        return None
+        # 2026-10-29 实测：agnes 会把理由写成 `"why": "…与"启动服务"任务最相关"`
+        # ——理由里的中文引号是 ASCII 双引号且未转义 ⇒ JSON 非法，整条结果被丢。
+        # pick 本身仍是明确数字，用正则只取它：**结论可取，理由降级为空**，
+        # 仍然要求 pick 落在候选范围内（幻觉防线不变）。
+        pm = re.search(r'["\']?pick["\']?\s*[:：]\s*(\d+)', raw)
+        if not pm:
+            return None
+        pick = int(pm.group(1))
+        if pick < 0 or pick > len(candidates):
+            return None
+        return {"pick": pick, "why": "",
+                "name": (candidates[pick - 1].get("name") if pick >= 1 else None),
+                "parsed_by": "regex"}
     if not isinstance(d, dict):
         return None
     pick = d.get("pick")

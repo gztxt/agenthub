@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
-"""远端判定后端：DeepSeek-Flash（CCR `deepseek/deepseek-flash`），2026-10-23。
+"""远端判定后端：Agnes-2.5-Flash（CCR `agnes/agnes-2.5-flash`），2026-10-29 起。
 
-## 为什么是它
+**2026-10-29 用户裁定：判定/技能一律 agnes-2.5-flash，取消 deepseek、取消免费模型。**
+切换原因（实测）：`deepseek/deepseek-flash` 的 provider 返回 402（余额不足），CCR 按
+`Router.fallback.model-chain` 静默回退到 `openrouter/free` —— 8 次实调用全部落到随机
+`:free` 模型（nemotron-3-ultra / 3.5-super-vl / 3.5-lightning / cohere-north-mini-code /
+poolside-laguna / dots-3），cost=0，延迟 4.0–16.5s。agnes-2.5-flash 同题 3 题实测
+2.0/6.5/3.4s，`upstream_model=agnes-2.5-flash`，无回退。
 
-本机 Ollama 与 `jev-decision` 技能已于 2026-10-23 删除，判定能力归零。对照实测
-（`agent-knowledge/250`、`work/judge-paid-20261023/REPORT.md`，同一 16 项中文 +
-4 项英文 noul）：
+以下对照表是 **2026-10-23** 的取证（当时 deepseek-flash 可用），保留作历史依据：
 
 | 后端 | noul CN/EN | choice 两序一致 | 摘要命中 | 单次均值 |
 |---|---|---|---|---|
@@ -52,15 +55,15 @@ BASE_URL = os.getenv("MANAGER_LLM_BASE_URL", "http://127.0.0.1:3456").rstrip("/"
 API_KEY = os.getenv("MANAGER_LLM_API_KEY", "")
 
 #: 钉死具体模型。经 CCR 需 provider 前缀；禁写 `openrouter/auto`（会自动选最便宜的
-#: 可用模型，最便宜可能是付费档）。
-MODEL = os.getenv("JUDGE_MODEL", "deepseek/deepseek-flash")
+#: 可用模型，最便宜可能是付费档）。2026-10-29 起默认 agnes-2.5-flash。
+MODEL = os.getenv("JUDGE_MODEL", "agnes/agnes-2.5-flash")
 
-#: 单题硬超时（秒）。实测均值 3.3s、长尾 11s；30s 给冷启动与排队留余量，
+#: 单题硬超时（秒）。agnes-2.5-flash 实测 2.0/6.5/3.4s；30s 给冷启动与排队留余量，
 #: 又能在 5 题 × 30s 内被 vitals 的 180s 兜住。
 TIMEOUT_S = float(os.getenv("JUDGE_TIMEOUT", "30"))
 
 #: 单题**判定**输出上限。判定只要一个 ~100 字 JSON；给 1200 是防 reasoning 模型
-#: 把思考过程也吐出来（`deepseek-flash` 会带 `reasoning_content`）。
+#: 把思考过程也吐出来（旧 deepseek-flash 会带 `reasoning_content`）。
 MAX_TOKENS = int(os.getenv("JUDGE_MAX_TOKENS", "1200"))
 
 #: 通用文本生成（摘要 / 长文）的上限。与 PT-08 对照口径一致（4000）——

@@ -339,19 +339,23 @@ class TestRemoteDispatch(_Base):
         local_judge.BACKEND = "remote"
 
     def test_dispatch_returns_answers_and_counts_ok(self):
+        # 假数据用**当前** JUDGE_MODEL：2026-10-29 已由 deepseek 换 agnes，
+        # 写死旧名会让换模型后这条必红（标签与真实模型无关的另一回事）。
+        judge_model = local_judge.remote_judge.MODEL
         fake = {"answers": {"q": {"type": "noul", "noul": 1.0}},
-                "model": "deepseek/deepseek-flash",
+                "model": judge_model,
                 "usage": {"prompt_tokens": 11, "completion_tokens": 7, "calls": 1}}
         with mock.patch.object(local_judge.remote_judge, "judge", return_value=fake) as m:
             out = local_judge.judge({"q": {"type": "noul", "instructions": "在不在？"}},
                                     state="s", timeout_s=9, use_cache=False)
         m.assert_called_once()
         self.assertEqual(out["answers"]["q"]["noul"], 1.0)
-        self.assertEqual(out["model"], "deepseek/deepseek-flash")
+        self.assertEqual(out["model"], judge_model)
         st = local_judge.status()
         self.assertEqual(st["ok"], 1)
-        self.assertEqual(st["backend"], "deepseek-flash")
-        self.assertEqual(st["model"], "deepseek/deepseek-flash")
+        # backend 是给人看的短名，必须跟着 JUDGE_MODEL 走（写死会在换模型后自相矛盾）
+        self.assertEqual(st["backend"], judge_model.rsplit("/", 1)[-1])
+        self.assertEqual(st["model"], judge_model)
 
     def test_remote_failure_maps_to_unavailable_with_kind(self):
         err = local_judge.remote_judge.RemoteJudgeUnavailable("网关超时", kind="timeout")

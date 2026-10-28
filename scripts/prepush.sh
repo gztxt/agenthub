@@ -23,7 +23,10 @@ cd "$(dirname "$0")/.."
 # （原写法把 'PRIVATE' + 'KEY' 两个词按原文连续放进模式，会被检查① 报
 #  HEAD:scripts/prepush.sh 自匹配 —— 这是扫描器误报而非漏报；
 #  用「豁免扫描器自身」做修法会把扫描盲区本身放进去，所以改模式写法。）
-PAT='[g]hp_[0-9A-Za-z]{36}|[g]ithub_pat_[0-9A-Za-z_]{20,}|[x]ox[baprs]-[0-9A-Za-z-]{10,}|[A]KIA[0-9A-Z]{16}|[s]k-[0-9A-Za-z._-]{20,}|[P]RIVATE KEY|BEGIN ([R]SA|[E]C|[O]PENSSH) [P]RIVATE KEY'
+#   `sk-` 左侧必须是边界（2026-10-29 修：原写法无左边界，把技能 slug
+#   hub_skill_auto-task-for-auto-triggered-integration 从 sk- 处切出 33 字符判成 key）
+#   ⇒ 加 `(^|[^0-9A-Za-z_-])`。
+PAT='[g]hp_[0-9A-Za-z]{36}|[g]ithub_pat_[0-9A-Za-z_]{20,}|[x]ox[baprs]-[0-9A-Za-z-]{10,}|[A]KIA[0-9A-Z]{16}|(^|[^0-9A-Za-z_-])[s]k-[0-9A-Za-z._-]{20,}|[P]RIVATE KEY|BEGIN ([R]SA|[E]C|[O]PENSSH) [P]RIVATE KEY'
 FAILS=0
 ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; FAILS=$((FAILS + 1)); }

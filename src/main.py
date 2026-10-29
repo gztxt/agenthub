@@ -106,7 +106,22 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.175"
+VERSION = "0.13.176"
+
+# v0.13.176（2026-10-29）：难度→档位（**只决定起点，只升不降**）。
+# 联网调研后刻意没做成"难度表直接当路由器"（那是 router 文献里的"信心剧场"）：
+#   · scixa《Model Tier Switching》把「用模型自评的 difficulty 做路由信号」列为头号病害；
+#     arXiv 2605.24299（20 模型×6 基准）实测置信度与表现基本无关 ⇒ 自评只能当起点先验。
+#   · TokenTrim 在 RouterArena 的消融：把难度信号整条拿掉，成本-准确率前沿几乎不动
+#     ⇒ 难度不产生收益，收益必须由 verdict 与升档承担。
+# 所以本版只做两件**能验证**的事：
+#   ① 模型档位：t1/t2/t3（`tiercfg.py`），只填空、不覆盖 Leader 显式选择、失败按档位上一档。
+#   ② 执行者档位：`promote_agent()` 在难度 3 时抬到工具环最完整的 a3（claude-code/codex），
+#      **只升不降**——
+#      降级要结果证据，自评不配。汇总节点（自动补的与 Leader 自写的）一律钉顶层。
+# ③ 同时暴露一个会打脸的指标 `model_tier_effective`：本机实测 5 个模型 ID 全被
+#    网关改写为 agnes-2.5-flash ⇒ 模型档位当前**不影响能力**，只有执行者档位有效。
+#    这个数不报，"档位映射"就是自我感觉良好。
 
 # v0.13.175（2026-10-29）：派发扩池 2 → 11 + 失败重试改升档（cascade）。
 # ① 扩池：新增 9 个带工具环的 CLI 执行者（claude-code/codex/dsh/pi/codebuddy/grok/

@@ -80,6 +80,44 @@ class TestEscalate(unittest.TestCase):
         # 同模型等于原地再赌：continue 到 agent 阶梯，而不是报 changed=True
         self.assertEqual(t["reason"], "agent:codex")
 
+    def test_tier_path_goes_one_step_up(self):
+        """难度定起点档 ⇒ 失败就上一档，而不是跳到一个与当前档无关的模型。"""
+        cfg = {"t1": ["cheap"], "t2": ["mid"], "t3": ["strong"]}
+        t = tasks.escalate_target("claude", "cheap", 1, {"claude"},
+                                  ccr_agents={"claude"}, tier="t1",
+                                  tiers_cfg=cfg, catalog={"cheap", "mid", "strong"},
+                                  catalog_checked=True)
+        self.assertTrue(t["changed"])
+        self.assertEqual(t["model"], "mid")
+        self.assertEqual(t["reason"], "tier:t2:mid")
+
+    def test_tier_top_falls_to_agent_ladder(self):
+        """已在最高档：再升没有模型可给了 ⇒ 换 agent（工具环更强）。"""
+        cfg = {"t1": ["cheap"], "t2": ["mid"], "t3": ["strong"]}
+        t = tasks.escalate_target("claude", "strong", 1, {"claude", "claude-code"},
+                                  ccr_agents={"claude"}, tier="t3", tiers_cfg=cfg,
+                                  catalog={"cheap", "mid", "strong"}, catalog_checked=True)
+        self.assertTrue(t["changed"])
+        self.assertEqual(t["agent_id"], "claude-code")
+
+    def test_tier_never_escalates_down(self):
+        """起点就是 t3、池里只有更低档 —— 不许给出降档目标。"""
+        cfg = {"t1": ["cheap"], "t2": ["mid"], "t3": ["strong"]}
+        t = tasks.escalate_target("claude", "strong", 1, {"claude"}, ccr_agents={"claude"},
+                                  tier="t3", tiers_cfg=cfg, catalog={"cheap", "mid"},
+                                  catalog_checked=True)
+        self.assertFalse(t["changed"])
+        self.assertEqual(t["reason"], "no_escalation_path")
+
+    def test_tier_without_catalog_falls_back_to_chain(self):
+        """清单取不到 ⇒ 档位路径不成立，退回旧链路（同时不假称升过档）。"""
+        cfg = {"t1": ["cheap"], "t2": ["mid"]}
+        with mock.patch.dict(os.environ, {"TASK_ESCALATE_MODELS": "m1"}, clear=False):
+            t = tasks.escalate_target("claude", "cheap", 1, {"claude"}, ccr_agents={"claude"},
+                                      tier="t1", tiers_cfg=cfg, catalog=set(),
+                                      catalog_checked=False)
+        self.assertEqual(t["model"], "m1")
+
     def test_escalation_columns_declared(self):
         """升档来源必须落库：不记就分不清"升档后又败"与"同档又败"。"""
         cols = {c for c, _t in tasks._TASK_COLUMNS}

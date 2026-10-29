@@ -148,9 +148,18 @@ _TASK_COLUMNS = (
     #   · model_choice  = Leader 拆解时**请求**的模型（意图值，可能被上游改写/回落）。
     # 合成一列就再也分不清「选了没生效」与「选了但网关换了」——正是 v0.13.167 那条的病根。
     ("model_choice", "TEXT"),
-    # difficulty 1~3（1 简单/2 普通/3 困难），只用于**选型依据与复盘**，不参与预算与判活：
-    # 拿它当阈值就是拿模型的自评当事实。
+    # difficulty 1~3（1 简单/2 普通/3 困难），只用于**起始档位与复盘**，不参与预算与判活：
+    # 拿它当阈值就是拿模型的自评当事实（`tiercfg.py` 顶部有两条文献判据）。
     ("difficulty", "INTEGER"),
+    # 2026-10-29 难度→档位：`tier` / `model_planned` 是**拆解时的决议**，与 `model`
+    # （执行后回包里的实发模型）三列三个口径。不记 `model_planned` 就分不清
+    # 「按档位发的」与「Leader 显式点的」；不记 `tier` 就没法算难度到底有没有用。
+    ("tier", "TEXT"),
+    ("model_planned", "TEXT"),
+    ("tier_reason", "TEXT"),
+    # 执行者被难度地板抬上来的来源（空 = 没动）。与 `escalated_from_*` 是两个阶段：
+    # 这里发生在**拆解期**（还没花钱），escalated 发生在**失败后**（已经花过一次）。
+    ("agent_promoted_from", "TEXT"),
 )
 
 
@@ -270,9 +279,10 @@ def _known_agent_ids() -> set:
         return set()
 
 
-def _next_escalation_note(agent_id: str, model: Optional[str], next_attempt: int) -> str:
+def _next_escalation_note(agent_id: str, model: Optional[str], next_attempt: int,
+                          tier: Optional[str] = None) -> str:
     """写进 error 字段的一句话：下一次重试会升到哪 —— 没有目标就直说没有。"""
-    t = escalate_target(agent_id, model, next_attempt, _known_agent_ids())
+    t = escalate_target(agent_id, model, next_attempt, _known_agent_ids(), tier=tier)
     return t["reason"]
 
 
@@ -291,8 +301,30 @@ def _ccr_model_agents() -> set:
         return {"claude", "jcode"}
 
 
+def _plan_tiers(items: List[dict], pool: set) -> tuple:
+    """难度→起始档位的**接线层**：只负责取清单与池子，判断全在 `tiercfg.py`（纯函数）。
+
+    清单取不到（网关挂/无凭据）时 `checked=False` ⇒ 不注入任何模型，
+    原因写 `catalog_unavailable`。这里绝不"给个默认值凑合"——
+    那会把「不知道」伪装成「选过了」。
+    """
+    import tiercfg as tierlib
+    try:
+        import modelcfg
+        cat = modelcfg.catalog_ids()
+        ids = {str(x) for x in (cat.get("ids") or set())}
+        checked = bool(cat.get("checked")) and bool(ids)
+    except Exception:  # noqa: BLE001 — 选型是增强，不许带倒拆解
+        ids, checked = set(), False
+    return tierlib.plan(items, catalog=ids, checked=checked, ccr_agents=_ccr_model_agents(),
+                        pool=pool)
+
+
 def escalate_target(agent_id: str, model_choice: Optional[str], attempts: Any,
-                    known: set, ccr_agents: Optional[set] = None) -> Dict[str, Any]:
+                    known: set, ccr_agents: Optional[set] = None,
+                    tier: Optional[str] = None, tiers_cfg: Optional[dict] = None,
+                    catalog: Optional[set] = None,
+                    catalog_checked: bool = False) -> Dict[str, Any]:
     """失败重试的**升档**目标（纯函数，可单测）。
 
     旧行为（v0.13.174 之前）：重试＝同 agent、同模型原地再跑一遍，只是把上次的
@@ -317,6 +349,18 @@ def escalate_target(agent_id: str, model_choice: Optional[str], attempts: Any,
             "from_agent": agent_id, "from_model": model_choice}
     if n <= 0:
         return dict(base, reason="first_attempt")
+
+    # ⓪ 档位路径（v0.13.176）：难度决定了起点档，失败就**上一档**，而不是跳到一个
+    #    和当前档无关的模型。已在最高档 ⇒ 落到 agent 阶梯。永不向下（next_tier 只向上）。
+    if tier and tier not in ("explicit", "native"):
+        import tiercfg as tierlib
+        cfg = tiers_cfg if tiers_cfg is not None else tierlib.parse_tiers()
+        nxt = tierlib.next_tier(tier, cfg)
+        if nxt and agent_id in (ccr_agents if ccr_agents is not None else _ccr_model_agents()):
+            m, why = tierlib.first_usable(nxt, cfg, catalog, catalog_checked)
+            if m and m != (model_choice or ""):
+                return dict(base, agent_id=agent_id, model=m, changed=True,
+                            reason="tier:%s:%s" % (nxt, m))
 
     chain = _csv_env("TASK_ESCALATE_MODELS")
     if chain and agent_id in (ccr_agents if ccr_agents is not None else _ccr_model_agents()):
@@ -518,7 +562,8 @@ LEADER_PROMPT = """你是任务编排器。把用户目标拆解为子任务 DAG
 - agent_id 只能从这里选：{agents}（选最合适的；不确定用 {default}）
 - **要读文件 / 跑命令 / 改代码**的子任务，必须选带工具环的执行 Agent（claude-code、codex、dsh、pi、codebuddy、grok、hermes、omp、cursor）；claude/jcode 是纯文本端点，做不了这类活，选它必编造
 - difficulty 取 1/2/3：1 = 单点取证或机械核对；2 = 要读多份材料后归纳；3 = 要取舍/设计/跨模块推理
-- model 可选：给了就必须从 {models} 里选；机械任务优先便宜模型，难度 3 才用强模型。不确定就**省略该字段**
+- model **一般省略**：省略后由 difficulty 决定起始档位（t1 便宜 / t2 中 / t3 强，失败会自动升档）。
+  只有你确实要用某个特定模型时才填，且必须从 {models} 里选
 - 子任务数 ≤ {maxn}；无依赖的兄弟任务会被并行执行，有依赖写 deps
 - 聚合/汇总类任务必须 deps 列出全部上游
 """
@@ -661,7 +706,16 @@ def ensure_synthesis(items: List[dict], default_agent: str) -> tuple:
     """
     leaves = _leaves(items)
     if len(leaves) <= 1:
-        return items, {"added": False, "reason": "single_leaf", "leaves": leaves}
+        # Leader 自己写的聚合节点同样是"结论出口"，失败最贵、最难发现 ⇒ 一并钉最高档。
+        # 判据是结构（deps 覆盖其余全部），不是标题里有没有"汇总"二字。
+        pinned = ""
+        if len(leaves) == 1:
+            for it in items:
+                if it["id"] == leaves[0] and set(it["deps"]) >= {x["id"] for x in items} - {it["id"]}:
+                    it["pinned_tier"] = "top"
+                    pinned = it["id"]
+        return items, {"added": False, "reason": "single_leaf", "leaves": leaves,
+                       "pinned": pinned}
     if len(items) >= MAX_TASKS:
         return items, {"added": False, "reason": "capacity", "leaves": leaves,
                        "hint": "已到 %d 条硬上限，未追加汇总节点" % MAX_TASKS}
@@ -669,8 +723,12 @@ def ensure_synthesis(items: List[dict], default_agent: str) -> tuple:
     while any(x["id"] == sid for x in items):
         sid = "%s%d" % (SYNTH_ID, i)
         i += 1
+    # `pinned_tier="top"`：汇总是最不该省的那一步 —— 上游各档都对、汇总写歪，
+    # 整条 run 的结论就废了，而这一点下游**看不出来**（router 文献里的
+    # "never demote synthesis" 同一理由：失败最贵、最难发现）。
     out = items + [{"id": sid, "task": SYNTH_TASK, "agent_id": default_agent,
-                    "deps": list(leaves), "difficulty": 2, "model": None}]
+                    "deps": list(leaves), "difficulty": 2, "model": None,
+                    "pinned_tier": "top"}]
     return out, {"added": True, "id": sid, "deps": leaves}
 
 
@@ -752,11 +810,14 @@ def _create_run(goal: str, items: List[dict], *, verify_kind: str,
     for it in items:
         db.execute(
             "INSERT INTO tasks(run_id,task_id,trace_id,goal,prompt,agent_id,deps,status,"
-            "verify_kind,budget_ms,budget_tokens,difficulty,model_choice,created_at,updated_at)"
-            " VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?,?,?)",
+            "verify_kind,budget_ms,budget_tokens,difficulty,model_choice,"
+            "tier,model_planned,tier_reason,agent_promoted_from,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?,?,?,?,?,?,?)",
             (run_id, it["id"], run_id, goal, it["task"], it["agent_id"],
              json.dumps(it["deps"]), verify_kind, budget_ms, budget_tokens,
-             it.get("difficulty"), it.get("model"), now, now))
+             it.get("difficulty"), it.get("model"),
+             it.get("tier"), it.get("model_planned"), it.get("tier_reason"),
+             it.get("agent_promoted_from") or "", now, now))
     db.execute("INSERT INTO task_runs(run_id,parent_run_id,round,goal,origin,auto_rounds,created_at)"
                " VALUES(?,?,?,?,?,?,?)",
                (run_id, parent_run_id, round_no, goal, origin,
@@ -830,9 +891,10 @@ async def decompose(body: DecomposeIn):
         raise HTTPException(502, f"Leader 拆解失败: {e}")
     # 汇总节点在 try 之外补：它抛错是**我们的** bug，不该被报成「Leader 拆解失败」。
     items, synth = ensure_synthesis(items, default)
+    items, tier_note = _plan_tiers(items, known)
     if body.dry_run:
         return {"run_id": None, "goal": body.goal, "tasks": items, "running": False,
-                "dry_run": True, "round": 1, "synthesis": synth,
+                "dry_run": True, "round": 1, "synthesis": synth, "tiers": tier_note,
                 "auto_rounds": bool(body.auto_rounds), "max_rounds": MAX_ROUNDS,
                 "note": "dry_run：只拆解未落库，确认后传 dry_run=false 再调一次"}
     run_id = _create_run(body.goal, items, verify_kind=body.verify_kind,
@@ -841,7 +903,7 @@ async def decompose(body: DecomposeIn):
     if body.auto_run:
         _start_runner(run_id)
     return {"run_id": run_id, "goal": body.goal, "tasks": items,
-            "running": body.auto_run, "round": 1, "synthesis": synth,
+            "running": body.auto_run, "round": 1, "synthesis": synth, "tiers": tier_note,
             "auto_rounds": bool(body.auto_rounds), "max_rounds": MAX_ROUNDS}
 
 
@@ -940,6 +1002,7 @@ async def _replan_once(run_id: str, auto: bool = False,
                    ("replan_invalid: %s" % str(e.detail)[:150], run_id))
         return {"ok": False, "run_id": run_id, "gate": gate,
                 "error": "重拆 DAG 非法: %s" % e.detail, "created": None}
+    items, _tier_note = _plan_tiers(items, known)
     # 占位：只有第一个调用者能把 child_run_id 从 NULL 改掉 ⇒ 并发重拆不会产生两条子 run。
     child_id = uuid.uuid4().hex[:10]
     won = db.execute("UPDATE task_runs SET child_run_id=? WHERE run_id=? AND child_run_id IS NULL",
@@ -1003,11 +1066,101 @@ async def dispatch_pool():
     能一眼回答 —— 是二进制不在、凭据缺、还是它根本不在池里。模块里的
     `adapter_status()` 是同一份判定，这里只做出口。
     """
-    import registry
+    import registry, tiers as tierlib
     status = registry.adapter_status()
     return {"ids": registry.dispatchable_ids(), "agents": status,
+            "tiers": tierlib.parse_tiers(),
             "escalate": {"models": _csv_env("TASK_ESCALATE_MODELS"),
                          "ladder": _csv_env("TASK_ESCALATE_LADDER", "claude-code,codex")}}
+
+
+@router.get("/api/tasks/tiers")
+async def dispatch_tiers():
+    """难度→档位的**配置**与**证伪数据**（v0.13.176）。
+
+    为什么要第二个接口：档位顺序（t1<t2<t3）是**声明**不是测量。
+    没有这个接口，`difficulty` 就只是个"看着很聪明"的字段 ——
+    判断它有没有用，只能靠 `audit` 里 difficulty 与首轮成功率的关系。
+    样本不足 10 条时**不给结论**：5 条样本算出来的比率是噪声，不是证据。
+    """
+    import tiercfg as tierlib
+    cfg = tierlib.parse_tiers()
+    mapping = tierlib.parse_mapping()
+    try:
+        import modelcfg
+        cat = modelcfg.catalog_ids()
+        ids = {str(x) for x in (cat.get("ids") or set())}
+        checked = bool(cat.get("checked")) and bool(ids)
+    except Exception:  # noqa: BLE001
+        ids, checked = set(), False
+
+    import registry
+    pool = set(registry.dispatchable_ids())
+    a_cfg = tierlib.parse_agent_tiers()
+    a_floor = tierlib.parse_agent_floor()
+    resolved = []
+    for d in (1, 2, 3):
+        t = tierlib.tier_for(d, mapping, tierlib.DEFAULT_FLOORS, cfg)
+        m, why = tierlib.first_usable(t, cfg, ids, checked)
+        # 用默认执行者（最常见的 jcode）走一遍地板，让"难度 3 会被抬到谁"直接可读。
+        prom, frm, ar = tierlib.promote_agent("jcode", d, pool, a_cfg, a_floor)
+        resolved.append({"difficulty": d, "tier": t, "model": m, "reason": why,
+                         "agent_default": "jcode", "agent": prom,
+                         "agent_promoted_from": frm, "agent_reason": ar})
+
+    rows = db.query(
+        "SELECT difficulty, COUNT(*) n,"
+        " SUM(CASE WHEN status='success' AND COALESCE(attempts,0)=0 THEN 1 ELSE 0 END) first_pass,"
+        " SUM(CASE WHEN COALESCE(attempts,0)>0 THEN 1 ELSE 0 END) retried,"
+        " SUM(CASE WHEN COALESCE(escalated_from_agent,'')<>''"
+        "           OR COALESCE(escalated_from_model,'')<>'' THEN 1 ELSE 0 END) escalated,"
+        " COALESCE(SUM(spent_tokens),0) tokens,"
+        " COALESCE(SUM(spent_ms),0) ms"
+        " FROM tasks WHERE difficulty IS NOT NULL GROUP BY difficulty ORDER BY difficulty")
+    # 模型档位**到底生效没有**：计划模型 ≠ 回包模型 ⇒ 网关改写了（本机 2026-10-29 实测
+    # 5 个 ID 全回 agnes-2.5-flash）。这个数不报，"档位映射"就是自我感觉良好。
+    mt = db.query("SELECT COUNT(*) n,"
+                  " SUM(CASE WHEN COALESCE(model,'')<>'' THEN 1 ELSE 0 END) observed,"
+                  " SUM(CASE WHEN COALESCE(model_planned,'')<>'' AND COALESCE(model,'')<>''"
+                  "           AND model_planned<>model THEN 1 ELSE 0 END) mismatch"
+                  " FROM tasks WHERE COALESCE(model_planned,'')<>''")[0]
+    mt_n, mt_o, mt_m = int(mt["n"] or 0), int(mt["observed"] or 0), int(mt["mismatch"] or 0)
+    # 分母只用**有观测值**的样本：`model` 为空说明回包没带模型，那不是"生效"，是"没观测"。
+    # 把没观测算进分母＝制造一个好看的 100%，正是本模块要防的假绿。
+    model_eff = {"planned": mt_n, "observed": mt_o, "rewritten": mt_m,
+                 "effective_rate": round(1 - mt_m / mt_o, 3) if mt_o else None,
+                 "note": ("回包模型≠计划模型 ⇒ 网关改写了 ID，档位不影响能力"
+                          if mt_o else "无观测值（回包未带 model）⇒ 判不了，不是 0% 也不是 100%")}
+
+    audit = []
+    for r in rows:
+        n = int(r["n"] or 0)
+        fp = int(r["first_pass"] or 0)
+        audit.append({"difficulty": r["difficulty"], "n": n,
+                      "first_pass_rate": round(fp / n, 3) if n else None,
+                      "retried": int(r["retried"] or 0), "escalated": int(r["escalated"] or 0),
+                      "tokens": int(r["tokens"] or 0), "ms": int(r["ms"] or 0)})
+
+    verdict = "样本不足：无法判断难度与结果是否相关"
+    big = [a for a in audit if a["n"] >= 10]
+    if len(big) >= 2:
+        rates = [a["first_pass_rate"] for a in big if a["first_pass_rate"] is not None]
+        spread = round(max(rates) - min(rates), 3) if len(rates) >= 2 else None
+        if spread is not None and spread < 0.1:
+            verdict = ("难度与首轮成功率无显著关联（极差 %.3f < 0.1）⇒ "
+                       "该映射没有证据支持，应考虑删掉而不是继续调阈值" % spread)
+        elif spread is not None:
+            verdict = "难度与首轮成功率极差 %.3f（n≥10 的各档），映射值得保留并继续观察" % spread
+
+    return {"ok": True, "order": tierlib.order(cfg), "tiers": cfg,
+            "mapping": {str(k): v for k, v in sorted(mapping.items())},
+            "floors": {str(k): v for k, v in sorted(tierlib.DEFAULT_FLOORS.items())},
+            "catalog": {"checked": checked, "size": len(ids)},
+            "agent_order": sorted(a_cfg.keys()),
+            "agent_tiers": a_cfg,
+            "agent_floor": {str(k): v for k, v in sorted(a_floor.items())},
+            "model_tier_effective": model_eff,
+            "resolved": resolved, "audit": audit, "verdict": verdict}
 
 
 @router.get("/api/tasks/runs")
@@ -1296,8 +1449,12 @@ async def _run_task(run_id: str, row: dict):
                      str(row.get("verify_reason") or "")[:300])) + prompt
 
     # ── 升档：第 N 次重试换一档（模型优先、其次 agent），换不动就写明原因 ──
-    exec_agent, exec_model = row["agent_id"], row.get("model_choice")
-    esc = escalate_target(exec_agent, exec_model, attempts_done, _known_agent_ids())
+    exec_agent = row["agent_id"]
+    # 三列三口径：model_planned（按档位决议）> model_choice（Leader 显式）>
+    # None（用该 agent 自己的默认）。执行前一律以"决议值"为准。
+    exec_model = row.get("model_planned") or row.get("model_choice")
+    esc = escalate_target(exec_agent, exec_model, attempts_done, _known_agent_ids(),
+                          tier=row.get("tier"))
     if esc["changed"]:
         exec_agent, exec_model = esc["agent_id"], esc["model"]
         db.execute("UPDATE tasks SET escalated_from_agent=?,escalated_from_model=?,updated_at=?"
@@ -1308,6 +1465,7 @@ async def _run_task(run_id: str, row: dict):
                              detail={"task": row["task_id"], "reason": esc["reason"],
                                      "from_agent": esc["from_agent"],
                                      "from_model": esc["from_model"],
+                                     "tier": row.get("tier"),
                                      "attempt": attempts_done})
 
     # ── B1：接单前置检索（记忆/知识库/技能），把线索拼进 prompt ──
@@ -1478,7 +1636,8 @@ async def _run_task(run_id: str, row: dict):
                             ("%s（自动重试 %d/%d，升档 %s）"
                              % (err, attempts_done + 1, MAX_AUTO_RETRY,
                                 _next_escalation_note(exec_agent, exec_model,
-                                                      attempts_done + 1)))[:500],
+                                                      attempts_done + 1,
+                                                      row.get("tier"))))[:500],
                             gaps[:500], verdict["status"], verify_ms, dur, spent_tokens,
                             used_model, _now(), run_id, row["task_id"]))
                 db.log_profile_event("task_exec", row["agent_id"], "retry", dur,

@@ -1,3 +1,41 @@
+## v0.13.176 — 难度→档位：只决定起点，只升不降
+
+> 来源：2026-10-29 用户令「实现难度到档位的映射；不要生搬硬套，先联网调研评估」。
+> 调研与设计全文见 `docs/DIFFICULTY-TIER-ROUTING-20261029.md`。
+
+### 为什么不是一张"难度→模型"表
+
+三篇一手材料的共同结论：**模型自评的难度不能当路由判据**（scixa "confidence theater"；
+arXiv 2605.24299 实测置信度与表现基本无关），且**难度信号本身不产生收益**
+（TokenTrim 在 RouterArena 的消融：拿掉难度路由器，前沿几乎不动）。
+所以硬路由表被否掉——它只会把"自评漂移"变成"静默降级"。
+
+### 落地的两档（语义不对称）
+
+1. **模型档位 `t1/t2/t3`**：只填空、不覆盖 Leader 显式选择、不猜 ID、不越模型域；
+   `tier / model_planned / tier_reason` 三列落库，与 `model`（回包实发）分口径。
+2. **执行者档位 `a1/a2/a3`**：`promote_agent()` 只在难度 3 时抬到 `a3`（claude-code/codex），
+   **只升不降**（降级要结果证据）；来源落 `agent_promoted_from`。
+3. 汇总节点（`t_sum` 与 Leader 自写的聚合）钉顶层，模型与执行者同时钉。
+4. 失败升档接档位：`t2 → t3`，已在顶档才落回 agent 阶梯。
+
+### 一次实测把"档位有效"的问号变成数字
+
+直连 CCR 打 5 个不同模型 ID，**回包全是 `agnes-2.5-flash`**
+（同期 `config.json.bak-20261029_005625-agnes-fallback`、上游 429）⇒ 模型档位当前是空转。
+新增 `GET /api/tasks/tiers` 的 `model_tier_effective`（planned / observed / rewritten /
+effective_rate，分母只算有观测的样本）与 `audit`（按难度的首轮成功率、重试、升档、token）。
+`audit.verdict` 在 n≥10 且极差<0.1 时**明写"该映射没有证据支持，应考虑删掉"**。
+
+### 验证
+
+- `tests/test_tiers.py` 26 例（含"显式选择不被覆盖""只升不降""清单取不到不猜 ID"）；
+  `tests/test_dispatch_escalate.py` 新增 4 例档位升档；L0 全量见下。
+- 影子 `:3200` 干跑：`d=3` 的两条由 jcode 抬到 claude-code，`d=2` 两条不动；
+  接口 `resolved` 三条与预期一致。
+- 生产未重启，本版仅影子验证。遗留：`model` 列在 jcode 任务上出现 NULL（独立缺陷，
+  导致观测分母为 0）；本版只保证"没观测不出假数"。
+
 ## v0.13.175 — 派发扩池 2 → 11 + 失败重试改升档
 
 > 来源：2026-10-29 用户令「执行下一步 2、3，另外 4 扩大到 claude/codex/dsh/pi/

@@ -7334,14 +7334,11 @@ function hhTime(ts) {                                   // 绝对日期：相对
   // v0.13.49：**不再带 HH:MM**。侧栏只有 240px 可用宽，时间占的那 5 个字符直接从
   // 摘要里抢走一小半可视长度（实测标题被挤到 0 宽）；挑哪条续聊也不靠天数内的钟点，
   // 日期足够定位。精确到分钟的信息没丢——它还在 title 悬停里。
-  // 2026-10-30：近两天改「今天 / 昨天」。它们一天只翻一次，不影响 DOM diff，
-  // 又从 5 个字符缩到 2 个字符——省下的宽度直接还给标题（同屏多 3 个汉字）。
-  // 更早仍用绝对 M-D；跨年补两位年份，否则去年的同月同日与今年无法区分。
+  // 2026-10-30（用户裁定）：**一律绝对日期 M-DD**。原先「今天 / 昨天」虽短，
+  // 但每隔一天就翻一次字面（2 字 ↔ 5 字），行尾日期右对齐后仍会跳宽度；
+  // 用户要的是「同一列、同一形状」。跨年补两位年份，否则去年同月同日与今年无法区分。
   if (!ts) return '';
   const d = new Date(ts * 1000), now = new Date(), p = n => String(n).padStart(2, '0');
-  const same = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-  if (same(d, now)) return '今天';
-  if (same(d, new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))) return '昨天';
   const md = p(d.getMonth() + 1) + '-' + p(d.getDate());
   return d.getFullYear() === now.getFullYear() ? md : p(d.getFullYear() % 100) + '-' + md;
 }

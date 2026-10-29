@@ -395,8 +395,12 @@
         .nav-hist .hh-row { display: flex; align-items: baseline; gap: 6px; padding: 4px 6px; cursor: pointer;
                             border-radius: 8px; font-size: var(--fs-xs); color: var(--text-2); min-width: 0; }
         .nav-hist .hh-row:hover { background: var(--surface-2); color: var(--text-1); }
-        .nav-hist .hh-t { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .nav-hist .hh-ts { flex: none; color: var(--muted); font-family: var(--font-mono); }
+        /* 行尾日期**必须每行同一列**（2026-10-30 用户裁定）：原来标题是 `flex:0 1 auto`，
+           短标题时整行内容总宽小于卡片宽，flex 从行首开始排 ⇒ 日期停在哪取决于标题长度，
+           8 行能排出 8 个位置。改法：标题 `flex:1 1 auto` 吃掉全部剩余宽度，把目录尾名与
+           日期顶到最右；日期再补 `margin-left:auto` 兜底（标题为空时也不会贴住目录名）。 */
+        .nav-hist .hh-t { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .nav-hist .hh-ts { flex: none; margin-left: auto; text-align: right; color: var(--muted); font-family: var(--font-mono); }
         /* 目录尾名可压缩：原 `flex:none` 会先占满 6em 再把标题挤到只剩几个字
            （长路径工程里标题几乎不可读）。改成可收缩、下限 2em，冲突时先让标题。 */
         .nav-hist .hh-cw { flex: 0 1 auto; min-width: 2em; color: var(--muted); font-family: var(--font-mono);
@@ -3149,6 +3153,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=b6a84335"></script>
+    <script src="/static/hub.js?v=def2478b"></script>
 </body>
 </html>

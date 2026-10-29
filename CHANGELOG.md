@@ -1,3 +1,29 @@
+## v0.13.173 — 技能中心归档根补两仓：show-me / frontend-design
+
+> 来源：2026-10-29 用户点名安装三个技能（grill-me / show-me / frontend-design）。
+
+### 根因：文件装好了，闸门把软链拒了
+
+`grill-me`、`grill-with-docs` 早已在 `技术文档/mattpocock-skills`（09-25 装，已登记归档根），
+缺的只是 codebuddy 这一路的软链；`show-me`（MIT）与 `frontend-design`（Apache-2.0）本轮才引入，
+clone 落 `技术文档/show-me` 与 `技术文档/anthropic-skills`（后者稀疏到 `skills/frontend-design`）。
+
+三路软链都建好后再查技能中心，`grill-me` 出现、另两个**一条都搜不到**：`_inside()` 按 realpath
+判越界，两个新仓不在 `ARCHIVE_ROOTS` ⇒ 被发现点软链进来也被拒读，**且不报错**。
+这与 10-27 `i-have-adhd` 完全同形——盘上有文件、路也在扫、只剩闸门在挡。
+
+### 修法与边界
+
+`ARCHIVE_ROOTS` 逐仓追加两条（不把 `技术文档/` 整体放宽：那会把 `snapshots/`、`全量备份/`
+与 `EXCLUDED_DIRS` 里四个桶一起放进来）。`tests/test_archive_roots.py` 的集合断言同步更新。
+
+### 验证
+
+- `pytest tests/test_archive_roots.py tests/test_skill_invoke.py tests/test_skill_facade.py tests/test_skill_list_q_parity.py` → 86 passed。
+- 新代码**进程内**扫三路（codebuddy / claude / agents），六个名字全中：
+  `show-me` `frontend-design` `grill-me` `grill-with-docs` `grilling` `domain-modeling`。
+- 生产 hub 仍是旧进程 ⇒ 面板要等**重启后**才看得到这两条；重启闸门当前是 `term_sessions>0`。
+
 ## v0.13.172 — Hub MCP 出口面：只读白名单 + 派发闸门（D 步）
 
 > 来源：PT-20261028-01 的 D 方案（反向挂 MCP）。用户裁定「先做 1，验证合格再继续 2」。

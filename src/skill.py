@@ -166,6 +166,12 @@ ARCHIVE_ROOTS: Dict[str, str] = {
     "/fs/1000/ftp/技术文档/hallmark": "1 条 · 09-25 用户点名评估并安装的技能仓",
     "/fs/1000/ftp/技术文档/Agent-Reach": "1 条 · 09-25 用户点名评估并安装的技能仓",
     "/fs/1000/ftp/技术文档/i-have-adhd": "1 条 · i-have-adhd 输出风格技能（ADHD Mode），软链在 ~/.claude/skills 但 realpath 落在本归档根，此前未登记导致被越界闸门拒读",
+    # 2026-10-29 用户点名装：show-me（MIT，charlie947/show-me）+ frontend-design（Apache-2.0，
+    # anthropics/skills）。两者都是**完整上游 clone**（show-me 全量 / anthropic-skills 稀疏到
+    # skills/frontend-design），按归档军规落 技术文档/<仓>/，所以必须逐仓登记，否则四个发现点的
+    # 软链会被越界闸门静默拒读（与 i-have-adhd 同一种失败形态）。
+    "/fs/1000/ftp/技术文档/show-me": "1 条 · show-me：把方案/对比渲染成自包含 HTML 并打开",
+    "/fs/1000/ftp/技术文档/anthropic-skills": "1 条 · frontend-design 官方版（稀疏 checkout，仅 skills/frontend-design）",
 }
 
 # ── v0.13.127 PT-20261019-01：路由级注记（B3 证伪事实的落点）────────────────

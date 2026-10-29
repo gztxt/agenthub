@@ -106,7 +106,16 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.172"
+VERSION = "0.13.173"
+
+# v0.13.173（2026-10-29）：技能中心**归档根**补两仓 —— show-me 与 frontend-design。
+# 为什么需要：两个技能按归档军规 clone 在 `技术文档/<仓>/`，软链进四个发现点；
+# 而 `_inside()` 按 realpath 判越界，仓不在 `ARCHIVE_ROOTS` 里 ⇒ 四个发现点全部
+# **静默拒读**，技能中心搜不到、`hub_skill_invoke` 也点不到（与 10-27 `i-have-adhd`
+# 同一种失败形态：文件在盘上、路也在扫，只是被自己的闸门挡掉，且不报错）。
+# 逐个仓登记而不是把 `技术文档/` 整体放宽：后者会把 snapshots / 全量备份 /
+# EXCLUDED_DIRS 里的四个桶一起放进来，等于用一条 FAIL 换一条已定结论。
+# 判据：`tests/test_archive_roots.py` 的集合断言 + `_allowed_roots()` 逐根 subTest。
 
 # v0.13.172（2026-10-28）：Hub MCP **出口面**收窄 —— 白名单 + 派发闸门（PT-20261028-01 D 步）。
 # 为什么需要：把 hub MCP 挂给别的 agent 会话（dsh 的 Bot）后，「默认全给、再想扣哪个」是错的

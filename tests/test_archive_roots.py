@@ -62,6 +62,9 @@ class ArchiveRootsTest(unittest.TestCase):
             "/fs/1000/ftp/技术文档/hallmark",
             "/fs/1000/ftp/技术文档/Agent-Reach",
             "/fs/1000/ftp/技术文档/i-have-adhd",
+            # 2026-10-29 用户点名装的两个第三方技能仓（show-me MIT / frontend-design Apache-2.0）
+            "/fs/1000/ftp/技术文档/show-me",
+            "/fs/1000/ftp/技术文档/anthropic-skills",
         }, "归档根集合变了：新增/删除都要在本文件与 CHANGELOG 里说清理由")
         # 用 monkeypatch 把假根换成真路径，验证「进了表就会被放进白名单」
         skill.ARCHIVE_ROOTS_ACTIVE = dict(_ARCHIVE)

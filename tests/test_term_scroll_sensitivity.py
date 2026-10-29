@@ -240,7 +240,12 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.172"
+    CURRENT_VERSION = "0.13.173"
+    #: v0.13.173：技能中心归档根补两仓（show-me / frontend-design）。
+    #: 关键词取自 main.py 版本注释：归档根 / show-me / frontend-design / 越界 / 静默拒读。
+    VERSION_ROOT_CAUSES["0.13.173"] = (
+        "归档根", "show-me", "frontend-design", "越界", "静默拒读",
+    )
     #: v0.13.172：Hub MCP 出口面收窄（白名单 + 派发闸门）。关键词取自 main.py 版本注释：
     #: 出口面 / 白名单 env / 派发闸门 env / 自指闭环 / blocked / unknown。
     VERSION_ROOT_CAUSES["0.13.172"] = (

@@ -240,7 +240,7 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.179"
+    CURRENT_VERSION = "0.13.180"
     #: v0.13.173：技能中心归档根补两仓（show-me / frontend-design）。
     #: 关键词取自 main.py 版本注释：归档根 / show-me / frontend-design / 越界 / 静默拒读。
     #: v0.13.174：派发三补（汇总节点 / 超时口径 / 拒答说法）。关键词取自 main.py 注释：
@@ -249,6 +249,14 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     #: v0.13.176：难度→档位。关键词取自 main.py 该版本注释实际写下的字句。
     #: v0.13.178：项目清单精度。关键词取自 main.py 该版本注释实际写下的字句。
     #: v0.13.179：历史会话行日期「绝对字面 + 同一列」。关键词同样取自 main.py 实际字句。
+    #: v0.13.180：关键词取自版本注释里**实际写下的字句**。
+    #: 核心是「判例 255 复发在寻址层」「ui_pin_host 把自适应整个关掉」「没有子网路由
+    #: ⇒ 超时是必然」「dsh-lo 补齐回环转发」「三网各一层」。
+    VERSION_ROOT_CAUSES["0.13.180"] = (
+        "ui_pin_host", "dsh-lo", "ERR_CONNECTION_TIMED_OUT", "子网路由",
+        "lanUrl", "PartOf/WantedBy=dsh.service",
+    )
+    #: v0.13.179：关键词取自版本注释里**实际写下的字句**。
     VERSION_ROOT_CAUSES["0.13.179"] = (
         "绝对字面", "flex:0 1 auto", "margin-left:auto", "今天/昨天", "121.58px",
     )

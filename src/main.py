@@ -106,7 +106,23 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.179"
+VERSION = "0.13.180"
+
+# v0.13.180（2026-10-30）：dsh 卡片地址恢复自适应 —— 判例 255 的复发形态。
+# 用户报障「tailscale 打不开 dsh，net::ERR_CONNECTION_TIMED_OUT」。
+#   ① 复发的不是监听层而是寻址层：v0.13.15x 为躲「127.0.0.1 打开 hub 时 lanUrl 把卡片
+#      地址改写成回环、而 dsh 只绑 192.168.5.102 ⇒ ERR_CONNECTION_REFUSED」，给 dsh 卡
+#      标了 ui_pin_host，那是**把整个自适应关掉**。副作用：tailnet 用户永远拿到
+#      `192.168.5.102` 字面量，而本机 tailscale 只广告 0.0.0.0/0（exit node 用途）、
+#      **没有 192.168.5.0/24 子网路由** ⇒ 该网段在 tailnet 上不可达，超时是必然。
+#   ② 正解是让「改写出来的地址一定连得上」，而不是禁止改写：新增 `dsh-lo.service`
+#      （socat 127.0.0.1:3080 → 192.168.5.102:3080，PartOf/WantedBy=dsh.service），
+#      与既有 `dsh-ts4`/`dsh-ts6` 同形 ⇒ 回环 / LAN / Tailscale 三网各有一层转发，
+#      三处 localhost 语义一致，dsh 本体绑定一动不动。`ui_pin_host` 置 False。
+#   ③ 判据：四地址（127.0.0.1 / 192.168.5.102 / 100.117.232.62 / [fd7a:…]）×
+#      单元 + HTTP 全绿（`~/bin/service-health-check.sh` 新增 dsh-lo 两条）；
+#      影子实例 `/api/agents` 的 dsh entry 不再带 pin_host、self_addrs 含三网地址。
+#      回归 `tests/test_net_url.py::DshCardAddressAdaptiveTest` 两例钉住防回退。
 
 # v0.13.179（2026-10-30）：历史会话行的日期——**绝对字面 + 每行同一列**。纯前端（无后端改动）。
 # 用户令：「日期要全部靠最右对齐，不能每行都不同位置，另外就是使用日期，例如 10-30」。

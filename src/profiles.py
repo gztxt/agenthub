@@ -328,11 +328,14 @@ PROFILES: List[dict] = [
     {"id": "dsh", "name": "DSH", "kind": "agent",
      "detect": {"systemd": ["dsh"], "proc": [r"(^|/)dsh( |$)"]},
      "cli": "dsh", "port": 3080, "ui": "http://192.168.5.102:3080",
-     # ui_pin_host：地址里的主机名**不许**被前端 lanUrl() 换成"当前访问名"。
-     # dsh 拒绝通配地址，只 bind `DSH_HOST=192.168.5.102`；访问 hub 用 127.0.0.1
-     # 时 lanUrl 会把卡片地址改写成 http://127.0.0.1:3080 ⇒ 嵌页 ERR_CONNECTION_REFUSED
-     # （2026-10-25 影子实例实测）。其余 agent 都绑 0.0.0.0，改写无害，故只标这一张卡。
-     "ui_pin_host": True,
+     # 2026-10-30 改判：**不再** pin_host。dsh 拒绝通配地址、只 bind
+     # `DSH_HOST=192.168.5.102`，原先用 ui_pin_host 冻结地址来躲「127.0.0.1 访问 hub
+     # 时被改写成回环地址 ⇒ ERR_CONNECTION_REFUSED」——副作用是 tailnet 用户永远
+     # 拿到 `192.168.5.102` 字面量，而 tailnet 侧没有 192.168.5.0/24 子网路由
+     # ⇒ ERR_CONNECTION_TIMED_OUT（2026-10-30 用户报障）。
+     # 正确形态是**三网各一层 socat**（dsh-lo / dsh-ts4 / dsh-ts6，全部 PartOf=dsh.service），
+     # 让 lanUrl 的改写结果在任何网络都能落地：只有能连上的地址才配被改写。
+     "ui_pin_host": False,
      "terminal": {"cmd": "/home/gztxt/.local/bin/dsh --profile tui",
                   "cwd": "/fs/1000/ftp/技术文档"},
      "chat": None,

@@ -1,3 +1,24 @@
+## v0.13.180 — dsh 卡片地址恢复自适应：三网各一层 socat，不再冻结 host
+
+> 来源：2026-10-30 用户报障「tailscale 打不开 dsh，`net::ERR_CONNECTION_TIMED_OUT`」。
+> 判例 `agent-knowledge/255` 的复发形态 —— 上次修了监听层与寻址层，这次回退点在寻址层。
+
+- **根因（两层）**：① 本机 tailscale `AdvertiseRoutes` 只有 `0.0.0.0/0`、`::/0`（exit node
+  用途），**没有 `192.168.5.0/24` 子网路由** ⇒ tailnet 客户端到 `192.168.5.102` 必然超时；
+  ② v0.13.15x 为躲「127.0.0.1 打开 hub 时 `lanUrl` 改写出回环地址、dsh 只绑 LAN 网卡 ⇒
+  ERR_CONNECTION_REFUSED」给卡片标了 `ui_pin_host`，那是**把整个地址自适应关掉** ——
+  代价是 tailnet 用户永远拿到局域网字面量。
+- **修法**：新增 `dsh-lo.service`（`socat 127.0.0.1:3080 → 192.168.5.102:3080`，
+  `PartOf`/`WantedBy=dsh.service`），与既有 `dsh-ts4`/`dsh-ts6` 同形；`ui_pin_host` 置 False。
+  三层转发 ⇒ `lanUrl` 改写出的地址在回环/LAN/Tailscale 任一网络都能落地，dsh 绑定不动。
+- **判据**（不是看代码）：四地址 × 单元 + HTTP 共 8 项全绿
+  （`~/bin/service-health-check.sh`，本版新增 dsh-lo 两条）；影子实例 `/api/agents` 的
+  dsh entry `pin_host` 已消失、`self_addrs` 含 `192.168.5.102`/`100.117.232.62`/`fd7a:…`。
+- **回归**：`tests/test_net_url.py::DshCardAddressAdaptiveTest` 两例 —— 卡片不得 pin_host、
+  三层转发单元必须存在且跟随 dsh 生命周期（漏一层就有一网是死链）。
+- ⚠ 未修：dsh 的 token 是进程级随机，服务每次重启换一次 ⇒ 用户保存的完整 URL 必失效，
+  只能从 hub 卡片（实时取 journal）或 `journalctl --user -u dsh.service` 取最新一条。
+
 ## v0.13.179 — 历史会话行：日期改成绝对 `M-DD`，且每行钉在同一列
 
 > 来源：2026-10-30 用户令「日期要全部靠最右对齐，不能每行都不同位置，另外就是使用日期，例如 10-30」。

@@ -101,5 +101,38 @@ class LanUrlRewriteTest(unittest.TestCase):
         self.assertEqual(bad, [])
 
 
+class DshCardAddressAdaptiveTest(unittest.TestCase):
+    """2026-10-30 判例（255 的复发形态）：dsh 卡片曾用 `ui_pin_host` 冻结地址。
+
+    冻结的动机是「127.0.0.1 访问 hub 时 lanUrl 改写出的回环地址连不上 dsh」，
+    但代价是 tailnet 用户**永远**拿到 `192.168.5.102` 字面量 —— 本机 tailscale
+    没有广告 192.168.5.0/24 子网路由，症状是 ERR_CONNECTION_TIMED_OUT。
+    正解是**三网各一层 socat**（lo/ts4/ts6，全部 PartOf=dsh.service）保住
+    「改写出来的地址一定连得上」，而不是把改写关掉。
+    """
+
+    def test_dsh_card_does_not_pin_host(self):
+        p = profiles.get_profile("dsh")
+        self.assertIsNotNone(p, "dsh 画像缺失")
+        self.assertFalse(p.get("ui_pin_host"),
+                         "dsh 又标了 ui_pin_host ⇒ tailnet 侧必超时（判例 255/2026-10-30）")
+        for e in profiles.entries_for(p, "running"):
+            if e.get("type") in ("embed", "open"):
+                self.assertNotIn("pin_host", e, f"{e.get('label')} 入口被冻结了 host")
+
+    def test_three_network_fronts_exist(self):
+        """少任何一层，lanUrl 改写出的地址就有一网是死链。"""
+        from pathlib import Path
+        unit_dir = Path.home() / ".config/systemd/user"
+        if not unit_dir.is_dir():
+            self.skipTest("无 systemd user 目录（非本机环境）")
+        for u in ("dsh-lo", "dsh-ts4", "dsh-ts6"):
+            f = unit_dir / f"{u}.service"
+            self.assertTrue(f.exists(), f"{u}.service 缺失：该网络入口无 socket")
+            txt = f.read_text()
+            self.assertIn("PartOf=dsh.service", txt, f"{u} 未跟随 dsh 生命周期")
+            self.assertIn("WantedBy=dsh.service", txt, f"{u} 不会随 dsh 拉起")
+
+
 if __name__ == "__main__":
     unittest.main()

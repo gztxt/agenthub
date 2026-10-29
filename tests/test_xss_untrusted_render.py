@@ -240,6 +240,38 @@ class TestCommandPanelIdEscaped(unittest.TestCase):
                             "a.id 疑似裸拼进 onclick 的 JS 字面量")
 
 
+class TestHistRowEscaped(unittest.TestCase):
+    """侧栏「会话记录」行：同一行里标题转了、目录与 tooltip 没转（2026-10-30 修）。
+
+    为什么这一处特别值得留闸门：`.hh-cw` 的内容来自 `hhDir(it.cwd)` —— **磁盘目录名**，
+    而 cwd 由每个 agent 的会话文件决定，用户可以随手 `mkdir '<img src=x onerror=...>'`
+    再在里面起一个会话。侧栏是常驻渲染、和终端同 origin（能起 pty），所以这不是理论风险。
+
+    本类同时是**同类漏网的探针**：`histHtml` 里任何新加的插值都必须走 escapeHtml。
+    """
+
+    def setUp(self):
+        self.body = _body(CHATHIST, "histHtml")
+
+    def test_dir_escaped(self):
+        self.assertIn("escapeHtml(hhDir(it.cwd, h.home))", self.body,
+                      "目录尾名是磁盘名（不可信），必须转义后才能进 innerHTML")
+
+    def test_title_and_ids_escaped(self):
+        for expr in ("escapeHtml(it.title)", "escapeHtml(it.id)", "escapeHtml(aid)"):
+            self.assertIn(expr, self.body, "%s 必须转义" % expr)
+
+    def test_tooltip_escaped(self):
+        """title 属性是**双引号属性语境**：未转义的 `"` 可直接逃出去加事件属性。"""
+        self.assertRegex(self.body, r"""title="'\s*\+\s*escapeHtml\(tip\)""",
+                         "tooltip 必须整体 escapeHtml 后再进属性值")
+
+    def test_no_bare_disk_field_concat(self):
+        """形状判据：禁止 `+ hhDir(...)` 这类裸拼（漏转义的形状，而不是某一处）。"""
+        self.assertNotRegex(self.body, r"\+\s*hhDir\(",
+                            "hhDir 的返回值疑似裸拼进 innerHTML")
+
+
 class TestReachabilityDocumented(unittest.TestCase):
     """记录「上游是否已收口」—— 决定渲染侧转义是唯一防线还是纵深防御。
 

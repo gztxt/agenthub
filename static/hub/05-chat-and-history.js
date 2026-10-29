@@ -321,9 +321,25 @@ function hhTime(ts) {                                   // 绝对日期：相对
   // v0.13.49：**不再带 HH:MM**。侧栏只有 240px 可用宽，时间占的那 5 个字符直接从
   // 摘要里抢走一小半可视长度（实测标题被挤到 0 宽）；挑哪条续聊也不靠天数内的钟点，
   // 日期足够定位。精确到分钟的信息没丢——它还在 title 悬停里。
+  // 2026-10-30：近两天改「今天 / 昨天」。它们一天只翻一次，不影响 DOM diff，
+  // 又从 5 个字符缩到 2 个字符——省下的宽度直接还给标题（同屏多 3 个汉字）。
+  // 更早仍用绝对 M-D；跨年补两位年份，否则去年的同月同日与今年无法区分。
+  if (!ts) return '';
+  const d = new Date(ts * 1000), now = new Date(), p = n => String(n).padStart(2, '0');
+  const same = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  if (same(d, now)) return '今天';
+  if (same(d, new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))) return '昨天';
+  const md = p(d.getMonth() + 1) + '-' + p(d.getDate());
+  return d.getFullYear() === now.getFullYear() ? md : p(d.getFullYear() % 100) + '-' + md;
+}
+
+/* 悬停里放**列表里删掉的那些**：精确到分钟的完整时间、消息条数。
+   侧栏宽度只够一列摘要，越删越需要悬停兜底；没有悬停兜底就等于信息真的丢了。 */
+function hhFull(ts) {
   if (!ts) return '';
   const d = new Date(ts * 1000), p = n => String(n).padStart(2, '0');
-  return p(d.getMonth() + 1) + '-' + p(d.getDate());
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+         ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
 }
 
 /* 跳目录之后，同名会话可能来自不同工程：只在「不属于画像目录」时补一个目录尾名，
@@ -336,27 +352,42 @@ function hhDir(cwd, home) {
 
 function histHtml(aid) {
   const h = HIST[aid];
-  if (!h || h.loading) return '<div class="nav-hist"><div class="hh-note">读取历史…</div></div>';
-  if (h.err) return '<div class="nav-hist"><div class="hh-note">历史读取失败：' + escapeHtml(h.err) + '</div></div>';
-  const rows = (h.items || []).map(it =>
-    '<div class="hh-row" data-agent="' + escapeHtml(aid) + '" data-sid="' + escapeHtml(it.id) + '"' +
-    ' title="' + escapeHtml(it.title) + (it.cwd ? ' ｜ ' + escapeHtml(it.cwd) : '') + '">' +
-    '<span class="hh-t">' + escapeHtml(it.title) + '</span>' +
-    '<span class="hh-cw">' + hhDir(it.cwd, h.home) + '</span>' +
-    '<span class="hh-ts">' + hhTime(it.ts) + '</span></div>').join('');
+  /* 首次读取才显示占位；**重取时保留上一次的行**（2026-10-30）：
+     原先每次展开都把整块换成「读取历史…」，侧栏瞬间塌成一行再弹回来（高度跳一次），
+     连着切换两个 agent 时像闪屏。旧行继续显示，取回后原地替换即可。 */
+  if (!h || (h.loading && !(h.items || []).length)) return '<div class="nav-hist"><div class="hh-note">读取历史…</div></div>';
+  // 有上次的行就继续显示，错误挂在下面；没有行才整块写错误（否则一块空表 + 一行提示）。
+  if (h.err && !(h.items || []).length) return '<div class="nav-hist"><div class="hh-note">历史读取失败：' + escapeHtml(h.err) + '</div></div>';
+  const rows = (h.items || []).map(it => {
+    /* 悬停补齐被列宽挤掉的信息：完整时间、条数、完整 cwd。
+       顺序与行内一致（摘要 → 目录 → 时间），读起来不用二次对位。 */
+    const tip = [it.title, hhDir(it.cwd, h.home), hhFull(it.ts),
+                 (it.msgs ? it.msgs + ' 条' : ''), (it.cwd || '')].filter(Boolean).join(' ｜ ');
+    return '<div class="hh-row" data-agent="' + escapeHtml(aid) + '" data-sid="' + escapeHtml(it.id) + '"' +
+      ' title="' + escapeHtml(tip) + '">' +
+      '<span class="hh-t">' + escapeHtml(it.title) + '</span>' +
+      /* ⚠ hhDir 的返回值是**磁盘目录名**，与标题同属不可信输入：漏转义＝一个叫
+         `<img onerror=...>` 的目录就能在侧栏执行脚本（同文件其余插值都转义了，只有这处漏）。 */
+      '<span class="hh-cw">' + escapeHtml(hhDir(it.cwd, h.home)) + '</span>' +
+      '<span class="hh-ts">' + hhTime(it.ts) + '</span></div>';
+  }).join('');
   /* v0.13.49：删掉「历史会话（N）」标题行。
      侧栏 240px 里它白白吃掉一行高度，而且它宣告的信息（这是历史、共几条）
      从「行本身就是会话条目 + 一共就这几行」已经自己说清了；条数还能从行尾日期
      与滚动位置看出来。留着它只会把 8 条记录往下顶。 */
   // note 在“已经有行”时也要显：截断/降级被吞掉的话，残缺结果看着就像完整清单
   // （09-22 jcode 只显 1 条那次，正是“扫描窗口用尽”的 note 没人看见）。
-  const tail = (rows && h.note) ? '<div class="hh-note">' + escapeHtml(h.note) + '</div>' : '';
+  const tail = ((rows && h.note) ? '<div class="hh-note">' + escapeHtml(h.note) + '</div>' : '') +
+               (h.err ? '<div class="hh-note">历史读取失败（仍显示上次结果）：' + escapeHtml(h.err) + '</div>' : '');
   return '<div class="nav-hist">' +
          (rows || '<div class="hh-note">' + escapeHtml(h.note || '该目录暂无可续会话') + '</div>') + tail + '</div>';
 }
 
 function histLoad(aid) {
-  HIST[aid] = { items: [], note: '', loading: true, err: '' };
+  /* 重取时别把已有行清空（见 histHtml 的注释）：只把状态改成 loading，
+     items/home 沿用上一次的值，失败分支也不会把已经显示出来的清单抹成空。 */
+  const prev = HIST[aid] || {};
+  HIST[aid] = { items: prev.items || [], note: prev.note || '', home: prev.home || '', loading: true, err: '' };
   renderNav();
   api('/api/term/history/' + encodeURIComponent(aid) + '?limit=' + HIST_LIMIT, { headers: termHeaders() })
     .then(d => { HIST[aid] = { items: d.items || [], note: d.note || '', home: d.cwd || '', loading: false, err: '' }; })
@@ -364,8 +395,12 @@ function histLoad(aid) {
       // 新前端 + 未重启的旧后端＝路由不存在（FastAPI 回 Not Found）。说人话，别抛生涩 404。
       // ⚠️ 单元名 2026-10-08 起是 agenthub.service；写旧名的后果是教用户去重启一个
       // 已停用的单元（restart 它既起不来又会在 journald 里刷重试），等于给错药方。
-      HIST[aid] = { items: [], note: '', loading: false,
-                    err: /not\s*found|404/i.test(m) ? '后端未更新：需重启 agenthub.service 后生效' : m }; })
+      // 401 同理：后端原文是英文 `term token required or invalid`，直接透出等于没提示。
+      const hint = /not\s*found|404/i.test(m) ? '后端未更新：需重启 agenthub.service 后生效'
+                 : /401|term token/i.test(m) ? '终端口令失效：到「设置 → 终端口令」重新应用后重试'
+                 : m;
+      // 失败时保留上一次成功取到的行（有的话），只把提示挂上去——一次抖动不该清空清单。
+      HIST[aid] = { items: prev.items || [], note: '', home: prev.home || '', loading: false, err: hint }; })
     .then(() => renderNav());                            // 无 finally 依赖：老 Safari 也走得到
 }
 

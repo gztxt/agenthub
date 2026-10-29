@@ -101,6 +101,15 @@ class TestHandoffTextNode(unittest.TestCase):
         out = self._run("console.log(handoffText({task_id:'t3',prompt:'P'}))")
         self.assertNotIn("上游：", out)
 
+    def test_machine_key_is_first_line(self):
+        """C 方案的幂等键：`[hub:<run>/<task>]` 必须是首行（spike_send.py 逐字对齐）。
+
+        没有它，去重只能靠解析人话；而 send 是不可重试 mutation ⇒ 猜错一次就是重复派活。
+        """
+        out = self._run("console.log(handoffText({task_id:'t1',prompt:'P1'}))")
+        self.assertTrue(out.startswith("[hub:r1/t1]"), out[:60])
+        self.assertIn("[agenthub → DS Bot] run r1 / t1", out)
+
 
 if __name__ == "__main__":
     unittest.main()

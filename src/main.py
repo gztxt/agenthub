@@ -106,7 +106,18 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.173"
+VERSION = "0.13.174"
+
+# v0.13.174（2026-10-29）：派发三补——强制汇总节点 / 超时口径统一 / 拒答识别补说法。
+# 为什么：影子实弹 5 条跑出两处「结构上就不该靠提示词」的洞。
+# ① 汇总节点：Leader 提示词只说「聚合类任务要 deps 列全上游」，**没有任何机制保证它写**⇒
+#    多叶子全 success、run 收敛、却没有结论。现在由 `ensure_synthesis` 在代码里补，并给
+#    Leader 的条数上限预留一格（`LEADER_MAXN = MAX_TASKS - 1`）。
+# ② 超时口径：adapter 写死 120s 而外层闸门是 600s ⇒ 长任务一律记成「执行者失败」，
+#    归因错一层。现在 `timeout_s` 由调用方传，取值 = TASK_TIMEOUT_S + 30（外层先触发）。
+# ③ 拒答说法：「我无法直接读取…没有可用的文件系统访问工具」不被旧正则覆盖，判 pass。
+#    补两条说法级正则；同批钉死「第二人称的操作建议不算拒答」。
+# ④ 口令桥首行加机器键 `[hub:<run>/<task>]`：C 的幂等键，不让它去解析人话。
 
 # v0.13.173（2026-10-29）：技能中心**归档根**补两仓 —— show-me 与 frontend-design。
 # 为什么需要：两个技能按归档军规 clone 在 `技术文档/<仓>/`，软链进四个发现点；

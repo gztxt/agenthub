@@ -6723,7 +6723,10 @@ let handoffBound = false;
 function handoffText(t) {
   const goal = String(currentRunGoal || '').trim();
   const prompt = String(t.prompt || '').trim();
-  const out = ['[agenthub → DS Bot] run ' + currentRun + ' / ' + t.task_id];
+  // 首行是**机器键**：C 方案（执行适配器）用它做幂等去重与结果回填，
+  // 不能让它去解析人类语。格式与 work/botboy-probe/spike_send.py 的 key 逐字一致。
+  const key = '[hub:' + currentRun + '/' + t.task_id + ']';
+  const out = [key + ' [agenthub → DS Bot] run ' + currentRun + ' / ' + t.task_id];
   if (goal) out.push('总目标：' + goal);
   out.push('子任务：' + (prompt || '（该任务没留存 prompt，请按任务名补全）'));
   if ((t.deps || []).length) out.push('上游：' + t.deps.join(', '));

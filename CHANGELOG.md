@@ -1,3 +1,44 @@
+## v0.13.174 — 派发三补：强制汇总节点 / 超时口径 / 拒答说法
+
+> 来源：2026-10-29 执行 `BOTBOY-DISPATCH-FUSION-EVAL-20261028.md` 的建议 1–5。
+
+### 1. P2 spike 跑通（不改生产代码）
+
+`work/botboy-probe/spike_send.py`：起 dsh → journal 取 token → `GET /?token=` 换 cookie →
+`send {sessionId,text}` → 轮询 → 取全文。**实测口径纠正**：结果面是 `chat {botId}`，
+`state.exchanges` 恒为 0（只记 bot↔bot）——评估文档原句「轮询 exchange 收结果」证伪。
+往返 13–25s，1093 字/300 行完整，幂等复跑 21ms 不重发。
+
+### 2. 强制汇总节点（结构约束，不是提示词）
+
+Leader 提示词只说「聚合类任务要 deps 列全上游」，没有任何机制保证它写 ⇒ 多叶子全 success、
+run 收敛、却没有结论。新增 `ensure_synthesis()`，decompose 与 replan 两个入口都调；
+同时 `LEADER_MAXN = MAX_TASKS - 1` 给自动节点预留一格。三种不追加都返回原因（不静默）。
+
+### 3. 超时口径统一
+
+`adapters/openai_compat.chat()` 原来写死 120s，而外层闸门是 `TASK_TIMEOUT_S=600` ⇒
+600 秒这道闸永不触发，长任务一律记成「执行者失败」。现在 `timeout_s` 由调用方传，
+`_call_chat` 只在 callable 收该参数时才传（3 参 lambda 不受影响），取值 `TASK_TIMEOUT_S + 30`。
+
+### 4. 拒答识别补「说法」
+
+影子实弹里 jcode 回「我无法直接读取…没有可用的文件系统访问工具」→ 旧正则不匹配 → pass。
+补两条说法级正则，并钉死反向：第二人称的「如果你无法访问…」是操作建议，不算拒答。
+
+### 5. 口令桥加机器键
+
+`handoffText` 首行加 `[hub:<run>/<task>]`，与 spike 的幂等键逐字一致；C 接入时按它去重，
+不去解析人话。
+
+### 验证
+
+- `tests/test_dispatch_synthesis_timeout.py` 10 例 + `tests/test_verifier.py` 26 例 + 口令桥 9 例全绿。
+- 影子 `:3198` 实弹 5 条：`958f1d9132` Leader 出 3 并行、代码补 `t_sum`（jcode），4/4 pass。
+- **仍不解决**：无工具的子任务会**编造**（`/etc/hostname` 真值 `zzst`，claude 回 `AGNES-2.5-FLASH`
+  且 verdict=pass）。文本层判不出来，只能靠 C（执行适配器）。
+- 生产 `:3102` 未重启（`term_sessions>0`），本版仅在影子验证。
+
 ## v0.13.173 — 技能中心归档根补两仓：show-me / frontend-design
 
 > 来源：2026-10-29 用户点名安装三个技能（grill-me / show-me / frontend-design）。

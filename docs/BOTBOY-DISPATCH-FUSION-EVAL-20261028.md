@@ -144,12 +144,80 @@ D 方案先落地的是「出口面收窄 + 挂载验证」两件：
   别把「401 凭据不匹配」当成鉴权坏了。
 
 
-### P2（**需裁定**，≥2 天，先 spike 后接入）
+### P2（**spike 已跑通，2026-10-29**；接入待裁，≥2 天）
 
 30 行脚本跑通一条闭环：起 dsh → 从 journal 取 token 换 cookie → `send` 给单 Bot →
-轮询 `exchange` 到出现该 Bot 回复 → 拿到全文。**这条不通，C 就不成立**，不要先改 `tasks.py`。
+轮询 → 拿到全文。**这条不通，C 就不成立**，不要先改 `tasks.py`。
 **验收（spike）**：一条真实任务从 send 到取回结果 ≤ 10 分钟、文本完整、无重复派发；
 失败时能区分「Bot 拒答」「超时」「dsh 没起来」三种，不许都报 failed。
+
+**实测（2026-10-29，`work/botboy-probe/spike_send.py`，dsh 0.2.2 / agnes-2.5-flash）**
+
+| 项 | 实测值 |
+|---|---|
+| 鉴权 | `GET /?token=<journal 里那个>` → 303 + `dsh-auth-*` cookie；之后 `POST /api/bot` |
+| 发送 | `send {sessionId, text}` 立即回 `ok(true)`（queue），**不是结果** |
+| **结果面** | **`chat {botId}`**（分页 items，含 `turn/seq/kind/text`）。**`state.exchanges` 恒为 0** —— 那张表只记 bot↔bot，私聊不进 ⇒ 评估文档原句「轮询 exchange 回收结果」**已证伪** |
+| 往返 | 纯对话 ~13s；带工具（pwd）13.4s；长输出 24.9s（均含鉴权+轮询粒度 2s） |
+| 全文 | 1093 字 / 300 行**逐行完整**，未见 2000 字截断（截断只在 `state.works` 投影里） |
+| 幂等 | 同 `[hub:run/task]` 复跑 21ms 返回 `idempotent-hit`，**未重发** |
+| 用量 | `usage` 端点给 per-owner / per-model 真值（含 cacheRead），与 hub 估算列**天然两口径** |
+
+**工具能力（实测，不是宣称）**：Chief 自报并实调 `bash / 文件读写 / glob / grep / web_search /
+subagent / workflow / create_bot / schedule / remember / skill`。⇒ 「子任务拿到工具」这个前提成立。
+
+**新发现的硬约束（接 C 前必须处理）**：
+1. dsh web 只绑一张网卡（`192.168.5.102:3080`），**127.0.0.1 没有监听**；探活必须先探端口再定 base。
+2. token 是进程级随机，换 cookie 只有 `GET /?token=` 一条路（urllib 会自动跟 303）。
+3. `chat` 页是**分页**的：长会话要跟 `cursor`，否则只看到最后一屏。
+
+
+### P2.1 影子实弹 5 条（2026-10-29，影子 `:3198`，非生产）
+
+| # | 目标 | 子任务 | 结果 | 判词 |
+|---|---|---|---|---|
+| 1 | RAID5 vs RAID10 三点取舍 | 3 并行 + **代码补的 `t_sum`** | 4/4 pass | 汇总节点真跑（t_sum 5272 tok） |
+| 2 | 1 到 100 求和 | 1 | pass，答案正确 | — |
+| 3 | 读 `/etc/hostname` | 1（claude） | **pass** | **编造**：真值 `zzst`，回 `AGNES-2.5-FLASH` |
+| 3b | 同上（修拒答正则后复跑） | 1 | 仍 pass | 见下 |
+| 4 | Python 回文函数 | 2 | pass | — |
+| 5 | TCP/UDP 各一句 + 合并 | 3（含自建汇总） | 3/3 pass | — |
+
+**两条必须写进结论的发现**
+
+1. **「假装干了」判不出来**。同一条文件任务，jcode 走「我无法直接读取…没有可用的文件系统访问工具」
+   （自述没干，新正则已判 `refusal`），claude 直接**编了一个值**（`AGNES-2.5-FLASH`）—— 后者与
+   真实产物在文本上不可区分，`nonempty` 与任何正则都判 pass。**这不是验收器的洞，是"没有工具"的必然结果**：
+   只有让子任务真的跑在带工具的执行面（C）上，`/etc/hostname` 才会回 `zzst`。
+2. **汇总节点按设计生效，但换了 agent**：Leader 出的 3 个并行节点是 `claude`，代码追加的 `t_sum`
+   用 `default_agent`（`jcode`）。**同一条 run 内 agent 会不同**，不是「所有子任务同一个 agent」。
+
+### P2.2 子任务是不是同一个 agent？能不能按难易度智能调度？
+
+**代码事实（可回原文核）**
+
+| 问题 | 事实 | 出处 |
+|---|---|---|
+| agent 谁定 | Leader 逐项填 `agent_id`；超池/未填回落 `default`（jcode） | `src/tasks.py:516-518` |
+| 可选池多大 | **2 家**（claude / jcode）+ 自定义端口 | `src/registry.py:40` |
+| 汇总节点用谁 | `default_agent`（不跟随上游） | `ensure_synthesis()` |
+| `difficulty` 管什么 | **只管复盘**，不参与预算、不参与选型、不参与判活 | `src/tasks.py:143-145` |
+| `model` 谁定 | Leader 可填，按 CCR 清单校验；非法降为 NULL | `src/tasks.py:519-526` |
+| 实测填没填 | 5 条 run、11 个子任务，`model` **全 NULL**，实发全部 `agnes-2.5-flash` | 影子库 `tasks` 表 |
+
+**判词**：**「智能调度」目前是名义上的，不是机制上的。**
+选择信号只有 LLM 自评（`difficulty` 由 Leader 拍），没有校准、没有反馈闭环、没有按 agent 能力画像；
+池子只有 2 家，实际结果就是「Leader 顺手选谁就是谁」，实测里 8/11 是 claude、3/11 是 jcode。
+这对应 RouteLLM / RouterArena 那条结论的最低档：**未校准的路由器在均值上看不出来，错都错在少数难样本上**。
+
+**若要真做，三条按性价比排序**
+
+1. **把 retry 改成 cascade**：现在验证失败是**同一模型**重跑（`MAX_AUTO_RETRY=1`），等于原样再赌一次；
+   改成「失败升一档模型再跑」才有多模型路由的意义（FrugalGPT 路线，代价是难任务双付）。
+2. **difficulty → 模型档位写进代码表**，不留在提示词里；前提是先用 20~30 条真实任务标定
+   「difficulty 与实发模型质量」的关系，否则只是把拍脑袋从模型换成硬编码。
+3. **扩池**：给 dsh / cloudcli 造 chat 适配器，或直接接 C 的 bot 通道 —— 池子 2 家时，
+   再怎么调度的上限也就是「二选一」。
 
 ### 明确不做
 
@@ -159,12 +227,12 @@ D 方案先落地的是「出口面收窄 + 挂载验证」两件：
 
 ## 5. 未验证项（不要当结论用）
 
-- 本机**未安装** `ds-bot` / `ds-harness-remote`（三个 profile 的 `node_modules` 均无）。
-- `api/bot` 的本地鉴权未实测：`channel.js:518` 注释说浏览器用 session cookie；
-  程序化调用需先 `GET ...?token=` 换 cookie，换法未跑通。
-- dsh 当前 `inactive`，token 只能从 journal 取；取不到时行为未测。
-- `works` 结果文件的读取路径未实测（只在源码里看到 `resultPath`）。
-- DS Bot 能力库是否支持 HTTP 型 MCP 服务，未查证。
+> 2026-10-29 复核：原 5 条里 4 条已实测（见 P2 表），**下面只留仍然没验的**。
+
+- `works` 的结果文件读取路径（`resultPath`）：本轮所有结果都从 `chat` 页取，没走这条。
+- DS Bot 能力库是否支持 **HTTP 型** MCP 服务（D 方案前提）：仍未查证。
+- `chat` 页分页上限与 `cursor` 翻页：只验了单屏（≤10 条），长会话未跑。
+- 生产（`:3102`）未接 C：本轮全部在影子 `:3198` 与 `work/` 脚本上跑。
 
 ## 6. 参考
 

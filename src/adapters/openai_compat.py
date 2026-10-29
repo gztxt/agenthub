@@ -50,10 +50,18 @@ class OpenAICompatAdapter(BaseAdapter):
         body = {"model": model or self.default_model or "default",
                 "messages": messages, "stream": False}
         url = f"{self.base_url}/v1/chat/completions"
+        # 超时口径统一（2026-10-29）：默认 120s 是**单轮对话**的合理值，但派发链路的
+        # 外层闸门是 `TASK_TIMEOUT_S=600`（tasks.py）。写死 120 会让外层闸门永不触发，
+        # 长任务一律表现成 `success=False`（"执行者失败"），而真实原因是客户端先断了 ——
+        # 归因直接错一层。调用方能传就按它传，传不了才退默认。
+        try:
+            total_s = float(kwargs.get("timeout_s") or 120.0)
+        except (TypeError, ValueError):
+            total_s = 120.0
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.post(url, headers=self.build_headers(), json=body,
-                                  timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                                  timeout=aiohttp.ClientTimeout(total=total_s)) as resp:
                     if resp.status != 200:
                         text = (await resp.text())[:500]
                         return {"success": False, "agent": self.agent_id,

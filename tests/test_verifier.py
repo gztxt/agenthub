@@ -106,6 +106,23 @@ class TestNonempty(unittest.TestCase):
         self.assertEqual(v["status"], verifier.STATUS_FAIL)
         self.assertEqual(v["gaps"][0]["id"], "refusal")
 
+    def test_chinese_no_capability_refusal_is_not_pass(self):
+        """影子实弹 2026-10-29 原文：旧正则（只认「我无法访问」）漏判 ⇒ pass。
+
+        同一条洞的第二种说法：「我无法**直接读取**…因为我目前**没有可用的…工具**」。
+        判据要覆盖说法，不是覆盖某一句。
+        """
+        out = ("我无法直接读取您系统的 `/etc/hostname` 文件，"
+               "因为我目前没有可用的文件系统访问工具。")
+        v = verifier.verify("nonempty", output=out)
+        self.assertEqual(v["status"], verifier.STATUS_FAIL)
+        self.assertEqual(v["gaps"][0]["id"], "refusal")
+
+    def test_second_person_caveat_still_passes(self):
+        """窄口径反向：第二人称的「如果你无法访问…」是操作建议，不是自述没干。"""
+        v = verifier.verify("nonempty", output="如果你无法访问该路径，可以先执行 ls 确认。")
+        self.assertEqual(v["status"], verifier.STATUS_PASS)
+
     def test_normal_caveat_still_passes(self):
         """窄口径：正常报告里出现 can't / 无法 不算拒答，别把好人判死。"""
         v = verifier.verify("nonempty",

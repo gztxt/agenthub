@@ -29,6 +29,10 @@ router = APIRouter()
 TASK_TIMEOUT_S = int(os.getenv("TASK_TIMEOUT_S", "600"))
 MAX_CONCURRENCY = 4
 MAX_TASKS = 12
+#: 告诉 Leader 的条数上限 = 硬上限 − 1：**留一格给代码追加的汇总节点**
+#: （`ensure_synthesis`）。不留这一格，Leader 顶满 12 条时多叶子就拿不到汇总，
+#: 又回到「全绿无结论」。这是结构性预留，不是保守取值。
+LEADER_MAXN = MAX_TASKS - 1
 UPSTREAM_TRIM = 4000
 #: P1-3：截断预算**只算正文**，标记开销另计（标记必须存在，否则下游无法分辨
 #: 「上游只写了这么多」与「被我砍掉了」—— 静默截断是最坏形态，见 format_upstream 文档串）。
@@ -552,6 +556,45 @@ def _validate_dag(items: list, known_agents: set, default_agent: str,
     return normalized
 
 
+#: 汇总节点：代码自动追加，**不靠 Leader 记得写**。
+#: 判例（2026-10-29）：Leader 提示词只写「聚合类任务必须 deps 列出全部上游」，
+#: 而没有任何机制保证它真会写一条聚合 —— 结果可能是「三路全 success、run 收敛，
+#: 但没有任何结论」。全绿的空转比失败更难发现，所以这条必须是结构约束。
+SYNTH_ID = "t_sum"
+SYNTH_TASK = ("汇总以下子任务的产出，给出一份统一结论：先逐条列出各处结论与其依据，"
+              "再指出彼此冲突或缺口，最后给出可直接交付的答案。不要复述过程。")
+
+
+def _leaves(items: List[dict]) -> List[str]:
+    """叶子 = 不被任何节点依赖的节点（DAG 里的终点）。"""
+    depended = {d for n in items for d in n["deps"]}
+    return [n["id"] for n in items if n["id"] not in depended]
+
+
+def ensure_synthesis(items: List[dict], default_agent: str) -> tuple:
+    """多叶子 ⇒ 追加一个汇总节点（deps = 全部叶子）。返回 `(items, note)`。
+
+    两种不追加（都返回原因，静默跳过＝又回到"全绿无结论"）：
+      · `single_leaf` —— 本身就是一个结论，再加一层只多烧一次 token；
+        注意「Leader 自己写了聚合」也落在这里：聚合节点必然是唯一叶子，
+        所以**不需要单独一条 already_aggregated 分支**（那会是死代码）。
+      · `capacity`    —— 已到 MAX_TASKS 硬上限，上限优先，由调用方决定是否重拆。
+    """
+    leaves = _leaves(items)
+    if len(leaves) <= 1:
+        return items, {"added": False, "reason": "single_leaf", "leaves": leaves}
+    if len(items) >= MAX_TASKS:
+        return items, {"added": False, "reason": "capacity", "leaves": leaves,
+                       "hint": "已到 %d 条硬上限，未追加汇总节点" % MAX_TASKS}
+    sid, i = SYNTH_ID, 2
+    while any(x["id"] == sid for x in items):
+        sid = "%s%d" % (SYNTH_ID, i)
+        i += 1
+    out = items + [{"id": sid, "task": SYNTH_TASK, "agent_id": default_agent,
+                    "deps": list(leaves), "difficulty": 2, "model": None}]
+    return out, {"added": True, "id": sid, "deps": leaves}
+
+
 def failure_signature(rows: list) -> str:
     """FAIL 签名（纯函数）：失败任务的 `(id, error 前 60 字)` 排序后取 sha1 前 12 位。
 
@@ -689,7 +732,7 @@ async def decompose(body: DecomposeIn):
         .replace("{agents}", ", ".join(sorted(known)) or "jcode")
         .replace("{default}", default)
         .replace("{models}", _agent_model_block(_model_choices(known)))
-        .replace("{maxn}", str(MAX_TASKS)))},
+        .replace("{maxn}", str(LEADER_MAXN)))},
         {"role": "user", "content": body.goal}]
     try:
         answer, _ = await llm.chat_tools_loop(messages, [], None, max_rounds=1)
@@ -698,9 +741,11 @@ async def decompose(body: DecomposeIn):
         raise
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"Leader 拆解失败: {e}")
+    # 汇总节点在 try 之外补：它抛错是**我们的** bug，不该被报成「Leader 拆解失败」。
+    items, synth = ensure_synthesis(items, default)
     if body.dry_run:
         return {"run_id": None, "goal": body.goal, "tasks": items, "running": False,
-                "dry_run": True, "round": 1,
+                "dry_run": True, "round": 1, "synthesis": synth,
                 "auto_rounds": bool(body.auto_rounds), "max_rounds": MAX_ROUNDS,
                 "note": "dry_run：只拆解未落库，确认后传 dry_run=false 再调一次"}
     run_id = _create_run(body.goal, items, verify_kind=body.verify_kind,
@@ -709,7 +754,7 @@ async def decompose(body: DecomposeIn):
     if body.auto_run:
         _start_runner(run_id)
     return {"run_id": run_id, "goal": body.goal, "tasks": items,
-            "running": body.auto_run, "round": 1,
+            "running": body.auto_run, "round": 1, "synthesis": synth,
             "auto_rounds": bool(body.auto_rounds), "max_rounds": MAX_ROUNDS}
 
 
@@ -782,7 +827,7 @@ async def _replan_once(run_id: str, auto: bool = False,
         REPLAN_PROMPT
         .replace("{agents}", ", ".join(sorted(known)) or "jcode")
         .replace("{models}", _agent_model_block(_model_choices(known)))
-        .replace("{maxn}", str(MAX_TASKS)))},
+        .replace("{maxn}", str(LEADER_MAXN)))},
         {"role": "user", "content":
             "总目标：%s\n\n上一轮（第 %s 轮）的执行结果：\n%s" % (goal, meta.get("round") or 1,
                                                         _replan_digest(rows))}]
@@ -802,6 +847,7 @@ async def _replan_once(run_id: str, auto: bool = False,
         return {"ok": True, "run_id": run_id, "gate": ok, "created": None}
     try:
         items = _validate_dag(raw, known, default, allowed)
+        items, synth = ensure_synthesis(items, default)
     except HTTPException as e:
         db.execute("UPDATE task_runs SET stop_reason=? WHERE run_id=?",
                    ("replan_invalid: %s" % str(e.detail)[:150], run_id))
@@ -1090,16 +1136,36 @@ def _chat_arity(fn) -> int:
     return n
 
 
+def _accepts_kwarg(fn, name: str) -> bool:
+    """callable 收不收这个关键字参数（显式声明或 `**kwargs` 都算）。
+
+    与 `_chat_arity` 同一套理由：`set_context` 的接线方不止一处，有的只写
+    3 参 lambda。多传一个它不认识的 kwarg 会 TypeError，而那时钱已经花掉了。
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind == p.VAR_KEYWORD for p in params.values())
+
+
 async def _call_chat(chat_fn, agent_id: str, prompt: str, tag: str,
                      model: Optional[str]):
     """按 chat_fn 的实际签名决定要不要把选型模型传下去。
 
     传不下去时**不报错**（拆解意图不等于执行契约），但这条事实是可查的：
     `model_choice` 有值而 `model`（实发回包）是另一个值，就是「选了没生效」的证据。
+
+    超时（2026-10-29）：adapter 一侧必须**晚于**外层 `asyncio.wait_for` 超时，
+    否则 TASK_TIMEOUT_S 这道闸永不触发 —— 症状是所有长任务都被记成「执行者失败」，
+    归因错一层（真实原因是客户端 120s 先断）。
     """
+    kw: Dict[str, Any] = {}
+    if _accepts_kwarg(chat_fn, "timeout_s"):
+        kw["timeout_s"] = TASK_TIMEOUT_S + 30
     if model and _chat_arity(chat_fn) >= 4:
-        return await chat_fn(agent_id, prompt, tag, model)
-    return await chat_fn(agent_id, prompt, tag)
+        return await chat_fn(agent_id, prompt, tag, model, **kw)
+    return await chat_fn(agent_id, prompt, tag, **kw)
 
 
 async def _run_task(run_id: str, row: dict):

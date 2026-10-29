@@ -363,7 +363,8 @@ async def _chat_dispatch(agent_id: str, message: str,
                          session_id: Optional[str] = None,
                          model: Optional[str] = None,
                          cwd: Optional[str] = None,
-                         trace_id: Optional[str] = None) -> Dict:
+                         trace_id: Optional[str] = None,
+                         timeout_s: Optional[float] = None) -> Dict:
     import time as _time
     t0 = _time.monotonic()
     # v0.13.50：模型取值的唯一入口 —— 请求显式带了就用请求的，没带就回落「设置 → 模型」
@@ -390,7 +391,7 @@ async def _chat_dispatch(agent_id: str, message: str,
                         (session_id,))
         history = [{"role": r["role"], "content": r["content"]} for r in reversed(hist)]
     result = await adapter.chat(message, session_id=session_id, model=model,
-                                history=history, cwd=cwd)
+                                history=history, cwd=cwd, timeout_s=timeout_s)
     # S2 画像埋点：append-only，成功率/耗时统计源
     dur = int((_time.monotonic() - t0) * 1000)
     db.log_profile_event("hub_chat", agent_id,

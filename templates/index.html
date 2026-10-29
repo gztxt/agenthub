@@ -3099,9 +3099,18 @@
               return out.join(' | ') || '(无资源计时)';
             })() + '\n'
           // 顶层 function 会整体提升，所以「某函数缺失」只有一种解释：响应体在它的声明处被截断
-          + '符号阶梯=' + ['openOverlay', 'go', 'loadAgents', 'navItemHtml', 'histHtml',
-                          'navRow', 'renderNav', 'initSidebar', 'syncOverlayMask',
-                          'setBadge', 'tick']   // 声明行号 102/110/161/1742/1803/1859/1862/1987/~2016/2070/2147
+          // ⚠️ 清单**会过期**：原表列过 syncOverlayMask / tick / loadAgents，三者早已不是顶层
+          // function 声明（改成了内嵌 / 局部 const / async），于是绿况下这几项恒为 0 —— 断言的
+          // 意思从「响应体被截断」漂移成「清单没跟上代码」，用户侧看到的就是一条查不出东西的红。
+          // 判据（改这里必须同时满足）：① 每项在 static/hub.js 里是**顶层声明**（`^function NAME(`
+          // 或 `^async function NAME(`，声明即挂到 window，`typeof window[NAME]==='function'`）；
+          // ② 按声明行**升序**排列 —— 阶梯第一个 0 才是响应体的切断位置；③ 覆盖面从头到尾
+          // （首项在前 1%、末项在后 5% 内），否则尾部截断查不出来。
+          // 防过期闸门：tests/test_hubjs_split.py 的 TestLadder 会逐项核对①②③，清单漂了即红。
+          + '符号阶梯=' + ['mdInline', 'openOverlay', 'renderHomeStats', 'settingsDelegates',
+                          'termToast', 'termWriteReplay', 'termFindBind', 'startMemoryEdit',
+                          'renderSkillInvocations', 'navItemHtml', 'histHtml', 'navRow',
+                          'renderNav', 'initSidebar', 'termTouchBind', 'bbRender']
               .map(function (k) { return k + ':' + (typeof window[k] === 'function' ? 1 : 0); }).join(' ') + '\n'
           + (L.length ? '异常清单(前8):\n' + L.slice(0, 8).join('\n') : '异常清单: 无');
       }
@@ -3140,6 +3149,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=d2ae1777"></script>
+    <script src="/static/hub.js?v=b6a84335"></script>
 </body>
 </html>

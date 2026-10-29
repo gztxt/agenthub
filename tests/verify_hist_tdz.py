@@ -119,7 +119,11 @@ chk("红况抛点 = 手机回传的 1907", bool(mred) and mred.group(1) == "1907
 chk("红况菜单空白（navTree子项=0）", field(tr, "navTree子项") == "0", field(tr, "navTree子项") or "")
 chk("红况 initSidebar 从未跑过", field(tr, "initSidebar跑过(遮罩出口)") == "undefined",
     field(tr, "initSidebar跑过(遮罩出口)") or "")
-chk("红况阶梯缺 syncOverlayMask（有 :0）", ":0" in (field(tr, "符号阶梯") or ""),
+# 判据只认「阶梯里出现了 :0」，**不钉具体符号名**：原版写死「缺 syncOverlayMask」，而那份
+# 清单本身会随重构过期（v0.13.179 前的 syncOverlayMask/tick/loadAgents 已非顶层函数），
+# 钉名字的判据会在清单过期的同一天变成误报。红基线（RED_SHA）里 mdInline/settingsDelegates/
+# termTouchBind/bbRender 都不存在 ⇒ 仍有 :0，「探针能发现缺失符号」这件事被如实验证。
+chk("红况阶梯检出缺失符号（有 :0）", ":0" in (field(tr, "符号阶梯") or ""),
     (field(tr, "符号阶梯") or "")[:80])
 chk("红况抽屉停在展开态（collapsed=false ⇒ 遮正文）", field(tr, "侧栏collapsed") == "false",
     field(tr, "侧栏collapsed") or "")

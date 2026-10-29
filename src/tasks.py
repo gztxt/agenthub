@@ -282,7 +282,9 @@ def _known_agent_ids() -> set:
 def _next_escalation_note(agent_id: str, model: Optional[str], next_attempt: int,
                           tier: Optional[str] = None) -> str:
     """写进 error 字段的一句话：下一次重试会升到哪 —— 没有目标就直说没有。"""
-    t = escalate_target(agent_id, model, next_attempt, _known_agent_ids(), tier=tier)
+    cat, checked = _catalog_snapshot()
+    t = escalate_target(agent_id, model, next_attempt, _known_agent_ids(), tier=tier,
+                        catalog=cat, catalog_checked=checked)
     return t["reason"]
 
 
@@ -301,6 +303,23 @@ def _ccr_model_agents() -> set:
         return {"claude", "jcode"}
 
 
+def _catalog_snapshot() -> tuple:
+    """CCR 当前可用模型清单 → `(ids, checked)`。取不到就 `(set(), False)`。
+
+    **升档和拆解必须用同一份清单**：2026-10-29 实测 `escalate_target` 的三处调用
+    都没传 `catalog`，`first_usable()` 恒返回 None ⇒ 档位升档路径**运行时永不生效**，
+    每次都掉到 agent 阶梯（claude-code 超时后换成了 codex，而不是升到 t2 模型）。
+    只写单测看不出来，因为单测自己传了 catalog。
+    """
+    try:
+        import modelcfg
+        cat = modelcfg.catalog_ids()
+        ids = {str(x) for x in (cat.get("ids") or set())}
+        return ids, bool(cat.get("checked")) and bool(ids)
+    except Exception:  # noqa: BLE001 — 选型是增强，不许带倒任何主流程
+        return set(), False
+
+
 def _plan_tiers(items: List[dict], pool: set) -> tuple:
     """难度→起始档位的**接线层**：只负责取清单与池子，判断全在 `tiercfg.py`（纯函数）。
 
@@ -309,13 +328,7 @@ def _plan_tiers(items: List[dict], pool: set) -> tuple:
     那会把「不知道」伪装成「选过了」。
     """
     import tiercfg as tierlib
-    try:
-        import modelcfg
-        cat = modelcfg.catalog_ids()
-        ids = {str(x) for x in (cat.get("ids") or set())}
-        checked = bool(cat.get("checked")) and bool(ids)
-    except Exception:  # noqa: BLE001 — 选型是增强，不许带倒拆解
-        ids, checked = set(), False
+    ids, checked = _catalog_snapshot()
     return tierlib.plan(items, catalog=ids, checked=checked, ccr_agents=_ccr_model_agents(),
                         pool=pool)
 
@@ -375,6 +388,45 @@ def escalate_target(agent_id: str, model_choice: Optional[str], attempts: Any,
                         reason="agent:%s" % cand)
 
     return dict(base, reason="no_escalation_path")
+
+
+def _schedule_exec_retry(run_id: str, row: dict, err: str, reason: str,
+                         attempts_done: int, exec_agent: str, exec_model: Optional[str],
+                         *, dur: int = 0, spent_tokens: int = 0,
+                         used_model: Optional[str] = None, kind: str = "",
+                         detail: Optional[dict] = None) -> bool:
+    """执行者自身失败（异常/超时/429）→ 有升档路径就排一次重试，返回是否已排。
+
+    为什么单独抽出来：`_execute_task` 里现在有**三条**执行失败出口（自称失败、
+    超时、任意异常），各写一遍重试必然漂移（2026-10-29 就是只给 verifier 失败
+    写了重试，执行失败三处全漏 ⇒ dsh 429 直接终态、汇总永远跑不到）。
+    """
+    if attempts_done >= MAX_AUTO_RETRY:
+        return False
+    cat, checked = _catalog_snapshot()
+    esc = escalate_target(exec_agent, exec_model, attempts_done + 1,
+                          _known_agent_ids(), tier=row.get("tier"),
+                          catalog=cat, catalog_checked=checked)
+    if not esc.get("changed"):
+        return False
+    db.execute("UPDATE tasks SET status='pending',attempts=?,error=?,verify_reason=?,"
+               "spent_ms=?,spent_tokens=?,model=?,finished_at=NULL,updated_at=?"
+               " WHERE run_id=? AND task_id=?",
+               (attempts_done + 1,
+                ("%s（自动重试 %d/%d，升档 %s→%s）"
+                 % (err, attempts_done + 1, MAX_AUTO_RETRY,
+                    exec_agent, esc.get("agent_id")))[:500],
+                reason[:500], dur, spent_tokens, used_model, _now(),
+                run_id, row["task_id"]))
+    db.log_profile_event("task_exec", row["agent_id"], "retry", dur,
+                         trace_id=row["trace_id"],
+                         detail=dict({"task": row["task_id"], "verify": kind,
+                                      "exec_failed": True,
+                                      "attempt": attempts_done + 1,
+                                      "escalate_to": esc.get("agent_id"),
+                                      "escalate_reason": esc.get("reason")},
+                                     **(detail or {})))
+    return True
 
 
 def retrieval_block(rep: Dict[str, Any], limit: int = RETRIEVAL_TRIM) -> str:
@@ -1066,7 +1118,7 @@ async def dispatch_pool():
     能一眼回答 —— 是二进制不在、凭据缺、还是它根本不在池里。模块里的
     `adapter_status()` 是同一份判定，这里只做出口。
     """
-    import registry, tiers as tierlib
+    import registry, tiercfg as tierlib
     status = registry.adapter_status()
     return {"ids": registry.dispatchable_ids(), "agents": status,
             "tiers": tierlib.parse_tiers(),
@@ -1453,13 +1505,18 @@ async def _run_task(run_id: str, row: dict):
     # 三列三口径：model_planned（按档位决议）> model_choice（Leader 显式）>
     # None（用该 agent 自己的默认）。执行前一律以"决议值"为准。
     exec_model = row.get("model_planned") or row.get("model_choice")
+    cat, cat_ok = _catalog_snapshot()
     esc = escalate_target(exec_agent, exec_model, attempts_done, _known_agent_ids(),
-                          tier=row.get("tier"))
+                          tier=row.get("tier"), catalog=cat, catalog_checked=cat_ok)
     if esc["changed"]:
         exec_agent, exec_model = esc["agent_id"], esc["model"]
-        db.execute("UPDATE tasks SET escalated_from_agent=?,escalated_from_model=?,updated_at=?"
-                   " WHERE run_id=? AND task_id=?",
-                   (esc["from_agent"], esc["from_model"], _now(), run_id, row["task_id"]))
+        # `agent_id` 必须同步改写（v0.13.177）：只记 `escalated_from_agent` 而把
+        # `agent_id` 留在原值 ⇒ 展示面写着 dsh、实际是 claude-code 跑的，归因全错；
+        # 更深一轮升档也会从旧 agent 起算，反复升到同一家。
+        db.execute("UPDATE tasks SET agent_id=?,escalated_from_agent=?,escalated_from_model=?,"
+                   "updated_at=? WHERE run_id=? AND task_id=?",
+                   (exec_agent, esc["from_agent"], esc["from_model"], _now(),
+                    run_id, row["task_id"]))
         db.log_profile_event("task_exec", exec_agent, "escalate", 0,
                              trace_id=row["trace_id"],
                              detail={"task": row["task_id"], "reason": esc["reason"],
@@ -1545,6 +1602,18 @@ async def _run_task(run_id: str, row: dict):
                 reason = ("executor_claimed_failure; verifier %s (%s): %s"
                           % (status_v, kind, gaps))[:500]
                 event = "fail"
+            # ── 执行者自身失败也走升档重试（v0.13.177）──
+            # 2026-10-29 实弹：dsh 连吃两次 `RATE_LIMIT 429` → 这条分支**直接写 failed**，
+            # 绕过了下面 verifier 失败分支的 `should_retry` ⇒ 整条 run 的 t2/t3 一次都不重试，
+            # t4 因为上游 failed 变 blocked，汇总永远跑不到。而 429 恰恰是「换一家就活」
+            # 的典型场景 —— 不重试等于把可恢复故障记成终态。
+            # 判据用 `escalate_target` 的 `changed`：**没有升档路径就不重试**（同 agent 同模型
+            # 原地再赌一次是纯浪费，那正是 v0.13.174 之前的错）。
+            if _schedule_exec_retry(run_id, row, err, reason, attempts_done,
+                                    exec_agent, exec_model, dur=dur,
+                                    spent_tokens=spent_tokens, used_model=used_model,
+                                    kind=kind):
+                return
             # ⚠ 口径冲突处理（2026-10-16）：P0-b 的契约是「**没过 verifier（含自述失败）的路径
             #   `verdict` 必须 NULL**」，而 P0-b 闸门 `test_verdict_null_on_self_reported_failure`
             #   钉着这一条。所以本条修复**不写 `verdict`**（保持 NULL），复核结论落 `verify_reason`
@@ -1663,16 +1732,26 @@ async def _run_task(run_id: str, row: dict):
         # 写成字面量却按 5 个参数传（SQL 只有 4 个占位符）⇒ sqlite3.ProgrammingError
         # 在**超时这个异常处理器内部**抛出，任务永远停在 running，且异常冒泡进
         # `_execute_run`。改成正常绑定，顺带把 model 一起记上。
+        _err = "超时熔断 %ds" % TASK_TIMEOUT_S
+        if _schedule_exec_retry(run_id, row, _err, _err, int(row.get("attempts") or 0),
+                                row.get("agent_id") or "",
+                                row.get("model_planned") or row.get("model_choice"),
+                                dur=TASK_TIMEOUT_S * 1000):
+            return
         db.execute("UPDATE tasks SET status='failed',error=?,finished_at=?,updated_at=?"
                    " WHERE run_id=? AND task_id=?",
-                   ("超时熔断 %ds" % TASK_TIMEOUT_S, _now(), _now(),
-                    run_id, row["task_id"]))
+                   (_err, _now(), _now(), run_id, row["task_id"]))
         db.log_profile_event("task_exec", row["agent_id"], "fail", TASK_TIMEOUT_S * 1000,
                              trace_id=row["trace_id"], detail={"task": row["task_id"], "timeout": True})
     except Exception as e:  # noqa: BLE001
+        _err = repr(e)[:500]
+        if _schedule_exec_retry(run_id, row, _err, _err, int(row.get("attempts") or 0),
+                                row.get("agent_id") or "",
+                                row.get("model_planned") or row.get("model_choice")):
+            return
         db.execute("UPDATE tasks SET status='failed',error=?,finished_at=?,updated_at=?"
                    " WHERE run_id=? AND task_id=?",
-                   (repr(e)[:500], _now(), _now(), run_id, row["task_id"]))
+                   (_err, _now(), _now(), run_id, row["task_id"]))
 
 
 async def _execute_run(run_id: str):

@@ -1,3 +1,69 @@
+## v0.13.177 — 派发链路四处断点：跑通一次真 e2e 才看得出来
+
+> 来源：2026-10-29 用户令「验证评估功能运行逻辑，整个流程要先跑通」。
+> 判据不是读代码，是**真跑一条 run 看它卡在哪**。跑了三条（生产 1 条 + 影子 2 条），
+> 抓出四个只在运行期显形的断点，全部修完并各配一条闸门。
+
+### 断点（按发现顺序，每条都是"代码看着对、跑起来不对"）
+
+1. **`/api/tasks/pool` 直接 500** —— `import tiers as tierlib` 是改名残留
+   （`src/tiers.py` → `tiercfg.py` 时漏了这一处）。症状是模块级 `ModuleNotFoundError`，
+   但被 FastAPI 包成 500，前端只看到"接口挂了"。
+2. **池子混进 5 个 `scan-*`** —— 扫描器把带端口的 systemd 服务写进 `custom_agents`，
+   `dispatchable_ids()` 只判「port 非空」⇒ WorkBuddy Daemon / Xvfb 都成了"可派发的 agent"。
+   这是 `239b4d553a`（t1→dsh→failed）的第二次形态：**有个端口 ≠ 能接 chat**。
+3. **执行者自身失败不重试** —— `if not result.get("success")` 分支直接写 `failed`，
+   绕过了 verifier 失败分支的 `should_retry`。实测 dsh 连吃两次 `RATE_LIMIT 429`，
+   t2/t3 一次都不重试，t4 因上游 failed 变 `blocked` ⇒ **汇总永远跑不到**。
+   而 429 恰是「换一家就活」的典型场景。
+4. **升档后不写回 `agent_id`** —— 只记 `escalated_from_agent`，展示面写着 dsh、
+   实际是 claude-code 跑的；更深一轮还会从旧 agent 起算。
+5. **档位升档运行时永不生效** —— `escalate_target()` 三处调用都没传 `catalog`，
+   `first_usable()` 恒返回 None ⇒ 每次都掉到 agent 阶梯。
+   单测看不出来（单测自己传了 catalog），只有实跑才露：claude-code 超时后
+   换成了 codex，而不是升到 t2 的 `deepseek/deepseek-v4-pro`。
+
+### 修复
+
+- `_catalog_snapshot()` 抽成唯一取清单入口，`_plan_tiers` 与三个升档调用点共用。
+- `_schedule_exec_retry()` 统一三条执行失败出口（自称失败 / 超时 / 任意异常），
+  判据是 `escalate_target(...).changed`：**没有升档路径就不重试**（原地再赌一次纯浪费）。
+- 升档时同步改写 `agent_id`。
+- 池子 SQL 加 `COALESCE(type,'') != 'systemd-service'`。
+
+### 一次真 e2e 的实测数据（影子 :3202，非生产）
+
+| 节点 | agent | tier | planned | 实发 model | verdict | 耗时 |
+|---|---|---|---|---|---|---|
+| t1 | claude-code | t1 | `alibaba/deepseek-v4.1-flash` | 同 | pass | 25.6s |
+| t2 | claude-code | t1 | 同 | 同 | pass | 128.8s |
+| t3 | claude-code | t1 | 同 | 同 | pass | 509.8s |
+| t4（汇总） | claude-code | **t3** | `openrouter/openai/gpt-6.1-terra-pro` | **同** | pass | 15.1s |
+
+产物是真值：`zzst`（/etc/hostname）、`Intel(R) Xeon(R) CPU E3-1226 v3`、根分区 91%。
+`/api/tasks/tiers` 的 `model_tier_effective`：**planned=5 / observed=4 / rewritten=0 /
+effective_rate=1.0** —— 档位真的改变了实发模型。
+
+**修正 v0.13.176 的一个结论**：「CCR 全模型回落 agnes ⇒ 档位空转」只对
+`claude`/`jcode` 那两个 OpenAI 兼容端点成立；走 CLI 直传（`claude-code --model`）时
+档位是真的，网关不改写。判断依据是 `model` 列（回包实发），不是请求值。
+
+### 升档路径实测（纯函数，同一份 catalog）
+
+```
+tier=t1 → claude-code / deepseek/deepseek-v4-pro     （只换模型，不换 agent）
+tier=t2 → claude-code / openrouter/openai/gpt-6.1-terra-pro
+tier=t3 → codex / None                               （已在顶档，转 agent 阶梯）
+不传 catalog → agent:codex                            （修复前的行为）
+```
+
+### 仍未验证
+
+- **生产未重启**（`term_sessions>0` 卡闸门），以上全部是影子 :3202/:3203 的数据。
+- `CHAIN_JUDGE` 默认仍为 0 ⇒ **语义判定这一环没跑**，本次只验到结构验收（nonempty）。
+- 执行者耗时差异极大（25s vs 510s），`TASK_TIMEOUT_S=600` 对 claude-code 偏松，
+  超时熔断实际上很难触发。
+
 ## v0.13.176 — 难度→档位：只决定起点，只升不降
 
 > 来源：2026-10-29 用户令「实现难度到档位的映射；不要生搬硬套，先联网调研评估」。

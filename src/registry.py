@@ -87,8 +87,14 @@ def dispatchable_ids() -> List[str]:
         ids.append(a)
     try:
         import db   # 延迟导入：registry 被 adapters 依赖，顶层引 db 会做环
+        # `type='systemd-service'` 是**扫描器**登记的外部服务（`scanner.py:147`：
+        # WorkBuddy Daemon / Xvfb / 任意监听端口），它们连 OpenAI 兼容协议都没有 ——
+        # 2026-10-29 实测池子里混进 5 个 `scan-*`，Leader 抽中就是一条注定失败的任务
+        # （同 `239b4d553a` 那次 t1→dsh→failed 的翻版，换了个名字而已）。
+        # 判据是「能接 chat」，不是「有个端口」。
         for r in db.query("SELECT id FROM custom_agents "
-                          "WHERE port IS NOT NULL AND port != ''"):
+                          "WHERE port IS NOT NULL AND port != ''"
+                          " AND COALESCE(type,'') != 'systemd-service'"):
             if r["id"] not in ids:
                 ids.append(r["id"])
     except Exception:  # noqa: BLE001  DB 未就绪时退回适配器清单，不能把派发池清空

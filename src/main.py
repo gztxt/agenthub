@@ -106,7 +106,7 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.176"
+VERSION = "0.13.177"
 
 # v0.13.176（2026-10-29）：难度→档位（**只决定起点，只升不降**）。
 # 联网调研后刻意没做成"难度表直接当路由器"（那是 router 文献里的"信心剧场"）：
@@ -122,6 +122,17 @@ VERSION = "0.13.176"
 # ③ 同时暴露一个会打脸的指标 `model_tier_effective`：本机实测 5 个模型 ID 全被
 #    网关改写为 agnes-2.5-flash ⇒ 模型档位当前**不影响能力**，只有执行者档位有效。
 #    这个数不报，"档位映射"就是自我感觉良好。
+
+# v0.13.177（2026-10-29）：跑通一次真 e2e 才看得见的四处断点。
+# 判据不是读代码，是真跑 run 看它卡在哪：`import tiers` 改名残留让
+# `/api/tasks/pool` 直接 500；池子靠「port 非空」收人 ⇒ 5 个 systemd-service
+# （`scan-*`）混成可派发目标；执行者自身失败（429/超时/异常）**不重试**，
+# 绕过 `should_retry` ⇒ 汇总结点永远跑不到；升档后不写回 `agent_id` ⇒
+# 展示面与归因错位；`escalate_target()` 三处调用都没传 `catalog` ⇒
+# 档位升档**运行时永不生效**（claude-code 超时后换成了 codex，而不是升到 t2 模型）。
+# 修完实测：t1–t4 全 success，产物为真值（zzst / Xeon E3-1226 v3 / 91%），
+# `model_tier_effective` 的 `effective_rate` = 1.0 —— CLI 直传时档位是真的
+# （v0.13.176 那条「网关全改写成 agnes」只对 claude/jcode 端点成立，本版修正）。
 
 # v0.13.175（2026-10-29）：派发扩池 2 → 11 + 失败重试改升档（cascade）。
 # ① 扩池：新增 9 个带工具环的 CLI 执行者（claude-code/codex/dsh/pi/codebuddy/grok/

@@ -26,6 +26,7 @@ import re
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 _REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
@@ -482,6 +483,34 @@ class TestDispatchablePool(unittest.TestCase):
         self.registry._adapters["codex"] = Dead()
         ids = self.registry.dispatchable_ids()
         self.assertNotIn("codex", ids)
+
+    def test_scanned_services_excluded(self):
+        """扫描器登记的 `systemd-service` 不是 agent（2026-10-29 实测池里混进 5 个 scan-*）。
+
+        它们**有个端口**但没有 OpenAI 兼容协议，派过去必失败 ——
+        「port 非空」不等于「能接 chat」，这是 239b4d553a 那类事故的第二次形态。
+        """
+        import db
+        with mock.patch.object(db, "query",
+                               return_value=[{"id": "goose"}]) as q:
+            ids = self.registry.dispatchable_ids()
+        self.assertIn("goose", ids, "自定义但非 systemd-service 的登记项仍应入池")
+        self.assertIn("systemd-service", q.call_args[0][0],
+                      "过滤必须落在 SQL 里，不能靠 Python 侧再筛一遍")
+
+    def test_scanned_services_filtered_by_real_sql(self):
+        """真跑一遍 SQL 选句：`type='systemd-service'` 的扫描项必须被 SQL 挡掉。"""
+        import sqlite3
+        sql = ("SELECT id FROM custom_agents WHERE port IS NOT NULL AND port != ''"
+               " AND COALESCE(type,'') != 'systemd-service'")
+        con = sqlite3.connect(":memory:")
+        con.execute("CREATE TABLE custom_agents(id TEXT, type TEXT, port TEXT)")
+        con.executemany("INSERT INTO custom_agents VALUES(?,?,?)",
+                        [("scan-a22996148f", "systemd-service", "8084"),
+                         ("goose", "node", "9100"),
+                         ("noport", "node", "")])
+        got = [r[0] for r in con.execute(sql)]
+        self.assertEqual(got, ["goose"], "扫描服务与无端口项都不该入池")
 
 
 if __name__ == "__main__":

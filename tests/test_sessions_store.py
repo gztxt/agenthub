@@ -212,6 +212,86 @@ class TestDshStore(unittest.TestCase):
             ss.resume_argv("dsh", "session-33333333-3333-3333-3333-333333333333", "/fallback")
 
 
+class TestOmpPiStore(unittest.TestCase):
+    """omp / pi 历史三处口径（2026-10-30 修，用户报障「omp 16 条里 12 条未命名会话」）。
+
+    三条判据都是在真机上量过才立的（见 _t_omp/_t_pi docstring）：
+      ① 标题：omp 开机写 `{"type":"title","title":""}`，真标题后补；空串必须回落首句提问
+      ② cwd：session 行自带 cwd，不能拿请求参数的画像目录顶替
+      ③ ts：取文件 mtime（最后活动），不是 session 行的开始时刻 —— 否则与 mtime 排序矛盾
+    全部 hermetic：把 OMP_SESSIONS / PI_SESSIONS 指到临时目录。
+    """
+
+    SID = "01a185ad-6ab8-7000-9e2a-be60715e65c0"
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self._orig = (ss.OMP_SESSIONS, ss.PI_SESSIONS)
+        ss.OMP_SESSIONS = self.root / "omp"
+        ss.PI_SESSIONS = self.root / "pi"
+        ss.OMP_SESSIONS.mkdir()
+        ss.PI_SESSIONS.mkdir()
+        ss._CACHE.clear()
+
+    def tearDown(self):
+        ss.OMP_SESSIONS, ss.PI_SESSIONS = self._orig
+        ss._CACHE.clear()
+        self._tmp.cleanup()
+
+    def _write(self, kind, *, title, first, cwd, started_ago=86400.0, age=0.0):
+        """按实测格式落一份 jsonl：title 行 → session 行（带 cwd）→ 一条 user 消息。"""
+        import json as _json
+        import os
+        import time as _time
+        rows = [{"type": "title", "v": 1, "title": title,
+                 "updatedAt": "2026-10-29T03:21:37.208Z", "pad": ""},
+                {"type": "session", "version": 3, "id": self.SID,
+                 "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%S.000Z",
+                                             _time.gmtime(_time.time() - started_ago)),
+                 "cwd": cwd},
+                {"type": "message", "id": "m1", "parentId": None,
+                 "message": {"role": "user",
+                             "content": [{"type": "text", "text": first}]}}]
+        bucket = (self.root / kind) / "--bucket--"
+        bucket.mkdir(exist_ok=True)
+        p = bucket / ("2026-10-29T03-21-37-208Z_" + self.SID + ".jsonl")
+        p.write_text("\n".join(_json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+                     encoding="utf-8")
+        if age:
+            t = _time.time() - age
+            os.utime(p, (t, t))
+        return p
+
+    def _assert_common(self, agent):
+        import time as _time
+        d = ss.list_history(agent, "/fallback/画像目录", 8)
+        it = d["items"][0]
+        self.assertEqual(it["title"], "首句就在这里", "空 title 必须回落到首句用户提问")
+        self.assertEqual(it["cwd"], "/fs/1000/ftp/技术文档/agenthub",
+                         "cwd 必须取 session 行自带的那个，不是请求参数的画像目录")
+        self.assertLess(abs(it["ts"] - int(_time.time())), 120,
+                        "ts 必须是文件 mtime（最后活动），不能是 session 开始时刻")
+
+    def test_omp_title_falls_back_and_cwd_ts_are_truthful(self):
+        self._write("omp", title="", first="首句就在这里",
+                    cwd="/fs/1000/ftp/技术文档/agenthub")
+        self._assert_common("omp")
+
+    def test_pi_title_falls_back_and_cwd_ts_are_truthful(self):
+        self._write("pi", title="", first="首句就在这里",
+                    cwd="/fs/1000/ftp/技术文档/agenthub")
+        self._assert_common("pi")
+
+    def test_omp_real_title_wins(self):
+        self._write("omp", title="它自己起的标题", first="首句就在这里",
+                    cwd="/fs/1000/ftp/技术文档/agenthub")
+        d = ss.list_history("omp", "/fallback", 8)
+        self.assertEqual(d["items"][0]["title"], "它自己起的标题",
+                         "omp 有真标题时不许被首句覆盖")
+
+
 class TestResumeArgv(unittest.TestCase):
     @tiers.host_only          # 需要盘上真 id 才能断言（L1）
     def test_good_ids(self):

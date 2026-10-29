@@ -683,7 +683,21 @@ def _omp_uuid_from_filename(name: str) -> Optional[str]:
 
 
 def _t_omp(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
-    """omp 历史：``~/.omp/agent/sessions/<桶>/<时间戳>_<uuid>.jsonl``，**跳目录**按 mtime 倒序。"""
+    """omp 历史：``~/.omp/agent/sessions/<桶>/<时间戳>_<uuid>.jsonl``，**跳目录**按 mtime 倒序。
+
+    2026-10-30 修三处（用户报障「omp 16 条里 12 条显示未命名会话」）：
+    ① 标题：omp 开机就写一行 ``{"type":"title","title":""}``，**真标题要等它自己生成后
+       才回填**；新建即退出的会话永远停在空串上 ⇒ 旧实现取到这行空 title 就 break，
+       从不回落到用户自己说的那句话。现按「title 行 → 首句用户提问」两跳取
+       （`message` 形状与 pi 同构，实测 content=[{"type":"text","text":…}]，故复用
+       `_pi_first_user`；两侧任一改动都要回来核对另一侧）。
+    ② cwd：旧实现把**请求参数 cwd**（画像目录）写进每条，于是 omp 的会话全显示成
+       「技术文档」、与真实工程目录无关。session 行自带 ``cwd``（实测
+       ``{"type":"session",…,"cwd":"/fs/1000/ftp/技术文档/agenthub"}``）⇒ 以它为准。
+    ③ ts：旧实现取 session 行的 timestamp = **会话开始时刻**，而列表按文件 mtime 排序
+       ⇒ 显示时间与顺序互相矛盾（续聊过的老会话排在最前却显示成最早）。改取 mtime =
+       最后一次写入 = 最后活动，与排序同源。
+    """
     if not OMP_SESSIONS.is_dir():
         return [], "omp 无会话目录"
     items: List[dict] = []
@@ -697,14 +711,16 @@ def _t_omp(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
             if d.get("type") == "title":
                 title = d.get("title") or ""
                 break
-        ts = 0
+        if not title:
+            title = _pi_first_user(objs)
+        s_cwd = ""
         for d in objs:
             if d.get("type") == "session":
-                ts = _iso(d.get("timestamp"))
+                s_cwd = d.get("cwd") or ""
                 break
         items.append({"agent": "omp", "id": sid,
                       "title": mask_title(title) or "未命名会话",
-                      "ts": ts, "msgs": None, "cwd": cwd})
+                      "ts": int(p.stat().st_mtime), "msgs": None, "cwd": s_cwd or cwd})
         if len(items) >= limit + 10:
             break
     items = items[:limit]
@@ -749,7 +765,17 @@ def _pi_first_user(objs: List[dict]) -> str:
 
 
 def _t_pi(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
-    """pi 历史：``~/.pi/agent/sessions/<桶>/<时间戳>_<uuid>.jsonl``，**跳目录**按 mtime 倒序。"""
+    """pi 历史：``~/.pi/agent/sessions/<桶>/<时间戳>_<uuid>.jsonl``，**跳目录**按 mtime 倒序。
+
+    2026-10-30 与 omp 同批修两处（同一类错，两处必须一起改，否则「按 agent 分叉」的
+    假象会留在侧栏里）：
+    · cwd 取 session 行自带的 ``cwd``（旧实现恒填请求参数＝画像目录，502 个会话全显示
+      成同一个目录，目录列彻底失效）；
+    · ts 取文件 mtime（旧实现取 session 开始时刻，与 mtime 排序矛盾：续聊过的老会话
+      排在最前却显示成最早）。
+    标题本就两跳（title 行 → 首句用户提问），pi 实测**从不写 title 行**（502 个文件里
+    0 条），所以它一直靠 `_pi_first_user` 兜底，行为不变。
+    """
     if not PI_SESSIONS.is_dir():
         return [], "pi 无会话目录"
     items: List[dict] = []
@@ -759,20 +785,20 @@ def _t_pi(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
             continue
         objs = _head_lines(p, 400)
         title = ""
+        s_cwd = ""
         for d in objs:
             if d.get("type") == "title":
                 title = d.get("title") or ""
                 break
         if not title:
             title = _pi_first_user(objs)
-        ts = 0
         for d in objs:
             if d.get("type") == "session":
-                ts = _iso(d.get("timestamp"))
+                s_cwd = d.get("cwd") or ""
                 break
         items.append({"agent": "pi", "id": sid,
                       "title": mask_title(title) or "未命名会话",
-                      "ts": ts, "msgs": None, "cwd": cwd})
+                      "ts": int(p.stat().st_mtime), "msgs": None, "cwd": s_cwd or cwd})
         if len(items) >= limit + 10:
             break
     items = items[:limit]

@@ -160,7 +160,31 @@ function termConnecting(on, ws) {
    这里在回放之后确认画面确实空了，才把 pty 尺寸挪一行再挪回来逼它重画整屏。
    回放落在隐藏态时先挂着（termHealPending），等 termRepaint() 在重新可见时补做。 */
 let termHealPending = false;
-function termHealBlank() { termHealPending = true; setTimeout(termHealNow, 250); }
+/* force = 不看空白率，一律整屏重建。给「差分行渲染」的整屏 TUI 用（见 termAltAgent）。 */
+let termHealForce = false;
+function termHealBlank(force) {
+  termHealPending = true;
+  if (force) termHealForce = true;
+  setTimeout(termHealNow, 250);
+}
+
+/* ── 差分行渲染的整屏 TUI：连接后必须强制整屏重建（PT-20261030-01）──────────
+   为什么单列一张名单：hub 从 v0.13.83 起恒用主屏 —— `?1049h` 当场吞掉并 term.clear()
+   （见 termAltScreenBlock）。但有一类 TUI（pi-tui 的 TuiAltScreen，dsh 在用）只重画
+   **与上一帧不同的行**，且把备用屏当空白画布。于是两份状态会分叉：
+     · TUI 的模型里：第 3 行还是 `you › …`、第 20 行还是提示符；
+     · 我们的屏幕上：term.clear() 之后只剩 ring 尾巴重放出来的半屏。
+   没变化的行**永远不会被重画** ⇒ 换会话 / 断线重连 / 刷新页面后长期挂着半屏空白。
+   实测（真 pty + 影子实例 3113 + chromium，2026-10-30）：dsh 重连后 26 行里 21 行空白；
+   把 pty 尺寸挪一行再挪回来（SIGWINCH）后整屏 26 行立刻补齐。
+   ⚠️ 为什么不一刀切对所有 agent 都做：claude / opencode / jcode 虽也发 `?1049h`，但每帧
+   整屏重画（cursor home + 全量帧）或走行内输出 ⇒ 自己就会补上；对它们发 resize 只会让
+   scrollback 重新折行、凭空多出一次重排。名单只收「差分渲染」这一类。
+   新增这类 agent 时：先确认它只重画变化行（`?2026h` 同步块里只有少数行），再加进来。 */
+const TERM_ALT_DIFF_AGENTS = ['dsh'];
+function termAltAgent(agent) {
+  return !!agent && TERM_ALT_DIFF_AGENTS.indexOf(String(agent)) >= 0;
+}
 
 /* ── 终端链接带外通道：登录(auth_url) / 页面(page_url) 两路（v0.13.87）──────
    场景（v0.13.64 原意）：手机上跑 `claude setup-token` / 任何 OAuth 登录，登录 URL
@@ -230,8 +254,12 @@ function termViewportBlankRows(t) {
 function termHealNow() {
   if (!termHealPending || !term || !termWs || termWs.readyState !== 1 || !termVisible()) return;
   termHealPending = false;
+  const force = termHealForce;
+  termHealForce = false;
   const blank = termViewportBlankRows(term);
-  if (blank * 3 < term.rows * 2) return;   // 画面有内容就别去打扰 pty
+  /* force 档只对差分行渲染的 TUI 生效（调用方已用它把关），这里不再看空白率：
+     它们的「看起来有内容」恰恰可能是**过期**内容，空白率判据会放它过去。 */
+  if (!force && blank * 3 < term.rows * 2) return;   // 画面有内容就别去打扰 pty
   const c = term.cols, r = term.rows;
   /* 自愈是**主动干预**（不是被动的几何变化），两帧都必须 claim：
      一是它得能真的改到尺寸，二是顺手把所有权收回本端——白块往往正是被别的端
@@ -1094,6 +1122,7 @@ function termConnect(sid, agent, opts) {
    termMouseWantReset();   // 新连接：鼠标意图从零判定（v0.13.84 连 want 表一起清），别继承上一会话
   termBracketed = false;   // 粘贴模式同理：新会话的 2004 要等它自己实时发来才算数
   termHealPending = false; // 上一条会话攒下的补画请求作废，新连接的回放自己会再挂
+  termHealForce = false;   // force 标记同理：别把上一条会话的「强制整屏」带过来
   if (!o.reconnect) termToastClear();   // 用户主动接的线：收掉「正在重连」提示；自动重连则留到 hb 往返成功才结案
   /* 保留画面时别清屏：清屏 = 先给用户一屏白底，而服务端只回放 ring 里最近 64KB
      （整屏帧早被增量帧挤出去）⇒ 补不满就一直白着，就是用户报的现象。 */
@@ -1156,7 +1185,10 @@ function termConnect(sid, agent, opts) {
       } else {
         term.write(TERM_MOUSE_OFF);
       }
-      termHealBlank();   // 回放可能只是 64KB 尾巴里的半屏，见函数注释
+      /* 回放可能只是 64KB 尾巴里的半屏，见函数注释。差分行渲染的 TUI（termAltAgent）
+         则更狠：只要清过屏就一定和它的内部模型对不上，不看空白率、直接整屏重建。
+         keepScreen 时屏幕原样保留，不存在分叉，不用强制。 */
+      termHealBlank(!keepScreen && termAltAgent(termSidAgent));
       return;
     }
     term.write(raw);

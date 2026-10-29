@@ -69,8 +69,22 @@ class TestMouseTier(unittest.TestCase):
         self.assertRegex(self.s02, r"termMouseLive\s*=\s*termMouseWant\.size\s*>\s*0")
 
     def test_R3_mousedown_keeps_reset_and_mouseup_arms_after_xterm(self):
-        self.assertIn("el.addEventListener('mousedown', termMouseResetNow", self.s03,
-                      "拖选复制/点击不抢焦点的语义（v0.13.81）不许回退")
+        # 2026-10-30 改形状而非改语义：mousedown 绑的是**分道入口** termMouseDownNow。
+        # 原断言钉死「mousedown 直绑 termMouseResetNow」，那条对 dsh 是致命的 ——
+        # 它的按钮/列表/滚动条全靠 SGR 上报，press 被本地同步吞掉 ⇒ 点什么都没反应
+        # （用户报障「dsh 终端比 codebuddy 差很远」的主体差异）。语义保留在分支里：
+        # 非「差分整屏 TUI + app 已声明鼠标」的会话照旧走复位，拖选/不抢焦点不回退。
+        self.assertIn("el.addEventListener('mousedown', termMouseDownNow", self.s03,
+                      "mousedown 必须绑分道入口")
+        self.assertIn("function termMouseDownNow", self.s03, "分道入口本体丢了")
+        i = self.s03.index("function termMouseDownNow")
+        body = self.s03[i:self.s03.index("function termMouseResetBind")]
+        self.assertRegex(body, r"termMouseLive\s*&&\s*termAltAgent\(\s*termSidAgent\s*\)",
+                         "放行条件必须是「app 实时声明鼠标 + 差分行整屏 TUI」，两个缺一不可")
+        self.assertIn("termMouseResetNow()", body,
+                      "其余分支仍要复位（v0.13.81 的拖选/不抢焦点语义不许回退）")
+        self.assertNotIn("el.addEventListener('mousedown', termMouseResetNow", self.s03,
+                         "mousedown 不许再直绑复位：那正是 dsh 点了没反应的根因")
         m = re.search(r"window\.addEventListener\('mouseup'[^)]*(\)[^;]*);", self.s03)
         self.assertIsNotNone(m, "必须有 window 级回装（选区常越出终端盒）")
         binding = m.group(0)
@@ -92,6 +106,24 @@ class TestMouseTier(unittest.TestCase):
         self.assertRegex(self.s03, r"\}\s*else \{\s*term\.write\(TERM_MOUSE_OFF\)",
                          "shell 画像维持 v0.8.1 口径：回放里的过期开关不算数")
         self.assertIn("termSidAgent !== 'shell'", self.s02, "want 缓存只写非 shell 会话")
+
+    def test_R6_touch_scroll_reaches_alt_screen_apps(self):
+        """触摸滑动在「无 scrollback 的整屏 TUI」上必须转成滚轮上报（2026-10-30）。
+
+        dsh 这类差分渲染的 TUI，内容不进 scrollback（baseY 恒 0）⇒ 旧实现
+        scrollToLine(0) 是空操作，手机上「怎么滑都不动」。判据两条：走对分支 +
+        合成真实 WheelEvent（自己拼 `\\x1b[<64;…M` 就是第二份会漂的坐标/编码真相）。
+        """
+        s13 = (REPO / "static/hub/13-term-touch.js").read_text(encoding="utf-8")
+        self.assertIn("function ttWheelToApp", s13, "整屏 TUI 的触摸转滚轮分支丢了")
+        i = s13.index("function ttScrollByPx")
+        body = s13[i:i + 900]
+        self.assertRegex(body, r"termMouseLive\s*&&\s*termAltAgent\(\s*termSidAgent\s*\)"
+                              r"\s*&&\s*ttWheelToApp\(", "分流条件不完整：必须限定整屏 TUI 且 app 要鼠标")
+        self.assertIn("xterm-scrollable-element", s13,
+                      "分发目标必须是 xterm 的滚动容器；派到 #termEl 只会冒泡向上，到不了监听器")
+        self.assertIn("new WheelEvent(", s13, "必须合成真实滚轮事件，让 xterm 自己编码 SGR")
+        self.assertNotIn("\\x1b[<64", s13, "不许手拼 SGR 滚轮上报（坐标系/编码会漂）")
 
     def test_R5_red_baseline_is_caught(self):
         old = _git(PRE_TIER_SHA, "static/hub/03-agents-cards.js")

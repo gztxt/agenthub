@@ -83,10 +83,49 @@ function ttViewportRow(clientY) {
 
    符号：手指向下拖（deltaY > 0）＝ 要看更早的内容 ＝ viewportY 变小。
    所以目标行号 = 当前 viewportY - deltaY/行高。 */
+/* ── 整屏 TUI 的滑动：转成滚轮上报喂回 pty（2026-10-30）─────────────────────
+   为什么单独一条路：dsh 这类**差分整屏渲染**的 TUI，内容不在 scrollback 里
+   （每帧绝对定位重画，buffer 只有一屏高 ⇒ baseY 恒 0）。上滑时
+   `scrollToLine(0)` 是空操作，用户侧就是「手机上怎么滑都不动」；
+   而同一个 TUI 的『向上翻看』能力其实存在——它靠滚轮 SGR 上报自滚
+   （桌面端这条路一直是通的，见 02-nav-and-poll.js 的 termWheelNow 分层）。
+   所以触摸层做同一件事：把「按行折算后的位移」合成为**真实 WheelEvent** 派发到
+   xterm 的滚动容器上。不自己拼 SGR 滚轮序列（64/65 号键）的理由：行列坐标、
+   1-based/0-based、utf8/utf16 编码全由 xterm 的 coreMouseService 负责，
+   自己拼就是第二份会漂的真相。
+   派发目标必须是 `.xterm-scrollable-element`（xterm 的 wheel 监听在它身上；
+   派到 #termEl 只会冒泡向上，根本到不了它）。
+   判据：只对 TERM_ALT_DIFF_AGENTS 且 app 实时声明了鼠标时走这条路；其余照旧走
+   scrollback（codex/claude/线性输出仍按原逻辑滚，行为零变化）。 */
+function ttWheelToApp(deltaYPx) {
+  const cell = ttCellPx();
+  const el = term && term.element &&
+             (term.element.querySelector('.xterm-scrollable-element') || term.element);
+  if (!cell || !el) return false;
+  ttResidPx += deltaYPx;
+  const rows = Math.trunc(ttResidPx / cell);
+  if (!rows) return true;                 // 不足一行：留余量，下一帧补（与 scrollToLine 同款）
+  ttResidPx -= rows * cell;
+  const n = Math.min(6, Math.abs(rows));  // 一帧最多 6 行：一次大跳会让对端连发重绘、卡顿
+  const dir = rows > 0 ? -cell : cell;    // 手指下滑(正) = 看更早 = 滚轮向上(负 deltaY)
+  const r = el.getBoundingClientRect();
+  for (let i = 0; i < n; i++) {
+    try {
+      el.dispatchEvent(new WheelEvent('wheel', {
+        deltaY: dir, deltaMode: 0,
+        clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+        bubbles: true, cancelable: true
+      }));
+    } catch (e) { return false; }         // 老浏览器没有 WheelEvent 构造器 ⇒ 退回 scrollToLine
+  }
+  return true;
+}
+
 function ttScrollByPx(deltaYPx) {
   if (!term || !deltaYPx) return;
   const cell = ttCellPx();
   if (!cell) return;
+  if (termMouseLive && termAltAgent(termSidAgent) && ttWheelToApp(deltaYPx)) return;
   try {
     const buf = term.buffer && term.buffer.active;
     const top = (buf && typeof buf.viewportY === 'number' && buf.viewportY >= 0) ? buf.viewportY : 0;

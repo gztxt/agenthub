@@ -3044,6 +3044,13 @@ function ensureTerm() {
   }
   /* 回调一律包一层：termRepaint(force) 的形参不能接 addEventListener/ResizeObserver 的事件对象 */
   window.addEventListener('resize', () => termRepaint());
+  /* 软键盘弹起只改 visualViewport（iOS/Android 的 window 不 resize）⇒ 旧实现 rows 不变、
+     光标与底栏被键盘盖住。整屏 TUI（dsh）的输入区就压在最底行，最先中招；termRepaint
+     内部走 100ms 防抖，连发 resize 不会打爆重排。 */
+  try {
+    if (window.visualViewport)
+      window.visualViewport.addEventListener('resize', () => termRepaint());
+  } catch (e) { /* 无 visualViewport：退回 window resize 那条 */ }
   new ResizeObserver(() => termRepaint()).observe($('termEl'));
   requestAnimationFrame(() => termRepaint());
   setTimeout(() => termRepaint(), 150);
@@ -3120,6 +3127,26 @@ function termWheelNow() {
   }
   termMouseResetNow();
 }
+/* mousedown 分道（2026-10-30，用户报障「dsh 终端比 codebuddy 差很远」）：
+   原实现 mousedown 无条件 termMouseResetNow()（同步把 xterm 协议切 NONE），
+   理由见上：让「点终端不被 TUI 抢焦点」+ 拖选第一帧就归浏览器。
+
+   为什么这条对 dsh 是致命的：dsh 的 TUI 是**自绘 UI**——按钮、列表、滚动条、
+   输入框焦点全靠 SGR 鼠标上报驱动（pi-tui 的 TuiAltScreen 建的时候就是
+   `{mouse:true}`，开机发 `?1000h?1002h?1003h?1004h?1006h`）。press 一被本地
+   吞掉，app 永远收不到，用户侧就是「看得见按钮，怎么点都没反应」；
+   codebuddy 的界面里没有鼠标交互（包内 0 处 `?1000h`），所以同一条代码在它身上
+   完全无感 —— 这就是「两个 agent 用起来差很远」的主体差异，不是渲染性能。
+
+   分道判据：**当前会话是差分行整屏 TUI（TERM_ALT_DIFF_AGENTS）且 app 实时声明要
+   鼠标**才让点击直达；其余一律照旧（shell / 线性输出 / 未声明鼠标的 TUI 不受影响）。
+   代价：dsh 里普通点选不再选中文本 —— xterm 内建 `shouldForceSelection()`
+   （非 mac 按 Shift、mac 按 Option，vendor xterm.js:120411）在跟踪态下就是官方
+   逃生口，按住 Shift 拖照样选；右键菜单「全选/复制」也在。 */
+function termMouseDownNow() {
+  if (termMouseLive && termAltAgent(termSidAgent)) return;
+  termMouseResetNow();
+}
 function termMouseResetBind() {
   const el = term && term.element;
   if (!el || el.dataset.mouseResetBound) return;
@@ -3127,7 +3154,7 @@ function termMouseResetBind() {
   /* capture 阶段 + passive：抢在 xterm 任何内部处理器之前，且不吞事件。
      mousedown 走捕获是为了纯点击也能复位（用户诉求「不抢焦点」）。 */
   el.addEventListener('wheel', termWheelNow, { capture: true, passive: true });
-  el.addEventListener('mousedown', termMouseResetNow, { capture: true });
+  el.addEventListener('mousedown', termMouseDownNow, { capture: true });
   /* 松手即回装 app 声明的跟踪态：拖选/点击归浏览器的窗口只到 mouseup 为止，
      下一次 wheel 立刻回到「喂给 app」的分层上。绑在 window：选区常越出终端盒，
      element 上的 mouseup 会漏装（实测漏装后 wheel 回不来，只有等 app 重画重新断言
@@ -9327,10 +9354,49 @@ function ttViewportRow(clientY) {
 
    符号：手指向下拖（deltaY > 0）＝ 要看更早的内容 ＝ viewportY 变小。
    所以目标行号 = 当前 viewportY - deltaY/行高。 */
+/* ── 整屏 TUI 的滑动：转成滚轮上报喂回 pty（2026-10-30）─────────────────────
+   为什么单独一条路：dsh 这类**差分整屏渲染**的 TUI，内容不在 scrollback 里
+   （每帧绝对定位重画，buffer 只有一屏高 ⇒ baseY 恒 0）。上滑时
+   `scrollToLine(0)` 是空操作，用户侧就是「手机上怎么滑都不动」；
+   而同一个 TUI 的『向上翻看』能力其实存在——它靠滚轮 SGR 上报自滚
+   （桌面端这条路一直是通的，见 02-nav-and-poll.js 的 termWheelNow 分层）。
+   所以触摸层做同一件事：把「按行折算后的位移」合成为**真实 WheelEvent** 派发到
+   xterm 的滚动容器上。不自己拼 SGR 滚轮序列（64/65 号键）的理由：行列坐标、
+   1-based/0-based、utf8/utf16 编码全由 xterm 的 coreMouseService 负责，
+   自己拼就是第二份会漂的真相。
+   派发目标必须是 `.xterm-scrollable-element`（xterm 的 wheel 监听在它身上；
+   派到 #termEl 只会冒泡向上，根本到不了它）。
+   判据：只对 TERM_ALT_DIFF_AGENTS 且 app 实时声明了鼠标时走这条路；其余照旧走
+   scrollback（codex/claude/线性输出仍按原逻辑滚，行为零变化）。 */
+function ttWheelToApp(deltaYPx) {
+  const cell = ttCellPx();
+  const el = term && term.element &&
+             (term.element.querySelector('.xterm-scrollable-element') || term.element);
+  if (!cell || !el) return false;
+  ttResidPx += deltaYPx;
+  const rows = Math.trunc(ttResidPx / cell);
+  if (!rows) return true;                 // 不足一行：留余量，下一帧补（与 scrollToLine 同款）
+  ttResidPx -= rows * cell;
+  const n = Math.min(6, Math.abs(rows));  // 一帧最多 6 行：一次大跳会让对端连发重绘、卡顿
+  const dir = rows > 0 ? -cell : cell;    // 手指下滑(正) = 看更早 = 滚轮向上(负 deltaY)
+  const r = el.getBoundingClientRect();
+  for (let i = 0; i < n; i++) {
+    try {
+      el.dispatchEvent(new WheelEvent('wheel', {
+        deltaY: dir, deltaMode: 0,
+        clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+        bubbles: true, cancelable: true
+      }));
+    } catch (e) { return false; }         // 老浏览器没有 WheelEvent 构造器 ⇒ 退回 scrollToLine
+  }
+  return true;
+}
+
 function ttScrollByPx(deltaYPx) {
   if (!term || !deltaYPx) return;
   const cell = ttCellPx();
   if (!cell) return;
+  if (termMouseLive && termAltAgent(termSidAgent) && ttWheelToApp(deltaYPx)) return;
   try {
     const buf = term.buffer && term.buffer.active;
     const top = (buf && typeof buf.viewportY === 'number' && buf.viewportY >= 0) ? buf.viewportY : 0;

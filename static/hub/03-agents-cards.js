@@ -513,6 +513,13 @@ function ensureTerm() {
   }
   /* 回调一律包一层：termRepaint(force) 的形参不能接 addEventListener/ResizeObserver 的事件对象 */
   window.addEventListener('resize', () => termRepaint());
+  /* 软键盘弹起只改 visualViewport（iOS/Android 的 window 不 resize）⇒ 旧实现 rows 不变、
+     光标与底栏被键盘盖住。整屏 TUI（dsh）的输入区就压在最底行，最先中招；termRepaint
+     内部走 100ms 防抖，连发 resize 不会打爆重排。 */
+  try {
+    if (window.visualViewport)
+      window.visualViewport.addEventListener('resize', () => termRepaint());
+  } catch (e) { /* 无 visualViewport：退回 window resize 那条 */ }
   new ResizeObserver(() => termRepaint()).observe($('termEl'));
   requestAnimationFrame(() => termRepaint());
   setTimeout(() => termRepaint(), 150);
@@ -589,6 +596,26 @@ function termWheelNow() {
   }
   termMouseResetNow();
 }
+/* mousedown 分道（2026-10-30，用户报障「dsh 终端比 codebuddy 差很远」）：
+   原实现 mousedown 无条件 termMouseResetNow()（同步把 xterm 协议切 NONE），
+   理由见上：让「点终端不被 TUI 抢焦点」+ 拖选第一帧就归浏览器。
+
+   为什么这条对 dsh 是致命的：dsh 的 TUI 是**自绘 UI**——按钮、列表、滚动条、
+   输入框焦点全靠 SGR 鼠标上报驱动（pi-tui 的 TuiAltScreen 建的时候就是
+   `{mouse:true}`，开机发 `?1000h?1002h?1003h?1004h?1006h`）。press 一被本地
+   吞掉，app 永远收不到，用户侧就是「看得见按钮，怎么点都没反应」；
+   codebuddy 的界面里没有鼠标交互（包内 0 处 `?1000h`），所以同一条代码在它身上
+   完全无感 —— 这就是「两个 agent 用起来差很远」的主体差异，不是渲染性能。
+
+   分道判据：**当前会话是差分行整屏 TUI（TERM_ALT_DIFF_AGENTS）且 app 实时声明要
+   鼠标**才让点击直达；其余一律照旧（shell / 线性输出 / 未声明鼠标的 TUI 不受影响）。
+   代价：dsh 里普通点选不再选中文本 —— xterm 内建 `shouldForceSelection()`
+   （非 mac 按 Shift、mac 按 Option，vendor xterm.js:120411）在跟踪态下就是官方
+   逃生口，按住 Shift 拖照样选；右键菜单「全选/复制」也在。 */
+function termMouseDownNow() {
+  if (termMouseLive && termAltAgent(termSidAgent)) return;
+  termMouseResetNow();
+}
 function termMouseResetBind() {
   const el = term && term.element;
   if (!el || el.dataset.mouseResetBound) return;
@@ -596,7 +623,7 @@ function termMouseResetBind() {
   /* capture 阶段 + passive：抢在 xterm 任何内部处理器之前，且不吞事件。
      mousedown 走捕获是为了纯点击也能复位（用户诉求「不抢焦点」）。 */
   el.addEventListener('wheel', termWheelNow, { capture: true, passive: true });
-  el.addEventListener('mousedown', termMouseResetNow, { capture: true });
+  el.addEventListener('mousedown', termMouseDownNow, { capture: true });
   /* 松手即回装 app 声明的跟踪态：拖选/点击归浏览器的窗口只到 mouseup 为止，
      下一次 wheel 立刻回到「喂给 app」的分层上。绑在 window：选区常越出终端盒，
      element 上的 mouseup 会漏装（实测漏装后 wheel 回不来，只有等 app 重画重新断言

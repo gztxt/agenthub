@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -76,6 +77,15 @@ EXCLUDE_DIR_NAMES = {"node_modules", "venv", ".venv", "__pycache__", "target", "
 #: 指望那些仓被扫描到。按目录名排会把「测试自己造的仓」也排掉，治好了污染、测瞎了扫描。
 #: 正确的粒度是**路径**：见 EXCLUDE_PATH_PREFIXES —— 夹具根是一个绝对路径，不是名字模式。
 EXCLUDE_NAME_PREFIXES = ("ARCHIVED",)
+
+#: v0.13.178：**后缀式备份目录**（`cloudcli.bak-20261005_141214-升1.37.3前`）。
+#:
+#: 判据为什么不能并进 EXCLUDE_DIR_NAMES：那是个精确集合（`git-backups`/`snapshots`），
+#: 而后缀式备份的名字随时间和说明变化，集合永远跟不上 —— 实测 L1 精度闸 51 > 50，
+#: 多出来的第一名就是「升级前的整仓拷贝」。
+#: 匹配「bak 作为独立词元」：`foo.bak`、`foo.bak-2026...`、`foo_bak` 命中；
+#: `bakery`/`backup-notes` 不命中（避免把真项目名误杀）。
+BACKUP_SEG_RE = re.compile(r"(?i)(^|[-_.])bak([-_.]|$)")
 
 #: v0.13.31 P1：绝对路径前缀闸（/tmp 探针与临时会话目录；扫描与 cloudcli 合并共用）
 #:
@@ -133,8 +143,25 @@ def _under_excluded(path: str, under: Optional[List[str]] = None,
             continue
         return True
 
+    # v0.13.178：派生备份目录不是项目。与 EXCLUDE_DIR_NAMES 同语义，只是判据从
+    # 「段名 ∈ 精确集合」扩成「段名形如后缀式备份」。**必须排在点名根豁免之前**：
+    # 扫描是在 `<根>/<备份目录>` 上调用本函数的，根豁免会把这支整片放过
+    # （v0.13.131 的 L0 夹具污染就是同一个次序错误）。
+    segs = p.split(os.sep)
+    if any(BACKUP_SEG_RE.search(seg) for seg in segs):
+        if not any(_inside(r, p) for r in roots):
+            return True
+
     for r in roots:
         if _inside(p, r):
+            rel = os.path.relpath(p, r)
+            parts = [] if rel == "." else rel.split(os.sep)
+            # v0.13.178：`<根>/work/…` 是施工中间产物区（AGENTS.md §2：产物进
+            # `<项目>/work/`，不落 /tmp），里面的克隆与发布副本不是独立项目。
+            # 只认「根的直接子目录 work」，不按任意段名排 —— 否则 `~/code/work/foo`
+            # 这类真项目会被误杀，也保住了「点名根指到 work 内部仍可扫」的语义。
+            if len(parts) >= 2 and parts[0] == "work":
+                return True
             return False
     for seg in p.split(os.sep):
         if seg in EXCLUDE_DIR_NAMES:

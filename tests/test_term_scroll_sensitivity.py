@@ -240,13 +240,17 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.177"
+    CURRENT_VERSION = "0.13.178"
     #: v0.13.173：技能中心归档根补两仓（show-me / frontend-design）。
     #: 关键词取自 main.py 版本注释：归档根 / show-me / frontend-design / 越界 / 静默拒读。
     #: v0.13.174：派发三补（汇总节点 / 超时口径 / 拒答说法）。关键词取自 main.py 注释：
     #: 汇总节点 / ensure_synthesis / LEADER_MAXN / 超时口径 / timeout_s / 拒答 / 机器键。
     #: v0.13.175：派发扩池 + 升档重试。关键词取自 main.py 该版本注释实际写下的字句。
     #: v0.13.176：难度→档位。关键词取自 main.py 该版本注释实际写下的字句。
+    #: v0.13.178：项目清单精度。关键词取自 main.py 该版本注释实际写下的字句。
+    VERSION_ROOT_CAUSES["0.13.178"] = (
+        "后缀式", "精度闸", "词元", "<根>/work/", "次序",
+    )
     VERSION_ROOT_CAUSES["0.13.177"] = (
         "import tiers", "systemd-service", "不重试", "agent_id", "catalog", "effective_rate",
     )

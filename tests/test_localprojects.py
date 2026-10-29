@@ -102,6 +102,38 @@ class TestScan(unittest.TestCase):
         self.assertTrue(hits[0]["git"])
         self.assertFalse(hits[0]["worktree"])
 
+    def test_backup_suffix_dir_dropped(self):
+        """v0.13.178：后缀式备份目录（`x.bak-<ts>-<说明>`）不是项目。
+        实测本机 `cloudcli.bak-20261005_141214-升1.37.3前` 被当项目，L1 精度闸 51 > 50。"""
+        _mkrepo(self.root, "realproj")
+        _mkrepo(self.root, "cloudcli.bak-20261005_141214-upgrade")
+        projects, _errors, _stats = lp._scan_roots([str(self.root)])
+        names = [p["name"] for p in projects]
+        self.assertIn("realproj", names)
+        self.assertFalse([n for n in names if ".bak-" in n], "备份目录必须整支排除")
+
+    def test_root_level_work_dir_dropped(self):
+        """`<根>/work/…` 是施工中间产物（AGENTS.md §2），里面的克隆不是独立项目。"""
+        _mkrepo(self.root, "realproj")
+        work = self.root / "work"
+        work.mkdir()
+        _mkrepo(work, "cloneA")
+        projects, _errors, _stats = lp._scan_roots([str(self.root)])
+        names = [p["name"] for p in projects]
+        self.assertIn("realproj", names)
+        self.assertNotIn("cloneA", names)
+        self.assertNotIn("work", names)
+
+    def test_nested_work_named_project_kept(self):
+        """`work` 只按**根的直接子目录**排：`<根>/code/work/foo` 是真项目，不许误杀。"""
+        code = self.root / "code"
+        code.mkdir()
+        work = code / "work"
+        work.mkdir()
+        d = _mkrepo(work, "foo")
+        projects, _errors, _stats = lp._scan_roots([str(self.root)])
+        self.assertIn(str(d), [p["path"] for p in projects])
+
     def test_derived_worktree_dropped(self):
         """P3（v0.13.31 精度收紧）：.git 文件指向已收录仓库 ⇒ 派生检出，剔除。
         用户点名「本机没那么多项目」——agent-hub-wt-* 与主仓成对出现即重复。"""

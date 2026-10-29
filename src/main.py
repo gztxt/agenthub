@@ -106,7 +106,20 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.174"
+VERSION = "0.13.175"
+
+# v0.13.175（2026-10-29）：派发扩池 2 → 11 + 失败重试改升档（cascade）。
+# ① 扩池：新增 9 个带工具环的 CLI 执行者（claude-code/codex/dsh/pi/codebuddy/grok/
+#    hermes/omp/cursor），全部走 `adapters/cli_agent.py` 的无头调用。**注册不等于可用**：
+#    `dispatchable_ids()` 逐家过 `available()`（二进制/凭据），不可用的挡在池外。
+#    判据来源：此前 `chat()` 不带 tools ⇒ 文件类子任务会编造（/etc/hostname 真值 zzst，
+#    端点回 AGNES-2.5-FLASH 且 verdict=pass）。实测 claude-code/codex/omp 均能把真值取回。
+# ② 无头模式的假绿：CLI 遇工具调用会停下要审批、退出码仍为 0 ⇒ 现在带各家免审批旗标
+#    （`TASK_CLI_YOLO=0` 可关），并把「请允许…/需要授权」判成 `needs_approval` 失败。
+# ③ 升档重试：第 N 次重试换一档 —— 模型优先（同域才换），否则换 agent（默认阶梯
+#    claude-code,codex）；换不动写 `no_escalation_path`，不假装升过。
+#    升档来源落 `escalated_from_agent/model` 两列，复盘才分得清「升档后又败」与「同档又败」。
+# ④ pi 从「恒失败桩」转正（`pi -p --model` 实测可用；默认模型返回空响应，故内置兜底）。
 
 # v0.13.174（2026-10-29）：派发三补——强制汇总节点 / 超时口径统一 / 拒答识别补说法。
 # 为什么：影子实弹 5 条跑出两处「结构上就不该靠提示词」的洞。

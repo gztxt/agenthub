@@ -471,8 +471,17 @@ class TestDispatchablePool(unittest.TestCase):
         ids = self.registry.dispatchable_ids()
         self.assertIn("claude", ids)
         self.assertIn("jcode", ids)
-        self.assertNotIn("pi", ids, "pi 的 chat() 恒返回需 Web UI，不是派发目标")
+        self.assertIn("pi", ids, "v0.13.175 起 pi 是 CLI 执行者（pi -p 实测可用）")
         self.assertNotIn("tdai", ids, "TDAI 是记忆中心，不是对话 Agent")
+
+    def test_unavailable_cli_excluded(self):
+        """注册 ≠ 可用：二进制不在时必须挡在池外，别让 Leader 抽中注定失败的任务。"""
+        class Dead:
+            def available(self):
+                return False, "binary_not_found: codex"
+        self.registry._adapters["codex"] = Dead()
+        ids = self.registry.dispatchable_ids()
+        self.assertNotIn("codex", ids)
 
 
 if __name__ == "__main__":

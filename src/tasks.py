@@ -134,6 +134,10 @@ _TASK_COLUMNS = (
     ("retrieval_json", "TEXT"),
     # B3：自动重试计数（上限 MAX_AUTO_RETRY，防验证失败→重跑→再失败→无限循环）。
     ("attempts", "INTEGER"),
+    # 2026-10-29 升档重试：记**从哪一档升上来**。不记的话，一次"升档后又失败"在库里
+    # 与"同一档又失败"长得一模一样，复盘必然把"升档无效"读成"能力不足"。
+    ("escalated_from_agent", "TEXT"),
+    ("escalated_from_model", "TEXT"),
     # 2026-10-23：主链判定附注（三态 completed/partial/off_topic + ok/ms/model/cached）。
     # 为什么留原文 JSON 而不是拆列：它是**判定证据**，字段还会随判定原语演进；
     # 而处置只依赖 `label` 一个字段（off_topic ⇒ 不自动接受），拆列没有收益。
@@ -253,6 +257,80 @@ def should_retry(verdict_status: str, repairable: bool, attempts: Any) -> bool:
     except (TypeError, ValueError):
         n = MAX_AUTO_RETRY          # 读不出来就当已用完（保守：不重试）
     return bool(repairable) and verdict_status == verifier.STATUS_FAIL and n < MAX_AUTO_RETRY
+
+
+def _known_agent_ids() -> set:
+    """当前可用派发池（`set_context` 的 agent_ids_fn，即 `dispatchable_ids()`）。"""
+    fn = _ctx.get("agent_ids_fn")
+    if not fn:
+        return set()
+    try:
+        return set(fn())
+    except Exception:  # noqa: BLE001 —— 池子读不出来只影响升档，不许带倒任务
+        return set()
+
+
+def _next_escalation_note(agent_id: str, model: Optional[str], next_attempt: int) -> str:
+    """写进 error 字段的一句话：下一次重试会升到哪 —— 没有目标就直说没有。"""
+    t = escalate_target(agent_id, model, next_attempt, _known_agent_ids())
+    return t["reason"]
+
+
+def _csv_env(name: str, default: str = "") -> List[str]:
+    raw = os.getenv(name, default) or ""
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def _ccr_model_agents() -> set:
+    """模型域 = CCR 的 agent（只有它们的 `--model` 能吃同一个模型 ID）。"""
+    try:
+        from adapters.cli_agent import SPECS as _CLI
+        return {"claude", "jcode"} | {a for a, sp in _CLI.items()
+                                      if sp.get("model_path") == "ccr"}
+    except Exception:  # noqa: BLE001
+        return {"claude", "jcode"}
+
+
+def escalate_target(agent_id: str, model_choice: Optional[str], attempts: Any,
+                    known: set, ccr_agents: Optional[set] = None) -> Dict[str, Any]:
+    """失败重试的**升档**目标（纯函数，可单测）。
+
+    旧行为（v0.13.174 之前）：重试＝同 agent、同模型原地再跑一遍，只是把上次的
+    `verify_reason` 塞进 prompt —— 同一执行者、同一能力，失败原因若是"能力不够"
+    就必然再失败一次，白烧一轮钱。这里改成 cascade：**换一档**再试。
+
+    两条路径，按优先级：
+      ① 模型升档：`TASK_ESCALATE_MODELS`（逗号分隔），第 N 次重试用第 N 项。
+         只对模型域 = CCR 的 agent 生效 —— 给 codebuddy/cursor 塞 CCR 模型 ID 必报
+         `unknown model`，那是把"升档"做成"必失败"。
+      ② agent 升档：没有模型通道时换阶梯里的下一个（`TASK_ESCALATE_LADDER`，
+         默认 `claude-code,codex`，工具环最完整的两家），且必须在**当前可用池**里。
+
+    都不成立时**原样重跑但写明 reason**（`no_escalation_path`）——
+    静默当已升档会让复盘把"同一档又输一次"读成"升档无效"。
+    """
+    try:
+        n = int(attempts or 0)
+    except (TypeError, ValueError):
+        n = 0
+    base = {"agent_id": agent_id, "model": model_choice, "changed": False,
+            "from_agent": agent_id, "from_model": model_choice}
+    if n <= 0:
+        return dict(base, reason="first_attempt")
+
+    chain = _csv_env("TASK_ESCALATE_MODELS")
+    if chain and agent_id in (ccr_agents if ccr_agents is not None else _ccr_model_agents()):
+        m = chain[min(n - 1, len(chain) - 1)]
+        if m and m != (model_choice or ""):
+            return dict(base, agent_id=agent_id, model=m, changed=True,
+                        reason="model:%s" % m)
+
+    for cand in _csv_env("TASK_ESCALATE_LADDER", "claude-code,codex"):
+        if cand != agent_id and cand in known:
+            return dict(base, agent_id=cand, model=None, changed=True,
+                        reason="agent:%s" % cand)
+
+    return dict(base, reason="no_escalation_path")
 
 
 def retrieval_block(rep: Dict[str, Any], limit: int = RETRIEVAL_TRIM) -> str:
@@ -438,6 +516,7 @@ LEADER_PROMPT = """你是任务编排器。把用户目标拆解为子任务 DAG
 每项格式: {"id":"t1","task":"中文指令（自包含，可独立执行）","agent_id":"执行Agent","difficulty":2,"deps":[]}
 规则：
 - agent_id 只能从这里选：{agents}（选最合适的；不确定用 {default}）
+- **要读文件 / 跑命令 / 改代码**的子任务，必须选带工具环的执行 Agent（claude-code、codex、dsh、pi、codebuddy、grok、hermes、omp、cursor）；claude/jcode 是纯文本端点，做不了这类活，选它必编造
 - difficulty 取 1/2/3：1 = 单点取证或机械核对；2 = 要读多份材料后归纳；3 = 要取舍/设计/跨模块推理
 - model 可选：给了就必须从 {models} 里选；机械任务优先便宜模型，难度 3 才用强模型。不确定就**省略该字段**
 - 子任务数 ≤ {maxn}；无依赖的兄弟任务会被并行执行，有依赖写 deps
@@ -688,9 +767,12 @@ def _create_run(goal: str, items: List[dict], *, verify_kind: str,
 def _allowed_models_for(known_agents: set) -> Optional[Dict[str, set]]:
     """能真正吃下 `model` 参数的 agent 的合法模型清单；取不到清单返回 None（= 不校验）。
 
-    只给走 OpenAI 兼容适配器的 **claude / jcode** 建白名单：
-      · pi 的适配器 chat() 恒返回「需通过 Web UI 交互」(adapters/pi.py:21)，给它选模型是自欺；
-      · 自定义端口 agent 的模型域在它自己那边，CCR 清单里没有它的 ID ⇒ 拿清单判它会误杀。
+    只给**模型域就是 CCR 的** agent 建白名单：claude/jcode（OpenAI 兼容端点）与
+    `cli_agent.SPECS` 里 `model_path="ccr"` 的 CLI（pi/codex/claude-code/omp/grok/hermes，
+    实测 `--model` 直接吃 CCR ID）。其余不建：
+      · codebuddy/cursor 的模型域是厂商自有清单，塞 CCR ID 必报 unknown model；
+      · dsh 的模型在 profile 里，没有 CLI 开关；
+      · 自定义端口 agent 的模型域在它自己那边 ⇒ 拿清单判它会误杀。
     `catalog_ids()` 取不到（网关挂/无凭据）时 `checked=False` ⇒ 返回 None，
     与 P0-4「判不了就不拦」同口径，绝不把「取不到」写成「选了非法模型」。
     """
@@ -702,7 +784,12 @@ def _allowed_models_for(known_agents: set) -> Optional[Dict[str, set]]:
             return None
     except Exception:  # noqa: BLE001 — 选型是增强，不许带倒拆解
         return None
-    return {a: ids for a in ("claude", "jcode") if a in known_agents} or None
+    try:
+        from adapters.cli_agent import SPECS as _CLI
+        ccr = {a for a, sp in _CLI.items() if sp.get("model_path") == "ccr"}
+    except Exception:  # noqa: BLE001
+        ccr = set()
+    return {a: ids for a in ({"claude", "jcode"} | ccr) if a in known_agents} or None
 
 
 def _model_choices(known_agents: set) -> Optional[List[str]]:
@@ -906,6 +993,21 @@ async def replan_run(run_id: str, body: ReplanIn = ReplanIn()):
     if out.get("created") and body.auto_run:
         _start_runner(out["created"])
     return out
+
+
+@router.get("/api/tasks/pool")
+async def dispatch_pool():
+    """当前**真能派活**的 agent 与各自被挡在池外的原因（v0.13.175 扩池的可视面）。
+
+    为什么要这个端点：池子从 2 家扩到 10 家之后，「为什么 Leader 没选 dsh」必须
+    能一眼回答 —— 是二进制不在、凭据缺、还是它根本不在池里。模块里的
+    `adapter_status()` 是同一份判定，这里只做出口。
+    """
+    import registry
+    status = registry.adapter_status()
+    return {"ids": registry.dispatchable_ids(), "agents": status,
+            "escalate": {"models": _csv_env("TASK_ESCALATE_MODELS"),
+                         "ladder": _csv_env("TASK_ESCALATE_LADDER", "claude-code,codex")}}
 
 
 @router.get("/api/tasks/runs")
@@ -1193,6 +1295,21 @@ async def _run_task(run_id: str, row: dict):
                   % (attempts_done, MAX_AUTO_RETRY,
                      str(row.get("verify_reason") or "")[:300])) + prompt
 
+    # ── 升档：第 N 次重试换一档（模型优先、其次 agent），换不动就写明原因 ──
+    exec_agent, exec_model = row["agent_id"], row.get("model_choice")
+    esc = escalate_target(exec_agent, exec_model, attempts_done, _known_agent_ids())
+    if esc["changed"]:
+        exec_agent, exec_model = esc["agent_id"], esc["model"]
+        db.execute("UPDATE tasks SET escalated_from_agent=?,escalated_from_model=?,updated_at=?"
+                   " WHERE run_id=? AND task_id=?",
+                   (esc["from_agent"], esc["from_model"], _now(), run_id, row["task_id"]))
+        db.log_profile_event("task_exec", exec_agent, "escalate", 0,
+                             trace_id=row["trace_id"],
+                             detail={"task": row["task_id"], "reason": esc["reason"],
+                                     "from_agent": esc["from_agent"],
+                                     "from_model": esc["from_model"],
+                                     "attempt": attempts_done})
+
     # ── B1：接单前置检索（记忆/知识库/技能），把线索拼进 prompt ──
     # 失败/超时一律降级（不阻塞），但**必须留下痕迹**（retrieval_json 里的 error）。
     if TASK_RETRIEVAL:
@@ -1210,9 +1327,9 @@ async def _run_task(run_id: str, row: dict):
     t0 = asyncio.get_event_loop().time()
     try:
         result = await asyncio.wait_for(
-            _call_chat(chat_fn, row["agent_id"], prompt,
+            _call_chat(chat_fn, exec_agent, prompt,
                        f"task-{row['trace_id']}-{row['task_id']}",
-                       row.get("model_choice")),
+                       exec_model),
             timeout=TASK_TIMEOUT_S)
         dur = int((asyncio.get_event_loop().time() - t0) * 1000)
         spent_tokens = int(((result.get("usage") or {}).get("total_tokens")) or 0)
@@ -1358,7 +1475,10 @@ async def _run_task(run_id: str, row: dict):
                            "finished_at=NULL,updated_at=?"
                            " WHERE run_id=? AND task_id=?",
                            (attempts_done + 1,
-                            ("%s（自动重试 %d/%d）" % (err, attempts_done + 1, MAX_AUTO_RETRY))[:500],
+                            ("%s（自动重试 %d/%d，升档 %s）"
+                             % (err, attempts_done + 1, MAX_AUTO_RETRY,
+                                _next_escalation_note(exec_agent, exec_model,
+                                                      attempts_done + 1)))[:500],
                             gaps[:500], verdict["status"], verify_ms, dur, spent_tokens,
                             used_model, _now(), run_id, row["task_id"]))
                 db.log_profile_event("task_exec", row["agent_id"], "retry", dur,

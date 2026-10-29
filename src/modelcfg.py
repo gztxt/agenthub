@@ -1000,8 +1000,9 @@ def chat_model(agent_id: str, requested: Optional[str] = None) -> str:
 
 #: 有静态聊天适配器、且**适配器真的会把 model 传下去**的 agent。
 #: ⚠ 只列 claude/jcode：这两家用 OpenAICompatAdapter（body["model"] = 入参）。
-#: pi 的适配器 chat() 恒返回「需通过 Web UI 交互」（adapters/pi.py:21），把 model 传进去
-#: 也没人接 —— 列进来就等于骗自己"这条通道生效"。tdai 是记忆后端，不在本页范围。
+#: pi 自 v0.13.175 起是 CLI 适配器（`pi -p --model`），模型在**派发/对话调用时**才注入，
+#: 与「设置页改完落盘、下次启动由 CLI 自己读」不是同一条通道 —— 列进来会让人以为
+#: 设置页那一栏也管它。tdai 是记忆后端，不在本页范围。
 _CHAT_STATIC = {"claude", "jcode"}
 
 

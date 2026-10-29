@@ -1,3 +1,62 @@
+## v0.13.175 — 派发扩池 2 → 11 + 失败重试改升档
+
+> 来源：2026-10-29 用户令「执行下一步 2、3，另外 4 扩大到 claude/codex/dsh/pi/
+> codebuddy/grok/hermes/omp/cursor」。
+
+### 1. 步骤 2：重试从「原地再赌」改成 cascade
+
+旧行为：验证失败 ⇒ 同 agent、同模型、把 `verify_reason` 塞进 prompt 再跑一次。
+能力不够的任务必然再输一次。现在 `escalate_target()`（纯函数）：
+
+1. **模型升档**：`TASK_ESCALATE_MODELS`（逗号分隔），第 N 次重试用第 N 项；
+   **只对模型域 = CCR 的 agent**（codebuddy/cursor 塞 CCR ID 必报 unknown model）。
+2. **agent 升档**：没有模型通道就换阶梯里的下一个（`TASK_ESCALATE_LADDER`，
+   默认 `claude-code,codex`），且必须在当前可用池里。
+3. 都没有 ⇒ `no_escalation_path`，**不假装升过档**。
+
+升档来源落 `escalated_from_agent/model` 两列 —— 不记就分不清「升档后又败」
+与「同档又败」。实测：`07075140dc` 的 t1 由 jcode 升到 claude-code。
+
+### 2. 步骤 3：C 的适配器落地
+
+`src/adapters/cli_agent.py`：一次子任务 = 一个无头进程，stdout 即产物。
+判据全部来自 2026-10-29 逐家实测：
+
+| agent | 无头调用 | 免审批旗标 |
+|---|---|---|
+| claude-code | `claude -p … --output-format text` | `--permission-mode bypassPermissions` |
+| codex | `codex exec --json` | `-s workspace-write` |
+| dsh | `dsh headless` | 无（凭据取 `dsh-src/.env`） |
+| pi | `pi -p --model` | 无（默认模型返回空响应，故兜底注入） |
+| codebuddy | `codebuddy -p --output-format text` | `-y` |
+| grok | `grok -p` | `--permission-mode bypassPermissions` |
+| hermes | `hermes -z` | `--yolo` |
+| omp | `omp -p` | `--auto-approve` |
+| cursor | `cursor-agent -p` | `--force` |
+
+**无头模式的假绿**（本轮实测）：claude-code 遇工具调用会停下输出「请允许以下权限…」
+并以**退出码 0** 结束 ⇒ verifier 判 pass，实际什么都没干。两条处置：
+① 带免审批旗标（`TASK_CLI_YOLO=0` 可关）；② 文案命中「请允许/需要授权」判
+`needs_approval` 失败。
+
+### 3. 步骤 4：派发池 2 → 11
+
+`dispatchable_ids()` 新增**可用性判定**：适配器注册 ≠ 能派活。二进制不在
+（或 dsh 缺 `DEEPSEEK_API_KEY`）的挡在池外，原因由 `GET /api/tasks/pool` 给出。
+`claude`/`jcode` 保持原语义（CCR 端点，对话页在用）；带工具环的 Claude Code
+走新 id `claude-code`，**不改名不静默换实现**。
+
+### 4. 验证
+
+- L0：3269+ 例（含新增 `test_cli_agent_adapter.py` 20 例、`test_dispatch_escalate.py` 9 例）。
+- 影子 `:3199` 实弹：
+  - 文件类 `1270f60608`：Leader 选 `claude-code` → 返回真值 `zzst`（21.5s，pass）；
+  - 旧路径 `07075140dc`：jcode 拒答 → 自动升档到 claude-code；
+  - 工具面直连：`/api/agents/codex/chat` 与 `/api/agents/omp/chat` 均正确返回
+    `/fs/1000/ftp/技术文档`。
+- **仍未做**：Leader 仍倾向全用同一家（三路对比任务 4/4 都选 jcode），
+  难度分没参与选型 —— 扩池只给了「可选」，没给「会选」。
+
 ## v0.13.174 — 派发三补：强制汇总节点 / 超时口径 / 拒答说法
 
 > 来源：2026-10-29 执行 `BOTBOY-DISPATCH-FUSION-EVAL-20261028.md` 的建议 1–5。

@@ -257,17 +257,10 @@ def _ui_ready(agent_id: str, spec: Optional[dict], p: dict) -> tuple:
 def _ui_spawn_env() -> Dict[str, str]:
     """原生界面子进程的 env。
 
-    PATH 必须**前置** `profiles.extra_path_dirs()`（nvm 各版本 bin + bun），
-    再补 npm-global/local：hub 由 systemd 拉起，自身 PATH 里这三处都没有；
-    而这些 CLI 的 shebang 是 `#!/usr/bin/env node|bun`，子进程自己还要再找解释器，
-    追加在尾部同样会拿系统 node 跑 Node22+ 的 bundle。与 `term.child_env()` 同口径。
+    2026-10-29 收口：实体实现移到 `profiles.cli_env()` —— 派发侧的 CLI 适配器
+    （`adapters/cli_agent.py`）需要**同一份** PATH，两处各写一份必然漂移。
     """
-    env = dict(os.environ)
-    extra = profiles_mod.extra_path_dirs() + [
-        str(Path.home() / ".npm-global" / "bin"),
-        str(Path.home() / ".local" / "bin"), "/usr/local/bin"]
-    env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
-    return env
+    return profiles_mod.cli_env()
 
 
 @router.get("/api/agents/{agent_id}/ui-status")

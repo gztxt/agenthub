@@ -747,6 +747,24 @@ def extra_path_dirs() -> List[str]:
     return dirs
 
 
+def cli_env() -> Dict[str, str]:
+    """起 CLI 子进程（终端 / 原生界面 / 派发适配器）共用的 env —— **唯一口径**。
+
+    2026-10-29：这段逻辑原在 `api_agents._ui_spawn_env()`，派发侧的 CLI 适配器
+    也需要同一份 PATH（否则 hub 进程里找不到 nvm/local 里的 CLI，而交互 shell 里
+    一切正常 ⇒ 开发环境假绿）。两处各写一份必然漂移，故收在这里。
+
+    PATH 必须**前置** `extra_path_dirs()`：这些 CLI 的 shebang 是
+    `#!/usr/bin/env node|bun`，追加在尾部仍会拿到系统 node。
+    """
+    env = dict(os.environ)
+    extra = extra_path_dirs() + [
+        str(Path.home() / ".npm-global" / "bin"),
+        str(Path.home() / ".local" / "bin"), "/usr/local/bin"]
+    env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
+    return env
+
+
 def _bun_bin() -> Optional[Path]:
     """`~/.bun/bin` 存在才返回（2026-10-24：omp 等 bun 系 CLI 的解释器目录）。
 

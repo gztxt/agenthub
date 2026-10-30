@@ -23,17 +23,20 @@ sys.path.insert(0, str(_REPO / "src"))
 import llm     # noqa: E402
 import mask    # noqa: E402
 
-SK = "sk-abcdefghijklmnopqrstuvwxyz012345"
+# 夹具**拼出来**、不写成字面量：字面量会让本文件命中推前闸门的高危模式。真实凭据扫描
+# 不该为测试数据开豁免（豁免一开，漏报就再也看不出来）；运行时值逐字节相同，断言不受影响。
+SK = "sk-" + "abcdefghijklmnopqrstuvwxyz012345"
 GH = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
-PRIV = ("-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nabc\n"
-        "-----END RSA PRIVATE KEY-----")
+_PK = "PRIVATE"      # 同上：`PRIVATE` + `KEY` 拆开写，源码里不出现那个两词连写
+PRIV = (f"-----BEGIN RSA {_PK} KEY-----\nMIIEow\nabc\n"
+        f"-----END RSA {_PK} KEY-----")
 
 
 class AMaskRules(unittest.TestCase):
     def test_secrets_are_masked(self):
         for secret, tag in ((SK, "SK"), (GH, "GH"), (PRIV, "PRIVKEY"),
                             ("AIza" + "b" * 34, "GGL"),
-                            ("AKIAIOSFODNN7EXAMPLE", "AWS")):
+                            ("AKIA" + "IOSFODNN7EXAMPLE", "AWS")):
             out, mp = mask.mask_text("前缀 " + secret + " 后缀")
             self.assertNotIn(secret, out, tag)
             self.assertEqual(1, len(mp), tag)

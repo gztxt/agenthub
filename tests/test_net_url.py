@@ -22,8 +22,10 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
+sys.path.insert(0, os.path.join(ROOT, "tests"))   # 让 `import tiers` 在两种入口下都成立
 
 import profiles  # noqa: E402
+import tiers     # noqa: E402
 
 
 class OwnAddrsTest(unittest.TestCase):
@@ -120,12 +122,15 @@ class DshCardAddressAdaptiveTest(unittest.TestCase):
             if e.get("type") in ("embed", "open"):
                 self.assertNotIn("pin_host", e, f"{e.get('label')} 入口被冻结了 host")
 
+    @tiers.host_only
     def test_three_network_fronts_exist(self):
-        """少任何一层，lanUrl 改写出的地址就有一网是死链。"""
+        """少任何一层，lanUrl 改写出的地址就有一网是死链。
+
+        断言读的是**本机** `~/.config/systemd/user` 里的真实 unit ⇒ 归 L1。原先用
+        函数内 `skipTest` 顶替分层，L0 就多出一个 skip（闸门判 validity=insufficient）。
+        """
         from pathlib import Path
         unit_dir = Path.home() / ".config/systemd/user"
-        if not unit_dir.is_dir():
-            self.skipTest("无 systemd user 目录（非本机环境）")
         for u in ("dsh-lo", "dsh-ts4", "dsh-ts6"):
             f = unit_dir / f"{u}.service"
             self.assertTrue(f.exists(), f"{u}.service 缺失：该网络入口无 socket")

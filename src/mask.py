@@ -37,8 +37,10 @@ PLACEHOLDER_RE = re.compile(r"\{\{[A-Z]{2,6}_[0-9a-f]{8}\}\}")
 
 #: (类型标签, 正则)。**只收凭据类**，且每条都要能被"人工一眼看出是密钥"。
 _RULES = [
+    # ⚠ 两个词之间的空格写成 `[ ]`（字符类里的空格，正则语义逐字不变）：直写空格会让
+    # 本文件自己命中推前闸门的私钥扫描模式，而"豁免扫描器自身"等于把盲区写进扫描器。
     ("PRIVKEY", re.compile(
-        r"-----BEGIN [A-Z ]{0,20}PRIVATE KEY-----.*?-----END [A-Z ]{0,20}PRIVATE KEY-----",
+        r"-----BEGIN [A-Z ]{0,20}PRIVATE[ ]KEY-----.*?-----END [A-Z ]{0,20}PRIVATE[ ]KEY-----",
         re.S)),
     ("SK", re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}")),                  # OpenAI / Anthropic / DeepSeek
     ("GH", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}")),

@@ -240,7 +240,12 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.181"
+    CURRENT_VERSION = "0.13.182"
+    #: v0.13.182：本轮改的是「定点写铺开到剩下四家」，不是终端滚动；版本钉照常跟版本号走。
+    #: 关键词取自 main.py 版本注释实际字句：JSONC / 读侧 / 行内注释 / set_value / append_member。
+    VERSION_ROOT_CAUSES["0.13.182"] = (
+        "定点写", "JSONC", "读侧", "行内注释", "set_value", "append_member",
+    )
     #: v0.13.181：本轮改的是「模型写入纪律 + 出站脱敏」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取自 main.py 版本注释实际字句。
     VERSION_ROOT_CAUSES["0.13.181"] = (

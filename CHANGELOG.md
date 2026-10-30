@@ -1,3 +1,25 @@
+## v0.13.182 — 定点写铺开到剩下四家写手（opencode / qoder / cursor / hermes）
+
+> 承接 v0.13.181：那一版只把 `claude` / `pi` 换成了区间定点写，另外四家仍是
+> `json.loads → 改 dict → json.dumps(indent=2)` 整份重写。用户裁定「铺开前先看它们
+> 各自文件有没有 JSONC 注释」——查完的结论是：**opencode.json 官方允许注释**（其余两家
+> 当前无注释但缩进是用户自己的），hermes 的 YAML 里 `fallback_providers` 已有行内注释。
+
+- **三家 JSON 写手改定点写**（`_opencode_write` / `_qoder_write` / `_cursor_write`）：
+  只替换目标值的字符区间、只向目标对象插新键，其余字节逐字不动；
+  键缺失或形状不认识才回落到原整份重写（语义不变）。
+- **全链路：读侧同样换成 JSONC 解析**（新增 `_json_load`）。原实现 `json.loads` 碰到
+  `// 为什么选这个模型` 就抛异常 ⇒ 设置页显示"解析失败"、保存直接 500，而那份文件
+  **本身是合法的**。读、写两条路同批改，避免"写得进、读不出"。
+- **hermes 行内注释保住**（`_hermes_write`）：旧正则 `(\S.*)$` 会连同 `  # 说明` 一起替换
+  ⇒ 改一次默认模型就悄悄删掉用户写在那行的理由。现在尾注释原样保留。
+- **jsonspan 补两个动作**：`set_value()`（布尔/数字标量，cursor 的
+  `hasChangedDefaultModel` 是 bool，`set_string` 会拒绝）与 `append_member()`
+  （往**对象**里插键：`provider.models.<id>`、`modelParameters.<model>`）。
+
+判据：`tests/test_jsonspan.py` 25 例（+9，逐条断言区间外字节不变）；
+`tests/test_modelcfg.py` 124 例（+4：三家 JSONC 注释/缩进保留 + hermes 行内注释保留）。
+
 ## v0.13.181 — 借 magpie 的写入纪律：原子落盘 / 定点改 JSON / 撤销上次保存 / 出站可逆脱敏
 
 > 来源：2026-10-30 用户「分析理解评估 magpie 是否可以借鉴融合到本机系统，重点是操作与设计思维」。

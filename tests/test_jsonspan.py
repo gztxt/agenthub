@@ -109,5 +109,64 @@ class CAppendObject(unittest.TestCase):
             J.append_object(SRC, ("model",), {"k": 1})
 
 
+class DSetValue(unittest.TestCase):
+    """v0.13.182：布尔/数字等非字符串标量也要能定点改（cursor 的 hasChangedDefaultModel）。"""
+
+    def test_bool_replacement_keeps_other_bytes(self):
+        src = '{\n  // 保持缩进\n  "a": 1,\n  "flag": false\n}\n'
+        out, old = J.set_value(src, ("flag",), True)
+        self.assertIs(old, False)
+        self.assertEqual(out, '{\n  // 保持缩进\n  "a": 1,\n  "flag": true\n}\n')
+
+    def test_number_replacement(self):
+        out, old = J.set_value('{"n": 1, "m": 2}', ("n",), 42)
+        self.assertEqual((old, J.validate(out)), (1, {"n": 42, "m": 2}))
+
+    def test_refuses_to_overwrite_object_with_scalar(self):
+        with self.assertRaises(J.JsonSpanError):
+            J.set_value(SRC, ("env",), "oops")
+        self.assertEqual(J.validate(SRC)["env"], {"MODEL": "a/b", "NOTE": '含 // 不是注释，含 " 引号'})
+
+    def test_missing_key_raises_keyerror(self):
+        with self.assertRaises(KeyError):
+            J.set_value(SRC, ("nope",), "x")
+
+
+class EAppendMember(unittest.TestCase):
+    """v0.13.182：往**对象**里插入成员（opencode 的 provider.models、cursor 的 modelParameters）。"""
+
+    def test_inserts_with_container_indent(self):
+        src = '{\n  "models": {\n    "a": {"name": "a"}\n  }\n}\n'
+        out = J.append_member(src, ("models",), "b", {"name": "b"})
+        # 插入点是上一成员的**末尾**（要补一个逗号），除此之外逐字不变
+        self.assertEqual(out.splitlines()[:2], src.splitlines()[:2], "已有字节被改")
+        self.assertEqual(J.validate(out)["models"],
+                         {"a": {"name": "a"}, "b": {"name": "b"}})
+
+    def test_existing_key_raises_keyerror(self):
+        src = '{"models": {"a": 1}}'
+        with self.assertRaises(KeyError):
+            J.append_member(src, ("models",), "a", 2)
+
+    def test_empty_object(self):
+        out = J.append_member('{\n  "p": {}\n}\n', ("p",), "k", [])
+        self.assertEqual(J.validate(out), {"p": {"k": []}})
+        self.assertEqual(out.count("\n"), 3, "空对象插入不该把文件撑成多行")
+
+    def test_single_line_object_stays_single_line(self):
+        out = J.append_member('{"p": {"a": 1}}', ("p",), "b", 2)
+        self.assertNotIn("\n", out)
+
+    def test_keeps_jsonc_comments(self):
+        src = '{\n  "p": {\n    "a": 1  // 用户写的理由\n  }\n}\n'
+        out = J.append_member(src, ("p",), "b", 2)
+        self.assertIn("// 用户写的理由", out, "注释被吃掉了")
+        self.assertEqual(J.validate(out)["p"], {"a": 1, "b": 2})
+
+    def test_non_object_is_refused(self):
+        with self.assertRaises(J.JsonSpanError):
+            J.append_member(SRC, ("model",), "k", 1)
+
+
 if __name__ == "__main__":
     unittest.main()

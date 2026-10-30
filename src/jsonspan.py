@@ -14,7 +14,8 @@ magpie 的做法（README 原文）是「只改唯一那个 key，原子写，�
 
 - `blank_comments()`：把 `//` 与 `/* */` 抹成等长空格（保持偏移与行号不变），
   仅用于**校验**；写入始终基于原文区间替换。
-- `set_string()` / `append_object()`：返回改好的全文，未触碰的字节逐字不变。
+- `set_string()` / `set_value()` / `append_object()` / `append_member()`：返回改好的全文，
+  未触碰的字节逐字不变。
 
 ⚠ 边界：这是**区间替换**不是 JSON 解析器，本模块只承诺两件事 ——
 ① 改写后的全文仍能通过 `json.loads`（用例逐条断言）；② 区间外字节不变。
@@ -25,8 +26,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-__all__ = ["JsonSpanError", "blank_comments", "validate", "set_string",
-           "append_object", "get_string"]
+__all__ = ["JsonSpanError", "blank_comments", "validate", "set_string", "set_value",
+           "append_object", "append_member", "get_string"]
 
 _WS = " \t\r\n"
 
@@ -272,6 +273,19 @@ def set_string(text: str, path: Tuple[str, ...], value: str) -> Tuple[str, Optio
     return text[:m[3]] + lit + text[m[4]:], old
 
 
+def set_value(text: str, path: Tuple[str, ...], value: Any) -> Tuple[str, Any]:
+    """把**标量**值替换成任意 JSON 值（布尔/数字/字符串），返回 (新全文, 旧值)。
+
+    只允许覆盖标量：原值是对象/数组时抛 `JsonSpanError` —— 那等于"改个默认值顺手把
+    用户整段配置删了"。键不存在抛 KeyError（调用方回落整份重写）。
+    """
+    _, m = _member(text, path)
+    raw = text[m[3]:m[4]]
+    if raw[:1] in ("{", "["):
+        raise JsonSpanError(f"{'.'.join(path)} 是对象/数组，拒绝整体覆盖")
+    return text[:m[3]] + json.dumps(value, ensure_ascii=False) + text[m[4]:], json.loads(raw)
+
+
 def _line_indent(text: str, pos: int) -> str:
     """pos 所在行的前导空白（用于对齐插入）。"""
     ls = text.rfind("\n", 0, pos) + 1
@@ -315,3 +329,30 @@ def append_object(text: str, path: Tuple[str, ...], obj: Dict[str, Any]) -> str:
     last_end = arr.members[-1][4]
     new_chunk = ",\n" + eind + body
     return text[:last_end] + new_chunk + text[last_end:]
+
+
+def append_member(text: str, path: Tuple[str, ...], key: str, value: Any) -> str:
+    """在 `path` 指向的**对象**末尾插入一个成员（只插入，不改任何已有字节）。
+
+    键已存在抛 `KeyError`（调用方据此走"已登记，无需追加"的分支），
+    路径/形状不认识抛 `JsonSpanError`。
+    """
+    obj = _walk(text, path)
+    if obj.kind != "object":
+        raise JsonSpanError(f"{'.'.join(path)} 不是对象")
+    if any(m[0] == key for m in obj.members):
+        raise KeyError(key)
+    close = obj.end - 1                       # 指向 '}'
+    lit = json.dumps(key, ensure_ascii=False) + ": " + json.dumps(value, ensure_ascii=False)
+    if "\n" not in text[obj.start:obj.end]:
+        chunk = (", " + lit) if obj.members else lit
+        return text[:close] + chunk + text[close:]
+    cind = _line_indent(text, close)
+    unit = _indent_unit(text, obj)
+    eind = cind + unit
+    body = (json.dumps(key, ensure_ascii=False) + ": "
+            + json.dumps(value, ensure_ascii=False, indent=len(unit)).replace("\n", "\n" + eind))
+    if not obj.members:
+        return text[:close] + "\n" + eind + body + "\n" + cind + text[close:]
+    last_end = obj.members[-1][4]
+    return text[:last_end] + ",\n" + eind + body + text[last_end:]

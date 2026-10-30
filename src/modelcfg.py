@@ -235,6 +235,16 @@ def _read_text(p: Path) -> str:
         raise ModelCfgError(f"配置文件不可读：{p}（{e}）", 500) from e
 
 
+def _json_load(text: str):
+    """按 **JSONC** 解析（`//` 与 `/* */` 注释先抹成空格）。
+
+    为什么不能直接用 `json.loads`（v0.13.182）：opencode 的配置文件官方允许注释，
+    用户写一行 `// 为什么选这个模型` 就让读侧显示"解析失败"、写侧直接 500 —
+    而它本来是完全合法的配置。解析失败抛 `JsonSpanError`（与 JSONDecodeError 同族处理）。
+    """
+    return jsonspan.validate(text)
+
+
 def _backup(p: Path, tag: str) -> str:
     """军规铁律：落笔前先时间戳备份。返回备份路径（相对 HOME 展示）。"""
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -718,11 +728,14 @@ def _hermes_write(model: str):
     body = "\n".join(lines[lo + 1:hi])
     changes: List[dict] = []
     for key, val in (("default", model), ("provider", HERMES_CCR_PROVIDER)):
-        pat = re.compile(rf"^(\s*{key}:\s*)(\S.*)$", re.M)
+        # v0.13.182：尾随行内注释 `  # 说明` 必须原样留住。原写法 `(\S.*)$` 会把它
+        # 一起吞掉 —— 改一次默认模型就悄悄删掉用户写在那行的理由（本机 config.yaml
+        # 的 fallback_providers 里就有这种行内注释）。
+        pat = re.compile(rf"^(\s*{key}:\s*)(\S.*?)(\s+#.*)?$", re.M)
         m = pat.search(body)
         if m:
             old = m.group(2).strip()
-            body = pat.sub(lambda _m, v=val: f"{_m.group(1)}{v}", body, count=1)
+            body = pat.sub(lambda _m, v=val: f"{_m.group(1)}{v}{_m.group(3) or ''}", body, count=1)
             op = "set"
         else:
             old = ""
@@ -762,8 +775,8 @@ def _opencode_read() -> dict:
     if not p.exists():
         return {"current": "", "files": [], "note": "未找到 ~/.config/opencode/opencode.json"}
     try:
-        d = json.loads(_read_text(p))
-    except json.JSONDecodeError as e:
+        d = _json_load(_read_text(p))
+    except (json.JSONDecodeError, jsonspan.JsonSpanError) as e:
         return {"current": "", "files": [str(p)], "note": f"opencode.json 解析失败：{e}"}
     cur = str(d.get("model") or "")
     # provider 取**现值自己的**前缀，不是写死 "ccr"：现值恒为 `provider/model_id`
@@ -794,7 +807,7 @@ def _opencode_write(model: str):
     等于给用户一个连不上的 provider，比报错更坏）。"""
     p = _opencode_path()
     text = _read_text(p)
-    d = json.loads(text)
+    d = _json_load(text)
     prov_id, _, mid = model.partition("/")
     prov = (d.get("provider") or {}).get(prov_id)
     if prov_id == model or not mid:
@@ -813,17 +826,31 @@ def _opencode_write(model: str):
     changes.append({"where": "opencode.json:model", "from": old, "to": model, "op": "set"})
 
     old_small = str(d.get("small_model") or "")
-    if old_small and old and old_small == old:
+    follow_small = bool(old_small and old and old_small == old)
+    if follow_small:
         d["small_model"] = model
         changes.append({"where": "opencode.json:small_model", "from": old_small, "to": model, "op": "set"})
 
     ids = list((prov.get("models") or {}).keys())
-    if mid not in ids:
+    add_model = mid not in ids
+    if add_model:
         prov.setdefault("models", {})[mid] = {"name": mid.split("/", 1)[-1]}
         changes.append({"where": f"opencode.json:provider.{prov_id}.models.{mid}",
                         "from": "", "to": f"登记模型（原 {len(ids)} 条 → {len(ids) + 1} 条）",
                         "op": "add-key"})
-    return [(p, json.dumps(d, ensure_ascii=False, indent=2) + "\n", changes)]
+    # v0.13.182：定点写（只替换/插入目标字节）。opencode.json 允许 JSONC 注释，
+    # 整份 json.dumps 会把注释与用户缩进一起抹掉；这里未触碰字节逐字不变，
+    # 键缺失/形状不认识才回落整份重写（老路径）。
+    try:
+        new, _old = jsonspan.set_string(text, ("model",), model)
+        if follow_small:
+            new, _old_small = jsonspan.set_string(new, ("small_model",), model)
+        if add_model:
+            new = jsonspan.append_member(new, ("provider", prov_id, "models"), mid,
+                                         {"name": mid.split("/", 1)[-1]})
+        return [(p, new, changes)]
+    except (KeyError, jsonspan.JsonSpanError):
+        return [(p, json.dumps(d, ensure_ascii=False, indent=2) + "\n", changes)]
 
 
 def _qoder_path() -> Path:
@@ -845,8 +872,8 @@ def _qoder_read() -> dict:
     if not p.exists():
         return {"current": "", "files": [], "note": "未找到 ~/.qoder/settings.json"}
     try:
-        d = json.loads(_read_text(p))
-    except json.JSONDecodeError as e:
+        d = _json_load(_read_text(p))
+    except (json.JSONDecodeError, jsonspan.JsonSpanError) as e:
         return {"current": "", "files": [str(p)], "note": f"settings.json 解析失败：{e}"}
     return {"current": str((d.get("model") or {}).get("name") or ""),
             "provider": "",
@@ -862,7 +889,7 @@ def _qoder_write(model: str):
     个普通客户端，模型由 CCR 侧决定），故设置页对近类 agent 的文案要说明这一点。"""
     p = _qoder_path()
     text = _read_text(p)
-    d = json.loads(text)
+    d = _json_load(text)
     if "/" in model or ":" in model:
         raise ModelCfgError(
             f"Qoder CLI 的模型名是本家的原生名（如 Qwen3.8-Max），不接受 CCR 的 "
@@ -874,8 +901,14 @@ def _qoder_write(model: str):
         d["model"] = blk
     old = str(blk.get("name") or "")
     blk["name"] = model
-    return [(p, json.dumps(d, ensure_ascii=False, indent=2) + "\n",
-             [{"where": "settings.json:model.name", "from": old, "to": model, "op": "set"}])]
+    chg = [{"where": "settings.json:model.name", "from": old, "to": model, "op": "set"}]
+    # v0.13.182：定点写。settings.json 里还有 securityScan/permissions/security 三段，
+    # 整份重排会让用户看不出"其实只改了模型名"；键缺失才回落整份重写。
+    try:
+        new, _old = jsonspan.set_string(text, ("model", "name"), model)
+        return [(p, new, chg)]
+    except (KeyError, jsonspan.JsonSpanError):
+        return [(p, json.dumps(d, ensure_ascii=False, indent=2) + "\n", chg)]
 
 
 def _cursor_path() -> Path:
@@ -893,8 +926,8 @@ def _cursor_read() -> dict:
     if not p.exists():
         return {"current": "", "files": [], "note": "未找到 ~/.cursor/cli-config.json"}
     try:
-        d = json.loads(_read_text(p))
-    except json.JSONDecodeError as e:
+        d = _json_load(_read_text(p))
+    except (json.JSONDecodeError, jsonspan.JsonSpanError) as e:
         return {"current": "", "files": [str(p)], "note": f"cli-config.json 解析失败：{e}"}
     return {"current": str((d.get("model") or {}).get("modelId") or ""),
             "provider": "ccr",
@@ -909,7 +942,7 @@ def _cursor_write(model: str):
     —— 这些是用户与 cursor 自己的配置面，hub 只负责「默认模型」这一件事。"""
     p = _cursor_path()
     text = _read_text(p)
-    d = json.loads(text)
+    d = _json_load(text)
     changes: List[dict] = []
     blk = d.get("model") if isinstance(d.get("model"), dict) else {}
     old = str(blk.get("modelId") or "")
@@ -924,14 +957,27 @@ def _cursor_write(model: str):
     d["selectedModel"] = sel
     changes.append({"where": "cli-config.json:selectedModel.modelId", "from": "", "to": model, "op": "set"})
     params = d.get("modelParameters") if isinstance(d.get("modelParameters"), dict) else {}
-    if model not in params:
+    add_param = model not in params
+    if add_param:
         params[model] = []
         changes.append({"where": f"cli-config.json:modelParameters.{model}",
                         "from": "", "to": "空参数表", "op": "add-key"})
     d["modelParameters"] = params
     d["hasChangedDefaultModel"] = True
     changes.append({"where": "cli-config.json:hasChangedDefaultModel", "from": "", "to": "true", "op": "set"})
-    return [(p, json.dumps(d, ensure_ascii=False, indent=2) + "\n", changes)]
+    # v0.13.182：定点写 8 处字节。这个文件里还有 permissions/display/editor/sandbox/
+    # network/hooks 等用户面配置，整份重排会把它们一并卷进 diff（看不出只改了模型）。
+    try:
+        new = text
+        for k in ("modelId", "displayModelId", "displayName", "displayNameShort"):
+            new, _o = jsonspan.set_string(new, ("model", k), model)
+        new, _o = jsonspan.set_string(new, ("selectedModel", "modelId"), model)
+        new, _o = jsonspan.set_value(new, ("hasChangedDefaultModel",), True)
+        if add_param:
+            new = jsonspan.append_member(new, ("modelParameters",), model, [])
+        return [(p, new, changes)]
+    except (KeyError, jsonspan.JsonSpanError):
+        return [(p, json.dumps(d, ensure_ascii=False, indent=2) + "\n", changes)]
 
 # ── argv-only 型 agent（2026-10-25：omp 入册）────────────────────────
 # 判据（实测，不是推断）：omp 的配置根 ~/.omp/agent 里是 sqlite（agent.db /

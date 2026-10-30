@@ -32,6 +32,7 @@ _L0_TMP = pathlib.Path(os.getenv("HUB_L0_TMP",
 
 import tiers                     # noqa: E402
 import db                        # noqa: E402
+import jsonspan                  # noqa: E402
 import modelcfg                  # noqa: E402
 
 # 清单校验（v0.13.167）在本文件里默认关闭：L0 是 hermetic 环境（假 HOME + 假模型 ID），
@@ -907,6 +908,87 @@ class MAutoDiscovery(_HomeFixture):
             self.assertFalse(st["supported"])
             self.assertIn("未接入", st["reason"],
                           "未登记的新 agent 要给「未接入」的如实理由，不是白名单外一句话")
+
+
+class JPinpointWrites(_HomeFixture):
+    """v0.13.182：opencode / qoder / cursor / hermes 四家写手改**定点写**。
+
+    判据不是"解析后的 dict 对不对"（整份 json.dumps 也对），而是**未触碰的字节逐字不变**：
+    ① opencode.json 允许 JSONC 注释 —— 整份重写会静默吃掉注释；
+    ② 用户把缩进改成 4 空格后，indent=2 的重排会让 diff 全红，下一个写入方无从比对；
+    ③ hermes 的行内注释（`default: x  # 为什么选它`）会被旧正则连同值一起吞掉。
+    """
+
+    def test_opencode_keeps_jsonc_comments_and_indent(self):
+        src = ('{\n'
+               '    // 用户手写：ccr 走本机 3456\n'
+               '    "$schema": "https://opencode.ai/config.json",\n'
+               '    "provider": {"ccr": {"models": {"old/model-b": {"name": "model-b"}}}},\n'
+               '    "model": "ccr/old/model-b",\n'
+               '    "small_model": "ccr/old/model-b",\n'
+               '    "permission": {"bash": "ask"}\n'
+               '}\n')
+        self._write(".config/opencode/opencode.json", src)
+        modelcfg.apply_model("opencode", "ccr/new/model-z")
+        out = self._read(".config/opencode/opencode.json")
+        self.assertIn("// 用户手写：ccr 走本机 3456", out, "JSONC 注释被整份重写吃掉")
+        self.assertIn('\n    "$schema"', out, "4 空格缩进被改成 2 空格（整份重排）")
+        d = json.loads(jsonspan.blank_comments(out))
+        self.assertEqual(d["model"], "ccr/new/model-z")
+        self.assertEqual(d["small_model"], "ccr/new/model-z")
+        self.assertIn("new/model-z", d["provider"]["ccr"]["models"], "新模型没登记进 provider")
+        self.assertIn("old/model-b", d["provider"]["ccr"]["models"], "原有登记被删")
+        self.assertEqual(d["permission"], {"bash": "ask"})
+
+    def test_qoder_keeps_other_sections_byte_identical(self):
+        src = ('{\n'
+               '    "model": {"name": "Qwen3.8-Flash"},\n'
+               '    "securityScan": {"l1StaticCheck": true, "l3DeepScan": true},\n'
+               '    "security": {"auth": {"selectedType": "qoder-browser"}}\n'
+               '}\n')
+        self._write(".qoder/settings.json", src)
+        modelcfg.apply_model("qoder", "Qwen3.8-Max")
+        out = self._read(".qoder/settings.json")
+        self.assertIn('    "securityScan": {"l1StaticCheck": true, "l3DeepScan": true},', out)
+        self.assertIn('    "security": {"auth": {"selectedType": "qoder-browser"}}', out)
+        self.assertEqual(out.count("\n"), src.count("\n"), "行数变了 ⇒ 被重排过")
+        self.assertEqual(json.loads(out)["model"]["name"], "Qwen3.8-Max")
+
+    def test_cursor_keeps_user_owned_sections(self):
+        src = ('{\n'
+               '    "permissions": {"allow": ["Shell(ls)"], "deny": []},\n'
+               '    "display": {"mode": "zen"},\n'
+               '    "model": {"modelId": "old/model-a", "displayModelId": "old/model-a",\n'
+               '              "displayName": "old/model-a", "displayNameShort": "old/model-a"},\n'
+               '    "hasChangedDefaultModel": false,\n'
+               '    "modelParameters": {"old/model-a": []},\n'
+               '    "selectedModel": {"modelId": "old/model-a", "parameters": []}\n'
+               '}\n')
+        self._write(".cursor/cli-config.json", src)
+        modelcfg.apply_model("cursor", "new/model-z")
+        out = self._read(".cursor/cli-config.json")
+        self.assertIn('    "permissions": {"allow": ["Shell(ls)"], "deny": []},', out)
+        self.assertIn('    "display": {"mode": "zen"},', out)
+        self.assertIn('"displayNameShort": "old/model-a"}', src)   # 夹具自检：原文确实是这个形状
+        d = json.loads(out)
+        self.assertEqual(d["model"]["modelId"], "new/model-z")
+        self.assertEqual(d["selectedModel"]["modelId"], "new/model-z")
+        self.assertIs(d["hasChangedDefaultModel"], True, "布尔位没改成 true")
+        self.assertIn("new/model-z", d["modelParameters"])
+        self.assertIn("old/model-a", d["modelParameters"], "旧模型的参数表被删")
+
+    def test_hermes_keeps_inline_comment(self):
+        src = ("model:\n"
+               "  default: old/model-a  # 为什么选它：免费池里最稳\n"
+               "  provider: some-provider\n"
+               "toolsets:\n"
+               "  - hermes-cli\n")
+        self._write(".hermes/config.yaml", src)
+        modelcfg.apply_model("hermes", "new/model-z")
+        out = self._read(".hermes/config.yaml")
+        self.assertIn("# 为什么选它：免费池里最稳", out, "行内注释被旧正则连值一起吞了")
+        self.assertIn("  default: new/model-z  # 为什么选它：免费池里最稳", out)
+        self.assertIn("toolsets:\n  - hermes-cli\n", out, "model 块外的内容被动了")
 
 
 if __name__ == "__main__":

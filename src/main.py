@@ -106,7 +106,15 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.181"
+VERSION = "0.13.182"
+
+# v0.13.182（2026-10-30）：定点写铺开到剩下四家写手（opencode / qoder / cursor / hermes）。
+#   ① opencode / qoder / cursor 从「json.loads → 改 → 整份 dumps」改成区间定点写：
+#      opencode.json 官方**允许 JSONC 注释**，整份重写会把用户的注释与 4 空格缩进一起抹掉；
+#   ② 全链路：这三家的**读侧**也换 JSONC 解析（原先遇到注释就显示"解析失败"）；
+#   ③ hermes 的 YAML 定点改会连值带行内注释一起替换 ⇒ 现在注释原样留住；
+#   ④ jsonspan 补 set_value（布尔/数字标量）与 append_member（往对象里插键）。
+#   判据：test_jsonspan 25（+9）/ test_modelcfg 124（+4 条逐字节保留）。
 
 # v0.13.181（2026-10-30）：借 magpie 的写入纪律（不装本体，见 agent-knowledge/76 改判横幅）。
 #   ① 原子落盘：apply_model 原先是 write_text（先截断再写），读方有读到半截 JSON 的窗口；

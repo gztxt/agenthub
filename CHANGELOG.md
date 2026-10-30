@@ -1,3 +1,35 @@
+## v0.13.183 — dsh 嵌页 401：token 必须属于**当前进程**
+
+> 来源：2026-10-30 用户报障「dsh web authentication required; reopen the URL printed
+> by dsh web」。这句是 dsh 自己的 401 正文（`browser-auth.ts:392`），不是网络错误：
+> 说明**页面进去了、只是没通过鉴权** —— 拿到的是死 token / 无 token 的地址。
+
+- **根因（`profiles._dsh_web_url`）**：旧实现取 `journalctl -o cat` 最近 200 行里
+  **最后一条**带 token 的行。而 dsh 的 token 是进程级随机（`randomBytes(32)`），
+  重启后横幅要等 4~8s（实测 12:49:17 Started → 12:49:21 才打印）。这段窗口里
+  "最后一条"仍是**上一个进程**的 token ⇒ 浏览器拿死 token 换 cookie 必 401；
+  该地址又被缓存 30s、嵌页 `dataset.src` 不变就不重载 ⇒ 用户只能自己重进一次。
+- **修法三条**：
+  ① `journalctl -u dsh.service _PID=<MainPID>` **就地按字段过滤**（窗口大小与日志
+     密度解耦，Bot 刷屏也不会把本次横幅挤出窗口）；`_PID` 与 `systemctl show -p MainPID`
+     逐值相等才 `ok`。
+  ② 三态替代二态：`ok` / `pending`（进程在跑、横幅未打印）/ `unknown`（journal 被
+     vacuum、unit 没跑）。`pending` 只缓存 1s，`ok` 缓存命中也要**复核 PID**——
+     否则重启后 30s 内还在吐旧地址。
+  ③ `GET /api/agents/dsh/ui-status` 增加 `token_state`，`pending` 一律 `ready=false`：
+     前端继续停在「正在拉起…」覆盖层，横幅出来自然转 ready 并带新 token 重载。
+     `unknown` **不拦**（明确降级成裸地址），否则会把一个能用的界面永久显示成死的。
+- **前端补恢复面**（`syncEmbedUrlIfChanged`）：`loadAgents` 拿到新 `/api/agents` 后，
+  若当前 embed 地址与 `embedFrame.dataset.src` 不同就 `applyChatMode()` 跟进。
+  原先只有"点启动"这条路径会重建嵌页，长开的页面在服务重启后永远停在旧 token。
+- **判据**：`tests/test_dsh_token_pid.py` 15 例（旧 PID 的 token 不得外发 / 新旧同在
+  时只取当前 PID / pending 120s 后降级 unknown / 缓存命中复核 PID / journalctl 失败
+  只降级不抛 / `_PID=` 出现在命令行 / 前端函数存在且被 loadAgents 调用）。
+- **实测（影子实例 :3196 + 生产 dsh 真重启）**：
+  `13:0x 拉起 dsh → 0.2s ready=False state=pending url=裸地址 → 4.6s ready=True
+  state=ok url_tail=OqncqT9I`（旧 token 尾 `…A9Aes` 已作废）。修复前这段窗口内
+  `/api/agents` 发的是**旧进程**的 token。
+
 ## v0.13.182 — 定点写铺开到剩下四家写手（opencode / qoder / cursor / hermes）
 
 > 承接 v0.13.181：那一版只把 `claude` / `pi` 换成了区间定点写，另外四家仍是

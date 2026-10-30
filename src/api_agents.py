@@ -277,7 +277,20 @@ async def agent_ui_status(agent_id: str):
         raise HTTPException(404, {"error": "no_agent", "agent_id": agent_id})
     spec = profiles_mod.ui_start_for(agent_id)
     ready, host, port = _ui_ready(agent_id, spec, p)
-    return {"agent_id": agent_id, "ready": ready, "port": port, "host": host}
+    # ★ dsh 的「就绪」不能只看端口（2026-10-30 用户报障 dsh 嵌页 401）：
+    # - 端口在 listening 那一刻横幅**未必**已打印（实测 4~8s 的窗口），此时嵌进去
+    #   只能拿到死 token / 裸地址 ⇒ 帧内是 "dsh web authentication required"。
+    # - 所以 token 还属于**已退出进程**（state=pending）时，一律报未就绪，让前端
+    #   继续停在「正在拉起…」覆盖层上；横幅一出来自然转 ready 并带着新 token 重载。
+    # - state=unknown（journal 被 vacuum / systemctl 不可用）**不拦**：那是明确降级，
+    #   拦了会把一个能用的界面永久显示成死的。
+    token_state = None
+    if agent_id == "dsh":
+        token_state = profiles_mod.dsh_token_state()
+        if token_state == "pending":
+            ready = False
+    return {"agent_id": agent_id, "ready": ready, "port": port, "host": host,
+            "token_state": token_state}
 
 
 @router.post("/api/agents/{agent_id}/ui-start")

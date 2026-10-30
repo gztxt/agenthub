@@ -7,6 +7,7 @@
 - 项目类型自动识别（agent_sources.rs → src/sources.py）
 """
 import asyncio
+import hashlib
 import hmac
 import json
 import os
@@ -35,6 +36,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from starlette.middleware.gzip import GZipMiddleware
 
 sys.path.insert(0, str(Path(__file__).parent))
 import db
@@ -106,7 +108,17 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.182"
+VERSION = "0.13.183"
+
+# v0.13.183（2026-10-30）：dsh 嵌页 401「authentication required」—— token 必须属于当前进程。
+#   ① 根因在**取地址**不在鉴权：`profiles._dsh_web_url` 取 journal 最后一条 token 行，
+#      而 dsh 的 token 是进程级随机、重启后要 4~8s 才打印 ⇒ 这段窗口「最后一条」仍是
+#      上一个进程的 token；死 token 换 cookie 必 401，且地址被缓存 30s、嵌页不重载。
+#   ② 修法：`journalctl _PID=<MainPID>` 就地按字段过滤 + 三态 ok/pending/unknown；
+#      pending 只缓存 1s，ok 命中也要复核 PID；`/ui-status` 的 pending 一律 ready=false
+#      （前端继续停「正在拉起…」），unknown 明确降级不拦。
+#   ③ 前端补恢复面 `syncEmbedUrlIfChanged`：loadAgents 拿到新地址就 applyChatMode。
+#   判据：tests/test_dsh_token_pid.py 15 例；影子 + 真重启实测 pending(裸地址)→ok(新 token)。
 
 # v0.13.182（2026-10-30）：定点写铺开到剩下四家写手（opencode / qoder / cursor / hermes）。
 #   ① opencode / qoder / cursor 从「json.loads → 改 → 整份 dumps」改成区间定点写：
@@ -513,6 +525,14 @@ def _parse_cors_origins() -> list:
 app.add_middleware(CORSMiddleware, allow_origins=_parse_cors_origins(),
                    allow_methods=["*"], allow_headers=["*"], allow_credentials=False)
 
+# ── 全局响应压缩（2026-10-30）──────────────────────────────────────────
+# 此前只有 /static/ 由 staticguard 逐文件 gzip，**HTML 与 JSON 全是明文**：
+# 首页 265KB 未压缩，在 440ms 的 Tailscale DERP 链路上实测要 8s（约 33KB/s 有效带宽）。
+# 这里补一层统一压缩 ⇒ 首页与 /api/agents（52KB）等一起受益。
+# 排除项用 starlette 默认表：text/event-stream 已在其中 ⇒ SSE 不会被缓冲住；
+# 已自带 Content-Encoding 的响应（/static/）中间件会跳过，不二次压缩。
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+
 # ── 非 MCP 写路径按 IP 滑动窗口限流（风格对齐 mcpgw._check_rate）──────
 API_RATE_PER_MIN = int(os.getenv("API_RATE_PER_MIN", "60"))
 # ⚙设置口令：查看 TERM_TOKEN 等敏感配置时要求提供（为空则设置页不可用）
@@ -828,12 +848,46 @@ async def api_port_detail(port: int):
 
 # ── Dashboard ─────────────────────────────────────────────────────────
 
+_HTML_BR_CACHE: dict = {}   # ETag -> brotli 字节；模板一改 ETag 就变 ⇒ 天然失效
+
+
+def _html_br_cached(body: bytes, etag: str):
+    """首页动态体的 brotli 缓存（q9 实测 265KB 约 15ms，缓存后 O(1)）。"""
+    hit = _HTML_BR_CACHE.get(etag)
+    if hit is None:
+        hit = staticguard.br_compress(bytes(body))
+        if hit is None:
+            return None
+        if len(_HTML_BR_CACHE) > 8:
+            _HTML_BR_CACHE.clear()
+        _HTML_BR_CACHE[etag] = hit
+    return hit
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     resp = templates.TemplateResponse(request, "index.html", {"version": VERSION})
     # 2026-09-26：HTML 原先不带任何缓存头/验证器 ⇒ 浏览器与已开标签页长期不自愈，
     # 部署新版后用户看到的仍是旧 UI。no-cache = 可存，但每次导航必须回源校验。
-    resp.headers["Cache-Control"] = "no-cache"
+    # 2026-10-30：**no-cache 却没有任何校验器 = 每次导航全量重下 265KB**（440ms 链路上
+    # 实测约 8s）。补 ETag（渲染结果哈希）⇒ 没改版只回 304 空响应；带 Vary 是因为同一
+    # ETag 对应 gzip / 明文两种表示，共享缓存不得互串。
+    body = resp.body if isinstance(resp.body, (bytes, bytearray)) else b""
+    etag = '"' + hashlib.sha256(bytes(body)).hexdigest()[:32] + '"'
+    if (request.headers.get("if-none-match") or "").strip() == etag:
+        return Response(status_code=304,
+                        headers={"Cache-Control": "no-cache", "ETag": etag,
+                                 "Vary": "Accept-Encoding"})
+    resp.headers.update({"Cache-Control": "no-cache", "ETag": etag})
+    # 2026-10-30：brotli 只有 HTTPS 下浏览器才要（明文 HTTP 不发 br）。命中就自己压，
+    # 压过的响应带 Content-Encoding ⇒ GZipMiddleware 会跳过，不会二次压、也不会重复加 Vary。
+    # 明文/gzip 路径不加 Vary，交给中间件补，避免出现两个 Accept-Encoding。
+    if staticguard.accepts(request.headers.get("accept-encoding") or "", "br"):
+        packed = _html_br_cached(body, etag)
+        if packed is not None:
+            resp.body = packed
+            resp.headers["Content-Encoding"] = "br"
+            resp.headers["Vary"] = "Accept-Encoding"
+            resp.headers["Content-Length"] = str(len(packed))
     return resp
 
 

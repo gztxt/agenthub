@@ -225,6 +225,20 @@ function entryUrl(e) {
   if (!e) return '';
   return e.pin_host ? (e.url || '') : lanUrl(e.url);
 }
+/* 地址变了就跟进（由 loadAgents 在每次拿到新 /api/agents 后调用）。
+   存在的理由：`applyChatMode` 只在 `dataset.src` ≠ 新地址时才设 `f.src`，而
+   dsh/reasonix 的地址带**进程级 token** —— 服务重启后新地址来了却没人触发
+   applyChatMode，帧里就一直停着旧 token 那份 401（用户看到 "dsh web
+   authentication required"）。这里把「数据变了」翻译成「界面跟进」。 */
+function syncEmbedUrlIfChanged() {
+  if (!chatPick || chatMode !== 'embed') return;
+  const a = entityById(chatPick);
+  const e = a && (a.entries || []).find(x => x.type === 'embed');
+  const f = $('embedFrame');
+  if (!e || !f) return;
+  const url = entryUrl(e);
+  if (url && url !== f.dataset.src) applyChatMode();
+}
 /* 嵌入存活探测：no-cors fetch 失败=目标端口无响应 → 覆盖层引导切换 */
 async function _embedAlive(url) {
   try {

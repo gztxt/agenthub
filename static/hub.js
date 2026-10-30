@@ -579,6 +579,11 @@ async function loadAgents() {
        location.hostname，见 lanUrl。空表时 lanUrl 只做回环替换（旧行为）。 */
     if (Array.isArray(d.self_addrs)) SELF_ADDRS = d.self_addrs;
     agentFailStreak = 0;
+    /* 进程级 token 的入口（dsh / reasonix）：服务一重启地址里的 token 就换，
+       而 embedFrame 只在 dataset.src 变化时才导航 ⇒ 页面开着不动的话，帧里会一直
+       停着旧 token 那份 401。数据到位点跟进一次，不等用户手动「重试嵌入」。
+       （2026-10-30 报障「dsh web authentication required」的恢复面。） */
+    if (typeof syncEmbedUrlIfChanged === 'function') syncEmbedUrlIfChanged();
     renderHomeStats();
     renderNav();   // v0.7.1：Agent / 基础设施的唯一入口是左侧手风琴，随数据刷新
     /* v0.13.103 补画项目页的 agent 下拉（用户 2026-10-11 报障：「本机项目」右侧
@@ -2168,6 +2173,20 @@ function switchMode(m) {
 function entryUrl(e) {
   if (!e) return '';
   return e.pin_host ? (e.url || '') : lanUrl(e.url);
+}
+/* 地址变了就跟进（由 loadAgents 在每次拿到新 /api/agents 后调用）。
+   存在的理由：`applyChatMode` 只在 `dataset.src` ≠ 新地址时才设 `f.src`，而
+   dsh/reasonix 的地址带**进程级 token** —— 服务重启后新地址来了却没人触发
+   applyChatMode，帧里就一直停着旧 token 那份 401（用户看到 "dsh web
+   authentication required"）。这里把「数据变了」翻译成「界面跟进」。 */
+function syncEmbedUrlIfChanged() {
+  if (!chatPick || chatMode !== 'embed') return;
+  const a = entityById(chatPick);
+  const e = a && (a.entries || []).find(x => x.type === 'embed');
+  const f = $('embedFrame');
+  if (!e || !f) return;
+  const url = entryUrl(e);
+  if (url && url !== f.dataset.src) applyChatMode();
 }
 /* 嵌入存活探测：no-cors fetch 失败=目标端口无响应 → 覆盖层引导切换 */
 async function _embedAlive(url) {

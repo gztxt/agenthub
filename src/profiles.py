@@ -170,31 +170,116 @@ def running_systemd_units(*, force_fresh: bool = False) -> set:
 #      明确降级，不做「看起来能用其实打不开」。
 # 直接读 journal 而不调 dshctl --url：后者要跑一遍完整脚本（实测 1~3s），
 # 而 discovery 是每请求路径；缓存 30s，与 _UNITSD_TTL_S 同量级。
-_DSH_URL_CACHE = {"ts": 0.0, "url": None}
+#
+# ★ 必须按 **MESSAGE 来自哪个 PID** 过滤（2026-10-30 用户报障「dsh web authentication
+#   required; reopen the URL printed by dsh web」）。旧实现只取日志里**最后一条**带
+#   token 的行，而服务重启后横幅要等 4~8s 才打印（实测 12:49:17 Started → 12:49:21
+#   才出 token）；这段窗口里"最后一条"仍是**上一个进程**的 token。浏览器拿死 token
+#   去换 cookie 得到 401，页面上就是那句 "authentication required"，且这条死 URL 会被
+#   缓存 30s、嵌页 `dataset.src` 不变就不再重载 ⇒ 用户只能自己重进一次。
+#   判据：`journalctl -o json` 的 `_PID` 与 `systemctl show -p MainPID` **逐值相等**。
+_DSH_URL_CACHE = {"ts": 0.0, "url": None, "state": "unknown", "pid": None}
 _DSH_URL_TTL_S = 30.0
+_DSH_URL_TTL_PENDING_S = 1.0   # 刚重启时按秒重试，别把「还没打印」缓存 30s
+
+
+def _dsh_main_pid() -> Optional[int]:
+    """dsh.service 当前主进程 PID；未运行 / systemctl 不可用 → None。"""
+    import subprocess
+    try:
+        r = subprocess.run(["systemctl", "--user", "show", "-p", "MainPID", "--value",
+                            "dsh.service"], capture_output=True, text=True, timeout=5)
+    except Exception:  # noqa: BLE001
+        return None
+    out = (r.stdout or "").strip()
+    if not out.isdigit() or int(out) <= 0:
+        return None
+    return int(out)
+
+
+_DSH_TOKEN_RE = r"https?://\S+\?token=[A-Za-z0-9._-]+"
+_DSH_PENDING_MAX_S = 120.0   # 进程起了这么久还没打印横幅 ⇒ 当「读不到」而不是「还在起」
+
+
+def _dsh_proc_age_s(pid: int) -> Optional[float]:
+    """进程已运行秒数（/proc/<pid>/stat 的 starttime + /proc/uptime，不启子进程）。"""
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as f:
+            rest = f.read().rpartition(b")")[2].split()
+        start_ticks = int(rest[19])                       # 第 22 字段（去掉 pid/comm 后第 20 项）
+        with open("/proc/uptime", "r") as f:
+            up = float(f.read().split()[0])
+        hz = float(os.sysconf("SC_CLK_TCK"))
+        return up - start_ticks / hz
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _dsh_scan(pid: Optional[int] = None) -> "tuple[Optional[str], str]":
+    """→ (带 token 的地址, state)。state 三档：
+
+    - `ok`      找到**当前主进程**打印的地址（唯一可用于鉴权的地址）
+    - `pending` 进程在跑但横幅还没打印（刚重启的那几秒）
+    - `unknown` 取不到（unit 没跑 / journal 被 vacuum / 格式变了）—— 明确降级
+
+    为什么用 `_PID=` 就地过滤而不是"读最近 N 行再挑"：dsh 的 Bot 会把日志刷得很密，
+    固定 200 行的窗口随时可能把**本次启动**的横幅挤出窗口，于是"挑最后一条"挑到的是
+    上一个进程的 token。`journalctl -u <unit> _PID=<MainPID>` 直接按字段过滤，
+    窗口大小与日志密度都无关。
+    """
+    import subprocess
+    if pid is None:
+        pid = _dsh_main_pid()
+    if pid is None:
+        return None, "unknown"
+    try:
+        out = subprocess.run(
+            ["journalctl", "--user", "-u", "dsh.service", "_PID=%d" % pid,
+             "-n", "400", "--no-pager", "-o", "cat"],
+            capture_output=True, text=True, timeout=8,
+        ).stdout or ""
+    except Exception:  # noqa: BLE001  取不到只降级，不能让整条 discovery 挂掉
+        return None, "unknown"
+    hits = re.findall(_DSH_TOKEN_RE, out)
+    if hits:
+        return hits[-1], "ok"
+    age = _dsh_proc_age_s(pid)
+    if age is not None and age <= _DSH_PENDING_MAX_S:
+        return None, "pending"
+    return None, "unknown"
+
+
+def _dsh_token() -> "tuple[Optional[str], str]":
+    import time
+    now = time.monotonic()
+    hit = _DSH_URL_CACHE
+    ttl = _DSH_URL_TTL_S if hit["state"] == "ok" else _DSH_URL_TTL_PENDING_S
+    if now - hit["ts"] < ttl:
+        # 命中 `ok` 也必须复核 PID：服务重启后 30s 内缓存里还躺着**旧进程**的地址，
+        # 直接吐出去就是那条必然 401 的死链接。pid 没变才能真正复用它。
+        if hit["url"] is None or _dsh_main_pid() == hit["pid"]:
+            return hit["url"], hit["state"]
+    pid = _dsh_main_pid()
+    url, state = _dsh_scan(pid)
+    hit["ts"] = now
+    hit["url"] = url
+    hit["state"] = state
+    hit["pid"] = pid
+    return url, state
 
 
 def _dsh_web_url() -> Optional[str]:
-    import subprocess
-    import time
-    now = time.monotonic()
-    if now - _DSH_URL_CACHE["ts"] < _DSH_URL_TTL_S:
-        return _DSH_URL_CACHE["url"]
-    url = None
-    try:
-        out = subprocess.run(
-            ["journalctl", "--user", "-u", "dsh.service", "-n", "200",
-             "--no-pager", "-o", "cat"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout or ""
-        hits = re.findall(r"https?://\S+\?token=[A-Za-z0-9._-]+", out)
-        if hits:
-            url = hits[-1]
-    except Exception:  # noqa: BLE001  取不到只降级，不能让整条 discovery 挂掉
-        url = None
-    _DSH_URL_CACHE["ts"] = now
-    _DSH_URL_CACHE["url"] = url
-    return url
+    """当前 dsh 进程的带 token 地址；拿不到（含"刚重启还没打印"）→ None。
+
+    **绝不返回上一个进程的 token**：那是一个必然 401 的死地址，比裸地址更坏
+    （裸地址至少一眼能看出没鉴权，死 token 会伪装成"地址是对的"）。
+    """
+    return _dsh_token()[0]
+
+
+def dsh_token_state() -> str:
+    """`ok` / `pending` / `unknown`，供 `/ui-status` 判「能不能现在就嵌」。见 _dsh_scan。"""
+    return _dsh_token()[1]
 
 
 def invalidate_ui_url(agent_id: str) -> None:
@@ -202,6 +287,8 @@ def invalidate_ui_url(agent_id: str) -> None:
     if agent_id == "dsh":
         _DSH_URL_CACHE["ts"] = 0.0
         _DSH_URL_CACHE["url"] = None
+        _DSH_URL_CACHE["state"] = "unknown"
+        _DSH_URL_CACHE["pid"] = None
     try:
         capabilities.invalidate_url(agent_id)
     except Exception:  # noqa: BLE001  缓存失效失败不该拦住启动流程

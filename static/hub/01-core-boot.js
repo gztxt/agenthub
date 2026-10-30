@@ -579,6 +579,11 @@ async function loadAgents() {
        location.hostname，见 lanUrl。空表时 lanUrl 只做回环替换（旧行为）。 */
     if (Array.isArray(d.self_addrs)) SELF_ADDRS = d.self_addrs;
     agentFailStreak = 0;
+    /* 进程级 token 的入口（dsh / reasonix）：服务一重启地址里的 token 就换，
+       而 embedFrame 只在 dataset.src 变化时才导航 ⇒ 页面开着不动的话，帧里会一直
+       停着旧 token 那份 401。数据到位点跟进一次，不等用户手动「重试嵌入」。
+       （2026-10-30 报障「dsh web authentication required」的恢复面。） */
+    if (typeof syncEmbedUrlIfChanged === 'function') syncEmbedUrlIfChanged();
     renderHomeStats();
     renderNav();   // v0.7.1：Agent / 基础设施的唯一入口是左侧手风琴，随数据刷新
     /* v0.13.103 补画项目页的 agent 下拉（用户 2026-10-11 报障：「本机项目」右侧

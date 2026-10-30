@@ -240,7 +240,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.182"
+    CURRENT_VERSION = "0.13.183"
+    #: v0.13.183：本轮改的是「dsh 嵌页 401 = token 属于旧进程」，不是终端滚动；版本钉照常跟版本号走。
+    #: 关键词取自 main.py 版本注释实际字句。
+    VERSION_ROOT_CAUSES["0.13.183"] = (
+        "authentication required", "_dsh_web_url", "_PID", "pending",
+        "syncEmbedUrlIfChanged", "test_dsh_token_pid",
+    )
     #: v0.13.182：本轮改的是「定点写铺开到剩下四家」，不是终端滚动；版本钉照常跟版本号走。
     #: 关键词取自 main.py 版本注释实际字句：JSONC / 读侧 / 行内注释 / set_value / append_member。
     VERSION_ROOT_CAUSES["0.13.182"] = (

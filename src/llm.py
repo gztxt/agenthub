@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
 
+import mask
 import resilience
 
 BASE_URL = os.getenv("MANAGER_LLM_BASE_URL", "http://127.0.0.1:8082").rstrip("/")
@@ -317,11 +318,19 @@ async def _create_message(system: Optional[str], messages: List[dict],
     if tools:
         body["tools"] = _openai_tools_to_anthropic(tools)
         body["tool_choice"] = {"type": "auto"}
+    # v0.13.181：出站可逆脱敏（src/mask.py）。**掩在最后一跳、还原在回包**：
+    # 上层（convo / steps / 落库）拿到的始终是真值 ⇒ 工具参数里带真 key 去执行，
+    # 而网络上走的是占位符。开关 HUB_MASK_OUTBOUND=0。
+    mask_map: Dict[str, str] = {}
+    if mask.enabled():
+        body, mask_map = mask.mask_obj(body)
     data = await resilience.instance.acall(
         _llm_breaker_key(),
         lambda: _post_once(body, request_id),
         attempts=LLM_ATTEMPTS, sleep_budget_s=LLM_RETRY_BUDGET_S,
         record=_record_attempt, call_id=resilience.new_call_id())
+    if mask_map:
+        data = mask.unmask_obj(data, mask_map)
     if usage_sink is not None:
         try:
             usage_sink.append({"model": body["model"], "request_id": request_id,

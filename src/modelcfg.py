@@ -37,6 +37,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -45,6 +46,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import db
+import jsonspan
 
 # ── 模型 ID 形状闸门 ────────────────────────────────────────────────
 # CCR /v1/models 实测形状：alibaba/qwen3.8-max、openrouter/poolside/laguna-xs-2.1:free。
@@ -247,6 +249,34 @@ def _backup(p: Path, tag: str) -> str:
     return str(dst)
 
 
+def _atomic_write(p: Path, text: str) -> None:
+    """原子落盘：同目录临时文件 → fsync → os.replace（magpie 的 temp-and-rename）。
+
+    为什么必须原子（2026-10-30 借 magpie 设计）：`write_text` 是「先截断、再写」，
+    截断与写完之间有一个窗口，此刻任何并发读取方（agent 启动读 settings.json、
+    CCR 启动重写、看门狗巡检）都会读到**空文件或半截 JSON**。备份救不了这种情形
+    —— 备份救的是「写坏了」，救不了「读到半截」。同文件系统内 rename 是原子的，
+    读方要么看到旧版要么看到新版。
+    权限位显式沿用原文件：os.replace 用的是临时文件的 mode，不带过去会变成 0600，
+    把用户 0644 的配置改成只有自己能读。
+    """
+    mode = p.stat().st_mode & 0o777
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 # ── 定点改写工具（只动目标 key，绝不整文件重写 / 全局替换）────────────
 def _esc(v: str) -> str:
     return v.replace("\\", "\\\\").replace('"', '\\"')
@@ -382,16 +412,45 @@ def _claude_read() -> dict:
             "files": [str(p)]}
 
 
+def _json_set_many(text: str, sets: List[Tuple[Tuple[str, ...], str]]):
+    """逐个字符串键做**定点替换**，返回 (新文本, [(路径, 旧值)])。
+
+    任一键缺失或不是字符串 ⇒ 返回 (None, [])，由调用方回落到"解析→改→整份重写"。
+    这样保留老路径的兜底语义（新键要新建时仍能建成），同时让**常见情形**只改那段字节。
+    """
+    out = text
+    olds: List[Tuple[Tuple[str, ...], str]] = []
+    try:
+        for path, val in sets:
+            out, old = jsonspan.set_string(out, path, val)
+            olds.append((path, old))
+    except (KeyError, jsonspan.JsonSpanError):
+        return None, []
+    return out, olds
+
+
 def _claude_write(model: str) -> List[Tuple[Path, str, List[dict]]]:
     p = _claude_paths()[0]
     text = _read_text(p)
-    d = json.loads(text)
     changes: List[dict] = []
+    env_keys = ("ANTHROPIC_MODEL", "CCR_CLAUDE_CODE_MODEL", "CODEXL_CLAUDE_CODE_MODEL")
+    # v0.13.181：先走定点替换（magpie 那套「只动那一个 key」）。本机 settings.json 是
+    # 4 空格缩进，而 json.dumps(indent=2) 会把整份 55 行重排 ⇒ 用户 diff 全红、
+    # 与其它写入方（CCR 启动重写）的差异被噪声盖住。
+    new, olds = _json_set_many(text, [(("model",), model)] +
+                               [(("env", k), model) for k in env_keys])
+    if new is not None:
+        changes.append({"where": "settings.json:model", "from": olds[0][1], "to": model, "op": "set"})
+        for (path, old), _v in zip(olds[1:], env_keys):
+            changes.append({"where": f"env.{path[-1]}", "from": old, "to": model, "op": "set"})
+        return [(p, new, changes)]
+    # 兜底：键不全（新装环境）时按老路径补齐后整份重写，语义与改前一致
+    d = json.loads(text)
     old = str(d.get("model") or "")
     d["model"] = model
     changes.append({"where": "settings.json:model", "from": old, "to": model, "op": "set"})
     env = d.setdefault("env", {})
-    for k in ("ANTHROPIC_MODEL", "CCR_CLAUDE_CODE_MODEL", "CODEXL_CLAUDE_CODE_MODEL"):
+    for k in env_keys:
         oldv = str(env.get(k) or "")
         env[k] = model
         changes.append({"where": f"env.{k}", "from": oldv, "to": model, "op": "set"})
@@ -509,16 +568,26 @@ def _pi_write(model: str):
     sp = _home() / ".pi" / "agent" / "settings.json"
     mp = _home() / ".pi" / "agent" / "models.json"
     out = []
-    s = json.loads(_read_text(sp))
+    text = _read_text(sp)
     changes = []
-    for k, v in (("defaultModel", model), ("defaultProvider", PI_CCR_PROVIDER)):
-        old = str(s.get(k) or "")
-        s[k] = v
-        changes.append({"where": f"settings.json:{k}", "from": old, "to": v, "op": "set"})
-    out.append((sp, json.dumps(s, ensure_ascii=False, indent=2) + "\n", changes))
+    pairs = [("defaultModel", model), ("defaultProvider", PI_CCR_PROVIDER)]
+    # v0.13.181：定点替换优先（settings.json 未改动字节一律保留）
+    new, olds = _json_set_many(text, [((k,), v) for k, v in pairs])
+    if new is not None:
+        for (k, v), (_path, old) in zip(pairs, olds):
+            changes.append({"where": f"settings.json:{k}", "from": old, "to": v, "op": "set"})
+        out.append((sp, new, changes))
+    else:                                   # 键不全（新装环境）⇒ 老路径补齐
+        s = json.loads(text)
+        for k, v in pairs:
+            old = str(s.get(k) or "")
+            s[k] = v
+            changes.append({"where": f"settings.json:{k}", "from": old, "to": v, "op": "set"})
+        out.append((sp, json.dumps(s, ensure_ascii=False, indent=2) + "\n", changes))
     # 模型不在 ccr-free 清单里时补一条：pi 只认清单内的 id（实测 --model 传清单外 id 会报 unknown model）
     if mp.exists():
-        m = json.loads(_read_text(mp))
+        mtext = _read_text(mp)
+        m = json.loads(mtext)
         prov = (m.get("providers") or {}).get(PI_CCR_PROVIDER)
         ch2: List[dict] = []
         if prov is None:
@@ -527,7 +596,9 @@ def _pi_write(model: str):
             m.setdefault("providers", {})[PI_CCR_PROVIDER] = prov
             ch2.append({"where": f"models.json:providers.{PI_CCR_PROVIDER}", "from": "",
                         "to": "新建 provider（CCR :3456/v1）", "op": "add-section"})
-        ids = [str(x.get("id") or "") for x in (prov.get("models") or [])]
+            ids = []
+        else:
+            ids = [str(x.get("id") or "") for x in (prov.get("models") or [])]
         if model not in ids:
             entry = {"id": model, "name": model}
             # 不带 contextWindow 会被 pi 静默兜底成 128000（pi-web 回显 128k）
@@ -535,7 +606,17 @@ def _pi_write(model: str):
             prov.setdefault("models", []).append(entry)
             ch2.append({"where": f"models.json:providers.{PI_CCR_PROVIDER}.models",
                         "from": f"{len(ids)} 条", "to": f"{len(ids) + 1} 条（+ {model}）", "op": "add-key"})
-        if ch2:
+            # 追加走定点插入（只插新元素，160+ 行原样不动）；provider 是新建的
+            # 或形状不认识时回落整份重写。
+            try:
+                out.append((mp, jsonspan.append_object(
+                    mtext, ("providers", PI_CCR_PROVIDER, "models"), entry), ch2))
+                ch2_done = True
+            except (KeyError, jsonspan.JsonSpanError):
+                ch2_done = False
+        else:
+            ch2_done = False
+        if ch2 and not ch2_done:
             out.append((mp, json.dumps(m, ensure_ascii=False, indent=2) + "\n", ch2))
     return out
 
@@ -1373,6 +1454,8 @@ def agent_state(agent_id: str) -> dict:
             # v0.13.85：把「这个 agent 的模型字段认什么」摆到设置页，否则用户会把
             # 原生名/CCR ID/只有注入三条路混着用，改了不生效却看上去"保存成功"。
             "write_mode": WRITE_MODE.get(agent_id, "argv"),
+            # v0.13.181：上次落笔的时间（有值 ⇒ 页面上「撤销上次保存」才有东西可撤）
+            "undo_at": (last_write(agent_id) or {}).get("at", ""),
             "hub_model": hub_model(agent_id)}
 
 
@@ -1508,10 +1591,12 @@ def apply_model(agent_id: str, model: str) -> dict:
                 f"配置文件不可写：{p}（常见原因是被设了不可变属性或只读挂载；"
                 f"`lsattr {p}` 若见 i 标记，需 `chattr -i {p}` 后才能保存）", 409)
     backups = [_backup(p, agent_id) for p, _n, _c in writes]
+    hub_from = hub_model(agent_id)
     applied = []
     try:
         for (p, new, changes), bak in zip(writes, backups):
-            p.write_text(new, encoding="utf-8")
+            # 原子写（v0.13.181）：本行原先是 p.write_text(new, ...)，见 _atomic_write 注释。
+            _atomic_write(p, new)
             applied.append({"file": str(p), "backup": bak,
                             "changes": [c for c in changes if c.get("op") != "skip"]})
     except OSError as e:  # noqa: BLE001
@@ -1523,9 +1608,100 @@ def apply_model(agent_id: str, model: str) -> dict:
                 pass
         raise ModelCfgError(f"写入失败已回滚：{e}", 500) from e
     set_hub_model(agent_id, model)
+    _record_write(agent_id, hub_from, applied)
     return {"agent_id": agent_id, "model": model, "mode": "set", "applied": applied,
             "write_mode": WRITE_MODE.get(agent_id, "argv"),
             "argv": terminal_argv(agent_id, model), "at": _now()}
+
+
+# ── 撤销上一次写入（v0.13.181，借 magpie 的 disconnect 语义）──────────
+# magpie 的卖点之一是「断开时把文件逐字节还回接入前的样子」。本机原来只有
+# 「时间戳备份」——回滚要人自己去一目录里挑 .bak、判断哪份对、再手工 cp，
+# 那一步在手机上根本做不了。这里把「刚写的那次」记账，一次点击还回去。
+def _ensure_writes_table() -> None:
+    db.execute("CREATE TABLE IF NOT EXISTS model_writes ("
+               "agent_id TEXT PRIMARY KEY, at TEXT NOT NULL, "
+               "hub_from TEXT NOT NULL, files TEXT NOT NULL)")
+
+
+def _record_write(agent_id: str, hub_from: str, applied: List[dict]) -> None:
+    """记下这次落笔的文件与备份路径（每个 agent 只留最近一次）。
+
+    记账失败**不许**把已经成功的写入变成失败：写盘已经发生，报错只会让用户重试，
+    而重试会再写一遍。故整段包 try。
+    """
+    try:
+        _ensure_writes_table()
+        db.execute("INSERT INTO model_writes(agent_id, at, hub_from, files) VALUES(?,?,?,?) "
+                   "ON CONFLICT(agent_id) DO UPDATE SET at=excluded.at, "
+                   "hub_from=excluded.hub_from, files=excluded.files",
+                   (agent_id, _now(), hub_from or "",
+                    json.dumps([{"file": a["file"], "backup": a["backup"]} for a in applied],
+                               ensure_ascii=False)))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def last_write(agent_id: str) -> Optional[dict]:
+    try:
+        _ensure_writes_table()
+        rows = db.query("SELECT agent_id, at, hub_from, files FROM model_writes WHERE agent_id=?",
+                        (agent_id,))
+    except Exception:  # noqa: BLE001 —— 表没建好只影响撤销按钮
+        return None
+    return rows[0] if rows else None
+
+
+def _undo_source(p: Path, backup: str) -> Path:
+    """校验备份路径可安全用作还原源（防越界 + 防张冠李戴）。"""
+    b = Path(backup)
+    home = _home().resolve()
+    try:
+        rp = b.resolve()
+    except OSError:
+        raise ModelCfgError(f"备份路径不可解析：{backup}", 409) from None
+    if home not in rp.parents:
+        raise ModelCfgError(f"拒绝还原到 HOME 之外：{backup}", 409)
+    if not rp.name.startswith(p.name + ".bak-"):
+        raise ModelCfgError(f"备份文件名与目标不匹配：{rp.name} 不属于 {p.name}", 409)
+    if not rp.exists():
+        raise ModelCfgError(f"备份已不存在：{backup}（可能被清理）", 404)
+    return rp
+
+
+def undo_model(agent_id: str) -> dict:
+    """把该 agent **最近一次** apply_model 的落点逐字节还原。
+
+    三条边界：
+      ① 只撤销 hub 自己记过账的那一次（文件与备份路径都取自 DB，不接收客户端传路径）；
+      ② 撤销本身也是写入 ⇒ 先给对方现状做时间戳备份，撤错了还能再撤回去；
+      ③ 清空（clear_model）不落盘，故不记账、也无从撤销 —— 由前端文案说明。
+    """
+    _spec_or_raise(agent_id)
+    rec = last_write(agent_id)
+    if not rec:
+        raise ModelCfgError(f"{agent_id} 没有可撤销的写入记录"
+                            f"（只记录经本页落过盘的成功写入）", 404)
+    files = json.loads(rec.get("files") or "[]")
+    if not files:
+        raise ModelCfgError(f"{agent_id} 上次保存没有改动任何配置文件，无需撤销", 404)
+    restored = []
+    for f in files:
+        p = Path(f["file"])
+        src = _undo_source(p, f["backup"])
+        if not p.exists():
+            raise ModelCfgError(f"配置文件已不存在：{p}（撤销会新建它，需人工确认）", 409)
+        _backup(p, f"undo-{agent_id}")      # 军规：撤销前也备份
+        _atomic_write(p, src.read_text(encoding="utf-8"))
+        restored.append({"file": str(p), "from_backup": str(src)})
+    if rec.get("hub_from"):
+        set_hub_model(agent_id, rec["hub_from"])
+    else:
+        clear_hub_model(agent_id)
+    db.execute("DELETE FROM model_writes WHERE agent_id=?", (agent_id,))
+    return {"agent_id": agent_id, "mode": "undo", "restored": restored,
+            "hub_model_to": rec.get("hub_from") or "", "at": _now(),
+            "note": "已按上次保存前的备份逐字节还原；清空操作不落盘，不在撤销范围。"}
 
 
 # ── HTTP 层 ────────────────────────────────────────────────────────
@@ -1588,6 +1764,11 @@ class VerifyLiveIn(BaseModel):
     passcode: str = ""
 
 
+class UndoIn(BaseModel):
+    agent_id: str
+    passcode: str = ""
+
+
 @router.post("/api/settings/model/verify-live")
 async def settings_model_verify_live(body: VerifyLiveIn, request: Request):
     """「真实调用验证」：用当前模型真打一次 CCR（max_tokens=1）。
@@ -1622,4 +1803,20 @@ async def settings_model_apply(body: ApplyIn, request: Request):
         raise _guard(e) from e
     act = "清空默认模型" if out.get("mode") == "clear" else f"设为 {body.model}"
     print(f"[settings] 模型设置落笔：{body.agent_id} → {act}", flush=True)
+    return out
+
+
+@router.post("/api/settings/model/undo")
+async def settings_model_undo(body: UndoIn, request: Request):
+    """撤销上一次保存（v0.13.181）：把配置文件还原到那次保存前的字节。
+
+    与 apply 同一把口令：它同样是写盘动作，且写的是 agent 自己的配置文件。
+    """
+    _check_passcode(body.passcode, request)
+    try:
+        out = undo_model(body.agent_id)
+    except ModelCfgError as e:
+        raise _guard(e) from e
+    print(f"[settings] 撤销模型写入：{body.agent_id} → "
+          f"{len(out['restored'])} 个文件已还原", flush=True)
     return out

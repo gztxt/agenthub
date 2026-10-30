@@ -1476,6 +1476,61 @@ function settingsRefreshMeta(model) {
   settingsAgentMeta(a);
 }
 
+/* ── 撤销上一次保存（v0.13.181，借 magpie 的 disconnect 语义）────────────
+   为什么要这个：落盘前有备份，但回滚要人自己去目录里挑 .bak、判断哪份对、
+   再手工 cp —— 手机上根本做不了。后端把「刚写的那次」记在 model_writes 表里，
+   这里一键还原（还原前它还会再备份一次当前状态，撤错了还能再撤回去）。
+   破坏性动作 ⇒ 必须 confirm；口令与「保存」同口径（口令错 401 / 未配 503）。 */
+async function settingsUndoModel() {
+  if (!SET_AGENT) return toast('先选一个 agent', 'err');
+  const pc = settingsPasscode();
+  if (!pc) {
+    const el = $('setPasscode');
+    if (el) el.focus();
+    return toast('请先填设置口令', 'err');
+  }
+  if (!window.confirm('把 ' + SET_AGENT + ' 的配置文件还原到「上一次保存之前」？\n\n' +
+      '· 只撤销最近一次保存，更早的不动\n' +
+      '· 还原前会再备份一次当前状态\n' +
+      '· 已开着的会话不受影响，新开终端才读新配置')) return;
+  const btn = $('setUndoBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const d = await api('/api/settings/model/undo', {
+      method: 'POST', noToken: true,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: SET_AGENT, passcode: pc })
+    });
+    lsSet('hub.passcode', pc);
+    clearPasscodeInput();
+    SET_AGENTS = [];
+    SET_DIFF = null;
+    await settingsModelsLoad(true);
+    settingsRenderUndone(d);
+    toast(SET_AGENT + '：已还原 ' + (d.restored || []).length + ' 个文件', 'ok');
+  } catch (e) {
+    if (/401|口令/.test(e.message)) lsRemove('hub.passcode');
+    clearPasscodeInput();
+    settingsRenderError('撤销失败', e);
+    toast('撤销失败：' + e.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function settingsRenderUndone(d) {
+  const box = $('setDiffBox');
+  if (!box) return;
+  box.innerHTML = '<div class="set-diff"><div class="set-diff-hd">已撤销：' +
+    escapeHtml(d.agent_id) + ' 的模型写入已还原</div>' +
+    (d.restored || []).map(r => '<div class="set-diff-row"><div class="k">' +
+      escapeHtml(r.file) + '</div><div class="v">还原自备份：' +
+      escapeHtml(r.from_backup) + '</div></div>').join('') +
+    '<div class="v">hub 侧模型现在是：' + escapeHtml(d.hub_model_to || '（未设置）') +
+    '。开新终端前请确认这就是你想要的。</div></div>';
+  box.style.display = 'block';
+}
+
 /* ── 设置 → GitHub 子菜单（v0.13.42）──────────────────────────────────────
    把原来写死在 githubprojects.py 里的三样东西（API 基址 / token 文件 / 克隆落点）
    变成运行时可配。三条纪律与模型页同源：
@@ -1836,6 +1891,7 @@ function settingsDelegates() {
     const act = e.target.closest('[data-settings-act]');
     if (act && act.dataset.settingsAct === 'preview') return settingsPreviewModel();
     if (act && act.dataset.settingsAct === 'apply') return settingsApplyModel();
+    if (act && act.dataset.settingsAct === 'undo') return settingsUndoModel();
     if (act && act.dataset.settingsAct === 'verify') return settingsVerifyModel(false);
     if (act && act.dataset.settingsAct === 'verify-live') return settingsVerifyModel(true);
     if (act) {

@@ -1,3 +1,45 @@
+## v0.13.181 — 借 magpie 的写入纪律：原子落盘 / 定点改 JSON / 撤销上次保存 / 出站可逆脱敏
+
+> 来源：2026-10-30 用户「分析理解评估 magpie 是否可以借鉴融合到本机系统，重点是操作与设计思维」。
+> 旧账 `agent-knowledge/76`（2026-10-02）判「不引入」，两条前提**本次均已失效**：
+> ① release tag 已可取证（`v0.1.2119`，2026-10-30T00:58Z）；② 免费池自愈脚本
+> `~/bin/ccr-refresh-free.sh:42` 早已停用（近 6 天 cron 全是 SKIP）⇒「CCR 不可替代」这条论据不成立。
+> **结论仍是「不装本体」**（协议差集为空、多一个写入方、磁盘 92%），但把它的**过程纪律**借过来。
+> 改判横幅见 `agent-knowledge/76` 顶部；台账 `PT-20261030-04`。
+
+- **P0 原子落盘**（`src/modelcfg.py:_atomic_write`）：`apply_model` 原先是 `p.write_text()`，
+  即「先截断再写」，截断与写完之间任何并发读方（agent 启动读 settings.json、CCR 启动重写、
+  看门狗巡检）都会读到**空或半截 JSON**——备份救不了这类事故（备份救"写坏了"，救不了"读到半截"）。
+  改为同目录 `mkstemp` → `fsync` → `os.replace`，并显式沿用原文件权限位（否则会变成 0600）。
+- **P0' JSON 定点改**（新增 `src/jsonspan.py`，`_claude_write` / `_pi_write` 改走它）：
+  实测 `~/.claude/settings.json` 是 **4 空格缩进 55 行**，而原实现 `json.dumps(indent=2)`
+  ⇒ **每次保存整份文件重排**，用户 diff 全红、与 CCR 启动重写的差异被噪声盖住。
+  现在只替换目标值的字符区间，其余字节逐字不动；`pi` 的 `models.json` 追加同理（只插新元素）。
+  键缺失（新装环境）或形状不认识时**回落**到原整份重写路径，语义不变。
+  另照搬 magpie 的「抹注释后连 JSON 都解析不了 ⇒ 报错，**不当空文件读**」。
+- **P1 撤销上次保存**（`model_writes` 表 + `POST /api/settings/model/undo` + 设置页按钮）：
+  原来回滚要人自己去目录里挑 `.bak-*`、判断哪份对、再手工 `cp`（手机上做不到）。
+  现在把「刚写的那一次」的文件与备份路径记账，一键逐字节还原（还原前再备份一次当前状态）。
+  还原源只取自 DB，**不接受客户端传路径**，且校验必须在 HOME 内、文件名必须属于目标文件。
+- **P2 出站可逆脱敏**（新增 `src/mask.py`，接在 `llm._create_message` 最后一跳）：
+  本机 hub 会把任务原文/日志/diff 直接发给远端模型，里面天然夹着密钥，而原有打码
+  （`sessions_export.py:52`）**只作用于导出文本，出站正文一个字节都不处理**。
+  现在把 `sk-* / ghp_* / github_pat_* / AKIA* / xox*- / AIza* / Bearer …/ 私钥块` 换成
+  `{{SK_1a2b3c4d}}` 出门、回包再把真值填回去。三条硬约束照抄 magpie：**同值同符**
+  （由值哈希派生，不破坏 prompt cache）、**只在内存**（映射不落盘）、**不可用即不发**。
+  故意**不做**人名/邮箱脱敏（误伤会废掉一批正常任务，且本机没有本地 NER 模型）。
+  开关 `HUB_MASK_OUTBOUND=0` 可整条关掉。
+- **P3 未落代码（判无消费者）**：magpie `fast` 策略的「20 分钟半衰期衰减均值 + 落在最快
+  10% 内保持原序」防抖，在本机**找不到任何按时延排序的消费方**
+  （`grep -rn "latency|耗时|ttft" src/ static/hub/ | grep sort|rank` 为空；
+  `src/modelprofile.py` 也没有任何 importer）⇒ 落下去就是死代码。
+  判据与参数已写进 `agent-knowledge/76` 的新 §十三，等真有「按速度排序」的界面再接。
+- **回归**：`tests/test_modelcfg.py` 95 例（新增 `PAtomicWrite` 3 / `QJsonSurgical` 5 /
+  `RUndo` 4 / 口令门 1）、`tests/test_jsonspan.py` 15 例、`tests/test_mask.py` 8 例；
+  全量 L0-hermetic **3390 ran / 0 failures**（豁免口子 8→9，已在 `test_writeauth.py` 交代理由）。
+- ⚠ 未做：`opencode` / `qoder` / `cursor` / `hermes` 的写手仍可能整份重写（本次只改了两家
+  最常写的 JSON 落点）；是否继续铺开须先看这四家的文件有没有自定义格式。
+
 ## v0.13.180 — dsh 卡片地址恢复自适应：三网各一层 socat，不再冻结 host
 
 > 来源：2026-10-30 用户报障「tailscale 打不开 dsh，`net::ERR_CONNECTION_TIMED_OUT`」。

@@ -240,7 +240,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.180"
+    CURRENT_VERSION = "0.13.181"
+    #: v0.13.181：本轮改的是「模型写入纪律 + 出站脱敏」，不是终端滚动；版本钉的职责是
+    #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取自 main.py 版本注释实际字句。
+    VERSION_ROOT_CAUSES["0.13.181"] = (
+        "原子落盘", "_atomic_write", "整份重排", "撤销", "占位符",
+        "HUB_MASK_OUTBOUND=0",
+    )
     #: v0.13.173：技能中心归档根补两仓（show-me / frontend-design）。
     #: 关键词取自 main.py 版本注释：归档根 / show-me / frontend-design / 越界 / 静默拒读。
     #: v0.13.174：派发三补（汇总节点 / 超时口径 / 拒答说法）。关键词取自 main.py 注释：

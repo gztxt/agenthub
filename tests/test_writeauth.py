@@ -90,7 +90,12 @@ class BRouteInventory(unittest.TestCase):
         # term-token / model/apply 完全同型：它们不碰 agent 配置，只写 hub 自己的
         # github_settings 表（+ 可选回写文件，落笔前备份）。再叠一层 token 门，
         # 用户在设置页就永远改不动地址与 key（自锁死）——与既有豁免同理。
-        self.assertLessEqual(len(uncovered), 8,
+        # 8 → 9（v0.13.181）：/api/settings/model/undo —— 撤销上一次模型写入。
+        # 它**同样是写盘**（把配置文件还原到那次保存之前），所以必须与 apply 同一把
+        # HUB_PASSCODE（错→401、未配→503），且口令走 POST body 不进 URL。
+        # 还原源只取自 model_writes 表里记载的备份路径，不接受客户端传路径
+        # ⇒ 不构成任意文件写入口（tests/test_modelcfg.py:RUndo 逐条钉住）。
+        self.assertLessEqual(len(uncovered), 9,
                              f"豁免口子涨到 {len(uncovered)} 条了，每加一条都要在这里交代清楚")
 
     def test_no_dead_exempt_entry(self):

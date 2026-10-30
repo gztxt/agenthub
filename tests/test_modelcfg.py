@@ -541,6 +541,17 @@ class EPasscodeGate(unittest.TestCase):
         self.assertEqual(e.status_code, 401)
         self.assertNotIn("secret-pc", str(e.detail), "拒绝原因里回显了口令")
 
+    def test_undo_endpoint_is_behind_the_same_passcode_gate(self):
+        """撤销也写盘，必须与保存同一把口令（漏了就是"绕过口令改配置文件"）。"""
+        os.environ.pop("HUB_PASSCODE", None)
+        e = self._err(modelcfg.settings_model_undo(
+            modelcfg.UndoIn(agent_id="claude", passcode="x"), None))
+        self.assertEqual(e.status_code, 503, "未配口令必须 fail-closed")
+        os.environ["HUB_PASSCODE"] = "secret-pc"
+        e = self._err(modelcfg.settings_model_undo(
+            modelcfg.UndoIn(agent_id="claude", passcode="guess-me"), None))
+        self.assertEqual(e.status_code, 401)
+
 
 
 class IThreeNewAgents(_HomeFixture):
@@ -1041,3 +1052,158 @@ class NEffectiveState(_CatalogFixture):
         self.assertEqual(st["argv_effective"], ["--model", "ccr-hub"],
                          "grok 注入的是 profile 表头键，不是模型 ID（页面必须如实显示）")
         self.assertEqual(st["effective"]["model"], "alibaba/qwen3.8-max")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# P0/P1（v0.13.181，借 magpie 的写入纪律）
+# ─────────────────────────────────────────────────────────────────────
+
+CLAUDE_4SP = """{
+    "env": {
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:3456",
+        "ANTHROPIC_MODEL": "old/model-a",
+        "CCR_CLAUDE_CODE_MODEL": "old/model-a",
+        "CODEXL_CLAUDE_CODE_MODEL": "old/model-a",
+        "API_TIMEOUT_MS": "600000"
+    },
+    "model": "old/model-a",
+    "permissions": {
+        "allow": [
+            "Bash(ls:*)"
+        ]
+    }
+}
+"""
+
+
+class PAtomicWrite(_HomeFixture):
+    """落笔必须是「临时文件 → rename」：读到半截 JSON 的窗口必须为零。"""
+
+    def test_replace_changes_inode_and_leaves_no_tmp(self):
+        p = self.home / ".claude/settings.json"
+        ino_before = p.stat().st_ino
+        modelcfg.apply_model("claude", "new/model-x")
+        self.assertNotEqual(p.stat().st_ino, ino_before,
+                            "同 inode 说明是原地截断写，不是原子替换")
+        self.assertEqual(json.loads(self._read(".claude/settings.json"))["model"], "new/model-x")
+        self.assertEqual(list(p.parent.glob(".settings.json.*.tmp")), [])
+
+    def test_failed_replace_keeps_original_bytes_and_no_tmp(self):
+        p = self.home / ".claude/settings.json"
+        before = self._read(".claude/settings.json")
+        real = os.replace
+
+        def boom(*a, **k):
+            raise OSError("disk full")
+
+        os.replace = boom
+        try:
+            with self.assertRaises(modelcfg.ModelCfgError):
+                modelcfg.apply_model("claude", "new/model-x")
+        finally:
+            os.replace = real
+        self.assertEqual(self._read(".claude/settings.json"), before,
+                         "替换失败必须回滚到原字节（不是半截新内容）")
+        self.assertEqual(list(p.parent.glob(".settings.json.*.tmp")), [],
+                         "失败后临时文件必须清掉，不能在用户目录里堆残骸")
+
+    def test_mode_preserved(self):
+        p = self.home / ".claude/settings.json"
+        os.chmod(p, 0o640)
+        modelcfg.apply_model("claude", "new/model-x")
+        self.assertEqual(p.stat().st_mode & 0o777, 0o640)
+
+
+class QJsonSurgical(_HomeFixture):
+    """JSON 落点只改目标键：缩进、键序、无关行逐字节不动。"""
+
+    def test_claude_keeps_4space_indent_and_untouched_lines(self):
+        self._write(".claude/settings.json", CLAUDE_4SP)
+        modelcfg.apply_model("claude", "new/model-x")
+        out = self._read(".claude/settings.json")
+        before_l, after_l = CLAUDE_4SP.splitlines(), out.splitlines()
+        self.assertEqual(len(before_l), len(after_l), "行数变了说明整份被重排")
+        changed = [i for i, (a, b) in enumerate(zip(before_l, after_l)) if a != b]
+        self.assertEqual(len(changed), 4, f"应变 4 行（model + 3 个 env），实际{changed}")
+        for i in changed:
+            self.assertIn("new/model-x", after_l[i])
+        self.assertIn('        "API_TIMEOUT_MS": "600000"', out, "无关键的缩进被改了")
+        self.assertIn('    "permissions": {', out, "嵌套对象被重排了")
+
+    def test_claude_env_value_with_escapes_roundtrips(self):
+        self._write(".claude/settings.json", CLAUDE_4SP)
+        modelcfg.apply_model("claude", "vendor/model:tag")
+        d = json.loads(self._read(".claude/settings.json"))
+        self.assertEqual(d["env"]["ANTHROPIC_MODEL"], "vendor/model:tag")
+
+    def test_pi_models_append_adds_only_new_lines(self):
+        self._write(".pi/agent/models.json", json.dumps(PI_MODELS, indent=4) + "\n")
+        before = self._read(".pi/agent/models.json")
+        modelcfg.apply_model("pi", "brand/new-model")
+        after = self._read(".pi/agent/models.json")
+        b, a = before.splitlines(), after.splitlines()
+        cut = b.index('                    "id": "old/model-b"') + 1   # 已有元素那行位置
+        self.assertEqual(a[:cut], b[:cut],
+                         "追加只应动数组尾部，已有元素之前的行不许重排")
+        self.assertGreater(len(a), len(b), "新元素必须真的追加进去了")
+        ids = [x["id"] for x in json.loads(after)["providers"]["ccr-free"]["models"]]
+        self.assertIn("brand/new-model", ids)
+
+    def test_pi_settings_keeps_formatting(self):
+        self._write(".pi/agent/settings.json",
+                    '{\n    "defaultModel": "old/model-a",\n'
+                    '    "defaultProvider": "ccr-free",\n    "keepMe": "x"\n}\n')
+        modelcfg.apply_model("pi", "new/model-x")
+        out = self._read(".pi/agent/settings.json")
+        self.assertIn('    "keepMe": "x"', out)
+        self.assertIn('    "defaultModel": "new/model-x"', out)
+        self.assertEqual(len(out.splitlines()), 5, "整份重排会改行数")
+
+    def test_malformed_json_refuses_instead_of_rewriting(self):
+        """magpie 的 ndv：「never read as empty」。坏文件必须报错，不许当空对象重写。"""
+        self._write(".claude/settings.json", '{"model": "a", "env": {')
+        before = self._read(".claude/settings.json")
+        with self.assertRaises(Exception):
+            modelcfg.apply_model("claude", "new/model-x")
+        self.assertEqual(self._read(".claude/settings.json"), before,
+                         "解析失败时绝不能改文件")
+
+
+class RUndo(_HomeFixture):
+    """撤销上一次落笔：逐字节还原 + 只撤一步 + 拒绝越界还原源。"""
+
+    def test_undo_restores_bytes_and_hub_value(self):
+        before = self._read(".claude/settings.json")
+        modelcfg.apply_model("claude", "new/model-x")
+        self.assertNotEqual(self._read(".claude/settings.json"), before)
+        out = modelcfg.undo_model("claude")
+        self.assertEqual(self._read(".claude/settings.json"), before, "必须逐字节还原")
+        self.assertEqual(len(out["restored"]), 1)
+        self.assertEqual(modelcfg.hub_model("claude"), "", "首次保存前 hub 无值 ⇒ 撤销后应为空")
+
+    def test_undo_without_record_is_404(self):
+        with self.assertRaises(modelcfg.ModelCfgError) as cm:
+            modelcfg.undo_model("pi")
+        self.assertEqual(cm.exception.status, 404)
+
+    def test_second_save_then_undo_goes_back_exactly_one_step(self):
+        modelcfg.apply_model("claude", "a/one")
+        first = self._read(".claude/settings.json")
+        modelcfg.apply_model("claude", "a/two")
+        modelcfg.undo_model("claude")
+        self.assertEqual(self._read(".claude/settings.json"), first)
+        self.assertEqual(modelcfg.hub_model("claude"), "a/one")
+        with self.assertRaises(modelcfg.ModelCfgError):
+            modelcfg.undo_model("claude")          # 只能撤一步，重复撤销必须报错
+
+    def test_undo_refuses_backup_outside_home(self):
+        modelcfg.apply_model("claude", "a/one")
+        rec = modelcfg.last_write("claude")
+        files = json.loads(rec["files"])
+        files[0]["backup"] = "/etc/passwd"
+        db.execute("UPDATE model_writes SET files=? WHERE agent_id=?",
+                   (json.dumps(files), "claude"))
+        with self.assertRaises(modelcfg.ModelCfgError) as cm:
+            modelcfg.undo_model("claude")
+        self.assertEqual(cm.exception.status, 409)
+        self.assertIn("HOME", cm.exception.args[0])

@@ -38,6 +38,10 @@ EXEMPT_PREFIXES: Dict[str, str] = {
         "v0.13.164：真实验证会真打一次网关（付费模型按量计费），端点自己校验 "
         "HUB_PASSCODE（错→401、未配→503）。与 apply 同口径，且口令走 POST body 不进 URL；"
         "再叠 token 门会让设置页的「真实验证」永远 401。",
+    "/api/settings/model/undo":
+        "v0.13.181：撤销上一次模型写入会把配置文件还原（也是写盘），端点自己校验 "
+        "HUB_PASSCODE（错→401、未配→503），与 apply 同口径、口令走 POST body。"
+        "还原源只取自 DB 里记的备份路径，不接受客户端传路径。",
     "/api/settings/github/":
         "设置→GitHub 四个写端点（test/apply/clear/refresh）各自校验 HUB_PASSCODE"
         "（错→401、未配→503）：地址与 key 只能从设置页改，再叠 token 门同样自锁死。"

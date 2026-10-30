@@ -106,7 +106,15 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.180"
+VERSION = "0.13.181"
+
+# v0.13.181（2026-10-30）：借 magpie 的写入纪律（不装本体，见 agent-knowledge/76 改判横幅）。
+#   ① 原子落盘：apply_model 原先是 write_text（先截断再写），读方有读到半截 JSON 的窗口；
+#      现走 `_atomic_write`（mkstemp → fsync → os.replace）；
+#   ② JSON 定点改：claude settings.json 是 4 空格缩进，旧写手按 indent=2 整份重排；
+#   ③ 撤销上次保存：把「刚写的那次」记账，一键逐字节还原（原来要人挑 .bak 再 cp）；
+#   ④ 出站可逆脱敏：密钥换占位符出门、回包填真值（同值同符 / 只在内存 / HUB_MASK_OUTBOUND=0 可关）。
+#   判据：95 + 15 + 8 例新用例，L0-hermetic 3390 ran / 0 failures。
 
 # v0.13.180（2026-10-30）：dsh 卡片地址恢复自适应 —— 判例 255 的复发形态。
 # 用户报障「tailscale 打不开 dsh，net::ERR_CONNECTION_TIMED_OUT」。

@@ -1866,10 +1866,17 @@ async def skill_relevant(request: Request,
                     r["judge"] = {"prob": probs[r["name"]],
                                   "picked": bool(picked) and r["name"] == picked}
             judge_block = {"ok": True, "picked": picked,
+                           # 概率闸结论必须回传：picked=None 有两种原因（模型没选 vs 未过闸），
+                           # 不在回包里写清楚，前端只能把两者显示成同一个「没结果」。
+                           "decided": a.get("decided"), "max_p": a.get("max_p"),
                            "confidence": a.get("confidence"),
                            "model": ans.get("model"),
                            "ms": int((time.monotonic() - t_j) * 1000),
-                           "why": "本地模型 choice 附注（不改 BM25 排序）"}
+                           "why": ("本地模型 choice 附注（不改 BM25 排序）"
+                                   if a.get("decided") is not False else
+                                   "未过闸：max_p=%s < %s，不给选中（概率仍逐行列出）"
+                                   % (a.get("max_p"),
+                                      (a.get("gate") or {}).get("threshold")))}
         except local_judge.LocalJudgeUnavailable as e:
             judge_block = {"ok": False, "picked": None, "why": str(e),
                            "ms": int((time.monotonic() - t_j) * 1000)}

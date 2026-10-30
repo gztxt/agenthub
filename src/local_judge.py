@@ -262,6 +262,8 @@ def status() -> Dict[str, Any]:
         "script": None if remote else str(p),
         "model": st.get("last_model") or (remote_judge.MODEL if remote else None),
         "remote": remote_judge.status() if remote else None,
+        # 概率闸阈值：改了要重启（模块常量导入时定型），面板据此解释 decided=false。
+        "min_p": remote_judge.MIN_P,
         "calls": calls,
         "ok": ok,
         "fail": int(st.get("fail") or 0),
@@ -351,6 +353,30 @@ def _judge_remote(questions: Dict[str, Any], state: str, timeout_s: float,
 def judge(questions: Dict[str, Any], state: str = "",
           timeout_s: float = DEFAULT_TIMEOUT_S,
           use_cache: bool = True) -> Dict[str, Any]:
+    """跑一轮判定，**并过概率闸**。`answers` 每题额外带 `max_p/decided/gate`。
+
+    闸在**这一层**（唯一汇聚点）：`_judge_raw` 的原样答案先落缓存，读出来再逐次过闸。
+    于是 ① remote/ollama 两个后端自动同权；② 改 `JUDGE_MIN_P` 重启后旧缓存按新阈值
+    重新裁决，**不需要清缓存**；③ `remote_judge.ask_one` 保持「原始解析层」语义
+    （测试与排查要看模型到底分布长什么样，不希望被闸改过）。
+
+    语义：`decided=False` 不是失败（不抛、不计 fail），是「问到了但没把握」——
+    调用方须自己决定退回硬规则。想区分「判完了/判不出/没判成」看三处：
+    `decided` / `decided=False` / 异常 `LocalJudgeUnavailable`。
+    """
+    res = _judge_raw(questions, state=state, timeout_s=timeout_s, use_cache=use_cache)
+    answers = res.get("answers") if isinstance(res, dict) else None
+    if not isinstance(answers, dict):
+        # 结构不对是后端违约（`_judge_raw` 本该抛）——原样返回，别在闸里编答案。
+        return res
+    out = dict(res)
+    out["answers"] = remote_judge.apply_gate(answers)
+    return out
+
+
+def _judge_raw(questions: Dict[str, Any], state: str = "",
+               timeout_s: float = DEFAULT_TIMEOUT_S,
+               use_cache: bool = True) -> Dict[str, Any]:
     """跑一轮本地判定。失败抛 `LocalJudgeUnavailable`，**不吞、不返回空**。
 
     返回 `{"answers": {...}, "model": ..., "usage": ...}`——

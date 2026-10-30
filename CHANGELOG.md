@@ -1,3 +1,36 @@
+## v0.13.184 — judge 概率闸：max_p 低于阈值不出判定
+
+> 来源：2026-10-30 讨论「GLiNER2.5-Decide / Colibri 能不能融合」。结论是不换模型
+> （英文 only、1.9GB 常驻 vs 本机 2GB 可用），但其中**「没把握必须是一个可设阈值的数」**
+> 这条设计本机缺着 —— 顺着查下去发现 `choice` 的 argmax 一直被下游当成真判定。
+
+- **根因（`remote_judge.ask_one`）**：`choice` 的 `probabilities` 被归一化成**和 = 1**
+  ⇒ **必然存在一个 argmax**。三个选项 0.40/0.35/0.25 时 `choice="第一个"` 读起来像
+  「模型选了它」，实际是一次掷硬币；`noul=0.52` 同罪。`_clamp01` 还会把解析不出的
+  字段补成 `0.0` —— 那是「读不出来」，不是「模型判 0」，两者在下游长得一模一样。
+  下游两条链都在拿这个 argmax 当真：`vitals` 把 `choice` 直接映射成「已安装/未安装」，
+  `/relevant` 把 `choice` 当「选中了哪个技能」。
+- **修法（`remote_judge.apply_gate` / `_max_p` / `MIN_P`）**：`max_p < JUDGE_MIN_P`
+  （默认 0.6）⇒ 清空决策字段（`choice`→None、`noul`→None），原始值存
+  `would_choose` / `p_model` 供复核，另加 `max_p` / `decided` / `gate`。
+  **只加 `decided=false` 不清值等于没接闸** —— 下游只认 `choice`。
+  `score` 没有「最大概率」可算 ⇒ `decided=None`（n/a），不编假刻度（同 `db.py`
+  「不可判定时留 NULL」）。默认 0.6 的依据：二选一要求至少 60/40；三选一（vitals 的
+  已安装/未安装/无法判断）里 0.6 意味着「过半且拉开」，均匀分布 0.333 直接出局。
+- **闸的位置（`local_judge.judge` 门面，唯一汇聚点）**：`_judge_raw` **不过闸** ⇒
+  缓存里存的是**原始分布**，读出来逐次过闸。于是 ① remote/ollama 两后端自动同权；
+  ② 改 `JUDGE_MIN_P` 重启后旧缓存按新阈值重判，**不必清缓存**；③ `ask_one` 保持
+  「原始解析层」语义，排查时能看到模型到底怎么分布的。幂等由测试守住。
+- **消费端**：`vitals` 拿 `None` 走 `present_from_evidence` 退回硬证据/`unknown`
+  （判例 245 §4 的「硬证据优先」天然接住）；`/relevant` 的 `judge_block` 回传
+  `decided`/`max_p`，把「模型没选」与「未过闸」两种 `picked=None` 分开写。
+- **判据**：`tests/test_judge_gate_l0.py` 17 例（阈值边界 / 判不出必清决策字段 /
+  幂等 / score 不适用 / 闸在门面不在 raw / 改阈值重判 / 消费端兜底）。
+  L0 3435 绿、L1 79 绿。
+- **未做**：没装 GLiNER2.5-Decide（英文 only + 1.9GB 常驻，本机可用内存 2GB）；
+  没给 `chain_judge` 那两条链加闸 —— 它已有「逐字复述 + 幻觉守卫」与
+  「正序/倒序各问一次一致才采信」，强于概率阈值。
+
 ## v0.13.183 — dsh 嵌页 401：token 必须属于**当前进程**
 
 > 来源：2026-10-30 用户报障「dsh web authentication required; reopen the URL printed

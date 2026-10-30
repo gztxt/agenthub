@@ -108,7 +108,18 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.183"
+VERSION = "0.13.184"
+
+# v0.13.184（2026-10-30）：judge 加概率闸 —— 「问到了但没把握」不再伪装成一次判定。
+#   ① 病：`choice` 的 probabilities 归一化成和=1 ⇒ **必然有 argmax**；0.40/0.35/0.25 时
+#      `choice="第一个"` 读起来像「模型选了它」，实际是掷硬币。`noul=0.52` 同罪。
+#      vitals 拿 choice 直接映射「已安装/未安装」，/relevant 拿 choice 当「选中了谁」。
+#   ② 药：`remote_judge.apply_gate()`，`max_p < JUDGE_MIN_P(默认0.6)` ⇒ 清空决策字段
+#      （choice→None / noul→None），原始值存 would_choose/p_model，另加 max_p/decided/gate。
+#      score 无最大概率 ⇒ decided=None（不适用），不编假刻度。
+#   ③ 位置：闸在 `local_judge.judge()` 门面（唯一汇聚点），raw 层不过闸 ⇒ 缓存里存原始
+#      分布，改阈值重启即按新阈值重判，不必清缓存。幂等由 `tests/test_judge_gate_l0.py` 守住。
+#   ④ 消费端：vitals 拿 None 退回硬证据/unknown；/relevant 的 judge_block 回传 decided/max_p。
 
 # v0.13.183（2026-10-30）：dsh 嵌页 401「authentication required」—— token 必须属于当前进程。
 #   ① 根因在**取地址**不在鉴权：`profiles._dsh_web_url` 取 journal 最后一条 token 行，

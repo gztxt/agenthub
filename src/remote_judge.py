@@ -70,6 +70,21 @@ MAX_TOKENS = int(os.getenv("JUDGE_MAX_TOKENS", "1200"))
 #: 实测 1200 会把中文摘要截断，`finish_reason=length` 时调用方按失败处理。
 GEN_MAX_TOKENS = int(os.getenv("JUDGE_GEN_MAX_TOKENS", "4000"))
 
+#: 判定闸阈值：单题**最大概率**低于它 ⇒ 这一题算「判不出」，不产出 `choice`/`noul`。
+#:
+#: 【为什么必须有一道闸】choice 的 `probabilities` 被归一化成和 = 1，**必然存在一个
+#: argmax**。三个选项各 0.4/0.35/0.25 时，`choice="第一个"` 读起来像「模型选了它」，
+#: 实际是一次掷硬币。`_clamp01` 还会把解析不出的字段补成 0.0 —— 那是「读不出来」，
+#: 不是「模型判 0」，两者在下游长得一模一样。本闸把「有倾向」与「没把握」分开：
+#: `decided=false` + `choice=None`（原始 argmax 存 `would_choose` 供复核）。
+#:
+#: 【默认 0.6】二选一要求至少 60/40；三选一（vitals 的 已安装/未安装/无法判断）里
+#: 0.6 意味着「过半且拉开」，均匀分布 0.333 直接出局。
+#: 【score 不参与】刻度评分回的是 `score`（0~1 的归一化分值）而不是选项概率，
+#: 没有「最大概率」可算 ⇒ `decided=None`（n/a），调用方自行接 `confidence`。
+#: 不给它编一个假刻度，与 `db.py`「不可判定时留 NULL」同一条纪律。
+MIN_P = float(os.getenv("JUDGE_MIN_P", "0.6"))
+
 _JSON_HINT = "只输出一个 JSON 对象，不要输出任何其他文字、不要用 markdown 代码围栏。"
 
 
@@ -292,9 +307,79 @@ def judge(questions: Dict[str, Any], state: str = "",
     return {"answers": answers, "model": MODEL, "usage": usage}
 
 
+def _num(x: Any) -> Optional[float]:
+    """宽松取数：非数字/None 返回 None（**不补 0**——补 0 会把「读不出」伪装成「判 0」）。"""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _max_p(answer: Dict[str, Any]) -> Optional[float]:
+    """单题「最大概率」。choice 取各选项最大值；noul 取 `max(p, 1-p)`；
+    score / 未知题型返回 None（不适用）。"""
+    t = answer.get("type")
+    if t == "choice":
+        vals = [v for v in (_num(x) for x in (answer.get("probabilities") or {}).values())
+                if v is not None]
+        return max(vals) if vals else None
+    if t == "noul":
+        # `p_model` 是闸关掉之后的原始概率（见 apply_gate）；读完闸的答案再读一次
+        # 必须还原成同一个 max_p，否则 cache 命中前后的门限结论会不一致。
+        p = _num(answer.get("p_model"))
+        if p is None:
+            p = _num(answer.get("noul"))
+        return None if p is None else max(p, 1.0 - p)
+    return None
+
+
+def apply_gate(answers: Dict[str, Any], threshold: Optional[float] = None) -> Dict[str, Any]:
+    """给一轮答案加**概率闸**：`max_p < 阈值` ⇒ 这一题判不出。
+
+    幂等：对已加过闸的答案再跑一次，结果逐字段相同（`cache` 里存的是**原始**答案，
+    每次读都重新过闸，所以改 `JUDGE_MIN_P` 重启后旧缓存立刻按新阈值生效，
+    不用清缓存）。
+
+    每题新增三个字段，**不改动题型与原始分布**：
+    - `max_p`：最大概率（score 为 None）；
+    - `decided`：True 判出来了 / False 判不出 / **None 不适用**；
+    - `gate`：`{threshold, passed, result}`，result ∈ passed|undecided|n/a。
+
+    判不出时**把决策字段清空**（choice→None、noul→None），原始值存 `would_choose` /
+    `p_model` 供复核。只加 flag 不清值是没用的：`vitals` 拿 `choice` 直接映射三态、
+    `/relevant` 拿 `choice` 当「选中了谁」，不清就等于闸门不存在。
+    """
+    t = MIN_P if threshold is None else float(threshold)
+    out: Dict[str, Any] = {}
+    for name, ans in (answers or {}).items():
+        if not isinstance(ans, dict):
+            out[name] = ans
+            continue
+        a = dict(ans)
+        mp = _max_p(a)
+        a["max_p"] = mp
+        if mp is None:
+            a["decided"] = None
+            a["gate"] = {"threshold": t, "passed": None, "result": "n/a"}
+        elif mp >= t:
+            a["decided"] = True
+            a["gate"] = {"threshold": t, "passed": True, "result": "passed"}
+        else:
+            a["decided"] = False
+            a["gate"] = {"threshold": t, "passed": False, "result": "undecided"}
+            if a.get("type") == "choice" and a.get("choice") is not None:
+                a["would_choose"] = a["choice"]
+                a["choice"] = None
+            elif a.get("type") == "noul" and a.get("noul") is not None:
+                a["p_model"] = a["noul"]
+                a["noul"] = None
+        out[name] = a
+    return out
+
+
 def status() -> Dict[str, Any]:
     """只读配置面（不联网）。真可用性看 `local_judge.status()` 的 last_ok/last_error。"""
     return {"backend": "remote", "configured": configured(), "base_url": BASE_URL,
             "model": MODEL, "timeout_s": TIMEOUT_S,
             "max_tokens": MAX_TOKENS, "gen_max_tokens": GEN_MAX_TOKENS,
-            "auth": bool(API_KEY)}
+            "min_p": MIN_P, "auth": bool(API_KEY)}

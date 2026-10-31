@@ -47,7 +47,7 @@ CACHE_README_CHARS = 6000
 MAX_CANDIDATES = 8
 ENRICH_LIMIT = 12
 LIST_EXPAND_LISTS = 4
-LIST_EXPAND_SUBPAGES = 4
+LIST_EXPAND_SUBPAGES = 12
 LIST_EXPAND_PER_LIST = 30
 LIST_EXPAND_TOTAL = 80
 LIST_EXPAND_THREADS = 4
@@ -76,6 +76,9 @@ def _plus_days(days: int) -> str:
 
 def ensure_schema() -> None:
     db.execute_script(SCHEMA)
+    # 2026-10-31：长期知识库（ref_repo_kb）同批建表 —— 检索垫池用它，缺表等于白跑一轮
+    import refscout_kb
+    refscout_kb.ensure_schema()
 
 def token() -> str:
     """DB（设置页）→ env → token 文件首行。**真值不出本函数**。"""

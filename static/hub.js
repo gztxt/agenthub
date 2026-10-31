@@ -5731,6 +5731,17 @@ async function submitRefScout() {
         allow_paid: !!($('refPaid') && $('refPaid').checked)
       })
     });
+    if (d.cached) {
+      /* 查询级缓存命中（后端 REF_QUERY_TTL_H，默认 24h）：同参数不会重跑重排、不烧 token。
+         没有 job_id 可轮询 —— 直接把已有卡刷出来并展开，用户看到的是「秒出」。
+         想强制重跑：卡片上的「重跑」按钮（带 refresh_of，永远绕过缓存）。 */
+      const age = Math.round((d.cached_age_s || 0) / 60);
+      hint.textContent = '命中缓存（' + (age >= 60 ? Math.round(age / 60) + ' 小时' : Math.max(1, age) + ' 分钟')
+        + '前的同参数结果）· 要重新检索请点卡片上的「重跑」';
+      await loadRefCards();
+      openRefCard(d.card_id);
+      return;
+    }
     hint.textContent = '已排队：' + d.job_id + (d.deduped ? '（同一模块已有任务，复用）' : '');
     pollRefJob(d.job_id, d.card_id);
   } catch (e) {

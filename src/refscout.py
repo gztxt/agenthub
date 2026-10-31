@@ -290,11 +290,65 @@ class ScoutIn(BaseModel):
     refresh_of: Optional[str] = None
     trigger: str = Field(default='manual', max_length=12)
 
+#: 查询级缓存（2026-10-31 用户裁问「每次查询就全量检索效率低」）。
+#:
+#: **为什么必须有**：底层 `gh_get` 有磁盘/库缓存（搜索 7 天、补全 1 天），所以重复查询
+#: 不会重复打 GitHub API；但**整条流水线仍会重跑** —— 打分、补全窗口、语义重排都要重来，
+#: 而重排是**花钱的 LLM 调用**（一次几千 token）。实测同一 module 连提两次就是两次重排。
+#:
+#: 判据：同一组查询参数（module + keywords + lang + min_stars + fresh_days + identifiers）
+#: 在 `REF_QUERY_TTL_H`（默认 24h）内命中已有卡 ⇒ **直接回卡，不建 job、不重排**。
+#: 要强制重跑有两条明路：界面上点「重跑」（带 `refresh_of`，永远绕过缓存），
+#: 或把 `REF_QUERY_TTL_H` 设 0。三种触发方式（manual/cron/intake）都走这里，不搞两套。
+REF_QUERY_TTL_H = float(os.getenv('REF_QUERY_TTL_H', '24'))
+
+
+def _query_fp(body: 'ScoutIn') -> str:
+    """查询指纹 → 稳定的卡片 id。同一组参数永远落到同一张卡（不再每次新 id 刷一堆重复卡）。"""
+    blob = json.dumps({
+        'm': body.module.strip().lower(),
+        'kw': sorted(k.strip().lower() for k in body.keywords if k.strip()),
+        'lang': body.lang.strip().lower(),
+        'ms': int(body.min_stars), 'fd': int(body.fresh_days),
+        'id': sorted(i.strip().lower() for i in body.identifiers if i.strip()),
+    }, ensure_ascii=False, sort_keys=True)
+    return 'q' + hashlib.sha256(blob.encode('utf-8')).hexdigest()[:10]
+
+
+def _cached_card(card_id: str) -> Optional[Dict[str, Any]]:
+    """命中的卡要么可直接用，要么是坏的（failed / 词法兜底）—— 后者也放过：重跑才有意义。"""
+    if REF_QUERY_TTL_H <= 0:
+        return None
+    rows = db.query('SELECT id,module,status,updated_at,meta FROM ref_cards WHERE id=?', (card_id,))
+    if not rows:
+        return None
+    row = rows[0]
+    if (row.get('status') or '') not in ('reranked', 'lexical', 'lexical_fallback'):
+        return None
+    try:
+        t = datetime.fromisoformat(str(row.get('updated_at') or ''))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - t).total_seconds()
+    except Exception:  # noqa: BLE001 —— 时间解析不了就当没命中（宁可重跑）
+        return None
+    if age > REF_QUERY_TTL_H * 3600:
+        return None
+    return {'card_id': row['id'], 'age_s': int(age)}
+
+
 def submit(body: ScoutIn) -> Dict[str, Any]:
     if not _rc_base.token():
         raise HTTPException(503, 'GitHub token 不可用（设置页 / GITHUB_TOKEN / github.txt）')
     mod = body.module.strip()
     key = body.refresh_of or mod
+    # 查询级缓存：命中就直接回卡（不建 job、不重排、不烧 token）。
+    # 放在 in-flight 判定**之前** —— 缓存命中不该去抢 _INFLIGHT 的键。
+    if not body.refresh_of:
+        hit = _cached_card(_query_fp(body))
+        if hit:
+            return {'job_id': '', 'card_id': hit['card_id'], 'deduped': True,
+                    'cached': True, 'cached_age_s': hit['age_s']}
     with _rc_base._INFLIGHT_LOCK:
         running = _rc_base._INFLIGHT.get(key)
         if running and (_job_row(running) or {}).get('status') in ('queued', 'running'):
@@ -302,7 +356,7 @@ def submit(body: ScoutIn) -> Dict[str, Any]:
         job_id = uuid.uuid4().hex[:12]
         _rc_base._INFLIGHT[key] = job_id
     payload = {'keywords': [k.strip() for k in body.keywords if k.strip()][:8], 'lang': body.lang.strip(), 'min_stars': body.min_stars, 'fresh_days': body.fresh_days, 'identifiers': [i.strip() for i in body.identifiers if i.strip()][:2], 'allow_paid': bool(body.allow_paid), 'trigger': body.trigger, 'refresh_of': body.refresh_of}
-    card_id = body.refresh_of or uuid.uuid4().hex[:12]
+    card_id = body.refresh_of or _query_fp(body)
     db.execute('INSERT INTO ref_jobs(id,card_id,module,payload,status,stage,created_at) VALUES(?,?,?,?,?,?,?)', (job_id, card_id, mod, json.dumps(payload, ensure_ascii=False), 'queued', 'queued', _rc_base._now()))
     _rc_base._POOL.submit(_run_job, job_id)
     return {'job_id': job_id, 'card_id': card_id, 'deduped': False}
@@ -419,6 +473,27 @@ async def api_delete(card_id: str):
         raise HTTPException(404, '情报卡不存在')
     db.execute('DELETE FROM ref_cards WHERE id=?', (card_id,))
     return {'deleted': card_id}
+
+@router.get('/kb')
+async def api_ref_kb(install: str = Query(default='', max_length=20), limit: int = Query(default=50, ge=1, le=200)):
+    """长期知识库（2026-10-31）：`install=candidate` 列出够格做「安装测试」的仓。
+
+    只读。**不做安装** —— 装代码是写动作，须用户点名；这里只把够格的挑出来。
+    """
+    import refscout_kb as _kb
+    if install == 'candidate':
+        return _kb.install_candidates(limit)
+    out = _kb.stats()
+    out['install_candidates'] = _kb.install_candidates(limit)['total']
+    return out
+
+
+@router.post('/kb/promote')
+async def api_ref_kb_promote(min_stars: int = Query(default=0, ge=0, le=100000)):
+    """按判据重扫一遍，把够格的标成安装候选（幂等，返回新标记条数）。"""
+    import refscout_kb as _kb
+    return {'promoted': _kb.promote_installable(min_stars or 0)}
+
 
 @router.get('/status')
 async def api_status():

@@ -37,6 +37,7 @@ from config import config
 import refscout_base as _rc_base
 import refscout_sources as _rc_sources
 import refscout_rank as _rc_rank
+import refscout_kb as _rc_kb
 
 _GH_LINK_RE = re.compile('github\\.com[/:]([A-Za-z0-9][A-Za-z0-9_.-]*)/([A-Za-z0-9_.-]{1,80})')
 _GH_RESERVED = {'features', 'topics', 'sponsors', 'marketplace', 'login', 'orgs', 'users', 'settings', 'about', 'pricing', 'apps', 'collections', 'trending', 'search', 'security', 'events', 'readme', 'contact', 'enterprise', 'solutions', 'site', 'git-guides', 'open-source', 'customer-stories', 'team', 'home'}
@@ -86,34 +87,105 @@ def _contents_text(full: str, path: str) -> str:
     return _blob_text(f'{_rc_base.GH_API}/repos/{full}/contents/{urllib.parse.quote(path)}')
 
 def _pick_lists(pre: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
-    """挑要展开的清单仓，返回仓库 item 列表（按预分顺序）。
+    """挑要展开的清单仓，返回仓库 item 列表。
 
-    只认两类，不靠「README 链接多」泛判：
-    ① 显式 `list` 桶（名字/描述像 awesome/curated）；
-    ② **自有来源**里 README 像目录的仓 —— `HelloGitHub` 的描述没有任何 list 词，
-       靠描述永远识别不出来；而它正是用户点名要展开的那种。
-    链接多 ≠ 清单：实测泛判会把 `gh-repo-stats`、`powerplatform-actions`
-    这类普通仓当清单，白烧掉整份展开预算（96 个项目的 API 额度）。
+    **2026-10-31 修复：显式来源保位**。旧实现只按预分取前 `limit` 个，而预分是「与当前
+    查询关键词的覆盖度」—— `521xueweihan/HelloGitHub` 的描述里没有任何「派发」类词，
+    覆盖度 0 ⇒ **永远排不进前 4**。实测卡 `62ebb8e53d02`：4 个名额全被
+    `Sfedfcv/redesigned-pancake`（README 拉不到）这类无关清单占掉，新增 0 个项目，
+    而用户**显式登记**的 HelloGitHub 一次都没被展开。
+
+    判据（用户 2026-10-31 裁定「执行 1、2、4」）：
+    ① **显式来源优先**：`p['sources']` 非空（来自 `ref_sources` 表）的仓库先占位，
+       **不参与相关度竞争** —— 用户把它加进来就是「我认定它是知识源」，不是搜索命中；
+    ② **每个显式来源至少 1 个名额**（按来源标签 round-robin），避免一个来源吃光名额；
+    ③ 剩余名额才按预分顺序给非来源的 `bucket == 'list'`。
+
+    ⚠ **「显式来源」不等于「清单」**：仍有信号闸门（`bucket=='list'` 或 README 链接数
+    ≥ `LIST_SIGNAL_LINKS`）。否则 `gztxt/term-demo` 这种普通仓会被当清单展开、
+    然后被「清单仓本身不计入候选」摘掉 —— 那是把候选池越切越小（本闸门第一版就这么红过）。
+    对显式来源，未补全的 README 会**按需取一次**（有缓存），预算上限 `_README_PROBE_CAP`。
     """
-    out: List[Dict[str, Any]] = []
+    picked: List[Dict[str, Any]] = []
     seen = set()
-    for p in pre:
+    probes = [0]
+    cache: Dict[str, bool] = {}
+
+    def is_list_like(p: Dict[str, Any]) -> bool:
         item = p['item']
         full = item.get('full_name') or ''
-        if not full or full.lower() in seen:
-            continue
-        owned = bool(p.get('sources'))
-        signals = 0
-        if owned and p.get('readme'):
-            signals = len(_gh_links(p['readme'], full)) + len(_md_subpages(p['readme'], 100))
-        if p['bucket'] == 'list' or (owned and signals >= _rc_base.LIST_SIGNAL_LINKS):
-            seen.add(full.lower())
-            out.append(item)
-        if len(out) >= limit:
-            break
-    return out
+        if p['bucket'] == 'list':
+            return True
+        if not p.get('sources'):
+            return False          # 非来源仓不泛判（会白烧整份展开预算）
+        if full in cache:
+            return cache[full]
+        text = p.get('readme') or ''
+        if not text and probes[0] < _README_PROBE_CAP:
+            probes[0] += 1
+            try:
+                text = _readme_text(full) or ''
+            except Exception:  # noqa: BLE001 —— 探 README 失败就当不是清单，不炸整卡
+                text = ''
+        sig = len(_gh_links(text, full)) + len(_md_subpages(text, 100)) if text else 0
+        cache[full] = sig >= _rc_base.LIST_SIGNAL_LINKS
+        return cache[full]
 
-def _expand_lists(lists: List[Dict[str, Any]], min_stars: int, known: set, keep: Optional[Any]=None) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    def take(item: Dict[str, Any]) -> bool:
+        full = item.get('full_name') or ''
+        if not full or full.lower() in seen or len(picked) >= limit:
+            return False
+        seen.add(full.lower())
+        picked.append(item)
+        return True
+
+    # ① 显式来源：按来源标签分组轮询，保证每个来源至少 1 个名额
+    by_label: Dict[str, List[Dict[str, Any]]] = {}
+    for p in pre:
+        for lb in (p.get('sources') or []):
+            by_label.setdefault(lb, []).append(p)
+    while len(picked) < limit and any(by_label.values()):
+        progressed = False
+        for lb in list(by_label.keys()):
+            queue = by_label[lb]
+            while queue:
+                cand = queue.pop(0)
+                if not is_list_like(cand):
+                    continue
+                if take(cand['item']):
+                    progressed = True
+                    break
+            if len(picked) >= limit:
+                break
+        if not progressed:
+            break
+
+    # ② 剩余名额：非来源的 list 桶，按预分顺序
+    for p in pre:
+        if len(picked) >= limit:
+            break
+        if p.get('sources'):
+            continue
+        if p['bucket'] == 'list':
+            take(p['item'])
+    return picked
+
+_README_PROBE_CAP = 12   # 找清单时最多按需探几个 README（有磁盘缓存，仍然别无限探）
+
+def _trusted_lists(lists: List[Dict[str, Any]], pre: List[Dict[str, Any]]) -> set:
+    """哪些清单仓属于「显式来源」—— 它们**免**覆盖度闸门（用户 2026-10-31 裁定 ④）。
+
+    旧行为：清单里每个链接还要过 `coverage >= 0.18`，而 HelloGitHub 收录的是「有趣的项目」，
+    与「派发」的覆盖度天然偏低 ⇒ 即使被展开，也会被这层闸门整批刷掉（实测新增 0）。
+    **先展开后筛选**：信任来源的收录关系（用户认它做知识源），质量闸门只保留
+    `archived` / `min_stars` 这类硬指标。
+    """
+    src = {str(p['item'].get('full_name') or '').lower() for p in pre if p.get('sources')}
+    return {str(it.get('full_name') or '').lower() for it in lists} & src
+
+
+def _expand_lists(lists: List[Dict[str, Any]], min_stars: int, known: set, keep: Optional[Any]=None,
+                  trusted: Optional[set]=None) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
     """把清单仓展开成收录项目，返回 ({key: {item, via}}, 逐清单日志)。
 
     `known` 是已在候选池里的 key 集合（小写 full_name），用于避免重复拉取。
@@ -123,6 +195,7 @@ def _expand_lists(lists: List[Dict[str, Any]], min_stars: int, known: set, keep:
     """
     found: Dict[str, Dict[str, Any]] = {}
     log_rows: List[Dict[str, Any]] = []
+    trusted = trusted or set()
     for lst in lists[:_rc_base.LIST_EXPAND_LISTS]:
         full = lst.get('full_name') or ''
         if not full or len(found) >= _rc_base.LIST_EXPAND_TOTAL:
@@ -156,7 +229,8 @@ def _expand_lists(lists: List[Dict[str, Any]], min_stars: int, known: set, keep:
                     continue
                 if int(data.get('stargazers_count') or 0) < min_stars:
                     continue
-                if keep is not None and (not keep(data)):
+                # 显式来源的收录关系免覆盖度闸门（`trusted`），硬指标照旧
+                if keep is not None and full.lower() not in trusted and (not keep(data)):
                     continue
                 key = str(data['full_name']).lower()
                 found.setdefault(key, {'item': data, 'via': set()})['via'].add(full)
@@ -471,6 +545,47 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int, fresh_d
         rec = pool.setdefault(key, {'item': srec['item'], 'seen': set()})
         rec['seen'].update(('src:' + lb for lb in srec['labels']))
         rec['sources'] = sorted(set(rec.get('sources') or []) | set(srec['labels']))
+    # ── 知识库垫池（2026-10-31）：把历次检索过的仓先放回候选池 ──
+    # 为什么放在「来源同步」之后、「预分」之前：预分要看到全部候选才能算 IDF；
+    # 而放在这里能让 `enrich_top` 认出「已补过的」从而不重复抓 README/树/head
+    # —— 那三路才是每轮真正的大头（每仓 3 次 API + 解析）。
+    kb_rows = []
+    try:
+        kb_rows = _rc_kb.seed_rows(module, keywords)
+    except Exception as e:  # noqa: BLE001 —— 知识库读失败不许拖垮整卡
+        arms_log.append({'name': 'kb', 'q': '', 'ok': False, 'count': 0, 'ms': 0,
+                         'cached': False, 'error': _rc_base._scrub(f'{type(e).__name__}: {e}')[:200]})
+    kb_hits = 0
+    for r in kb_rows:
+        full = r.get('full_name') or ''
+        if not full:
+            continue
+        key = full.lower()
+        if key in pool:
+            continue
+        item = {
+            'full_name': full, 'html_url': r.get('url') or f'https://github.com/{full}',
+            'description': r.get('descr') or '', 'topics': r.get('topics') or [],
+            'stargazers_count': int(r.get('stars') or 0),
+            'license': {'spdx_id': r.get('license') or ''} if r.get('license') else None,
+            'archived': bool(int(r.get('archived') or 0)),
+            'pushed_at': r.get('pushed_at') or '',
+            'default_branch': r.get('branch') or 'main',
+        }
+        rec = {'item': item, 'seen': {'kb'}, 'sources': list(r.get('sources') or [])}
+        # 有 README 摘要 + head ⇒ 视为已补全：跳过 enrich（省 3 次 API/仓）
+        if r.get('readme_gist') and r.get('head'):
+            rec['enriched'] = True
+            rec['branch'] = r.get('branch') or 'main'
+            rec['head'] = r.get('head')
+            rec['readme'] = r.get('readme_gist') or ''
+            rec['paths'] = []
+        pool[key] = rec
+        kb_hits += 1
+    if kb_hits:
+        arms_log.append({'name': 'kb', 'q': '', 'ok': True, 'count': kb_hits, 'ms': 0,
+                         'cached': True, 'error': None})
+
     toks = _rc_rank.tokens_of(keywords)
     groups = _rc_rank.alias_groups(keywords)
 
@@ -531,7 +646,8 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int, fresh_d
             def keep(item: Dict[str, Any]) -> bool:
                 blob = _rc_rank._expand_blob(_rc_rank._norm_text(_rc_rank._name_blob(item)))
                 return _rc_rank._concept_cov(blob, groups, w0)[0] >= 0.18
-            found, expanded_log = _expand_lists(lists, min_stars, set(pool), keep)
+            trust = _trusted_lists(lists, pre)
+            found, expanded_log = _expand_lists(lists, min_stars, set(pool), keep, trusted=trust)
             for key, rec in found.items():
                 pool[key] = {'item': rec['item'], 'seen': set(), 'via': rec['via']}
             if found:
@@ -566,6 +682,11 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int, fresh_d
             if r['repo'] == lj.get('picked'):
                 r['local_judge'] = {'picked': True, 'moved': lj['moved'], 'confidence': lj.get('confidence'), 'ms': lj.get('ms'), 'model': lj.get('model')}
                 break
+    # ── 写穿知识库（2026-10-31）：把本轮候选的简介/摘要/三轴分落表，供下一轮垫池 ──
+    try:
+        _rc_kb.upsert(ranked, module, keywords)
+    except Exception as e:  # noqa: BLE001 —— 写库失败不许让整卡失败
+        log.warning('[refscout] 知识库写入失败：%s: %s', type(e).__name__, str(e)[:160])
     rerank_err, used_model = ('', '')
     if do_rerank and ranked:
         mark('rerank')
@@ -573,7 +694,13 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int, fresh_d
         if not used_model:
             arms_log.append({'name': 'llm-rerank', 'q': '', 'ok': False, 'count': 0, 'ms': 0, 'error': rerank_err or 'empty/invalid JSON', 'cached': False})
     failed = [a for a in arms_log if not a['ok'] and (not a['name'].startswith('llm-'))]
-    meta = {'arms': arms_log, 'local_judge': lj, 'pool_size': len(pool), 'sources': src_overview, 'list_expand': expanded_log, 'list_sources': list_sources, 'rerank': bool(used_model), 'rerank_model': used_model, 'rerank_paid': bool(used_model and used_model not in (llm.memory_model(), llm.free_fallback_model())), 'rerank_error': rerank_err, 'degraded': [a['name'] + ':' + str(a.get('error') or 'fail') for a in failed], 'all_arms_failed': bool(arms_log) and all((not a['ok'] for a in arms_log if not a['name'].startswith('llm-'))), 'cache': _rc_base.cache_stats(), 'token': bool(_rc_base.token())}
+    meta = {'arms': arms_log, 'local_judge': lj, 'pool_size': len(pool), 'sources': src_overview, 'list_expand': expanded_log, 'list_sources': list_sources, 'rerank': bool(used_model), 'rerank_model': used_model, 'rerank_paid': bool(used_model and used_model not in (llm.memory_model(), llm.free_fallback_model())), 'rerank_error': rerank_err, 'degraded': [a['name'] + ':' + str(a.get('error') or 'fail') for a in failed], 'all_arms_failed': bool(arms_log) and all((not a['ok'] for a in arms_log if not a['name'].startswith('llm-'))), 'kb_hits': kb_hits, 'cache': _rc_base.cache_stats(), 'token': bool(_rc_base.token())}
+    # rerank 之后补写一次：这一轮才有 judge/why（use/read/skip），安装候选靠它判
+    try:
+        _rc_kb.upsert(ranked, module, keywords)
+        _rc_kb.promote_installable()
+    except Exception as e:  # noqa: BLE001
+        log.warning('[refscout] 知识库回写失败：%s: %s', type(e).__name__, str(e)[:160])
     status = 'reranked' if used_model else 'lexical_fallback' if rerank_err else 'lexical'
     elapsed = round(time.monotonic() - t0, 1)
     mark('render')

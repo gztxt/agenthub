@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -30,6 +31,8 @@ import execsem    # P2 C3：统一执行语义枚举（词表唯一真相源）
 import db
 import tdai_client
 import usage_ledger
+
+log = logging.getLogger(__name__)
 import writeauth
 
 router = APIRouter()
@@ -298,7 +301,7 @@ def _fire(subject: str, status: str, duration_ms: int, detail: Dict[str, Any]) -
     try:
         db.log_profile_event(SOURCE, subject, status, duration_ms, detail=detail)
     except Exception as e:  # noqa: BLE001
-        print(f"[runlog] 埋点失败(不影响业务)：{subject} {type(e).__name__}: {e}", flush=True)
+        log.warning(f"[runlog] 埋点失败(不影响业务)：{subject} {type(e).__name__}: {e}")
 
 
 def note(subject: str, detail: Dict[str, Any], status: str = "success",
@@ -424,8 +427,8 @@ def _require_read(request: Request) -> None:
         writeauth.secrets_from_env())
     if verdict not in ("allow", "exempt"):
         # 只打 verdict/path/来源，绝不打凭据（与 audit.py 同一口径）
-        print(f"[runlog] 拒绝 {verdict}：{request.url.path} "
-              f"来源={request.client.host if request.client else '?'} —— {reason}", flush=True)
+        log.warning(f"[runlog] 拒绝 {verdict}：{request.url.path} "
+                    f"来源={request.client.host if request.client else '?'} —— {reason}")
         raise HTTPException(status_code=503 if verdict == "misconfig" else 401, detail=reason)
 
 

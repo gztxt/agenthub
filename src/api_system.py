@@ -12,6 +12,7 @@
 
 鉴权：`/api/system/restart` 不在 `writeauth.EXEMPT_PREFIXES` 里 ⇒ 由写闸门覆盖，需口令。
 """
+import logging
 import os
 import subprocess
 import time
@@ -19,6 +20,8 @@ import time
 from fastapi import APIRouter, HTTPException
 
 import term as term_mod
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -46,5 +49,5 @@ async def system_restart(force: int = 0):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, {"error": "spawn_failed",
                                   "detail": "%s: %s" % (type(e).__name__, str(e)[:160])})
-    print(f"[restart] 已派发重启 {RESTART_UNIT}（term_sessions={n} force={bool(force)}）", flush=True)
+    log.info(f"[restart] 已派发重启 {RESTART_UNIT}（term_sessions={n} force={bool(force)}）")
     return {"status": "restarting", "unit": RESTART_UNIT, "term_sessions": n}

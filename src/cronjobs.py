@@ -7,6 +7,7 @@
 """
 import asyncio
 import json
+import logging
 import os
 import shlex
 import subprocess
@@ -20,6 +21,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 import db
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -208,8 +211,7 @@ async def _tick_loop():
                 res = await asyncio.gather(*(_fire(j) for j in due), return_exceptions=True)
                 for job, r in zip(due, res):
                     if isinstance(r, BaseException):
-                        print(f"[cron] job {job.get('name') or job.get('id')} 触发失败: {r!r}",
-                              file=sys.stderr)
+                        log.warning(f"[cron] job {job.get('name') or job.get('id')} 触发失败: {r!r}")
         except Exception:  # noqa: BLE001
             pass
         await asyncio.sleep(TICK_S)

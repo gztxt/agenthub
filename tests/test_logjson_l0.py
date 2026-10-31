@@ -11,9 +11,11 @@
 import io
 import json
 import logging
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
@@ -75,34 +77,99 @@ class TestFormatter(unittest.TestCase):
 
 
 class TestSetup(unittest.TestCase):
+    """setup() 的开关与 handler 契约。
+
+    v0.13.186 起 handler 挂在 **root**（配 SrcOnlyFilter），不再是 agenthub logger
+    自挂一份 —— 因为迁移后的模块用 `logging.getLogger(__name__)`，名字是 `config`/
+    `term` 这类顶层名，自挂 agenthub 收不到它们。清理必须同时覆盖 root。
+    """
+
     def setUp(self):
         self.logger = logging.getLogger("agenthub")
+        self.root = logging.getLogger()
         self._handlers = list(self.logger.handlers)
+        self._root_handlers = list(self.root.handlers)
         self._prop = self.logger.propagate
+        self._root_level = self.root.level
         logjson._setup_done = False
 
     def tearDown(self):
         for h in list(self.logger.handlers):
             if h not in self._handlers:
                 self.logger.removeHandler(h)
-        if len(self.logger.handlers) != len(self._handlers):
-            self.logger.handlers[:] = self._handlers
+        for h in list(self.root.handlers):
+            if h not in self._root_handlers:
+                self.root.removeHandler(h)
         self.logger.propagate = self._prop
+        self.root.setLevel(self._root_level)
         logjson._setup_done = False
 
-    def test_idempotent_handlers(self):
-        logjson.setup()
-        n = len(self.logger.handlers)
-        logjson.setup()
-        self.assertEqual(len(self.logger.handlers), n, "重复 setup 叠加 handler = 每条日志打两遍")
+    def _install(self, env=None, **kw):
+        """装到 StringIO 上：显式 stream 让断言不依赖真实 stdout/stderr。"""
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, env or {}, clear=False):
+            if not env:
+                os.environ.pop(logjson.LOG_JSON_ENV, None)
+            logjson.setup(stream=buf, **kw)
+        return buf
 
-    def test_no_propagation_to_root(self):
+    def test_idempotent_handlers(self):
+        self._install()
+        n = len(self.root.handlers)
+        logjson._setup_done = False          # 模拟“忘了已装过”的第二次调用
         logjson.setup()
-        self.assertFalse(self.logger.propagate, "冒泡到 root 会与 uvicorn handler 重复输出")
+        self.assertEqual(len(self.root.handlers), n,
+                         "重复 setup 叠加 handler = 每条日志打两遍（root 标记位应拦住）")
+
+    def test_default_is_plain_text_not_json(self):
+        buf = self._install()
+        logjson.get_logger("probe").info("hello")
+        self.assertEqual(buf.getvalue(), "hello\n",
+                         "默认模式必须与 print 逐字一致：无时间戳、无级别前缀、换行结尾")
+        self.assertIsInstance(
+            logjson._installed(self.root).formatter, logjson.PlainFormatter)
+
+    def test_json_env_switches_formatter(self):
+        buf = self._install(env={"HUB_LOG_JSON": "1"})
+        logjson.get_logger("probe").warning("boom", extra={"k": 1})
+        line = buf.getvalue().strip()
+        d = json.loads(line)
+        self.assertEqual(d["msg"], "boom")
+        self.assertEqual(d["level"], "WARNING")
+        self.assertEqual(d["k"], 1)
+        self.assertIsInstance(
+            logjson._installed(self.root).formatter, logjson.JsonFormatter)
+
+    def test_falsey_env_keeps_plain(self):
+        for v in ("0", "", "false", "no"):
+            logjson._setup_done = False
+            for h in list(self.root.handlers):
+                if getattr(h, logjson._HANDLER_TAG, False):
+                    self.root.removeHandler(h)
+            buf = self._install(env={"HUB_LOG_JSON": v})
+            logjson.get_logger("probe").info("plain")
+            self.assertEqual(buf.getvalue(), "plain\n", f"HUB_LOG_JSON={v!r} 不该启用 JSON")
+
+    def test_third_party_records_are_filtered_out(self):
+        buf = self._install()
+        # pathname 指向本测试文件（tests/ 不在 src/ 下）⇒ 必须被 SrcOnlyFilter 丢掉，
+        # 否则接上 root 就等于把 aiohttp/uvicorn 的日志也改了格式。
+        logging.getLogger("some.thirdparty").warning("library noise")
+        self.assertEqual(buf.getvalue(), "", "非 src/ 模块的记录穿过了过滤器")
+
+    def test_filter_accepts_agenthub_namespace(self):
+        buf = self._install()
+        logjson.get_logger("csp").info("probe")
+        self.assertEqual(buf.getvalue(), "probe\n")
+
+    def test_propagates_to_root_handler(self):
+        self._install()
+        self.assertTrue(self.logger.propagate,
+                        "handler 在 root 上，agenthub logger 必须冒泡才收得到")
 
     def test_handler_emits_json_line(self):
         buf = io.StringIO()
-        logjson.setup()
+        self._install()
         h = logjson.JsonStreamHandler(buf)
         h.setFormatter(logjson.JsonFormatter())
         self.logger.addHandler(h)

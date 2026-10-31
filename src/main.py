@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import sys
@@ -19,6 +20,9 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
+
+#: 诊断日志统一走这里；格式由 logjson.setup() 按 HUB_LOG_JSON 决定（默认纯文本＝原 print 口径）
+log = logging.getLogger(__name__)
 
 # 必须在导入 config 前加载 .env
 from dotenv import load_dotenv
@@ -42,6 +46,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 import csp
 import db
 import logjson
+
+# ── 日志先于其它 src 模块配置（v0.13.186）──
+# config / db / term 在 **import 期**就有诊断输出（.env 覆盖、WAL 检查点、TERM_TOKEN 兜底）。
+# 若等 app 组装完再 setup，这些记录在「无 handler」的 root 上会被静默丢弃 ——
+# print 换 logger 之后它们不会自己冒出来。JSON 开关读进程环境；本文件已在上面
+# load_dotenv 过 .env，因此 .env 里的 HUB_LOG_JSON 同样生效。
+logjson.setup()
 import modelcfg
 from config import config
 from discovery import AgentDiscovery, AgentInfo
@@ -108,7 +119,7 @@ from api_vitals import router as vitals_router, agent_profs_for_vitals
 from api_summarize import router as summarize_router   # 2026-10-23：本机摘要提炼
 from api_system import router as system_router   # 系统级：前端「需重启」按钮的自重启端点
 
-print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
+log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
 VERSION = "0.13.185"
@@ -544,7 +555,7 @@ def _parse_cors_origins() -> list:
             raise ValueError("empty CORS_ORIGINS")
         return origins
     except Exception as e:  # noqa: BLE001
-        print(f"[Agent Hub] CORS_ORIGINS 解析失败（{e}），退化为仅回环来源")
+        log.warning(f"[Agent Hub] CORS_ORIGINS 解析失败（{e}），退化为仅回环来源")
         return ["http://127.0.0.1:3102", "http://localhost:3102", "http://[::1]:3102"]
 
 
@@ -601,7 +612,7 @@ async def api_rate_limit(request: Request, call_next):
             while window and window[0] < cut:
                 window.popleft()
             if len(window) >= API_RATE_PER_MIN:
-                print(f"[rate] 429：{ip} 超过 {API_RATE_PER_MIN}/min（{request.method} {path}）")
+                log.warning(f"[rate] 429：{ip} 超过 {API_RATE_PER_MIN}/min（{request.method} {path}）")
                 return JSONResponse(
                     {"detail": f"API 限流：超过 {API_RATE_PER_MIN}/min"}, status_code=429)
             window.append(time.monotonic())
@@ -658,9 +669,9 @@ async def csp_report(request: Request):
     print(f"[csp] 违规报告 来源={src} " + json.dumps(data, ensure_ascii=False)[:2000])
     return Response(status_code=204)
 
-# ── v0.13.185：JSON 行日志（新增通道，不接管 root/uvicorn）──
-# 只配 `agenthub` 命名空间；既有 print 与 uvicorn 访问日志口径不变。
-logjson.setup()
+# ── v0.13.185：JSON 行日志（新增通道，不接管 uvicorn 的访问日志）──
+# 实际配置点在文件上方 import 区（必须早于 config/db/term 的 import 期日志）；
+# 这里不再重复调用 —— setup() 虽幂等，但两处调用点会让「谁先决定格式」难以追。
 
 templates_dir = Path(__file__).parent.parent / "templates"
 static_path = Path(__file__).parent.parent / "static"
@@ -746,17 +757,17 @@ try:
 
     app.router.lifespan_context = _hub_lifespan
     app.mount("/hub-mcp", _mcp_app)
-    print("[Agent Hub] Hub MCP server 已挂载：/hub-mcp/mcp（lifespan 已并入）")
+    log.info("[Agent Hub] Hub MCP server 已挂载：/hub-mcp/mcp（lifespan 已并入）")
     # v0.13.172：出口面审计一行入日志 —— 谁被扣、白名单拼错、dispatch 是否开
     _scope = hubmcp.TOOL_SCOPE
-    print("[Agent Hub] Hub MCP 出口：%d 个工具%s%s%s" % (
+    log.info("[Agent Hub] Hub MCP 出口：%d 个工具%s%s%s" % (
         len(_scope.get("kept") or []),
         "，扣掉 %s" % ",".join(_scope["removed"]) if _scope.get("removed") else "",
         "，dispatch 闸门挡下 %s" % ",".join(_scope["blocked"]) if _scope.get("blocked") else "",
         "，白名单里不存在 %s" % ",".join(_scope["unknown"]) if _scope.get("unknown") else "",
     ))
 except Exception as e:  # noqa: BLE001
-    print(f"[Agent Hub] Hub MCP server 挂载失败（主服务不受影响）：{type(e).__name__}: {e}")
+    log.warning(f"[Agent Hub] Hub MCP server 挂载失败（主服务不受影响）：{type(e).__name__}: {e}")
 
 
 @app.get("/health")
@@ -773,7 +784,7 @@ async def health():
         db_ok = True
     except Exception as e:  # noqa: BLE001
         db_ok = False
-        print(f"[health] db 自检失败：{type(e).__name__}: {str(e)[:120]}", flush=True)
+        log.warning(f"[health] db 自检失败：{type(e).__name__}: {str(e)[:120]}")
     out = {"status": "ok", "service": "agenthub", "version": VERSION, "port": config.port,
            "db_ok": db_ok,
            "term_sessions": term_mod.alive_count(),
@@ -862,7 +873,7 @@ async def settings_term_token(request: Request, req: PasscodeRequest):
         raise HTTPException(503, "未设置 HUB_PASSCODE，请先在 .env 配置后再使用设置页")
     if not hmac.compare_digest(req.passcode, HUB_PASSCODE):
         ip = request.client.host if request.client else "?"
-        print(f"[settings] 口令错误：{ip}")
+        log.warning(f"[settings] 口令错误：{ip}")
         raise HTTPException(401, "口令错误")
     tok = os.getenv("TERM_TOKEN", "")
     return {"term_token": tok, "set": bool(tok)}
@@ -1003,8 +1014,8 @@ async def prov_loop():
         try:
             await asyncio.to_thread(selfattest.refresh)
         except Exception as e:  # noqa: BLE001
-            print("[prov] 溯源刷新异常（下轮重试）%s: %s" % (
-                type(e).__name__, str(e)[:160]), flush=True)
+            log.warning("[prov] 溯源刷新异常（下轮重试）%s: %s" % (
+                type(e).__name__, str(e)[:160]))
         await asyncio.sleep(float(os.getenv("HUB_PROV_SEC", "30")))
 
 
@@ -1037,7 +1048,7 @@ async def wal_checkpoint_loop():
         try:
             await asyncio.to_thread(db.checkpoint)
         except Exception as e:  # noqa: BLE001
-            print(f"[db] WAL 检查点异常（下轮重试）{type(e).__name__}: {str(e)[:160]}", flush=True)
+            log.warning(f"[db] WAL 检查点异常（下轮重试）{type(e).__name__}: {str(e)[:160]}")
 
 
 #: 技能调用转录采集周期（秒）。默认 600；≤0 关闭本条循环。
@@ -1062,11 +1073,11 @@ async def skill_scan_loop():
         try:
             r = await asyncio.to_thread(skill_direct_mod.scan)
             if r.get("events"):
-                print("[skill-scan] 采到 %s 条调用 %s（扫 %s 文件，跳过 %s）" % (
+                log.info("[skill-scan] 采到 %s 条调用 %s（扫 %s 文件，跳过 %s）" % (
                     r.get("events"), r.get("by_caller"),
-                    r.get("files"), r.get("skipped")), flush=True)
+                    r.get("files"), r.get("skipped")))
         except Exception as e:  # noqa: BLE001
-            print(f"[skill-scan] 采集异常（下轮重试）{type(e).__name__}: {str(e)[:160]}", flush=True)
+            log.warning(f"[skill-scan] 采集异常（下轮重试）{type(e).__name__}: {str(e)[:160]}")
         await asyncio.sleep(HUB_SKILL_SCAN_SEC)
 
 
@@ -1086,14 +1097,12 @@ def _drift_tick() -> dict:
 def _drift_log(out: dict, where: str) -> None:
     for _d in out.get("drift") or []:
         _bad = "，".join(f"{k}={v}" for k, v in (_d.get("owned") or {}).items())
-        print(f"[modelcfg] {where} 配置漂移：{_d['id']} 持久化={_d['hub_model']} 但文件里 {_bad}",
-              flush=True)
+        log.warning(f"[modelcfg] {where} 配置漂移：{_d['id']} 持久化={_d['hub_model']} 但文件里 {_bad}")
     for _x in out.get("repaired") or []:
-        print(f"[modelcfg] {where} 漂移已写回：{_x['id']} → {_x['model']}"
-              + (f"（备份 {len(_x['backups'])} 份）" if not _x.get("dry_run") else "（dry-run）"),
-              flush=True)
+        log.info(f"[modelcfg] {where} 漂移已写回：{_x['id']} → {_x['model']}"
+                 + (f"（备份 {len(_x['backups'])} 份）" if not _x.get("dry_run") else "（dry-run）"))
     for _x in out.get("skipped") or []:
-        print(f"[modelcfg] {where} 漂移未写回：{_x['id']} —— {_x['reason']}", flush=True)
+        log.warning(f"[modelcfg] {where} 漂移未写回：{_x['id']} —— {_x['reason']}")
 
 
 async def model_drift_loop():
@@ -1105,7 +1114,7 @@ async def model_drift_loop():
         try:
             _drift_log(await asyncio.to_thread(_drift_tick), "巡检")
         except Exception as e:  # noqa: BLE001
-            print(f"[modelcfg] 巡检异常（下轮重试）{type(e).__name__}: {str(e)[:160]}", flush=True)
+            log.warning(f"[modelcfg] 巡检异常（下轮重试）{type(e).__name__}: {str(e)[:160]}")
 
 
 async def vitals_loop():
@@ -1116,10 +1125,10 @@ async def vitals_loop():
     while True:
         try:
             r = await asyncio.to_thread(vitals_mod.vitals.sweep, agent_profs_for_vitals())
-            print("[vitals] sweep %s" % r, flush=True)
+            log.info("[vitals] sweep %s" % r)
         except Exception as e:  # noqa: BLE001
-            print("[vitals] sweep 异常（下轮重试）%s: %s" % (
-                type(e).__name__, str(e)[:160]), flush=True)
+            log.warning("[vitals] sweep 异常（下轮重试）%s: %s" % (
+                type(e).__name__, str(e)[:160]))
         await asyncio.sleep(vitals_mod.SWEEP_EVERY)
 
 
@@ -1134,7 +1143,7 @@ async def startup():
     try:
         db.execute("PRAGMA wal_autocheckpoint=0")
     except Exception as e:  # noqa: BLE001 —— 关不掉只是保留旧行为（有尖峰），不该拖垮启动
-        print(f"[db] 关闭自动检查点失败（保留默认行为）：{type(e).__name__}: {str(e)[:120]}", flush=True)
+        log.warning(f"[db] 关闭自动检查点失败（保留默认行为）：{type(e).__name__}: {str(e)[:120]}")
     # v0.13.101：录制预算的计数表播种（存量库升级后计数从0 起跳会让预算判据失真）。
     # 幂等且只在计数行缺失时才做那一次全表 SUM；播种失败不许拖垮启动——
     # 计数表缺失时 total_bytes() 返回 0，代价是预算偏松（多录一点），
@@ -1142,7 +1151,7 @@ async def startup():
     try:
         term_record.ensure_counted()
     except Exception as e:  # noqa: BLE001
-        print(f"[term_record] 计数表播种跳过：{type(e).__name__}: {str(e)[:160]}", flush=True)
+        log.warning(f"[term_record] 计数表播种跳过：{type(e).__name__}: {str(e)[:160]}")
     appstate.discovery = AgentDiscovery(config, db=db)
     build_adapters(config)
     # v0.13.50 起的漂移体检 + v0.13.51 的授权写回：启动先修一轮（CCR 可能还没改写，
@@ -1150,7 +1159,7 @@ async def startup():
     try:
         _drift_log(_drift_tick(), "启动")
     except Exception as e:  # noqa: BLE001 —— 体检/写回出岔子不许拖垮整个启动
-        print(f"[modelcfg] 启动漂移处理异常：{type(e).__name__}: {str(e)[:160]}", flush=True)
+        log.warning(f"[modelcfg] 启动漂移处理异常：{type(e).__name__}: {str(e)[:160]}")
     # 上游网关注入（/health 的 ccr_gateway 情报源）。watch 放两个「写死在配置里的模型 ID」：
     # manager 用的那个 + vitals L4 探针用的那个。上游一旦改名/下架，watch.<id>=false 当天可见，
     # 不必等探活烧一轮 token 才发现（09-23 的 M1 阻塞「拿不到在线清单」就此长期解除）。
@@ -1209,15 +1218,15 @@ async def startup():
                     listen_port=profiles_mod.EMBED_PROXY_PORT)
                 await _embed_proxy.start()
         except Exception as e:
-            print(f"[Agent Hub] 注入代理启动失败（不影响其他功能）：{type(e).__name__}: {e}")
+            log.warning(f"[Agent Hub] 注入代理启动失败（不影响其他功能）：{type(e).__name__}: {e}")
             _embed_proxy = None
     sa = selfattest.boot()   # 记下启动那一刻的 sha，供 /health 判 code_stale
-    print(f"[Agent Hub] 启动完成 v{VERSION} sha={sa['git_sha_boot'] or '?'}，"
-          f"监听 {config.host}:{config.port}")
-    print(f"[Agent Hub] CCR: {config.ccr_url} | pi: {config.pi_url} | "
-          f"jcode: {config.jcode_url} | TDAI: {config.tdaI_url}")
-    print(f"[Agent Hub] LLM（记忆 L2 重建 / DAG 拆解）: {config.manager_llm_base} "
-          f"model={config.manager_llm_model}")
+    log.info(f"[Agent Hub] 启动完成 v{VERSION} sha={sa['git_sha_boot'] or '?'}，"
+             f"监听 {config.host}:{config.port}")
+    log.info(f"[Agent Hub] CCR: {config.ccr_url} | pi: {config.pi_url} | "
+             f"jcode: {config.jcode_url} | TDAI: {config.tdaI_url}")
+    log.info(f"[Agent Hub] LLM（记忆 L2 重建 / DAG 拆解）: {config.manager_llm_base} "
+             f"model={config.manager_llm_model}")
 
 
 @app.on_event("shutdown")

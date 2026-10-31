@@ -7,6 +7,7 @@
 
 鉴权：设了 HOOK_AUTH_TOKEN 则必须 Bearer 携带；未设则仅允许回环来源。
 """
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -15,6 +16,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 import db
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -49,7 +52,7 @@ def _check_auth(request: Request) -> None:
         return
     client = _effective_client_ip(request)
     if client not in ("127.0.0.1", "::1", "localhost"):
-        print(f"[hook] 拒绝：未设 HOOK_AUTH_TOKEN 且来源非回环（{client}）")
+        log.warning(f"[hook] 拒绝：未设 HOOK_AUTH_TOKEN 且来源非回环（{client}）")
         raise HTTPException(status_code=403, detail="hook writes allowed from loopback only")
 
 

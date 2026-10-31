@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import os
 import re
 import shutil
@@ -47,6 +48,8 @@ from typing import Dict, List, Optional, Tuple
 
 import db
 import jsonspan
+
+log = logging.getLogger(__name__)
 
 # ── 模型 ID 形状闸门 ────────────────────────────────────────────────
 # CCR /v1/models 实测形状：alibaba/qwen3.8-max、openrouter/poolside/laguna-xs-2.1:free。
@@ -1772,7 +1775,7 @@ def _check_passcode(pc: str, request) -> None:
         raise HTTPException(503, "未设置 HUB_PASSCODE，模型设置已停用（fail-closed）")
     if not hmac.compare_digest(pc or "", want):
         ip = request.client.host if request and request.client else "?"
-        print(f"[settings] 模型设置口令错误：{ip}", flush=True)
+        log.warning(f"[settings] 模型设置口令错误：{ip}")
         raise HTTPException(401, "口令错误")
 
 
@@ -1848,7 +1851,7 @@ async def settings_model_apply(body: ApplyIn, request: Request):
     except ModelCfgError as e:
         raise _guard(e) from e
     act = "清空默认模型" if out.get("mode") == "clear" else f"设为 {body.model}"
-    print(f"[settings] 模型设置落笔：{body.agent_id} → {act}", flush=True)
+    log.info(f"[settings] 模型设置落笔：{body.agent_id} → {act}")
     return out
 
 
@@ -1863,6 +1866,6 @@ async def settings_model_undo(body: UndoIn, request: Request):
         out = undo_model(body.agent_id)
     except ModelCfgError as e:
         raise _guard(e) from e
-    print(f"[settings] 撤销模型写入：{body.agent_id} → "
-          f"{len(out['restored'])} 个文件已还原", flush=True)
+    log.info(f"[settings] 撤销模型写入：{body.agent_id} → "
+             f"{len(out['restored'])} 个文件已还原")
     return out

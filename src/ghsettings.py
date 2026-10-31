@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import os
 import re
 import shutil
@@ -52,6 +53,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter(tags=["ghsettings"])
+
+log = logging.getLogger(__name__)
 
 #: 可配置键（token 单独处理：只写不读）
 KEYS = ("api_base", "git_host", "owner", "clone_base")
@@ -472,8 +475,8 @@ def apply(fields: Dict[str, str], write_files: bool = False) -> Dict[str, Any]:
     out["backups"] = backups
     out["files_written"] = files_written
     out["applied"] = sorted(list(fields.keys()))
-    print(f"[settings] GitHub 设置落笔：{','.join(sorted(fields))}"
-          f"（回写文件 {len(files_written)} 个）", flush=True)
+    log.info(f"[settings] GitHub 设置落笔：{','.join(sorted(fields))}"
+             f"（回写文件 {len(files_written)} 个）")
     return out
 
 
@@ -485,7 +488,7 @@ def clear() -> Dict[str, Any]:
         _del(k)
     cleared = [k for k, v in before.items() if v]
     invalidate_cache()
-    print(f"[settings] GitHub 设置已清除：{cleared or '（本来就是空的）'}", flush=True)
+    log.info(f"[settings] GitHub 设置已清除：{cleared or '（本来就是空的）'}")
     return {"cleared": cleared, "effective": effective(), "token": token_view(), "at": _now()}
 
 
@@ -646,7 +649,7 @@ def _check_passcode(pc: str, request: Request, what: str) -> None:
         raise HTTPException(503, "未设置 HUB_PASSCODE，GitHub 设置已停用（fail-closed）")
     if not hmac.compare_digest(pc or "", want):
         ip = request.client.host if request and request.client else "?"
-        print(f"[settings] GitHub 设置口令错误（{what}）：{ip}", flush=True)
+        log.warning(f"[settings] GitHub 设置口令错误（{what}）：{ip}")
         raise HTTPException(401, "口令错误")
 
 

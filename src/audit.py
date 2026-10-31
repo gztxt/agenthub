@@ -25,6 +25,7 @@ fail-closed：服务端没配口令 ⇒ 503 而不是放行（与 writeauth.deci
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -34,6 +35,8 @@ import db
 import evidence
 import traceview
 import writeauth
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -56,8 +59,8 @@ def _require_read(request: Request) -> None:
         writeauth.secrets_from_env())
     if verdict not in ("allow", "exempt"):
         # 只打 verdict/path/来源，绝不打凭据（与 main.py 的 [export] 日志同一口径）
-        print(f"[audit] 拒绝 {verdict}：{request.url.path} "
-              f"来源={request.client.host if request.client else '?'} —— {reason}", flush=True)
+        log.warning(f"[audit] 拒绝 {verdict}：{request.url.path} "
+                    f"来源={request.client.host if request.client else '?'} —— {reason}")
         raise HTTPException(status_code=503 if verdict == "misconfig" else 401, detail=reason)
 
 

@@ -25,6 +25,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -39,6 +40,8 @@ from pydantic import BaseModel, Field
 import runlog
 import tdai_client
 import writeauth
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/cloudcli", tags=["cloudcli"])
 
@@ -162,8 +165,8 @@ async def cloudcli_start(request: Request, body: StartIn):
         writeauth.provided_token(request.headers.raw, request.url.query),
         writeauth.secrets_from_env())
     if verdict not in ("allow", "exempt"):
-        print(f"[cloudcli] 拒绝 {verdict}：{request.url.path} "
-              f"来源={request.client.host if request.client else '?'} —— {reason}", flush=True)
+        log.warning(f"[cloudcli] 拒绝 {verdict}：{request.url.path} "
+                    f"来源={request.client.host if request.client else '?'} —— {reason}")
         raise HTTPException(status_code=503 if verdict == "misconfig" else 401, detail=reason)
 
     try:

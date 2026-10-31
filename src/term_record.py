@@ -23,11 +23,14 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import db
+
+log = logging.getLogger(__name__)
 
 DEFAULT_MAX_SESSION = 32 * 1024 * 1024
 DEFAULT_MAX_TOTAL = 512 * 1024 * 1024
@@ -169,7 +172,7 @@ def _exec(sql: str, params: tuple = ()) -> bool:
         db.execute(sql, params)
         return True
     except Exception as e:  # noqa: BLE001
-        print(f"[term_record] 写入跳过（不影响终端）：{type(e).__name__}: {e}", flush=True)
+        log.warning(f"[term_record] 写入跳过（不影响终端）：{type(e).__name__}: {e}")
         return False
 
 
@@ -203,7 +206,7 @@ def ensure_counted() -> None:
     _seed_counted()
     db.execute("INSERT INTO term_rec_meta(k,v) VALUES('seeded',1) "
                "ON CONFLICT(k) DO UPDATE SET v=1")
-    print("[term_record] 计数表已播种：%s" % _human(total_bytes()), flush=True)
+    log.info("[term_record] 计数表已播种：%s" % _human(total_bytes()))
 
 
 #: 播种用的**单条** SQL。看起来绕（为什么要 INSERT…SELECT 而不是先 SELECT 再

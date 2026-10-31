@@ -11,11 +11,14 @@
 - asset_audit       资产变更审计（append-only：谁改了哪个资产；detail 落库前脱敏）
 """
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+log = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _conn: Optional[sqlite3.Connection] = None
@@ -230,7 +233,7 @@ def init_db(path: Path) -> None:
     try:
         _conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     except sqlite3.OperationalError as e:  # noqa: BLE001
-        print(f"[db] wal_checkpoint 跳过（不影响启动）：{type(e).__name__}: {e}", flush=True)
+        log.warning(f"[db] wal_checkpoint 跳过（不影响启动）：{type(e).__name__}: {e}")
     with _lock:
         _conn.executescript(SCHEMA)
         # S2 画像/追踪列（存量库自动迁移）

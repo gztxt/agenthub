@@ -32,6 +32,7 @@ v0.13.47：系统菜单的「运行日志」页**删除**，它挑 `source='rest
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -44,6 +45,8 @@ from fastapi.responses import PlainTextResponse
 import db
 import runlog           # 只为复用 SUBJECTS 枚举（三中心 subject 的唯一权威定义）
 import writeauth
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -260,8 +263,8 @@ async def hublog_query(request: Request,
         writeauth.provided_token(request.headers.raw, request.url.query),
         writeauth.secrets_from_env())
     if verdict not in ("allow", "exempt"):
-        print(f"[hublog] 拒绝 {verdict}：{request.url.path} "
-              f"来源={request.client.host if request.client else '?'} —— {reason}", flush=True)
+        log.warning(f"[hublog] 拒绝 {verdict}：{request.url.path} "
+                    f"来源={request.client.host if request.client else '?'} —— {reason}")
         raise HTTPException(status_code=503 if verdict == "misconfig" else 401, detail=reason)
 
     if source not in ("all", "journal", "event", "error", "rest"):

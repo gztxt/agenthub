@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -41,6 +42,8 @@ import db
 import prefs
 import sessions_export as export_mod
 import writeauth
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["settings-bundle"])
 
@@ -294,9 +297,8 @@ def _require_auth(request: Request) -> None:
         writeauth.secrets_from_env())
     if verdict not in ("allow", "exempt"):
         # 只打 verdict/path/来源，绝不打凭据
-        print(f"[settings-bundle] 拒绝 {verdict}：{request.url.path} "
-              f"来源={request.client.host if request.client else '?'} —— {reason}",
-              flush=True)
+        log.warning(f"[settings-bundle] 拒绝 {verdict}：{request.url.path} "
+                    f"来源={request.client.host if request.client else '?'} —— {reason}")
         raise HTTPException(status_code=503 if verdict == "misconfig" else 401,
                             detail=reason)
 

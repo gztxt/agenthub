@@ -4,6 +4,7 @@
 """
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -28,6 +29,8 @@ import vitals as vitals_mod
 from config import config
 from registry import get_adapter
 from sources import detect_project
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -346,7 +349,7 @@ async def start_agent_ui(agent_id: str):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, {"error": "spawn_failed", "agent_id": agent_id,
                                   "detail": "%s: %s" % (type(e).__name__, str(e)[:160])})
-    print(f"[ui-start] {agent_id} pid={proc.pid} cmd={' '.join(cmd)}", flush=True)
+    log.info(f"[ui-start] {agent_id} pid={proc.pid} cmd={' '.join(cmd)}")
     # 回收僵尸：hub 自己不退，子进程退出后没人 wait ⇒ 进程表里留一个 [defunct]
     # （2026-10-25 实测 opencode 停掉后 808366 变 Zs，父进程仍是 hub）。线程里 wait
     # 顺便关掉日志句柄；daemon 线程不拖住 hub 退出。

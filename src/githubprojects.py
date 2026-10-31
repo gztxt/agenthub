@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -55,6 +56,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
+
+
+log = logging.getLogger(__name__)
 from pydantic import BaseModel, Field
 
 import db
@@ -523,9 +527,8 @@ async def github_clone(request: Request, body: CloneIn):
         writeauth.provided_token(request.headers.raw, request.url.query),
         writeauth.secrets_from_env())
     if verdict not in ("allow", "exempt"):
-        print(f"[github] 拒绝 {verdict}：{request.url.path} "
-              f"来源={request.client.host if request.client else '?'} —— {reason}",
-              flush=True)
+        log.warning(f"[github] 拒绝 {verdict}：{request.url.path} "
+                    f"来源={request.client.host if request.client else '?'} —— {reason}")
         raise HTTPException(status_code=503 if verdict == "misconfig" else 401,
                             detail=reason)
 

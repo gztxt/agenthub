@@ -27,9 +27,12 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import Dict
+
+log = logging.getLogger(__name__)
 
 import db
 
@@ -112,7 +115,7 @@ async def retention_loop(interval_s: int = DEFAULT_INTERVAL_S) -> None:
         try:
             out = sweep_once()
             if any(out.values()):
-                print("[retention] 清理：%s" % out, flush=True)
+                log.info("[retention] 清理：%s" % out)
         except Exception as e:                          # noqa: BLE001
-            print("[retention] 清理异常（不影响其他功能）：%s: %s"
-                  % (type(e).__name__, str(e)[:160]), flush=True)
+            log.warning("[retention] 清理异常（不影响其他功能）：%s: %s"
+                        % (type(e).__name__, str(e)[:160]))

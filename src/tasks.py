@@ -71,6 +71,21 @@ RETRIEVAL_TRIM = int(os.getenv("TASK_RETRIEVAL_TRIM", "1200"))
 #: 检索自身的超时（秒）。检索只是增强，**绝不能拖死一个子任务**：
 #: 超时就当「本次无线索」进 prompt（并显式写出来），子任务照跑。
 RETRIEVAL_TIMEOUT_S = float(os.getenv("TASK_RETRIEVAL_TIMEOUT_S", "8"))
+
+#: **分步任务必须先拿技能说明书**（用户 2026-10-31 裁定「执行 3」）。
+#:
+#: 背景：B1 只把「技能命中」写成一行提示（`hub_skill_auto(task=...)`），要不要去调
+#: 全靠执行者自觉 —— 实测子任务直接进 LLM，把本该照说明书做的活重新发明一遍，
+#: 既慢又偏。这里改成**派发时就把正文注入 prompt**：本地优先（BM25 归一化 ≥0.40），
+#: 不够像才走商店（受 `SKILL_STORE_AUTO` / 小时额度 / 质量门槛约束）。
+#:
+#: 三条边界，缺一条就会变成新的「静默不可用」：
+#: ① 失败**不阻塞**子任务（技能是增强，不是前提），但必须把原因写进 `retrieval_json`；
+#: ② 正文按 `TASK_SKILL_MAX_CHARS` 截断并**显式标出省略量**（同 `format_upstream` 纪律）；
+#: ③ `TASK_SKILL_INJECT=0` 可整体关掉（离线跑测 / 回归对照）。
+TASK_SKILL_INJECT = os.getenv("TASK_SKILL_INJECT", "1").strip().lower() not in ("0", "false", "no", "off")
+TASK_SKILL_MAX_CHARS = int(os.getenv("TASK_SKILL_MAX_CHARS", "6000"))
+TASK_SKILL_TIMEOUT_S = float(os.getenv("TASK_SKILL_TIMEOUT_S", "12"))
 #: B3：验证失败且**可修复**时自动重试的最大次数。默认 1（= 最多跑两遍）。
 #: 不做无限重试：验证失败如果每次原因相同，重跑只是烧钱（本仓铁律：失败即止损）。
 MAX_AUTO_RETRY = int(os.getenv("TASK_AUTO_RETRY", "1"))
@@ -459,6 +474,61 @@ def retrieval_block(rep: Dict[str, Any], limit: int = RETRIEVAL_TRIM) -> str:
         return body
     keep = max(0, limit - len(head))
     return body[:len(head) + keep] + "\n……（检索线索已省略 %d 字符）……" % (len(body) - len(head) - keep)
+
+
+def skill_inject_block(got: Dict[str, Any], limit: int = 0) -> str:
+    """把 acquire 结果压成**注入给执行者**的技能块（纯函数，L0 可直测）。
+
+    只在真的拿到正文时出块：`ok=true` 但正文为空（`with_body=false` 场景）
+    说明「找到技能但没取内容」——那种情况给一行指引比给个空标题有用。
+    截断**显式**：尾部写省略了多少字符，否则下游分不清「说明书就这么短」与「被砍了」。
+    """
+    limit = limit or TASK_SKILL_MAX_CHARS
+    if not isinstance(got, dict) or not got.get("ok"):
+        return ""
+    name = got.get("name") or "?"
+    route = got.get("route") or "?"
+    src = got.get("source") or "local"
+    body = str(got.get("content") or "")
+    head = ("—— 技能说明书（%s · 来源 %s；**按它做，别自己重发明**）——\n" % (name, src))
+    if not body:
+        return head + "- 已定位技能 `%s`（route=%s），正文未取回：需要细节时调 `hub_skill_invoke(name=\"%s\")`。\n" % (name, route, name)
+    keep = max(0, limit - len(head))
+    if len(body) > keep:
+        tail = "\n……（技能正文已省略 %d 字符；需要全文调 hub_skill_invoke(name=\"%s\")）……" % (len(body) - keep, name)
+        body = body[:keep] + tail
+    return head + body + "\n"
+
+
+async def _skill_inject_for(goal: str, prompt: str, agent_id: str) -> tuple:
+    """派发前取一次技能说明书，返回 `(块文本, 落库用的 dict)`。**任何失败都不阻塞**。
+
+    调 `skill_store.acquire`（与 `/api/skill/auto` 同一条链路，不另立门槛 ——
+    两套门槛必然漂移，漂移形态是「同一任务两个入口选到不同技能」）。
+    """
+    import skill_store as store_mod        # 局部导入：skill_store 依赖 skill，顶层会成环
+    t0 = asyncio.get_event_loop().time()
+    meta: Dict[str, Any] = {"enabled": TASK_SKILL_INJECT, "ok": False}
+    try:
+        got = await asyncio.wait_for(
+            store_mod.acquire((goal + " :: " + prompt)[:1500], caller="task:%s" % (agent_id or "?"),
+                              task=(goal or "")[:500], allow_install=True, local_only=False),
+            timeout=TASK_SKILL_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        meta["error"] = "超时 %.0fs" % TASK_SKILL_TIMEOUT_S
+        meta["ms"] = int((asyncio.get_event_loop().time() - t0) * 1000)
+        return ("", meta)
+    except Exception as e:  # noqa: BLE001 —— 技能链路坏了不许带倒子任务
+        meta["error"] = "%s: %s" % (type(e).__name__, str(e)[:200])
+        meta["ms"] = int((asyncio.get_event_loop().time() - t0) * 1000)
+        return ("", meta)
+    meta.update({"ok": bool(got.get("ok")), "source": got.get("source"),
+                 "name": got.get("name"), "route": got.get("route"),
+                 "norm": (got.get("local") or {}).get("norm"),
+                 "installed": bool((got.get("store") or {}).get("installed")),
+                 "reason": (got.get("store") or {}).get("reason") or got.get("reason"),
+                 "ms": int((asyncio.get_event_loop().time() - t0) * 1000)})
+    return (skill_inject_block(got), meta)
 
 
 async def _retrieval_for(goal: str, prompt: str, agent_id: str) -> tuple:
@@ -1527,15 +1597,27 @@ async def _run_task(run_id: str, row: dict):
 
     # ── B1：接单前置检索（记忆/知识库/技能），把线索拼进 prompt ──
     # 失败/超时一律降级（不阻塞），但**必须留下痕迹**（retrieval_json 里的 error）。
+    rmeta: Dict[str, Any] = {}
     if TASK_RETRIEVAL:
         block, rmeta = await _retrieval_for(row.get("goal") or "", prompt,
                                             row.get("agent_id") or "")
         if block:
             prompt = block + "\n\n" + prompt
+    # ── 技能说明书注入（用户 2026-10-31 裁定「执行 3」）：分步任务先拿技能正文本 ──
+    # B1 只给一行「去调 hub_skill_auto」的指引，实测执行者不会去调 —— 于是把该照
+    # 说明书做的事重新发明一遍（慢且偏）。这里改成派发时直接注入，失败降级不阻塞。
+    if TASK_SKILL_INJECT:
+        sblock, smeta = await _skill_inject_for(row.get("goal") or "", row["prompt"] or "",
+                                                exec_agent)
+        if sblock:
+            prompt = sblock + "\n\n" + prompt
+        rmeta = dict(rmeta or {})
+        rmeta["skill_inject"] = smeta
+    if rmeta:
         try:
             db.execute("UPDATE tasks SET retrieval_json=?,updated_at=? "
                        "WHERE run_id=? AND task_id=?",
-                       (json.dumps(rmeta, ensure_ascii=False)[:4000], _now(),
+                       (json.dumps(rmeta, ensure_ascii=False)[:6000], _now(),
                         run_id, row["task_id"]))
         except Exception:  # noqa: BLE001 — 落库失败不得带倒子任务（检索是增强）
             pass

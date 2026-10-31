@@ -1812,11 +1812,17 @@ async function openRefCard(id) {
   try {
     const d = await api('/api/ref/cards/' + encodeURIComponent(id));
     REF_CARD_ID = id;
-    $('refDetailBox').style.display = '';
+    const box = $('refDetailBox');
+    box.style.display = '';
     $('refDetailTitle').textContent = d.module + ' · ' + refStatusText(d.status) +
       ' · as of ' + String(d.as_of || '').replace('T', ' ').slice(0, 19) +
       ' · 下次刷新 ' + String(d.next_refresh || '').slice(0, 10);
     $('refDetail').textContent = d.md || '';
+    /* 详情在 DOM 里已前置到列表上方，这里再兜一次滚动：窄屏/长列表下
+       「展开在视口外」会被用户读成「点了没反应」（2026-10-31 实测 y≈751 / vh=757）。
+       block:'nearest' = 已经在视口内就不动，避免每次点都跳。 */
+    try { box.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (e) { /* 老浏览器 */ }
+    $('refDetail').scrollTop = 0;
   } catch (e) {
     toast('读取情报卡失败：' + e.message, 'err');
   }

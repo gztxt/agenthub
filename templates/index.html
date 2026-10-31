@@ -2491,14 +2491,18 @@
                                 来源同步在下次「检索/重跑」时进行，archived 仍拒 · 单来源最多 300 仓
                             </div>
                         </div>
-                        <div class="sp-bd box"><div id="refCards" class="sp-list">加载中…</div></div>
-                        <div class="sp-bd box" id="refDetailBox" style="display:none;margin-top:12px">
+                        <!-- 详情框必须放在**卡片列表之前**（2026-10-31 用户报「点查看无反应」）。
+                             原来它在列表后面：46 张卡把页面撑到 4000+px，详情展开在 y≈751 处、
+                             1440×900 视口只剩 6px 露头 ⇒ 用户看到的就是「点了没反应」（真渲染实测）。
+                             放前面 + max-height 滚动，点开就在眼前；JS 侧另配 scrollIntoView 兜底。 -->
+                        <div class="sp-bd box" id="refDetailBox" style="display:none;margin-bottom:12px">
                             <div class="toolbar" style="margin-bottom:8px">
                                 <span class="hint" id="refDetailTitle"></span>
                                 <button class="btn ghost sm" data-ref-act="close">收起</button>
                             </div>
-                            <pre id="refDetail" style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0"></pre>
+                            <pre id="refDetail" style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0;max-height:60vh;overflow:auto"></pre>
                         </div>
+                        <div class="sp-bd box"><div id="refCards" class="sp-list">加载中…</div></div>
                     </div>
                 </div>
 
@@ -3176,6 +3180,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=22c54d79"></script>
+    <script src="/static/hub.js?v=6a41d237"></script>
 </body>
 </html>

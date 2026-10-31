@@ -176,8 +176,8 @@ async def _document(writer: asyncio.StreamWriter, head_line: bytes, header: byte
         writer.write(raw)   # 注意：raw 已含结尾空行，别再补 _END，否则多一个 CRLF
     else:
         rb = _inject(rb)
-        print("[embed] 文档注入: %s -> body %d bytes (style %d)" % (
-              head_line.decode(errors="replace")[:38], len(rb), len(INJECT_CSS)), flush=True)
+        log.info("[embed] 文档注入: %s -> body %d bytes (style %d)" % (
+            head_line.decode(errors="replace")[:38], len(rb), len(INJECT_CSS)))
         lines = [ln for ln in _HDR_SPLIT.split(rh)
                  if ln.strip()
                  and not _ENC.match(ln)
@@ -245,7 +245,7 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
         return
     doc = _is_document(head_line, rest)   # 逐请求埋点已摘（会把 hub 日志刷满）
     if not doc and head_line.upper().startswith(b"GET ") and b"text/html" in rest.lower():
-        print("[embed] GET+html Accept 但判为非文档，走隧道: %s" % head_line.decode(errors="replace")[:48], flush=True)
+        log.info("[embed] GET+html Accept 但判为非文档，走隧道: %s" % head_line.decode(errors="replace")[:48])
     if doc:
         await _document(writer, head_line, rest, up_w, up_r, pre_body,
                         _authority(host, port))
@@ -272,8 +272,8 @@ class EmbedProxy:
         except OSError as e:
             log.warning("[%s] 注入代理监听 %s:%s 失败：%s —— 嵌入视图将回落直连", self.name, *self.listen, e)
             return False
-        print(f"[Agent Hub] {self.name} 外框注入代理：{self.listen[0]}:{self.listen[1]} → "
-              f"{self.upstream[0]}:{self.upstream[1]}")
+        log.info(f"[Agent Hub] {self.name} 外框注入代理：{self.listen[0]}:{self.listen[1]} → "
+                 f"{self.upstream[0]}:{self.upstream[1]}")
         return True
 
     async def stop(self) -> None:

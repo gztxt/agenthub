@@ -1,8 +1,11 @@
 """配置管理"""
+import logging
 import os
 from pathlib import Path
 from typing import Dict, Optional
 from dotenv import load_dotenv
+
+log = logging.getLogger(__name__)
 
 env_path = Path(__file__).parent.parent / ".env"
 
@@ -34,11 +37,11 @@ _env_override: Dict[str, str] = {
 
 if env_path.exists():
     load_dotenv(env_path, override=True)
-    print(f"[Config] 已加载 .env（覆盖模式）: {env_path}")
+    log.info(f"[Config] 已加载 .env（覆盖模式）: {env_path}")
 
 if _env_override:
-    print(f"[Config] 隔离变量优先于 .env: "
-          + ", ".join(f"{k}={v}" for k, v in sorted(_env_override.items())))
+    log.info(f"[Config] 隔离变量优先于 .env: "
+             + ", ".join(f"{k}={v}" for k, v in sorted(_env_override.items())))
 
 
 class Config:

@@ -11,6 +11,7 @@ import asyncio
 import errno
 import hmac
 import json
+import logging
 import os
 import pty
 import re
@@ -35,13 +36,15 @@ import profiles
 import sessions_store
 import term_record
 
+log = logging.getLogger(__name__)
+
 router = APIRouter()
 
 TERM_TOKEN = os.getenv("TERM_TOKEN", "")
 if not TERM_TOKEN:
     # 兜底：未配置 token 时自动生成，避免"空 token=不鉴权"的裸奔状态
     TERM_TOKEN = secrets.token_urlsafe(32)
-    print(f"[term] TERM_TOKEN 未配置，已自动生成随机 token（前4位={TERM_TOKEN[:4]}，len={len(TERM_TOKEN)}）")
+    log.warning(f"[term] TERM_TOKEN 未配置，已自动生成随机 token（前4位={TERM_TOKEN[:4]}，len={len(TERM_TOKEN)}）")
 IDLE_TTL_S = int(os.getenv("TERM_IDLE_TTL", "600"))
 #: **无人观看**时的更短 TTL（PT-20261024-08 B2）。
 #: 为什么需要两级：IDLE_TTL_S 判的是「会话整体静默」，
@@ -416,7 +419,7 @@ def describe_exit(status: Optional[int], hub_killed: bool = False) -> str:
 def _check_term_token(provided: str, source: str) -> None:
     """缺 token 即拒：校验失败记一行拒绝原因（绝不记录 token 值）"""
     if not provided or not hmac.compare_digest(provided, TERM_TOKEN):
-        print(f"[term] 拒绝：token 校验失败（{source}）")
+        log.warning(f"[term] 拒绝：token 校验失败（{source}）")
         raise HTTPException(status_code=401, detail="term token required or invalid")
 
 
@@ -498,11 +501,11 @@ class Session:
                 # 成本只在失败路径（正常启动零开销）。
                 try:
                     import traceback
-                    print("[term] 子进程 exec 失败 cmd=%r cwd=%r: %s"
-                          % (cmd[0], cwd, traceback.format_exc()), flush=True)
+                    log.warning("[term] 子进程 exec 失败 cmd=%r cwd=%r: %s"
+                                % (cmd[0], cwd, traceback.format_exc()))
                 except Exception:  # noqa: BLE001
-                    print("[term] 子进程 exec 失败 cmd=%r（traceback 也拿不到）"
-                          % (cmd[0],), flush=True)
+                    log.warning("[term] 子进程 exec 失败 cmd=%r（traceback 也拿不到）"
+                                % (cmd[0],))
                 try:
                     os.write(2, ("\r\n[hub: 无法启动 %s —— %s]\r\n"
                                  % (cmd[0], exc)).encode())
@@ -1223,7 +1226,7 @@ async def reap_loop():
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
-            print(f"[term] reap_loop 异常（下轮重试）：{type(e).__name__}: {e}", flush=True)
+            log.warning(f"[term] reap_loop 异常（下轮重试）：{type(e).__name__}: {e}")
 
 
 def _fast_reap_enabled() -> bool:
@@ -1262,13 +1265,12 @@ async def fast_reap_loop() -> None:
     就等于把缺口原样放回去，而且更难发现（没有报错、没有日志）。
     """
     if not _fast_reap_enabled():
-        print("[term] 子进程即时感知快车道已关闭"
-              "（TERM_FAST_REAP_INTERVAL<=0）⇒ 零输出即死最长需等 %.0fs"
-              % REAP_INTERVAL_S, flush=True)
+        log.info("[term] 子进程即时感知快车道已关闭"
+                 "（TERM_FAST_REAP_INTERVAL<=0）⇒ 零输出即死最长需等 %.0fs"
+                 % REAP_INTERVAL_S)
         return
-    print("[term] 子进程即时感知快车道已启用：每 %.1fs 探活一次"
-          "（常规 reap %.0fs）" % (_FAST_REAP_INTERVAL_S, REAP_INTERVAL_S),
-          flush=True)
+    log.info("[term] 子进程即时感知快车道已启用：每 %.1fs 探活一次"
+             "（常规 reap %.0fs）" % (_FAST_REAP_INTERVAL_S, REAP_INTERVAL_S))
     while True:
         await asyncio.sleep(_FAST_REAP_INTERVAL_S)
         try:
@@ -1276,8 +1278,7 @@ async def fast_reap_loop() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
-            print(f"[term] fast_reap_loop 异常（下轮重试）：{type(e).__name__}: {e}",
-                  flush=True)
+            log.warning(f"[term] fast_reap_loop 异常（下轮重试）：{type(e).__name__}: {e}")
 
 
 def _reap_dying() -> None:
@@ -1359,7 +1360,7 @@ async def term_ws(ws: WebSocket, sid: str, token: str = Query(default="")):
     # 缺 token 即拒：query ?token= 与 header X-TERM-TOKEN 两种都接受
     provided = token or ws.headers.get("x-term-token", "")
     if not provided or not hmac.compare_digest(provided, TERM_TOKEN):
-        print("[term] 拒绝：ws 握手 token 校验失败（/ws/term）")
+        log.warning("[term] 拒绝：ws 握手 token 校验失败（/ws/term）")
         # WS 握手阶段不能用 HTTPException（Starlette 在 ws 上下文不可靠），显式关闭 4401=未授权
         await ws.close(code=4401)
         return

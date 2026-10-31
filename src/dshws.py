@@ -25,6 +25,7 @@ rpc.ts）把 cwd 注册成工作区。该调用**幂等**（同路径返回既�
 from __future__ import annotations
 
 import json
+import logging
 import time
 import urllib.error
 import urllib.parse
@@ -32,6 +33,8 @@ import urllib.request
 import uuid
 from http.cookiejar import CookieJar
 from typing import Any, Dict, Optional, Tuple
+
+log = logging.getLogger(__name__)
 
 #: dsh web 的共享 RPC 通道端点（method 与 URL 末段同名）
 _RPC_CREATE = "workspace/create"
@@ -105,7 +108,7 @@ def ensure_workspace(cwd: str, web_url: Optional[str] = None) -> bool:
         web_url = profiles._dsh_web_url()
     split = _split_web_url(web_url or "")
     if split is None:
-        print(f"[dshws] 未注册工作区（dsh web 地址/ token 不可用）：{cwd}", flush=True)
+        log.warning(f"[dshws] 未注册工作区（dsh web 地址/ token 不可用）：{cwd}")
         return False
     base, token = split
     t0 = time.monotonic()
@@ -113,9 +116,9 @@ def ensure_workspace(cwd: str, web_url: Optional[str] = None) -> bool:
         value = _post_rpc(base, token, _RPC_CREATE, {"request": {"path": cwd}})
     except (urllib.error.URLError, OSError, ValueError, RuntimeError) as e:
         # URLError 含 connection refused / timeout；ValueError 含 JSON 解析失败
-        print(f"[dshws] 工作区注册失败（不阻塞建会话）cwd={cwd}: {type(e).__name__}: {e}", flush=True)
+        log.warning(f"[dshws] 工作区注册失败（不阻塞建会话）cwd={cwd}: {type(e).__name__}: {e}")
         return False
     ws = (value or {}).get("workspace") or {}
-    print(f"[dshws] 工作区就绪 {ws.get('path') or cwd}（created={value.get('created')}，"
-          f"{int((time.monotonic() - t0) * 1000)}ms）", flush=True)
+    log.info(f"[dshws] 工作区就绪 {ws.get('path') or cwd}（created={value.get('created')}，"
+             f"{int((time.monotonic() - t0) * 1000)}ms）")
     return True

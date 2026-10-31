@@ -2,6 +2,7 @@
 
 只依赖 db 与导出/鉴权的纯函数层；无共享状态。
 """
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -14,6 +15,8 @@ import db
 import export_batch                   # 导出取消息的批量 IN（L0 可测的纯函数层）
 import sessions_export as export_mod
 import writeauth                    # 导出端点按写端点同等鉴权（复用 decide 的 fail-closed）
+
+log = logging.getLogger(__name__)
 from config import config
 
 router = APIRouter()
@@ -71,8 +74,8 @@ async def export_sessions(request: Request, format: str = "json", agent_id: Opti
         writeauth.provided_token(request.headers.raw, request.url.query),
         writeauth.secrets_from_env())
     if verdict not in ("allow", "exempt"):
-        print(f"[export] 拒绝 {verdict}：{request.url.path} "
-              f"来源={request.client.host if request.client else '?'} —— {reason}", flush=True)
+        log.warning(f"[export] 拒绝 {verdict}：{request.url.path} "
+                    f"来源={request.client.host if request.client else '?'} —— {reason}")
         raise HTTPException(status_code=503 if verdict == "misconfig" else 401, detail=reason)
 
     fmt = "csv" if str(format).lower() == "csv" else "json"
@@ -115,9 +118,9 @@ async def export_sessions(request: Request, format: str = "json", agent_id: Opti
         body, ctype, fname, meta = export_mod.render(
             rows, export_mod.SESSION_COLUMNS, fmt, "sessions", meta=meta, redact=bool(redact))
 
-    print(f"[export] {meta.get('kind')} fmt={fmt} rows={meta.get('count')} "
-          f"redacted={'yes' if redact else 'no'} hits={meta.get('redacted_hits')} "
-          f"来源={request.client.host if request.client else '?'}", flush=True)
+    log.info(f"[export] {meta.get('kind')} fmt={fmt} rows={meta.get('count')} "
+             f"redacted={'yes' if redact else 'no'} hits={meta.get('redacted_hits')} "
+             f"来源={request.client.host if request.client else '?'}")
     return Response(content=body, media_type=ctype,
                     headers={"Content-Disposition": f'attachment; filename="{fname}"',
                              "X-Export-Count": str(meta.get("count", 0)),

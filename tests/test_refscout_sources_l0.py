@@ -23,6 +23,7 @@ sys.path.insert(0, str(_REPO / "src"))
 
 import db          # noqa: E402
 import refscout    # noqa: E402
+import refscout_sources  # B4 切分：补丁要打在使用它的模块上
 
 
 def _repo_item(name, desc, **over):
@@ -110,12 +111,12 @@ class TestSourceFetch(unittest.TestCase):
             return [_repo_item("gztxt/a", "x"), _repo_item("gztxt/b", "y")], \
                 {"ok": True, "ms": 1, "cached": False}
 
-        old = refscout.gh_get
-        refscout.gh_get = fake
+        old = refscout_sources.gh_get
+        refscout_sources.gh_get = fake
         try:
             got = refscout._fetch_source("owner", "gztxt")
         finally:
-            refscout.gh_get = old
+            refscout_sources.gh_get = old
         self.assertTrue(got["ok"])
         self.assertEqual(len(got["items"]), 2)
         self.assertIn("type=owner", calls[0])
@@ -127,12 +128,12 @@ class TestSourceFetch(unittest.TestCase):
                 return None, {"ok": False, "status": 404, "error": "HTTP404"}
             return [_repo_item("acme/one", "z")], {"ok": True, "ms": 1}
 
-        old = refscout.gh_get
-        refscout.gh_get = fake
+        old = refscout_sources.gh_get
+        refscout_sources.gh_get = fake
         try:
             got = refscout._fetch_source("owner", "acme")
         finally:
-            refscout.gh_get = old
+            refscout_sources.gh_get = old
         self.assertTrue(got["ok"])
         self.assertEqual(got["items"][0]["full_name"], "acme/one")
 
@@ -143,12 +144,12 @@ class TestSourceFetch(unittest.TestCase):
             urls.append(url)
             return None, {"ok": False, "status": 403, "error": "HTTP403 rate limit"}
 
-        old = refscout.gh_get
-        refscout.gh_get = fake
+        old = refscout_sources.gh_get
+        refscout_sources.gh_get = fake
         try:
             got = refscout._fetch_source("owner", "acme")
         finally:
-            refscout.gh_get = old
+            refscout_sources.gh_get = old
         self.assertFalse(got["ok"])
         self.assertFalse(any("/orgs/" in u for u in urls),
                          "403 是限流，换端点只会多烧一次额度")
@@ -162,12 +163,12 @@ class TestSourceFetch(unittest.TestCase):
             urls.append(url)
             return (page1 if re.search(r"[?&]page=1(&|$)", url) else []), {"ok": True, "ms": 1}
 
-        old = refscout.gh_get
-        refscout.gh_get = fake
+        old = refscout_sources.gh_get
+        refscout_sources.gh_get = fake
         try:
             got = refscout._fetch_source("starred", "gztxt")
         finally:
-            refscout.gh_get = old
+            refscout_sources.gh_get = old
         self.assertTrue(got["ok"])
         self.assertEqual(len(got["items"]), 100)
         self.assertIn("/users/gztxt/starred", urls[0])
@@ -196,13 +197,13 @@ class TestSourceInPool(unittest.TestCase):
         return fake
 
     def _collect(self, fake):
-        old = refscout.gh_get
-        refscout.gh_get = fake
+        old = refscout_sources.gh_get
+        refscout_sources.gh_get = fake
         try:
             return refscout.collect("终端复用", ["terminal", "websocket", "pty"], "", 20,
                                     180, [], False, do_rerank=False)
         finally:
-            refscout.gh_get = old
+            refscout_sources.gh_get = old
 
     def test_zero_star_fork_still_enters_candidates(self):
         got = self._collect(self._fake_gh([
@@ -261,13 +262,13 @@ class TestStarredInPool(unittest.TestCase):
                 return {"items": []}, {"ok": True, "ms": 1}
             return None, {"ok": False, "status": 404}
 
-        old = refscout.gh_get
-        refscout.gh_get = fake
+        old = refscout_sources.gh_get
+        refscout_sources.gh_get = fake
         try:
             got = refscout.collect("终端复用", ["terminal", "websocket", "pty"], "", 20,
                                    180, [], False, do_rerank=False)
         finally:
-            refscout.gh_get = old
+            refscout_sources.gh_get = old
         cand = next(c for c in got["candidates"] if c["repo"] == "someone/ttyd")
         self.assertEqual(cand["sources"], ["star:gztxt"])
         self.assertEqual(got["meta"]["sources"][0]["kind"], "starred")

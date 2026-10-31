@@ -28,6 +28,10 @@ sys.path.insert(0, str(_REPO / "src"))
 
 import db          # noqa: E402
 import refscout    # noqa: E402
+import refscout_base  # B4 切分：补丁要打在使用它的模块上
+import refscout_collect  # B4 切分：补丁要打在使用它的模块上
+import refscout_rank  # B4 切分：补丁要打在使用它的模块上
+import refscout_sources  # B4 切分：补丁要打在使用它的模块上
 
 
 class TestQueries(unittest.TestCase):
@@ -311,16 +315,16 @@ class TestPartialRerankOrdering(unittest.TestCase):
     def test_unjudged_above_skip(self):
         ranked = [self._cand("a/skip", 0.9), self._cand("b/unjudged", 0.8),
                   self._cand("c/use", 0.1)]
-        orig = refscout.rerank
-        refscout.rerank = lambda module, impls, allow_paid: (
+        orig = refscout_collect.rerank
+        refscout_collect.rerank = lambda module, impls, allow_paid: (
             {"a/skip": {"func": 0.0, "impl": 0.0, "design": 0.0,
                         "judge": "skip", "why": "相邻"},
              "c/use": {"func": 0.9, "impl": 0.9, "design": 0.9,
                        "judge": "use", "why": "同题"}}, "", "fake", [])
         try:
-            err, used, _ = refscout.apply_rerank("模块", ranked, False)
+            err, used, _ = refscout_collect.apply_rerank("模块", ranked, False)
         finally:
-            refscout.rerank = orig
+            refscout_collect.rerank = orig
         self.assertEqual(err, "")
         self.assertEqual([c["repo"] for c in ranked], ["c/use", "b/unjudged", "a/skip"])
 
@@ -344,12 +348,12 @@ class TestSafetyRouter(unittest.TestCase):
 
         cand = {"repo": "a/b", "stars": 1, "desc": "x", "topics": [],
                 "readme_gist": "", "sample_paths": [], "item": {}}
-        orig = refscout._llm_text
-        refscout._llm_text = fake
+        orig = refscout_collect._llm_text
+        refscout_collect._llm_text = fake
         try:
-            out, err, used, attempts = refscout.rerank("模块", [cand], allow_paid=False)
+            out, err, used, attempts = refscout_collect.rerank("模块", [cand], allow_paid=False)
         finally:
-            refscout._llm_text = orig
+            refscout_collect._llm_text = orig
         self.assertFalse(out)
         self.assertIn("safety-router", err)
         self.assertEqual(len(calls), 1, "同一免费池换模型只会再撞一次，必须命中即停")
@@ -368,12 +372,12 @@ class TestSafetyRouter(unittest.TestCase):
 
         cand = {"repo": "a/b", "stars": 1, "desc": "x", "topics": [],
                 "readme_gist": "", "sample_paths": [], "item": {}}
-        orig = refscout._llm_text
-        refscout._llm_text = fake
+        orig = refscout_collect._llm_text
+        refscout_collect._llm_text = fake
         try:
-            out, err, used, attempts = refscout.rerank("模块", [cand], allow_paid=True)
+            out, err, used, attempts = refscout_collect.rerank("模块", [cand], allow_paid=True)
         finally:
-            refscout._llm_text = orig
+            refscout_collect._llm_text = orig
         self.assertIn("a/b", out)
         self.assertEqual(len(calls), 2)
         self.assertEqual(attempts[0]["error"], "safety-router")
@@ -398,15 +402,15 @@ class TestSingleKeyword(unittest.TestCase):
                 return {"total_count": 1, "items": [item]}, {"ok": True, "ms": 1}
             return None, {"ok": True, "ms": 1}
 
-        orig_get, orig_enrich = refscout.gh_get, refscout._enrich
-        refscout.gh_get = fake_get
-        refscout._enrich = lambda full, branch: {
+        orig_get, orig_enrich = refscout_sources.gh_get, refscout_rank._enrich
+        refscout_sources.gh_get = fake_get
+        refscout_rank._enrich = lambda full, branch: {
             "readme": "a cron library for go", "paths": ["cron.go"], "head": "abc"}
         try:
             got = refscout.collect("定时任务", ["cron"], "", 0, 3650, [],
                                    False, do_rerank=False)
         finally:
-            refscout.gh_get, refscout._enrich = orig_get, orig_enrich
+            refscout_sources.gh_get, refscout_rank._enrich = orig_get, orig_enrich
         impls = [c for c in got["candidates"] if c["bucket"] == "impl"]
         self.assertEqual([c["repo"] for c in impls], ["robfig/cron"])
 
@@ -422,12 +426,12 @@ class TestRerankNormalization(unittest.TestCase):
             return ('{"items":[{"repo":"Robfig/Cron","func":0.9,"impl":0.8,'
                     '"design":0.7,"judge":"USE","why":"同题"}]}', "", "end_turn")
 
-        orig = refscout._llm_text
-        refscout._llm_text = fake
+        orig = refscout_collect._llm_text
+        refscout_collect._llm_text = fake
         try:
-            out, err, _used, _att = refscout.rerank("定时任务", [cand], allow_paid=True)
+            out, err, _used, _att = refscout_collect.rerank("定时任务", [cand], allow_paid=True)
         finally:
-            refscout._llm_text = orig
+            refscout_collect._llm_text = orig
         self.assertEqual(err, "")
         self.assertIn("robfig/cron", out)
         self.assertEqual(out["robfig/cron"]["judge"], "use")
@@ -487,16 +491,16 @@ class TestPaidSampling(unittest.TestCase):
             '"judge":"skip","why":"无"}]}')
 
     def setUp(self):
-        self.orig = (refscout._llm_text, refscout._sample_count,
+        self.orig = (refscout_collect._llm_text, refscout_collect._sample_count,
                      refscout.llm.memory_model, refscout.llm.free_fallback_model)
         refscout.llm.memory_model = lambda: "free/a"
         refscout.llm.free_fallback_model = lambda: "free/b"
         self.paid = refscout._ref_model()
         self.samples = 3
-        refscout._sample_count = lambda: self.samples
+        refscout_collect._sample_count = lambda: self.samples
 
     def tearDown(self):
-        (refscout._llm_text, refscout._sample_count, refscout.llm.memory_model,
+        (refscout_collect._llm_text, refscout_collect._sample_count, refscout.llm.memory_model,
          refscout.llm.free_fallback_model) = self.orig
 
     def test_single_sample_still_gets_60s(self):
@@ -508,8 +512,8 @@ class TestPaidSampling(unittest.TestCase):
             calls.append((model, timeout))
             return self.good, "", "end_turn"
 
-        refscout._llm_text = fake
-        out, err, used, _att = refscout.rerank("m", [self.cand], allow_paid=True)
+        refscout_collect._llm_text = fake
+        out, err, used, _att = refscout_collect.rerank("m", [self.cand], allow_paid=True)
         self.assertEqual(err, "")
         self.assertEqual(used, self.paid)
         self.assertIn("a/b", out)
@@ -523,8 +527,8 @@ class TestPaidSampling(unittest.TestCase):
             calls.append(model)
             return seq[len(calls) - 1], "", "end_turn"
 
-        refscout._llm_text = fake
-        out, err, _used, attempts = refscout.rerank("m", [self.cand], allow_paid=True)
+        refscout_collect._llm_text = fake
+        out, err, _used, attempts = refscout_collect.rerank("m", [self.cand], allow_paid=True)
         self.assertEqual(err, "")
         self.assertEqual(len(calls), 3, "默认采 3 次")
         self.assertEqual(out["a/b"]["judge"], "read", "2:1 取多数")
@@ -543,8 +547,8 @@ class TestPaidSampling(unittest.TestCase):
         def fake(prompt, model, timeout=0, max_tokens=0):
             return seq.pop(0), "", "end_turn"
 
-        refscout._llm_text = fake
-        out, _err, _used, _att = refscout.rerank("m", [self.cand], allow_paid=True)
+        refscout_collect._llm_text = fake
+        out, _err, _used, _att = refscout_collect.rerank("m", [self.cand], allow_paid=True)
         self.assertEqual(out["a/b"]["judge"], "skip")
 
     def test_repo_seen_once_in_three_is_dropped(self):
@@ -560,8 +564,8 @@ class TestPaidSampling(unittest.TestCase):
         def fake(prompt, model, timeout=0, max_tokens=0):
             return seq.pop(0), "", "end_turn"
 
-        refscout._llm_text = fake
-        out, _err, _used, _att = refscout.rerank("m", cands, allow_paid=True)
+        refscout_collect._llm_text = fake
+        out, _err, _used, _att = refscout_collect.rerank("m", cands, allow_paid=True)
         self.assertNotIn("a/b", out, "只被 1/3 采到 ⇒ 不拿单票当结论")
         self.assertIn("b/c", out)
 
@@ -572,8 +576,8 @@ class TestPaidSampling(unittest.TestCase):
         def fake(prompt, model, timeout=0, max_tokens=0):
             return seq.pop(0)
 
-        refscout._llm_text = fake
-        out, err, used, attempts = refscout.rerank("m", [self.cand], allow_paid=True)
+        refscout_collect._llm_text = fake
+        out, err, used, attempts = refscout_collect.rerank("m", [self.cand], allow_paid=True)
         self.assertEqual(err, "")
         self.assertEqual(used, self.paid)
         self.assertIn("a/b", out)
@@ -587,8 +591,8 @@ class TestPaidSampling(unittest.TestCase):
             calls.append(model)
             return ("", "TimeoutError", "") if model == self.paid else (self.good, "", "end_turn")
 
-        refscout._llm_text = fake
-        out, err, used, _att = refscout.rerank("m", [self.cand], allow_paid=True)
+        refscout_collect._llm_text = fake
+        out, err, used, _att = refscout_collect.rerank("m", [self.cand], allow_paid=True)
         self.assertEqual(used, "free/a")
         self.assertIn("a/b", out)
         self.assertEqual(calls, [self.paid] * 3 + ["free/a"])
@@ -602,8 +606,8 @@ class TestPaidSampling(unittest.TestCase):
             calls.append(model)
             return "User Safety: safe", "", "end_turn"
 
-        refscout._llm_text = fake
-        out, err, _used, attempts = refscout.rerank("m", [self.cand], allow_paid=True)
+        refscout_collect._llm_text = fake
+        out, err, _used, attempts = refscout_collect.rerank("m", [self.cand], allow_paid=True)
         self.assertFalse(out)
         self.assertIn("safety-router", err)
         self.assertEqual(calls.count(self.paid), 1, "付费档只发一次就收工")
@@ -616,8 +620,8 @@ class TestPaidSampling(unittest.TestCase):
             calls.append((model, timeout))
             return self.good, "", "end_turn"
 
-        refscout._llm_text = fake
-        _out, err, used, _att = refscout.rerank("m", [self.cand], allow_paid=False)
+        refscout_collect._llm_text = fake
+        _out, err, used, _att = refscout_collect.rerank("m", [self.cand], allow_paid=False)
         self.assertEqual(err, "")
         self.assertEqual(used, "free/a")
         self.assertEqual(calls, [("free/a", 25)], "免费档一次 25s，不采样")
@@ -660,7 +664,7 @@ class TestMajorityAggregation(unittest.TestCase):
         try:
             for raw, want in (("1", 1), ("3", 3), ("9", 5), ("0", 1), ("x", 3)):
                 os.environ["REF_RERANK_SAMPLES"] = raw
-                self.assertEqual(refscout._sample_count(), want, raw)
+                self.assertEqual(refscout_collect._sample_count(), want, raw)
         finally:
             if old is None:
                 os.environ.pop("REF_RERANK_SAMPLES", None)
@@ -707,16 +711,16 @@ class TestIdentifierLimit(unittest.TestCase):
         def fake_execute(sql, args):
             rows.append((sql, args))
 
-        orig = (refscout._POOL.submit, refscout.db.query, refscout.db.execute, refscout.token)
+        orig = (refscout._POOL.submit, refscout.db.query, refscout.db.execute, refscout_base.token)
         refscout._POOL.submit = lambda fn, job_id: None
         refscout.db.query = lambda *a, **k: []
         refscout.db.execute = fake_execute
-        refscout.token = lambda: "t"
+        refscout_base.token = lambda: "t"
         try:
             refscout.submit(refscout.ScoutIn(module="终端", identifiers=["a", "b", "c"]))
         finally:
             (refscout._POOL.submit, refscout.db.query,
-             refscout.db.execute, refscout.token) = orig
+             refscout.db.execute, refscout_base.token) = orig
         payload = json.loads(rows[0][1][3])
         self.assertEqual(payload["identifiers"], ["a", "b"])
 

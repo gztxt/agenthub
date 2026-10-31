@@ -20,6 +20,11 @@ _REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
 
 import refscout  # noqa: E402
+import refscout_collect  # noqa: E402
+import refscout_base  # noqa: E402
+import refscout_sources  # noqa: E402
+# ⚠ 补丁必须打在**使用它的模块**上：`refscout.<name> = f` 只改 refscout 里的名字绑定，
+#   collect 内部读自己的 globals ⇒ 打错地方会「补丁没生效」，本文件 2026-10-31 实测红过 5 条。
 
 
 def _repo_item(name, stars=100, **over):
@@ -73,14 +78,14 @@ class TestExpandLists(unittest.TestCase):
         self.readme = "[p1](https://github.com/foo/bar) [114](content/HelloGitHub114.md)"
         self.page = ("[a](https://github.com/baz/qux) [b](https://github.com/old/dead) "
                      "[c](https://github.com/tiny/repo) [d](https://github.com/foo/bar)")
-        self._old = (refscout._readme_text, refscout._contents_text, refscout.gh_get)
+        self._old = (refscout_collect._readme_text, refscout_collect._contents_text, refscout_sources.gh_get)
 
     def tearDown(self):
-        (refscout._readme_text, refscout._contents_text, refscout.gh_get) = self._old
+        (refscout_collect._readme_text, refscout_collect._contents_text, refscout_sources.gh_get) = self._old
 
     def _patch(self, stars=None):
-        refscout._readme_text = lambda full: self.readme
-        refscout._contents_text = lambda full, path: self.page
+        refscout_collect._readme_text = lambda full: self.readme
+        refscout_collect._contents_text = lambda full, path: self.page
         table = {
             "foo/bar": _repo_item("foo/bar", stars=(stars or {}).get("foo/bar", 300)),
             "baz/qux": _repo_item("baz/qux", stars=(stars or {}).get("baz/qux", 120)),
@@ -92,11 +97,11 @@ class TestExpandLists(unittest.TestCase):
             name = url.rsplit("/repos/", 1)[-1]
             return table.get(name), {"ok": name in table}
 
-        refscout.gh_get = fake
+        refscout_sources.gh_get = fake
 
     def test_expands_readme_and_subpage(self):
         self._patch()
-        found, logs = refscout._expand_lists([self.list_item], 0, set())
+        found, logs = refscout_collect._expand_lists([self.list_item], 0, set())
         self.assertEqual(set(found), {"foo/bar", "baz/qux", "tiny/repo"})
         self.assertEqual(found["foo/bar"]["via"], {"521xueweihan/HelloGitHub"})
         self.assertEqual(logs[0]["pages"], 1, "追了 1 篇子页")
@@ -104,35 +109,35 @@ class TestExpandLists(unittest.TestCase):
 
     def test_archived_and_min_stars_still_apply(self):
         self._patch()
-        found, _ = refscout._expand_lists([self.list_item], 50, set())
+        found, _ = refscout_collect._expand_lists([self.list_item], 50, set())
         self.assertNotIn("old/dead", found, "archived 不因清单推荐而豁免")
         self.assertNotIn("tiny/repo", found, "min_stars 照常生效")
 
     def test_known_keys_are_not_refetched(self):
         self._patch()
-        found, _ = refscout._expand_lists([self.list_item], 0, {"foo/bar"})
+        found, _ = refscout_collect._expand_lists([self.list_item], 0, {"foo/bar"})
         self.assertNotIn("foo/bar", found)
 
     def test_total_cap(self):
         self._patch()
-        old = refscout.LIST_EXPAND_TOTAL
-        refscout.LIST_EXPAND_TOTAL = 2
+        old = refscout_base.LIST_EXPAND_TOTAL
+        refscout_base.LIST_EXPAND_TOTAL = 2
         try:
-            found, _ = refscout._expand_lists([self.list_item], 0, set())
+            found, _ = refscout_collect._expand_lists([self.list_item], 0, set())
         finally:
-            refscout.LIST_EXPAND_TOTAL = old
+            refscout_base.LIST_EXPAND_TOTAL = old
         self.assertEqual(len(found), 2)
 
     def test_keep_gate_blocks_irrelevant_items(self):
         self._patch()
-        found, _ = refscout._expand_lists(
+        found, _ = refscout_collect._expand_lists(
             [self.list_item], 0, set(), lambda item: item["full_name"] == "foo/bar")
         self.assertEqual(set(found), {"foo/bar"})
 
     def test_readme_failure_is_logged_not_raised(self):
         self._patch()
-        refscout._readme_text = lambda full: ""
-        found, logs = refscout._expand_lists([self.list_item], 0, set())
+        refscout_collect._readme_text = lambda full: ""
+        found, logs = refscout_collect._expand_lists([self.list_item], 0, set())
         self.assertEqual(found, {})
         self.assertFalse(logs[0]["ok"])
         self.assertIn("readme", logs[0]["error"])
@@ -174,14 +179,14 @@ class TestRerankShortlist(unittest.TestCase):
             seen["repos"] = [c["repo"] for c in cands]
             return {}, "boom", "", []
 
-        old = refscout.rerank
-        refscout.rerank = fake
+        old = refscout_collect.rerank
+        refscout_collect.rerank = fake
         try:
             ranked = [_cand(repo=f"e{i}", enriched=True) for i in range(10)]
             ranked += [_cand(repo="no-readme", enriched=False, impl=0.99)]
-            refscout.apply_rerank("m", ranked, False)
+            refscout_collect.apply_rerank("m", ranked, False)
         finally:
-            refscout.rerank = old
+            refscout_collect.rerank = old
         self.assertEqual(len(seen["repos"]), refscout.MAX_CANDIDATES)
         self.assertNotIn("no-readme", seen["repos"])
         self.assertTrue(all(r.startswith("e") for r in seen["repos"]))

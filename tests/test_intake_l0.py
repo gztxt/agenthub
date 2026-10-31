@@ -21,6 +21,7 @@ _REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
 
 import intake  # noqa: E402
+import refscout_base  # B4 切分：token 住在 refscout_base，补丁要打在那里
 
 
 def _mem(n=1, degraded=None, error=""):
@@ -156,13 +157,13 @@ class TestRefJob(unittest.TestCase):
 
     def setUp(self):
         self._old = (intake.refscout.submit, intake.refscout.job_view,
-                     intake.refscout.token, intake.time.sleep)
-        intake.refscout.token = lambda: "tok"
+                     refscout_base.token, intake.time.sleep)
+        refscout_base.token = lambda: "tok"
         intake.time.sleep = lambda s: None
 
     def tearDown(self):
         (intake.refscout.submit, intake.refscout.job_view,
-         intake.refscout.token, intake.time.sleep) = self._old
+         refscout_base.token, intake.time.sleep) = self._old
 
     @staticmethod
     def _card():

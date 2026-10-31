@@ -9,6 +9,13 @@
   ② `run_tests()`：仅当 `allow_run=True` **且** ①里没有安装钩子、没有 copyleft、
      体积在预算内时才真跑，超时硬杀，只回 stdout/stderr 尾部。
 
+  第二档的依赖准备分两种，**都是为了不执行仓库自带的安装钩子**：
+  Node 走 `npm ci --ignore-scripts`（pnpm/yarn 同 `--ignore-scripts`）；
+  Python **不 pip install**（构建后端会跑 `setup.py`，风险等同 `postinstall`），
+  改为把 `<root>/src` 与 `<root>` 注入 `PYTHONPATH` —— 实测 `pytest-dev/iniconfig`
+  从 `ModuleNotFoundError` 变为 54 passed。第三方依赖缺失时测试照常失败并回显
+  ImportError，那是**如实结论**，不做静默兜底。
+
 判据来源（不做第二套）：copyleft 用 `refscout_base.GPL_RE`，候选资格用
 `refscout_kb.install_candidates`。`probe` 不写知识库，只回结果。
 """
@@ -31,6 +38,8 @@ CLONE_TIMEOUT_S = int(os.getenv("REF_PROBE_CLONE_TIMEOUT", "120"))
 MAX_MB = int(os.getenv("REF_PROBE_MAX_MB", "200"))
 #: 真跑测试的硬超时（秒）。跑不动就杀，不留后台进程。
 RUN_TIMEOUT_S = int(os.getenv("REF_PROBE_RUN_TIMEOUT", "180"))
+#: 装依赖的硬超时（秒）。冷缓存下 `npm ci` 比测试本身慢一个量级，故与测试分开计时。
+INSTALL_TIMEOUT_S = int(os.getenv("REF_PROBE_INSTALL_TIMEOUT", "240"))
 
 #: 测试命令候选（按检出顺序）。**只认这几条**：都能在无交互、无服务端依赖下跑。
 TEST_COMMANDS: List[tuple] = [
@@ -150,6 +159,54 @@ def probe(full_name: str, ref: str = "") -> Dict[str, Any]:
             "executables": executables, "can_run": not reasons, "reasons": reasons}
 
 
+def test_env(root: Path) -> Dict[str, str]:
+    """测试进程的环境：只注入 import 路径，**不装任何包、不执行仓库代码**。"""
+    env = os.environ.copy()
+    src = root / "src"
+    parts = ([str(src)] if src.is_dir() else []) + [str(root)]
+    if env.get("PYTHONPATH"):
+        parts.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(parts)
+    return env
+
+
+def node_install_cmd(root: Path, tool: str) -> Optional[List[str]]:
+    """Node 系的装依赖命令，**一律带 `--ignore-scripts`**。
+
+    装包时会执行仓库的 `preinstall/postinstall/prepare`——那正是 `probe` 要拦的东西。
+    probe 已经拦了一道，这里再兜一道：判据漂移时也不会盲跑仓库代码。
+    """
+    if tool == "npm":
+        base = ["npm", "ci"] if (root / "package-lock.json").exists() else ["npm", "install"]
+        return base + ["--ignore-scripts", "--no-audit", "--no-fund"]
+    if tool == "pnpm":
+        return ["pnpm", "install", "--ignore-scripts"]
+    if tool == "yarn":
+        return ["yarn", "install", "--ignore-scripts"]
+    return None
+
+
+def prepare(root: Path, test_cmd: List[str]) -> Dict[str, Any]:
+    """第二档的前置：装依赖。返回 `{ran, cmd, rc, tail|error}`。
+
+    只有 Node 系需要前置：Python 走 `test_env` 的 `PYTHONPATH`，cargo/go 的测试
+    子命令自带拉依赖。**装依赖失败也算结果**（`stage=deps`），不报成「测试失败」。
+    """
+    cmd = node_install_cmd(root, (list(test_cmd) or [""])[0])
+    if not cmd:
+        return {"ran": False, "reason": "无需前置（Python 走 PYTHONPATH；cargo/go 自带）"}
+    try:
+        r = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True,
+                           timeout=INSTALL_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return {"ran": True, "cmd": cmd, "rc": -1,
+                "error": "装依赖超时 %ds，已杀进程" % INSTALL_TIMEOUT_S}
+    except FileNotFoundError as e:
+        return {"ran": True, "cmd": cmd, "rc": -1, "error": "命令不存在: %s" % e}
+    return {"ran": True, "cmd": cmd, "rc": r.returncode,
+            "tail": ((r.stdout or "") + (r.stderr or ""))[-1200:]}
+
+
 def run_tests(full_name: str, allow_run: bool = False, extra_args: Optional[List[str]] = None
               ) -> Dict[str, Any]:
     """第二档：真跑测试。**默认拒绝**，且必须过第一档的全部禁令。
@@ -168,18 +225,22 @@ def run_tests(full_name: str, allow_run: bool = False, extra_args: Optional[List
         return {"ok": False, "refused": True, "reasons": info.get("reasons") or []}
     root = Path(info["dir"])
     cmd = list(info["test_command"] or []) + list(extra_args or [])
+    prep = prepare(root, cmd)
+    if prep.get("ran") and prep.get("rc") != 0:
+        return {"ok": False, "stage": "deps", "cmd": cmd, "prep": prep, "dir": info["dir"],
+                "reasons": [prep.get("error") or "装依赖失败 rc=%s" % prep.get("rc")]}
     try:
         r = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True,
-                           timeout=RUN_TIMEOUT_S)
+                           timeout=RUN_TIMEOUT_S, env=test_env(root))
         out, err = (r.stdout or ""), (r.stderr or "")
-        return {"ok": r.returncode == 0, "rc": r.returncode, "cmd": cmd,
+        return {"ok": r.returncode == 0, "rc": r.returncode, "cmd": cmd, "prep": prep,
                 "stdout_tail": out[-2000:], "stderr_tail": err[-1000:],
                 "size_mb": info["size_mb"], "dir": info["dir"]}
     except subprocess.TimeoutExpired:
-        return {"ok": False, "timeout": RUN_TIMEOUT_S, "cmd": cmd,
+        return {"ok": False, "timeout": RUN_TIMEOUT_S, "cmd": cmd, "prep": prep,
                 "error": "测试超时 %ds，已杀进程" % RUN_TIMEOUT_S}
     except FileNotFoundError as e:
-        return {"ok": False, "cmd": cmd, "error": "命令不存在: %s" % e}
+        return {"ok": False, "cmd": cmd, "prep": prep, "error": "命令不存在: %s" % e}
 
 
 def cleanup(full_name: str) -> Dict[str, Any]:

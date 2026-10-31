@@ -4,9 +4,12 @@
 1. `probe` 只做静态判定 —— 命中安装钩子 / copyleft / 超体积 ⇒ `can_run=False` 且写明原因；
 2. `run_tests` **默认拒绝**（没人工点头绝不执行外部仓库代码）；
 3. 体检不过时 `run_tests` 一律 refuse，**不给绕过体检的口子**；
-4. 认不出测试入口 ≠ 失败（`test_command=None`，但要进 reasons）。
+4. 认不出测试入口 ≠ 失败（`test_command=None`，但要进 reasons）；
+5. 第二档的依赖准备**不执行仓库代码**：Python 只注入 `PYTHONPATH`、Node 必带
+   `--ignore-scripts`（否则 `npm i` 就是在跑 `postinstall`）。
 """
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -94,6 +97,34 @@ class TestRunGate(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertTrue(out.get("refused"))
         self.assertIn("copyleft", " ".join(out["reasons"]))
+
+
+class TestPrepare(unittest.TestCase):
+    def test_test_env_injects_src_layout(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _mk(pathlib.Path(d), {"src/pkg/__init__.py": ""})
+            env = inst.test_env(root)
+            parts = env["PYTHONPATH"].split(os.pathsep)
+            self.assertEqual(parts[0], str(root / "src"))
+            self.assertEqual(parts[1], str(root))
+
+    def test_node_install_always_ignore_scripts(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for tool in ("npm", "pnpm", "yarn"):
+                cmd = inst.node_install_cmd(root, tool)
+                self.assertIn("--ignore-scripts", cmd, tool)
+            self.assertIsNone(inst.node_install_cmd(root, "cargo"))
+
+    def test_npm_prefers_ci_when_lockfile(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = _mk(pathlib.Path(d), {"package-lock.json": "{}"})
+            self.assertEqual(inst.node_install_cmd(root, "npm")[:2], ["npm", "ci"])
+
+    def test_python_needs_no_prepare(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = inst.prepare(pathlib.Path(d), ["python3", "-m", "pytest", "-q"])
+        self.assertFalse(out["ran"])
 
 
 if __name__ == "__main__":

@@ -169,7 +169,8 @@ class TestWiringIsReal(unittest.TestCase):
         self.assertIn("TASK_RETRIEVAL", att_src, "缺少开关，出问题无法一键关掉检索")
 
     def test_run_task_uses_should_retry(self):
-        src = inspect.getsource(tasks._run_task)
+        # 2026-10-31 再拆：验证分支搬到 `_verify_and_settle`，断言跟到那里。
+        src = inspect.getsource(tasks._verify_and_settle)
         self.assertIn("should_retry(", src)
         self.assertIn("attempts", src)
 
@@ -180,7 +181,7 @@ class TestWiringIsReal(unittest.TestCase):
 
     def test_retry_does_not_touch_success_path(self):
         """接受路径（AUTO_ACCEPT）不得被重试逻辑污染：`submitted`/`success` 只写一次。"""
-        src = inspect.getsource(tasks._run_task)
+        src = inspect.getsource(tasks._verify_and_settle)
         i = src.find("STATUS_PASS")
         self.assertNotEqual(i, -1)
         self.assertNotIn("should_retry", src[i:i + 400])

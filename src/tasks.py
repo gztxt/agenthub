@@ -1628,6 +1628,174 @@ async def _attach_retrieval(run_id: str, row: dict, prompt: str, exec_agent: str
             pass
     return prompt
 
+async def _settle_self_failure(run_id: str, row: dict, result: dict, attempts_done: int,
+                             exec_agent: str, exec_model, dur: int, spent_tokens: int,
+                             used_model) -> bool:
+    """执行者自称失败时的结算：过一遍独立复核并留痕；能升档就排重试。
+
+    返回 True 表示已处理（调用方直接 return），False 表示执行者其实报了 success
+    （调用方继续走④的验证分支）。2026-10-31 从 `_run_task` 拆出。
+    """
+    # ③ 自称失败：**失败方向仍保守**（不因产物非空就升级），但必须过一遍独立复核并留痕。
+    #    §7-④：执行者不得自证 success（④），也**不得自证 fail**（本支）——旧实现直接 failed、
+    #    不看产物、不留结论 ⇒「其实产物合格」被静默掩盖、事后不可复核。
+    if not result.get("success"):
+        err = (result.get("error") or "unknown")[:500]
+        kind = row.get("verify_kind") or verifier.DEFAULT_KIND
+        # §7-①：复核走**线程**（`to_thread`）而非就地同步调用 —— 否则协程从不 yield，
+        # 置下的 `verifying` 在 DB 上没人读得到。
+        db.execute("UPDATE tasks SET status='verifying',verify_started_at=?,updated_at=?"
+                   " WHERE run_id=? AND task_id=?", (_now(), _now(), run_id, row["task_id"]))
+        v0 = asyncio.get_event_loop().time()
+        verdict = await asyncio.to_thread(verifier.verify, kind,
+                                          output=result.get("response"),
+                                          expect=row.get("verify_expect"))
+        verify_ms = int((asyncio.get_event_loop().time() - v0) * 1000)
+        status_v = verdict["status"]
+        if status_v == verifier.STATUS_PASS:
+            reason = ("executor_claimed_failure_but_output_verified: %s" % err)[:500]
+            event = "mismatch"
+        else:
+            gaps = "; ".join("%s: %s" % (g["id"], g["detail"]) for g in verdict["gaps"])
+            reason = ("executor_claimed_failure; verifier %s (%s): %s"
+                      % (status_v, kind, gaps))[:500]
+            event = "fail"
+        # ── 执行者自身失败也走升档重试（v0.13.177）──
+        # 2026-10-29 实弹：dsh 连吃两次 `RATE_LIMIT 429` → 这条分支**直接写 failed**，
+        # 绕过了下面 verifier 失败分支的 `should_retry` ⇒ 整条 run 的 t2/t3 一次都不重试，
+        # t4 因为上游 failed 变 blocked，汇总永远跑不到。而 429 恰恰是「换一家就活」
+        # 的典型场景 —— 不重试等于把可恢复故障记成终态。
+        # 判据用 `escalate_target` 的 `changed`：**没有升档路径就不重试**（同 agent 同模型
+        # 原地再赌一次是纯浪费，那正是 v0.13.174 之前的错）。
+        if _schedule_exec_retry(run_id, row, err, reason, attempts_done,
+                                exec_agent, exec_model, dur=dur,
+                                spent_tokens=spent_tokens, used_model=used_model,
+                                kind=kind):
+            return True
+        # ⚠ 口径冲突处理（2026-10-16）：P0-b 的契约是「**没过 verifier（含自述失败）的路径
+        #   `verdict` 必须 NULL**」，而 P0-b 闸门 `test_verdict_null_on_self_reported_failure`
+        #   钉着这一条。所以本条修复**不写 `verdict`**（保持 NULL），复核结论落 `verify_reason`
+        #   + `mismatch` 事件 —— 目的（**不再静默**）达到了，且不破别人的契约。
+        db.execute("UPDATE tasks SET status='failed',error=?,verify_reason=?,"
+                   "verify_ms=?,"
+                   "duration_ms=?,spent_ms=?,spent_tokens=?,model=?,finished_at=?,updated_at=?"
+                   " WHERE run_id=? AND task_id=?",
+                   (err, reason, verify_ms, dur, dur, spent_tokens, used_model,
+                    _now(), _now(), run_id, row["task_id"]))
+        db.log_profile_event("task_exec", row["agent_id"], event, dur,
+                             trace_id=row["trace_id"],
+                             detail={"task": row["task_id"], "verify": kind,
+                                     "verify_status": status_v, "claimed_failure": True})
+        return True
+    return False
+
+
+async def _verify_and_settle(run_id: str, row: dict, result: dict, attempts_done: int,
+                            exec_agent: str, exec_model, dur: int, spent_tokens: int,
+                            used_model) -> None:
+    """④ 执行者不自证：置 verifying → verifier 独立判产物 → 按结论结算。
+
+    三条出口：过 ⇒ 主链判定后 success/submitted；可修复 ⇒ 排自动重试（pending）；
+    不可修复 ⇒ failed。2026-10-31 从 `_run_task` 拆出，仅搬代码不改判据。
+    """
+    # ④ **执行者不自证**：先 verifying，再由 verifier 独立判产物（P0-3 主判据）。
+    kind = row.get("verify_kind") or verifier.DEFAULT_KIND
+    db.execute("UPDATE tasks SET status='verifying',spent_ms=?,spent_tokens=?,updated_at=?,"
+               "verify_started_at=? WHERE run_id=? AND task_id=?",
+               (dur, spent_tokens, _now(), _now(), run_id, row["task_id"]))
+    v0 = asyncio.get_event_loop().time()
+    # §7-①：走线程 ⇒ 协程在此 yield，外部读得到 `verifying`
+    verdict = await asyncio.to_thread(verifier.verify, kind,
+                                      output=result.get("response"),
+                                      expect=row.get("verify_expect"))
+    verify_ms = int((asyncio.get_event_loop().time() - v0) * 1000)
+    if verdict["status"] == verifier.STATUS_PASS:
+        # P1-4：**产物过 verifier ≠ 被接受**。AUTO_ACCEPT 开（默认）则立刻接受（＝旧行为），
+        # 关则停在 `submitted` 等外部 `POST /accept`。两条路都写 submitted_at，
+        # 于是「提交→接受」的时延在两种模式下都可度量。
+        out = str(result.get("response") or "")[:20000]
+        # ── 主链判定（2026-10-23）──
+        # verifier 只判**结构**（非空 / 是 JSON 数组 / 含指定子串），不判「有没有答任务」。
+        # 这里补一次三态分类（completed / partial / off_topic），处置方向刻意单向：
+        #   判成 off_topic ⇒ 不自动接受，转 `submitted` 等人工复核；
+        #   判成 partial/completed ⇒ 与接入前一致（partial 只记附注，不拦）；
+        #   判定没跑成（脚本缺失/超时/标签不在枚举） ⇒ **完全旧行为**，不拦不降级。
+        # 为什么不是「判成 completed 才接受」：1.5b 的置信度不可信（451 题以 0.95 选错），
+        # 拿它当放行闸等于把「模型觉得像」当成事实；反过来只让它拦，错了最多多一次人看。
+        jv = await asyncio.to_thread(
+            chain_judge.classify_output,
+            row.get("goal") or row.get("prompt") or "", out)
+        judge_json = json.dumps(jv, ensure_ascii=False)[:2000]
+        # 处置折成纯函数（`chain_judge.accept_decision`），L0 才能把「方向」钉死：
+        # 判成 off_topic 只降级不丢弃；判定没跑成 = 旧行为。
+        decision = chain_judge.accept_decision(AUTO_ACCEPT, jv)
+        need_review = decision["review"]
+        if decision["accept"]:
+            db.execute("UPDATE tasks SET status='success',output=?,duration_ms=?,spent_ms=?,"
+                       "spent_tokens=?,model=?,verdict=?,verify_reason=?,verify_ms=?,"
+                       "judge_json=?,submitted_at=?,accepted_at=?,accepted_by=?,"
+                       "finished_at=?,updated_at=?"
+                       " WHERE run_id=? AND task_id=?",
+                       (out, dur, dur, spent_tokens, used_model, verdict["status"], None,
+                        verify_ms, judge_json, _now(), _now(), "auto", _now(), _now(),
+                        run_id, row["task_id"]))
+        else:
+            # need_review 时这里就是「verifier 过了但判定说答非所问」——原因写进
+            # verify_reason（它此时必为 NULL），让复核的人知道**不是** verifier 失败。
+            reason = decision["reason"]
+            db.execute("UPDATE tasks SET status='submitted',output=?,duration_ms=?,spent_ms=?,"
+                       "spent_tokens=?,model=?,verdict=?,verify_reason=?,verify_ms=?,"
+                       "judge_json=?,submitted_at=?,updated_at=?"
+                       " WHERE run_id=? AND task_id=?",
+                       (out, dur, dur, spent_tokens, used_model, verdict["status"], reason,
+                        verify_ms, judge_json, _now(), _now(), run_id, row["task_id"]))
+        db.log_profile_event("task_exec", row["agent_id"],
+                             "success" if (AUTO_ACCEPT and not need_review) else "submitted",
+                             dur,
+                             trace_id=row["trace_id"],
+                             detail={"task": row["task_id"], "verify": kind,
+                                     "model": used_model,
+                                     "auto_accept": AUTO_ACCEPT and not need_review,
+                                     "judge": jv.get("label") if jv.get("ok") else "unjudged",
+                                     "judge_ok": bool(jv.get("ok")),
+                                     "judge_ms": jv.get("ms")})
+    else:
+        gaps = "; ".join("%s: %s" % (g["id"], g["detail"]) for g in verdict["gaps"])
+        err = ("verifier %s (%s): %s" % (verdict["status"], kind, gaps))[:500]
+        # ── B3：可修复的验证失败，自动重试 MAX_AUTO_RETRY 次（默认 1）──
+        # 只对 `repairable` 重试：`insufficient`（未知 kind / 无产物）重跑也不会变好。
+        # 次数写进 `attempts` 列并在重跑时把上次的 verify_reason 接进 prompt（否则就是原样再赌）。
+        if should_retry(verdict["status"], verdict.get("repairable"), attempts_done):
+            db.execute("UPDATE tasks SET status='pending',attempts=?,error=?,verify_reason=?,"
+                       "verdict=?,verify_ms=?,spent_ms=?,spent_tokens=?,model=?,"
+                       "finished_at=NULL,updated_at=?"
+                       " WHERE run_id=? AND task_id=?",
+                       (attempts_done + 1,
+                        ("%s（自动重试 %d/%d，升档 %s）"
+                         % (err, attempts_done + 1, MAX_AUTO_RETRY,
+                            _next_escalation_note(exec_agent, exec_model,
+                                                  attempts_done + 1,
+                                                  row.get("tier"))))[:500],
+                        gaps[:500], verdict["status"], verify_ms, dur, spent_tokens,
+                        used_model, _now(), run_id, row["task_id"]))
+            db.log_profile_event("task_exec", row["agent_id"], "retry", dur,
+                                 trace_id=row["trace_id"],
+                                 detail={"task": row["task_id"], "verify": kind,
+                                         "verify_status": verdict["status"],
+                                         "attempt": attempts_done + 1,
+                                         "model": used_model})
+            return
+        db.execute("UPDATE tasks SET status='failed',error=?,duration_ms=?,spent_ms=?,"
+                   "spent_tokens=?,model=?,verdict=?,verify_reason=?,"
+                   "finished_at=?,updated_at=?"
+                   " WHERE run_id=? AND task_id=?",
+                   (err, dur, dur, spent_tokens, used_model, verdict["status"], gaps[:500],
+                    _now(), _now(), run_id, row["task_id"]))
+        db.log_profile_event("task_exec", row["agent_id"], "fail", dur,
+                             trace_id=row["trace_id"],
+                             detail={"task": row["task_id"], "verify": kind,
+                                     "verify_status": verdict["status"],
+                                     "model": used_model})
 async def _run_task(run_id: str, row: dict):
     chat_fn = _ctx.get("chat_fn")
     if not chat_fn:
@@ -1677,155 +1845,11 @@ async def _run_task(run_id: str, row: dict):
                                  trace_id=row["trace_id"],
                                  detail={"task": row["task_id"], "budget": over})
             return
-        # ③ 自称失败：**失败方向仍保守**（不因产物非空就升级），但必须过一遍独立复核并留痕。
-        #    §7-④：执行者不得自证 success（④），也**不得自证 fail**（本支）——旧实现直接 failed、
-        #    不看产物、不留结论 ⇒「其实产物合格」被静默掩盖、事后不可复核。
-        if not result.get("success"):
-            err = (result.get("error") or "unknown")[:500]
-            kind = row.get("verify_kind") or verifier.DEFAULT_KIND
-            # §7-①：复核走**线程**（`to_thread`）而非就地同步调用 —— 否则协程从不 yield，
-            # 置下的 `verifying` 在 DB 上没人读得到。
-            db.execute("UPDATE tasks SET status='verifying',verify_started_at=?,updated_at=?"
-                       " WHERE run_id=? AND task_id=?", (_now(), _now(), run_id, row["task_id"]))
-            v0 = asyncio.get_event_loop().time()
-            verdict = await asyncio.to_thread(verifier.verify, kind,
-                                              output=result.get("response"),
-                                              expect=row.get("verify_expect"))
-            verify_ms = int((asyncio.get_event_loop().time() - v0) * 1000)
-            status_v = verdict["status"]
-            if status_v == verifier.STATUS_PASS:
-                reason = ("executor_claimed_failure_but_output_verified: %s" % err)[:500]
-                event = "mismatch"
-            else:
-                gaps = "; ".join("%s: %s" % (g["id"], g["detail"]) for g in verdict["gaps"])
-                reason = ("executor_claimed_failure; verifier %s (%s): %s"
-                          % (status_v, kind, gaps))[:500]
-                event = "fail"
-            # ── 执行者自身失败也走升档重试（v0.13.177）──
-            # 2026-10-29 实弹：dsh 连吃两次 `RATE_LIMIT 429` → 这条分支**直接写 failed**，
-            # 绕过了下面 verifier 失败分支的 `should_retry` ⇒ 整条 run 的 t2/t3 一次都不重试，
-            # t4 因为上游 failed 变 blocked，汇总永远跑不到。而 429 恰恰是「换一家就活」
-            # 的典型场景 —— 不重试等于把可恢复故障记成终态。
-            # 判据用 `escalate_target` 的 `changed`：**没有升档路径就不重试**（同 agent 同模型
-            # 原地再赌一次是纯浪费，那正是 v0.13.174 之前的错）。
-            if _schedule_exec_retry(run_id, row, err, reason, attempts_done,
-                                    exec_agent, exec_model, dur=dur,
-                                    spent_tokens=spent_tokens, used_model=used_model,
-                                    kind=kind):
-                return
-            # ⚠ 口径冲突处理（2026-10-16）：P0-b 的契约是「**没过 verifier（含自述失败）的路径
-            #   `verdict` 必须 NULL**」，而 P0-b 闸门 `test_verdict_null_on_self_reported_failure`
-            #   钉着这一条。所以本条修复**不写 `verdict`**（保持 NULL），复核结论落 `verify_reason`
-            #   + `mismatch` 事件 —— 目的（**不再静默**）达到了，且不破别人的契约。
-            db.execute("UPDATE tasks SET status='failed',error=?,verify_reason=?,"
-                       "verify_ms=?,"
-                       "duration_ms=?,spent_ms=?,spent_tokens=?,model=?,finished_at=?,updated_at=?"
-                       " WHERE run_id=? AND task_id=?",
-                       (err, reason, verify_ms, dur, dur, spent_tokens, used_model,
-                        _now(), _now(), run_id, row["task_id"]))
-            db.log_profile_event("task_exec", row["agent_id"], event, dur,
-                                 trace_id=row["trace_id"],
-                                 detail={"task": row["task_id"], "verify": kind,
-                                         "verify_status": status_v, "claimed_failure": True})
+        if await _settle_self_failure(run_id, row, result, attempts_done, exec_agent,
+                                      exec_model, dur, spent_tokens, used_model):
             return
-        # ④ **执行者不自证**：先 verifying，再由 verifier 独立判产物（P0-3 主判据）。
-        kind = row.get("verify_kind") or verifier.DEFAULT_KIND
-        db.execute("UPDATE tasks SET status='verifying',spent_ms=?,spent_tokens=?,updated_at=?,"
-                   "verify_started_at=? WHERE run_id=? AND task_id=?",
-                   (dur, spent_tokens, _now(), _now(), run_id, row["task_id"]))
-        v0 = asyncio.get_event_loop().time()
-        # §7-①：走线程 ⇒ 协程在此 yield，外部读得到 `verifying`
-        verdict = await asyncio.to_thread(verifier.verify, kind,
-                                          output=result.get("response"),
-                                          expect=row.get("verify_expect"))
-        verify_ms = int((asyncio.get_event_loop().time() - v0) * 1000)
-        if verdict["status"] == verifier.STATUS_PASS:
-            # P1-4：**产物过 verifier ≠ 被接受**。AUTO_ACCEPT 开（默认）则立刻接受（＝旧行为），
-            # 关则停在 `submitted` 等外部 `POST /accept`。两条路都写 submitted_at，
-            # 于是「提交→接受」的时延在两种模式下都可度量。
-            out = str(result.get("response") or "")[:20000]
-            # ── 主链判定（2026-10-23）──
-            # verifier 只判**结构**（非空 / 是 JSON 数组 / 含指定子串），不判「有没有答任务」。
-            # 这里补一次三态分类（completed / partial / off_topic），处置方向刻意单向：
-            #   判成 off_topic ⇒ 不自动接受，转 `submitted` 等人工复核；
-            #   判成 partial/completed ⇒ 与接入前一致（partial 只记附注，不拦）；
-            #   判定没跑成（脚本缺失/超时/标签不在枚举） ⇒ **完全旧行为**，不拦不降级。
-            # 为什么不是「判成 completed 才接受」：1.5b 的置信度不可信（451 题以 0.95 选错），
-            # 拿它当放行闸等于把「模型觉得像」当成事实；反过来只让它拦，错了最多多一次人看。
-            jv = await asyncio.to_thread(
-                chain_judge.classify_output,
-                row.get("goal") or row.get("prompt") or "", out)
-            judge_json = json.dumps(jv, ensure_ascii=False)[:2000]
-            # 处置折成纯函数（`chain_judge.accept_decision`），L0 才能把「方向」钉死：
-            # 判成 off_topic 只降级不丢弃；判定没跑成 = 旧行为。
-            decision = chain_judge.accept_decision(AUTO_ACCEPT, jv)
-            need_review = decision["review"]
-            if decision["accept"]:
-                db.execute("UPDATE tasks SET status='success',output=?,duration_ms=?,spent_ms=?,"
-                           "spent_tokens=?,model=?,verdict=?,verify_reason=?,verify_ms=?,"
-                           "judge_json=?,submitted_at=?,accepted_at=?,accepted_by=?,"
-                           "finished_at=?,updated_at=?"
-                           " WHERE run_id=? AND task_id=?",
-                           (out, dur, dur, spent_tokens, used_model, verdict["status"], None,
-                            verify_ms, judge_json, _now(), _now(), "auto", _now(), _now(),
-                            run_id, row["task_id"]))
-            else:
-                # need_review 时这里就是「verifier 过了但判定说答非所问」——原因写进
-                # verify_reason（它此时必为 NULL），让复核的人知道**不是** verifier 失败。
-                reason = decision["reason"]
-                db.execute("UPDATE tasks SET status='submitted',output=?,duration_ms=?,spent_ms=?,"
-                           "spent_tokens=?,model=?,verdict=?,verify_reason=?,verify_ms=?,"
-                           "judge_json=?,submitted_at=?,updated_at=?"
-                           " WHERE run_id=? AND task_id=?",
-                           (out, dur, dur, spent_tokens, used_model, verdict["status"], reason,
-                            verify_ms, judge_json, _now(), _now(), run_id, row["task_id"]))
-            db.log_profile_event("task_exec", row["agent_id"],
-                                 "success" if (AUTO_ACCEPT and not need_review) else "submitted",
-                                 dur,
-                                 trace_id=row["trace_id"],
-                                 detail={"task": row["task_id"], "verify": kind,
-                                         "model": used_model,
-                                         "auto_accept": AUTO_ACCEPT and not need_review,
-                                         "judge": jv.get("label") if jv.get("ok") else "unjudged",
-                                         "judge_ok": bool(jv.get("ok")),
-                                         "judge_ms": jv.get("ms")})
-        else:
-            gaps = "; ".join("%s: %s" % (g["id"], g["detail"]) for g in verdict["gaps"])
-            err = ("verifier %s (%s): %s" % (verdict["status"], kind, gaps))[:500]
-            # ── B3：可修复的验证失败，自动重试 MAX_AUTO_RETRY 次（默认 1）──
-            # 只对 `repairable` 重试：`insufficient`（未知 kind / 无产物）重跑也不会变好。
-            # 次数写进 `attempts` 列并在重跑时把上次的 verify_reason 接进 prompt（否则就是原样再赌）。
-            if should_retry(verdict["status"], verdict.get("repairable"), attempts_done):
-                db.execute("UPDATE tasks SET status='pending',attempts=?,error=?,verify_reason=?,"
-                           "verdict=?,verify_ms=?,spent_ms=?,spent_tokens=?,model=?,"
-                           "finished_at=NULL,updated_at=?"
-                           " WHERE run_id=? AND task_id=?",
-                           (attempts_done + 1,
-                            ("%s（自动重试 %d/%d，升档 %s）"
-                             % (err, attempts_done + 1, MAX_AUTO_RETRY,
-                                _next_escalation_note(exec_agent, exec_model,
-                                                      attempts_done + 1,
-                                                      row.get("tier"))))[:500],
-                            gaps[:500], verdict["status"], verify_ms, dur, spent_tokens,
-                            used_model, _now(), run_id, row["task_id"]))
-                db.log_profile_event("task_exec", row["agent_id"], "retry", dur,
-                                     trace_id=row["trace_id"],
-                                     detail={"task": row["task_id"], "verify": kind,
-                                             "verify_status": verdict["status"],
-                                             "attempt": attempts_done + 1,
-                                             "model": used_model})
-                return
-            db.execute("UPDATE tasks SET status='failed',error=?,duration_ms=?,spent_ms=?,"
-                       "spent_tokens=?,model=?,verdict=?,verify_reason=?,"
-                       "finished_at=?,updated_at=?"
-                       " WHERE run_id=? AND task_id=?",
-                       (err, dur, dur, spent_tokens, used_model, verdict["status"], gaps[:500],
-                        _now(), _now(), run_id, row["task_id"]))
-            db.log_profile_event("task_exec", row["agent_id"], "fail", dur,
-                                 trace_id=row["trace_id"],
-                                 detail={"task": row["task_id"], "verify": kind,
-                                         "verify_status": verdict["status"],
-                                         "model": used_model})
+        await _verify_and_settle(run_id, row, result, attempts_done, exec_agent,
+                                 exec_model, dur, spent_tokens, used_model)
     except asyncio.TimeoutError:
         # 2026-10-15 P0-a 取证时发现既存缺陷（非本次引入）：原句把 `'超时熔断 %ds'`
         # 写成字面量却按 5 个参数传（SQL 只有 4 个占位符）⇒ sqlite3.ProgrammingError

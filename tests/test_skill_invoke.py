@@ -505,3 +505,31 @@ class TestPickExtra(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+# ── 注入钩子的窄路闸门（2026-10-31） ──────────────────────────────────────
+class TestRelevantRoutesNarrowing(_InvokeCase):
+    """`/relevant?routes=` 必须**真的少扫**，不是只过滤结果。
+
+    实测背景：全 22 路扫描墙钟 780ms（claude 612 / agents 608ms），而 pi 的
+    input 钩子预算 500ms ⇒ 每次超时丢弃；服务端却照记 235 条 skill.inject。
+    `routes` 被静默忽略（FastAPI 不报未知 query 参）时，把参数接上去也等于没接。
+    """
+
+    def setUp(self):
+        super().setUp()
+        _mk_skill(self.a, "demo", "演示技能 用于窄路测试")
+
+    def test_only_requested_routes_are_scanned(self):
+        r = self.client.get("/api/skill/relevant",
+                            params={"q": "演示技能", "n": 3, "rerank": "false",
+                                    "routes": "src"})
+        self.assertEqual(r.status_code, 200, r.text)
+        names = [b["name"] for b in r.json()["backends"]]
+        self.assertEqual(names, ["src"],
+                         "routes 必须作用在扇出上，否则延迟一点没降：%s" % names)
+
+    def test_unknown_route_is_400_not_silent_empty(self):
+        r = self.client.get("/api/skill/relevant",
+                            params={"q": "演示技能", "routes": "nope"})
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("nope", r.text)

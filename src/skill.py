@@ -1789,6 +1789,13 @@ async def skill_relevant(request: Request,
                                          "多花数秒（CPU 推理），而注入通道预算 600ms"),
                          caller: str = Query(default="", max_length=64),
                          via: str = Query(default="", max_length=16),
+                         routes: Optional[str] = Query(
+                             default=None,
+                             description="逗号分隔；**只扫这些路**（白名单，未知 400）。"
+                                         "不传＝全部路。为注入钩子而加：全扫实测墙钟 780ms"
+                                         "（claude 612ms / agents 608ms 最慢），而 pi 的 input"
+                                         "钩子预算 500ms ⇒ 不窄化就永远超时丢弃（实测 235 次"
+                                         "skill.inject 账上、transcript 里只 3 次真投递）"),
                          llm_rerank: bool = Query(default=False,
                                                   description="用免费模型（CCR openrouter/free）"
                                                               "在 top-N 内重排（默认关，见 PT-20261022-13）"),
@@ -1816,11 +1823,20 @@ async def skill_relevant(request: Request,
     两者在权重统计里分属「曝光」与「查询」，不能混加。
     """
     t0 = time.monotonic()
-    routes = disk_routes()
-    scans = await asyncio.gather(*[_scan_async(r, route_roots(r)) for r in routes])
+    allowed = list(disk_routes())
+    if routes is None:
+        want = allowed
+    else:
+        want = [x.strip() for x in routes.split(",") if x.strip()]
+        bad = sorted(set(want) - set(allowed))
+        if bad:
+            raise HTTPException(400, f"未知 routes: {bad}；可用值 {sorted(allowed)}")
+        if not want:
+            raise HTTPException(400, "routes 不能为空")
+    scans = await asyncio.gather(*[_scan_async(r, route_roots(r)) for r in want])
     items: List[Dict[str, Any]] = []
     backends: List[Dict[str, Any]] = []
-    for r, s in zip(routes, scans):
+    for r, s in zip(want, scans):
         items.extend(s.get("items") or [])
         backends.append(_backend(r, s))
     unique, _aliases = _dedup(items)

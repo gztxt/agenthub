@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import concurrent.futures as futures
 import hashlib
@@ -486,6 +487,28 @@ async def api_ref_kb(install: str = Query(default='', max_length=20), limit: int
     out = _kb.stats()
     out['install_candidates'] = _kb.install_candidates(limit)['total']
     return out
+
+
+@router.post('/kb/probe')
+async def api_ref_kb_probe(name: str = Query(min_length=3, max_length=120),
+                           ref: str = Query(default='', max_length=80)):
+    """安装前体检第一档：浅克隆 + 静态判定，**不执行仓库内任何代码**（2026-10-31）。"""
+    import refscout_install as _inst
+    return await asyncio.to_thread(_inst.probe, name, ref)
+
+
+@router.post('/kb/test')
+async def api_ref_kb_test(name: str = Query(min_length=3, max_length=120),
+                          allow_run: bool = Query(default=False)):
+    """第二档：真跑测试。默认拒绝（allow_run=false）；体检不过一律拒绝。"""
+    import refscout_install as _inst
+    return await asyncio.to_thread(_inst.run_tests, name, allow_run)
+
+
+@router.delete('/kb/probe')
+async def api_ref_kb_probe_cleanup(name: str = Query(min_length=3, max_length=120)):
+    import refscout_install as _inst
+    return await asyncio.to_thread(_inst.cleanup, name)
 
 
 @router.post('/kb/promote')

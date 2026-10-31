@@ -1,10 +1,17 @@
 # Agent Hub 全面升级优化方案（2026-09-29）
 
-> **状态**：待授权。本文只是方案，**未动一行代码**（除本文件）。
+> **状态**：已部分执行。截至 2026-10-31，P0 批与 P1/P2-A 多数已落地（见 §9 与正文「复核」标注）；
+> 原始方案叙述原样保留作决策留痕。
 > **取证基线**：commit `45c780e`（v0.13.57）· 服务端口 3102 · 取证时间 2026-09-29 15:00–16:20
-> **方法**：4 路只读代理分头审计（后端 38 模块 / 前端 11 分片 / 终端+测试 / 产品体验），
+> **方法**：4 路只读代理分头审计（后端 38 模块 / 前端 11 分片——2026-10-31 复核现为 13 分片 / 终端+测试 / 产品体验），
 > 主会话对每一条 P0 逐条实弹复核 —— **证伪 2 条、降级 3 条、确认 6 条**（见 §2 复核台账）。
 > 代理原始结论不直接采信；本文每条都带 `文件:行号`，且标注复核结论。
+> **复核（2026-10-31，HEAD `7f2cb53` / 复核基线 `52cbd5a`）**：事实与数字以
+> `docs/UPGRADE-PLAN-REVIEW-20261031.md` §1.2 的实测值为准，本文涉及处已就地标注，下文未标注的
+> 数字仍是 2026-09-29 的历史基线（保留，不改写）。
+> 该复核的 §1.3 硬错 / §1.4 捏造引用 / §2.3 已完成三张表针对的是 `AgentHub全面升级方案.docx`，
+> **本文无对应断言**（逐条对照见 `agenthub/work/dispatch/agenthub-upgrade-20261031/D1-report.md`）；两条竞品引用已核实不存在（2026-10-31 HTTP 404）：
+> Karpathy AgentHub、Hermes Web UI —— 本文自始未收录，无需删除。
 
 ---
 
@@ -18,7 +25,8 @@
 - **病灶**（本次要修的）：① 终端四个 P0（心跳续命 TTL / 子进程退出不回收 / EAGAIN 杀连接 /
   token 进日志）；② 事件循环被同步 IO 阻塞（资源页、cloudcli）；③ kill 侧 MainThread 误杀；
   ④ 徽章死代码 + `code_stale` 不上屏 + 三套「可用/异常」口径打架；⑤ 资源页 CSS 变量未定义、
-  无窄屏适配；⑥ 绑 IPv4 only 违反工作区军规；⑦ xterm 5.5.0 落后一代且 canvas addon 将被移除。
+  无窄屏适配；⑥ 绑 IPv4 only 违反工作区军规；⑦ xterm 5.5.0 落后一代且 canvas addon 将被移除
+  （2026-10-31 复核：已升 6.0.0，此项闭合）。
 
 **建议节奏**：P0 止血 → P1 修复 → P2 升级（xterm 6 / 跨 Agent 活动指示）→ P3 架构债。
 每批独立可回滚，`git revert` 即退。
@@ -32,8 +40,9 @@
 commit      45c780e (v0.13.57)，领先 origin/master 8 个提交（未推送）
 工作树      主 checkout 干净（v0.13.57 已由他人提交）
 测试        L0 hermetic 785 例全绿 0 skip / L1 host 44 例 2 红
+            （2026-10-31 复核：L0 3439 例、0 skip / 0 fail，见 REVIEW §1.2）
 依赖        fastapi 0.141.1 · uvicorn 0.52.4 · pydantic 2.13.5 · aiohttp 3.14.3
-            xterm.js 5.5.0（2024-04-05）· Python 3.11.2 · 无 uvloop/orjson/httpx
+            xterm.js 5.5.0（2024-04-05；2026-10-31 复核已升 6.0.0）· Python 3.11.2 · 无 uvloop/orjson/httpx
 前端产物    md5(static/hub.js) == templates/index.html 里的 ?v=4004ac26（同步 ✅）
 ```
 
@@ -124,7 +133,7 @@ C6 判「agent-hub 仓 ahead=8 未推送」。**方案执行必须在 worktree �
 |---|---|---|---|
 | P1-1 | `vitals._save` 固定 `.json.tmp`，并发 sweep/verify 互相覆盖丢状态 | `src/vitals.py:489` | tmp 加 pid+线程后缀，或走 `term` 同款「锁内 tmp→os.replace」 |
 | P1-2 | `cronjobs._tick_loop` 串行 `await _fire`，单 job 超时 120s 拖死全部 | `src/cronjobs.py:181-197` | 改 `asyncio.gather(..., return_exceptions=True)` 并发；`except` 补日志 |
-| P1-3 | `db.execute_script` 不 commit，DDL 依赖隐式事务 | `src/db.py:210-212` | 补 `commit()` |
+| P1-3 | `db.execute_script` 不 commit，DDL 依赖隐式事务 | `src/db.py:210-212` | 补 `commit()`（2026-09-30 已修：`src/db.py:331-336`，`523172c`） |
 | P1-4 | `mcpgw.add_acl` `db.query(...)[0]` 无空列表保护 ⇒ IndexError 500 | `src/mcpgw.py:238-240` | 空列表判 404 |
 | P1-5 | `main.py` 5 处 `create_task` 无引用 + shutdown 不 cancel | `src/main.py:969-974` | 存进模块级集合，shutdown 统一 cancel |
 | P1-6 | `term._norm_intent` 文档与实现相反（未知值 doc 说 update，实现被拒） | `src/term.py:296` vs `:312` | 对齐文档或实现；补未知值单测 |
@@ -162,13 +171,16 @@ C6 判「agent-hub 仓 ahead=8 未推送」。**方案执行必须在 worktree �
 ## 5. P2 — 升级批（真正的新能力）
 
 ### P2-A 终端栈升级：xterm.js 5.5.0 → 6.0.0（**需谨慎，影响面大**）
-- **现状**：`static/vendor/xterm.js` 是 `@xterm/xterm@5.5.0`（2024-04-05），已落后一代。
+- **状态（2026-10-31 复核）：已完成** —— `static/vendor/README.md:12-19` 逐文件登记 `@xterm/xterm` **6.0.0**
+  + 6 个 addon（fit 0.11.0 / webgl 0.19.0 / search 0.16.0 / unicode11 0.9.0 / web-links 0.12.0 /
+  clipboard 0.2.0）版本与 md5，提交 `a32c8fa`（v0.13.60）。以下为 09-29 立项时的分析，原样保留。
+- **现状**：`static/vendor/xterm.js` 是 `@xterm/xterm@5.5.0`（2024-04-05），已落后一代。（2026-10-31 复核：已升 6.0.0）
 - **为什么现在做**：v0.13.57 刚引入 WebGL/Canvas 渲染器，**正是 6.0.0 改进的方向**（6.0.0 修复/重做了 WebGL 图集与 CJK 处理）。而 6.0.0 **移除了 canvas addon**（本机无物理 GPU，canvas 是实际主力回落路径之一）——迁移必须同步调整回落链。
 - **影响面**：xterm API 面很小（只用了 `write/clear/resize/loadAddon/refresh/paste/focus/unicode`），迁移可控；但要同步 6 个 addon 版本、补 LICENSE（vendor 无 LICENSE、addon 无版本标记）。
 - **建议**：独立一批、单独 worktree、先做「vendor 换新 + 渲染器回落链调整 + 终端冒烟」三件事，不夹带其它修复。**验收**：终端起得来、CJK 不方块、webgl/canvas/dom 三档可切、Unicode11 生效。
 - **可延后**：若风险预算紧，5.5.0 继续用也可用（当前 CJK 已由 v0.13.57 字体栈 + 渲染器自愈兜住），6.0 迁移属「消除已知上游缺陷」而非「修当前 bug」。
 - **本机 vendor 实测复核（2026-09-29）**：
-  - `static/vendor/xterm.js` = 5.5.0；addon 版本混装且无版本标记（`fit.js` 0.10.0 / `addon-clipboard.js` 3.7.7 / 其余 grep 不到版本串）⇒ **迁移时无法按版本对齐，必须整包换 + 逐个登记版本号**。
+  - `static/vendor/xterm.js` = 5.5.0；addon 版本混装且无版本标记（`fit.js` 0.10.0 / `addon-clipboard.js` 3.7.7 / 其余 grep 不到版本串）⇒ **迁移时无法按版本对齐，必须整包换 + 逐个登记版本号**。（2026-10-31 复核：升级后已由 `static/vendor/README.md` 逐文件登记，此项闭合）
   - `addon-webgl.js` **已实现 `clearTextureAtlas()` + `onContextLoss`**，但项目代码（`03-agents-cards.js:294-299`）只挂了 `onContextLoss`，**`clearTextureAtlas` 一次都没调用** ⇒ 上游「显存持续增长 / atlas 页面耗尽后画面花掉」的已知问题在本项目处于**未修状态**。这是 P2-A 里**成本最低、收益最直接**的一条：迁移前后各加一次定时 `clearTextureAtlas()` 即可（建议先做，等价于 5.5.0 上的止血）。
   - `03-agents-cards.js:275-281` 的回落链是 `webgl → canvas → dom`，且已用 `termCjkUsable()` 做 CJK 前置判断（这条设计正确，保留）。6.0.0 移除 canvas addon 后回落链变 `webgl → dom`，**需同步改 `03-agents-cards.js:282` 的 `canvas` 分支**，否则白屏且无提示。
   - 迁移风险点：WebGL 的 `clearTextureAtlas` 在**无 GPU 的软件渲染环境**下是否可用未验证 ⇒ 须带 try/catch 且失败静默降级（与现有 `onContextLoss` 兜底同风格）。
@@ -185,6 +197,8 @@ C6 判「agent-hub 仓 ahead=8 未推送」。**方案执行必须在 worktree �
 - 无 CI（无 `.github/workflows`）。分层设计反复写「干净 runner 结论必须一样」，实际从未验证。
 
 ### P2-D 其它
+> **2026-10-31 复核**：本小节多数已于 `f3eaf82`（v0.13.59）闭合 —— 供应商 LICENSE/版本登记、
+> CHANGELOG 补 52~58 断档、DESIGN 过期订正、README kill 口径四项均已落地；下行原文保留。
 - 供应商 LICENSE 补齐（`static/vendor/` 无 LICENSE、6 个 addon 无版本标记）。
 - `CHANGELOG.md` 断档：顶部停在 v0.13.51，v0.13.52~57 六个版本无记录（当日提交纪律断档）。
 - `DESIGN.md` 严重过期：列已不存在的 `chat.py`/`scheduler.py`、API 表过时、称前端是单文件、**写绑 `0.0.0.0`**（与 P1-12 军规矛盾）。
@@ -199,7 +213,7 @@ C6 判「agent-hub 仓 ahead=8 未推送」。**方案执行必须在 worktree �
 - **真相源三裂**：模型值同时在 `.env` / hub SQLite / 各 agent 配置文件，靠 300s 巡检对齐——这是本仓多次「静默不可用」的根因。
 - **`db` 是 20+ 模块直接 import 的全局单例**，无连接池/上下文，`init_db` 重指全局连接；缺 repository 层。
 - **错误处理三风格并存**：`raise HTTPException` / 返回 `{"ok":False}` / `print` 后 continue，调用方逐个记。
-- **前端全局作用域**：10 分片拼接后仍是单一全局作用域，顺序即契约（TDZ 事故、`var` 冗余的必然成本）；无单一 store。
+- **前端全局作用域**：13 分片（2026-10-31 复核；09-29 审计时为 10 个，新增 `14-botboy.js`）拼接后仍是单一全局作用域，顺序即契约（TDZ 事故、`var` 冗余的必然成本）；无单一 store。
 - **真相源散落**：`.env`（`override=True` 强制覆盖）/ SQLite / 模块硬编码常量（`memfed.WORKSPACE`、`kb.TURBOVEC_CWD`）三处。
 - `sessions_store` 的 `_grok_read` 假定 `[models].default` 是 profile 键，本机 grok 写成模型 ID ⇒ 当前值恒空（PT-20260928-01 遗留）。
 
@@ -235,3 +249,22 @@ C6 判「agent-hub 仓 ahead=8 未推送」。**方案执行必须在 worktree �
 - ✅ **证据驱动**：每条带 `文件:行号`；代理 P0 已逐条复核（证伪 2/降级 3/确认 6，§2）。
 - ✅ **不投机设计**：P3 明确「本次只登记不动」；xterm 6 迁移标注「可延后」。
 - ⚠️ **本方案文档自身也受工作区军规管辖**：它落在 agent-hub 仓内、属未跟踪文件；**授权后第一步应连同代码一起 `git add` 并当天 commit**，否则又是一份 `/tmp` 式易失产物（09-24 事故：未提交堆积 = 一次事故清零）。
+
+---
+
+## 9. 已上线（勿重复立项）
+
+> 取证：2026-10-31，HEAD `7f2cb53`（复核报告基线 `52cbd5a`）。以下五项在同期《AgentHub 全面升级方案》
+> 中被列为待做/缺口；本文件虽未单列，一并登记为**已上线**，不得再按新能力立项 —— 要改按缺陷修。
+> 逐条证据均在本仓当前代码中，非引自报告。
+
+| 项 | 落地证据 | 判 |
+|---|---|---|
+| MCP 客户端 | `src/mcpgw.py:23-34`（`ClientSession` / `stdio_client` / `streamable_http_client`）、`:186-199` 会话工厂；`requirements.txt:14` `mcp==2.1.1` | ✅ |
+| Skill 共享库 / 商店 | `src/skill_store.py`（1,288 行；`install()` :166、`store_install()` :1187） | ✅ |
+| 移动端触摸层 | `static/hub/13-term-touch.js:1`（惯性滚动 / 长按选区 / 双指缩放） | ✅ |
+| WAL 与 checkpoint | `src/db.py:212` `PRAGMA journal_mode=WAL`；`init_db()` 内启动 `wal_checkpoint(TRUNCATE)` + 定期 checkpoint | ✅ |
+| Agent 自动注册 | `src/profiles.py:784` `all_profiles()`（画像合并点，v0.13.155） | ✅ |
+
+另：本文 P1-3（`db.execute_script` 补 commit，`src/db.py:331-336`，`523172c`/v0.13.59）与
+P2-A（xterm 5.5.0→6.0.0，`static/vendor/README.md:12-19`，`a32c8fa`/v0.13.60）亦已落地。

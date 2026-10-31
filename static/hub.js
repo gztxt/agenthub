@@ -327,6 +327,21 @@ function toast(msg, cls, opts = {}) {
   return el;   // v0.13.6：返回节点，供「链路恢复后收掉同一条提示」用（老调用方忽略返回值，行为不变）
 }
 
+/* F1（2026-10-31）：统一 toast 门面 —— kind ∈ {info, ok, warn, error}。
+ *
+ * 为什么是**包装**而不是改 toast() 签名：toast(msg, cls) 有 134 处调用，且
+ * 03/02 消费它的返回值「链路恢复后收掉同一条提示」（tests/test_toast_a11y.py 钉着）。
+ * 这里只做 kind → 既有 CSS 类 的映射，旧调用零改动、零语义变化。
+ * 映射表同时是白名单：未知 kind 按 info 处理并留一条 console.warn（不静默吞掉）。
+ * `error` 复用既有 .err 类（含 --danger-border/--danger-text token），不新增色值。 */
+const TOAST_KIND_CLASS = { info: 'info', ok: 'ok', warn: 'warn', error: 'err' };
+function showToast(kind, msg, opts = {}) {
+  const k = Object.prototype.hasOwnProperty.call(TOAST_KIND_CLASS, kind) ? kind : 'info';
+  if (k !== kind) console.warn('showToast(): 未知 kind "' + kind + '"，按 info 处理');
+  return toast(String(msg == null ? '' : msg), TOAST_KIND_CLASS[k], opts);
+}
+window.showToast = showToast;   // 供其它分片与探针调用（bundle 非模块，显式挂更清楚）
+
 function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -359,8 +374,15 @@ function jsStr(s) {
  * 主内容区 inline onclick 合法（侧栏禁令不涉这里——浮层三条配套红线原文口径）。 */
 function boxBusy(id, msg) {
   const el = $(id);
-  if (el) el.innerHTML = '<div class="hint">' + escapeHtml(msg || '加载中…') + '</div>';
-  return !!el;
+  if (!el) return false;
+  /* F1：busy 态用骨架占位而不是一行「加载中…」——列表区高度不塌、失败时不会
+     因为「空白 → 突然出现内容」而被当成两次不同的加载。文字只留给读屏（aria-label）。
+     纯几何骨架，颜色全部来自 :root token（--surface-2 / --hover），不新增色值。 */
+  const label = escapeHtml(msg || '加载中…');
+  el.innerHTML = '<div class="skel" role="status" aria-label="' + label + '">' +
+    '<div class="skel-row"></div><div class="skel-row short"></div><div class="skel-row"></div>' +
+    '</div>';
+  return true;
 }
 function boxFail(id, err, retryFn) {
   const el = $(id);
@@ -2106,7 +2128,7 @@ function gotoChat(id, mode) {
 
 function renderChatSide() {
   const side = $('chatAgents');
-  if (!AGENTS.length) { side.innerHTML = '<div class="hint" style="padding:10px">加载…</div>'; loadAgents().then(renderChatSide); return; }
+  if (!AGENTS.length) { boxBusy('chatAgents', '加载 Agent 列表…'); loadAgents().then(renderChatSide); return; }
   // 显示有Web UI可嵌入的实体（agent + 有embed entry的实体）
   const list = AGENTS.filter(a => a.kind === 'agent' || (a.entries || []).some(e => e.type === 'embed'));
   side.innerHTML = list.map(a => {
@@ -7325,6 +7347,10 @@ function cmdCatalog() {
   (AGENTS || []).forEach(a => {
     rows.push({ k: 'a', id: a.id, label: a.name || a.id, sub: a.id });
   });
+  rows.push({ k: 'x', id: 'terminal', label: '打开终端（当前 Agent）', sub: '动作' });
+  rows.push({ k: 'x', id: 'settings', label: '打开设置 · 模型', sub: '动作' });
+  rows.push({ k: 'x', id: 'register', label: '注册自定义 Agent', sub: '动作' });
+  rows.push({ k: 'x', id: 'scan', label: '自动扫描本机 Agent', sub: '动作' });
   rows.push({ k: 'x', id: 'reload', label: '刷新实体与健康', sub: '动作' });
   rows.push({ k: 'x', id: 'nav-search', label: '搜索侧栏实体', sub: '动作' });
   return rows;
@@ -7340,6 +7366,19 @@ function cmdAction(id) {
     if (si) { si.focus(); si.select(); }
     return;
   }
+  /* F1：动作条目复用既有入口（go / gotoChat / openRegister / runScan），不新造导航。
+     终端动作不写死 agent：优先当前选中的实体，否则取第一个带 term 入口的 Agent；
+     两者都没有（首屏 AGENTS 还没到）时给一条 warn toast，而不是静默无反应。 */
+  if (id === 'terminal') {
+    const pick = chatPick || ((AGENTS || []).find(
+      a => a.kind === 'agent' && (a.entries || []).some(e => e.type === 'term')) || {}).id;
+    if (!pick) { showToast('warn', '还没有可打开终端的 Agent（列表仍在加载）'); return; }
+    gotoChat(pick, 'term');
+    return;
+  }
+  if (id === 'settings') { go('settings-model'); return; }
+  if (id === 'register') { openRegister(); return; }
+  if (id === 'scan') { runScan(); return; }
 }
 
 function openCmd() {

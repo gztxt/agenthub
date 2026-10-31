@@ -48,6 +48,7 @@ from discovery import AgentDiscovery, AgentInfo
 from ports import list_listeners, port_in_use
 from sources import detect_project
 import scanner
+import writeauth
 from writeauth import write_gate
 from registry import build_adapters, get_adapter, dispatchable_ids
 import hook as hook_mod
@@ -563,7 +564,7 @@ API_RATE_PER_MIN = int(os.getenv("API_RATE_PER_MIN", "60"))
 # ⚙设置口令：查看 TERM_TOKEN 等敏感配置时要求提供（为空则设置页不可用）
 HUB_PASSCODE = os.getenv("HUB_PASSCODE", "")
 _api_rate: Dict[str, deque] = defaultdict(deque)
-_RATE_EXCLUDED_PREFIXES = ("/telemetry/events/", "/health", "/mcp")
+_RATE_EXCLUDED_PREFIXES = ("/telemetry/events/", "/health", "/mcp", "/api/csp/report")
 _RATE_WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 #: P0-6：_api_rate 是进程级字典，每个见过的 IP 留一个 deque **永不删除**。
 #: 唯一来源是内网/反代，但 IP 会随设备休眠、DHCP 续租、容器重建不断变化 ⇒ 长时间运行
@@ -615,6 +616,47 @@ app.middleware("http")(write_gate)
 # ── v0.13.185：CSP / 安全响应头（默认 Report-Only，见 src/csp.py 头注释）──
 # 挂在这里 = 最外层 ⇒ 401/429 与 SSE 也带同一套头，不会出现「被拒的响应没有安全头」。
 app.middleware("http")(csp.middleware)
+
+# ── F1（2026-10-31）：CSP 违规报告出口（report-uri）──────────────────────
+# Report-Only 只报告不拦截，但报告必须有去处：CSP 的 report-uri 只接受浏览器
+# 自动 POST 的 JSON，且浏览器**不会**带自定义头 ⇒ 不能走 write_token 闸门，
+# 否则报告全变 401、观察窗口等于没开。端点只记日志、不落库、无副作用：
+#   · 64KB 上限（浏览器单条报告通常 <2KB，超限直接丢弃）；
+#   · 非 JSON / 超大 / 解析失败一律 204，不让上报端重试风暴；
+#   · 内容截断到 2000 字符再打，避免一条报告把 journal 刷爆。
+# 策略本体仍在 src/csp.py（单一真相源）；这里只在响应返回后**追加** report-uri，
+# 所以 csp.py 与强制/关断开关（HUB_CSP）行为完全不变。
+CSP_REPORT_PATH = "/api/csp/report"
+_CSP_REPORT_MAX = 64 * 1024
+writeauth.EXEMPT_PREFIXES[CSP_REPORT_PATH] = (
+    "浏览器 CSP 上报无法携带 x-hub-token（规范不允许自定义头）；端点只写日志、"
+    "不落库、不产生副作用，且有 64KB 上限与非 JSON 丢弃 ⇒ 与 /telemetry/events/ 同口径。")
+
+
+@app.middleware("http")
+async def csp_report_uri(request: Request, call_next):
+    resp = await call_next(request)
+    for name in ("Content-Security-Policy-Report-Only", "Content-Security-Policy"):
+        val = resp.headers.get(name)
+        if val and "report-uri" not in val:
+            resp.headers[name] = f"{val}; report-uri {CSP_REPORT_PATH}"
+    return resp
+
+
+@app.post("/api/csp/report")
+async def csp_report(request: Request):
+    raw = await request.body()
+    if len(raw) > _CSP_REPORT_MAX:
+        print(f"[csp] 报告超限丢弃：{len(raw)}B > {_CSP_REPORT_MAX}B")
+        return Response(status_code=204)
+    try:
+        data = json.loads(raw or b"{}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[csp] 非 JSON 报告丢弃（{e}）：{raw[:200]!r}")
+        return Response(status_code=204)
+    src = request.client.host if request.client else "?"
+    print(f"[csp] 违规报告 来源={src} " + json.dumps(data, ensure_ascii=False)[:2000])
+    return Response(status_code=204)
 
 # ── v0.13.185：JSON 行日志（新增通道，不接管 root/uvicorn）──
 # 只配 `agenthub` 命名空间；既有 print 与 uvicorn 访问日志口径不变。

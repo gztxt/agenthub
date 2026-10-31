@@ -121,7 +121,7 @@ function gotoChat(id, mode) {
 
 function renderChatSide() {
   const side = $('chatAgents');
-  if (!AGENTS.length) { side.innerHTML = '<div class="hint" style="padding:10px">加载…</div>'; loadAgents().then(renderChatSide); return; }
+  if (!AGENTS.length) { boxBusy('chatAgents', '加载 Agent 列表…'); loadAgents().then(renderChatSide); return; }
   // 显示有Web UI可嵌入的实体（agent + 有embed entry的实体）
   const list = AGENTS.filter(a => a.kind === 'agent' || (a.entries || []).some(e => e.type === 'embed'));
   side.innerHTML = list.map(a => {

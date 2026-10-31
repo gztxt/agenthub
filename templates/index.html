@@ -890,6 +890,21 @@
         #toast div { background: var(--bg); border: 1px solid var(--border); padding: 12px 20px; border-radius: 10px; font-size: var(--fs-base); animation: pulse 3s forwards; box-shadow: 0 8px 24px var(--shadow-lg); }
         #toast div.err { border-color: var(--danger-border); color: var(--danger-text); }
         #toast div.ok { border-color: var(--text-2); color: var(--text-1); }
+        /* F1（2026-10-31）：showToast(kind,msg) 的另外两档。颜色只取 :root 语义 token，
+           不新增色值；ok 沿用上面的中性描边（134 处旧 toast('…','ok') 的观感不变）。 */
+        #toast div.info { border-color: var(--border); color: var(--text-2); }
+        #toast div.warn { border-color: var(--warn-border); color: var(--warn); }
+        /* F1：busy 态的骨架占位（boxBusy）。高亮条走 --surface-2 → --hover 的渐变，
+           几何用圆角块而不是文字，列表区在加载期间不会塌成一条「加载中…」。 */
+        .skel { display: flex; flex-direction: column; gap: 8px; padding: 10px 2px; }
+        .skel-row { position: relative; overflow: hidden; height: 14px; border-radius: 6px;
+                    background: var(--surface-2); }
+        .skel-row.short { width: 62%; }
+        .skel-row::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+                           background: linear-gradient(90deg, transparent, var(--hover), transparent);
+                           animation: skel-shimmer 1.4s infinite; }
+        @keyframes skel-shimmer { to { transform: translateX(100%); } }
+        @media (prefers-reduced-motion: reduce) { .skel-row::after { animation: none; } }
 
         /* .footer 已于 2026-10-08 删除（用户裁定，见挂载点处注释）：宽屏这条与
            窄屏那两条（.footer + .foot-long 的 display:none）一并摘掉。
@@ -3161,6 +3176,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=5be0799d"></script>
+    <script src="/static/hub.js?v=c49d9531"></script>
 </body>
 </html>

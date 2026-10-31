@@ -159,10 +159,14 @@ class TestWiringIsReal(unittest.TestCase):
     """源码级钉住接线（函数行为由上面用例证明，这里证明它**被调用**）。"""
 
     def test_run_task_calls_retrieval_and_persists_it(self):
-        src = inspect.getsource(tasks._run_task)
-        self.assertIn("_retrieval_for(", src, "_run_task 没有调用检索 ⇒ 三段仍未串联")
-        self.assertIn("retrieval_json", src, "检索结果没有落库 ⇒ 事后无法复盘")
-        self.assertIn("TASK_RETRIEVAL", src, "缺少开关，出问题无法一键关掉检索")
+        # 2026-10-31 拆 `_run_task`（B4 片3）：检索段搬到 `_attach_retrieval`，
+        # 断言随之改成「两段都要在」—— 只改一处会漏掉「谁调用谁」这条。
+        run_src = inspect.getsource(tasks._run_task)
+        att_src = inspect.getsource(tasks._attach_retrieval)
+        self.assertIn("_attach_retrieval(", run_src, "_run_task 不再串检索段")
+        self.assertIn("_retrieval_for(", att_src, "_attach_retrieval 没有调用检索")
+        self.assertIn("retrieval_json", att_src, "检索结果没有落库 ⇒ 事后无法复盘")
+        self.assertIn("TASK_RETRIEVAL", att_src, "缺少开关，出问题无法一键关掉检索")
 
     def test_run_task_uses_should_retry(self):
         src = inspect.getsource(tasks._run_task)

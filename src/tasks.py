@@ -15,7 +15,7 @@ import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -1545,13 +1545,11 @@ async def _call_chat(chat_fn, agent_id: str, prompt: str, tag: str,
     return await chat_fn(agent_id, prompt, tag, **kw)
 
 
-async def _run_task(run_id: str, row: dict):
-    chat_fn = _ctx.get("chat_fn")
-    if not chat_fn:
-        db.execute("UPDATE tasks SET status='failed',error='chat 引擎未就绪',updated_at=? "
-                   "WHERE run_id=? AND task_id=?", (_now(), run_id, row["task_id"]))
-        return
-    # 上下文传递：上游 success 输出注入
+async def _prepare_prompt(run_id: str, row: dict) -> str:
+    """拼装执行 prompt：上游产物注入 + 上一次验证失败的提示。
+
+    2026-10-31 从 `_run_task`（277 行）拆出，纯拼装、不写库，便于单测。
+    """
     ups = db.query("SELECT task_id,output FROM tasks WHERE run_id=? AND status='success'",
                    (run_id,))
     upstream = {u["task_id"]: u["output"] or "" for u in ups}
@@ -1569,8 +1567,15 @@ async def _run_task(run_id: str, row: dict):
         prompt = ("—— 上一次验证未通过（自动重试 %d/%d）：%s ——\n\n"
                   % (attempts_done, MAX_AUTO_RETRY,
                      str(row.get("verify_reason") or "")[:300])) + prompt
+    return prompt
 
-    # ── 升档：第 N 次重试换一档（模型优先、其次 agent），换不动就写明原因 ──
+
+def _resolve_exec_target(run_id: str, row: dict, attempts_done: int) -> Tuple[str, Optional[str]]:
+    """升档决议：第 N 次重试换一档（模型优先、其次 agent），换不动就写明原因。
+
+    返回 `(agent_id, model)`。副作用：升档成功时改写 tasks.agent_id 并记 escalate 事件
+    （`agent_id` 必须同步改写，否则展示面与实际执行者不一致 —— v0.13.177 实弹）。
+    """
     exec_agent = row["agent_id"]
     # 三列三口径：model_planned（按档位决议）> model_choice（Leader 显式）>
     # None（用该 agent 自己的默认）。执行前一律以"决议值"为准。
@@ -1580,9 +1585,6 @@ async def _run_task(run_id: str, row: dict):
                           tier=row.get("tier"), catalog=cat, catalog_checked=cat_ok)
     if esc["changed"]:
         exec_agent, exec_model = esc["agent_id"], esc["model"]
-        # `agent_id` 必须同步改写（v0.13.177）：只记 `escalated_from_agent` 而把
-        # `agent_id` 留在原值 ⇒ 展示面写着 dsh、实际是 claude-code 跑的，归因全错；
-        # 更深一轮升档也会从旧 agent 起算，反复升到同一家。
         db.execute("UPDATE tasks SET agent_id=?,escalated_from_agent=?,escalated_from_model=?,"
                    "updated_at=? WHERE run_id=? AND task_id=?",
                    (exec_agent, esc["from_agent"], esc["from_model"], _now(),
@@ -1594,18 +1596,21 @@ async def _run_task(run_id: str, row: dict):
                                      "from_model": esc["from_model"],
                                      "tier": row.get("tier"),
                                      "attempt": attempts_done})
+    return exec_agent, exec_model
 
-    # ── B1：接单前置检索（记忆/知识库/技能），把线索拼进 prompt ──
-    # 失败/超时一律降级（不阻塞），但**必须留下痕迹**（retrieval_json 里的 error）。
+
+async def _attach_retrieval(run_id: str, row: dict, prompt: str, exec_agent: str) -> str:
+    """B1 接单前置检索 + 技能说明书注入，把线索拼进 prompt 并落 retrieval_json。
+
+    失败/超时一律降级（不阻塞），但**必须留下痕迹**（retrieval_json 里的 error）。
+    2026-10-31 从 `_run_task` 拆出：这段是「取增强」，与执行/结算无关。
+    """
     rmeta: Dict[str, Any] = {}
     if TASK_RETRIEVAL:
         block, rmeta = await _retrieval_for(row.get("goal") or "", prompt,
                                             row.get("agent_id") or "")
         if block:
             prompt = block + "\n\n" + prompt
-    # ── 技能说明书注入（用户 2026-10-31 裁定「执行 3」）：分步任务先拿技能正文本 ──
-    # B1 只给一行「去调 hub_skill_auto」的指引，实测执行者不会去调 —— 于是把该照
-    # 说明书做的事重新发明一遍（慢且偏）。这里改成派发时直接注入，失败降级不阻塞。
     if TASK_SKILL_INJECT:
         sblock, smeta = await _skill_inject_for(row.get("goal") or "", row["prompt"] or "",
                                                 exec_agent)
@@ -1621,6 +1626,18 @@ async def _run_task(run_id: str, row: dict):
                         run_id, row["task_id"]))
         except Exception:  # noqa: BLE001 — 落库失败不得带倒子任务（检索是增强）
             pass
+    return prompt
+
+async def _run_task(run_id: str, row: dict):
+    chat_fn = _ctx.get("chat_fn")
+    if not chat_fn:
+        db.execute("UPDATE tasks SET status='failed',error='chat 引擎未就绪',updated_at=? "
+                   "WHERE run_id=? AND task_id=?", (_now(), run_id, row["task_id"]))
+        return
+    prompt = await _prepare_prompt(run_id, row)
+    attempts_done = int(row.get("attempts") or 0)
+    exec_agent, exec_model = _resolve_exec_target(run_id, row, attempts_done)
+    prompt = await _attach_retrieval(run_id, row, prompt, exec_agent)
     t0 = asyncio.get_event_loop().time()
     try:
         result = await asyncio.wait_for(

@@ -319,7 +319,11 @@ function termCjkUsable() {
   try {
     const cv = document.createElement('canvas');
     cv.width = 48; cv.height = 48;
-    const cx = cv.getContext('2d');
+    // willReadFrequently：这块画布的唯一用途就是 getImageData 读回像素量字形墨水，
+    // 默认（GPU 后端）每次 readback 都会强制同步回读，Chrome 实测会刷
+    // 「Multiple readback operations using getImageData are faster with the
+    //  willReadFrequently attribute set to true」并走慢路径（2026-10-31 控制台实测）。
+    const cx = cv.getContext('2d', { willReadFrequently: true });
     if (!cx) return true;
     // 字体栈里带换行缩进，先压成单行空白再交给 canvas font 解析
     const stack = cssToken('--term-font', 'monospace').replace(/\s+/g, ' ');

@@ -120,3 +120,35 @@ class TestMiddleware(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFrameSrc(unittest.TestCase):
+    """hub 的核心用法是嵌入各 agent 自己的 Web 界面 ⇒ 必须显式给 frame-src。
+
+    2026-10-31 实测：缺 frame-src 时浏览器回落 `default-src 'self'`，
+    每个嵌入面板都在控制台报 `Framing 'http://100.117.232.62:30141/' violates ...`。
+    这条闸门钉的是**「frame-src 不许被 default-src 兜走」**，不是某个具体网段。
+    """
+
+    def test_frame_src_directive_present(self):
+        self.assertIn("frame-src ", csp.POLICY,
+                      "缺 frame-src ⇒ 嵌入面板全部回落 default-src 'self' 报违规")
+
+    def test_default_frame_src_covers_remote_panels(self):
+        # 默认值必须容得下局域网/Tailscale/IPv6 三类网段（IP 段通配在 CSP 里非法，
+        # 所以只能按 scheme 放开；收紧走 HUB_CSP_FRAME_SRC，见 csp._frame_src 注释）
+        seg = [p for p in csp.POLICY.split(";") if p.strip().startswith("frame-src")][0]
+        for need in ("'self'", "http:", "https:"):
+            self.assertIn(need, seg, f"frame-src 缺 {need}：远程面板会被拦")
+
+    def test_env_can_narrow_frame_src(self):
+        old = os.environ.get("HUB_CSP_FRAME_SRC")
+        try:
+            os.environ["HUB_CSP_FRAME_SRC"] = "'self' http://192.168.5.102:*"
+            self.assertEqual(csp._frame_src(), "'self' http://192.168.5.102:*",
+                             "HUB_CSP_FRAME_SRC 必须能收窄白名单")
+        finally:
+            if old is None:
+                os.environ.pop("HUB_CSP_FRAME_SRC", None)
+            else:
+                os.environ["HUB_CSP_FRAME_SRC"] = old

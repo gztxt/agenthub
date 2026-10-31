@@ -27,12 +27,33 @@ from typing import Optional
 from starlette.requests import Request
 from starlette.responses import Response
 
+#: `frame-src` 的口径（2026-10-31 实测补齐）。
+#:
+#: **为什么必须显式写，不能靠 default-src 兜底**：hub 的核心用法就是**嵌入**各 agent 自己的
+#: 原生 Web 界面（cloudcli :3010、dsh、pi :30141、qwenpaw :8088…），嵌入地址是运行时从画像/
+#: 拉起日志里取的，跨 **局域网 IP / Tailscale 100.x / IPv6** 三种网段且**逐个 agent 不同**。
+#: 缺 `frame-src` 时浏览器回落到 `default-src 'self'` ⇒ 每一个嵌入面板都报违规
+#: （2026-10-31 用户控制台实测：`Framing 'http://100.117.232.62:30141/' violates ... "default-src 'self'"`）。
+#:
+#: **为什么给 `http: https:` 而不是逐个枚举**：CSP 的 host-source 不支持 IP 段通配
+#: （`http://100.*` 非法），而这三类网段随设备休眠/DHCP/重连不断变化 —— 枚举必然周期性失效，
+#: 失效形态正是本仓反复治理的「静默不可用」。
+#: **风险为什么可接受**：`frame-src` 只决定「谁可以被嵌进框里」，跨源 iframe 拿不到父页面的
+#: DOM/存储/脚本上下文（同源策略独立生效）；它比 `script-src` 宽一档，但不会让外站脚本在我们的
+#: 源里执行。真要紧的是 `script-src`，那里仍然只有 `'self'` + 已知必需的 inline/eval 债务。
+#: 想收紧：`HUB_CSP_FRAME_SRC='self' http://192.168.5.102:* http://100.117.232.62:*` 显式列白名单。
+def _frame_src() -> str:
+    v = (os.getenv("HUB_CSP_FRAME_SRC") or "").strip()
+    return v or "'self' http: https:"
+
+
 #: 单行策略（浏览器对多行不敏感，但单行便于 grep 与日志取证）
 POLICY = "; ".join([
     "default-src 'self'",
     "base-uri 'self'",
     "form-action 'self'",
     "frame-ancestors 'none'",
+    "frame-src " + _frame_src(),
     "object-src 'none'",
     "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
     "style-src 'self' 'unsafe-inline'",

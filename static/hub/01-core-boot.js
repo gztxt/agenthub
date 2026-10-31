@@ -327,6 +327,21 @@ function toast(msg, cls, opts = {}) {
   return el;   // v0.13.6：返回节点，供「链路恢复后收掉同一条提示」用（老调用方忽略返回值，行为不变）
 }
 
+/* F1（2026-10-31）：统一 toast 门面 —— kind ∈ {info, ok, warn, error}。
+ *
+ * 为什么是**包装**而不是改 toast() 签名：toast(msg, cls) 有 134 处调用，且
+ * 03/02 消费它的返回值「链路恢复后收掉同一条提示」（tests/test_toast_a11y.py 钉着）。
+ * 这里只做 kind → 既有 CSS 类 的映射，旧调用零改动、零语义变化。
+ * 映射表同时是白名单：未知 kind 按 info 处理并留一条 console.warn（不静默吞掉）。
+ * `error` 复用既有 .err 类（含 --danger-border/--danger-text token），不新增色值。 */
+const TOAST_KIND_CLASS = { info: 'info', ok: 'ok', warn: 'warn', error: 'err' };
+function showToast(kind, msg, opts = {}) {
+  const k = Object.prototype.hasOwnProperty.call(TOAST_KIND_CLASS, kind) ? kind : 'info';
+  if (k !== kind) console.warn('showToast(): 未知 kind "' + kind + '"，按 info 处理');
+  return toast(String(msg == null ? '' : msg), TOAST_KIND_CLASS[k], opts);
+}
+window.showToast = showToast;   // 供其它分片与探针调用（bundle 非模块，显式挂更清楚）
+
 function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -359,8 +374,15 @@ function jsStr(s) {
  * 主内容区 inline onclick 合法（侧栏禁令不涉这里——浮层三条配套红线原文口径）。 */
 function boxBusy(id, msg) {
   const el = $(id);
-  if (el) el.innerHTML = '<div class="hint">' + escapeHtml(msg || '加载中…') + '</div>';
-  return !!el;
+  if (!el) return false;
+  /* F1：busy 态用骨架占位而不是一行「加载中…」——列表区高度不塌、失败时不会
+     因为「空白 → 突然出现内容」而被当成两次不同的加载。文字只留给读屏（aria-label）。
+     纯几何骨架，颜色全部来自 :root token（--surface-2 / --hover），不新增色值。 */
+  const label = escapeHtml(msg || '加载中…');
+  el.innerHTML = '<div class="skel" role="status" aria-label="' + label + '">' +
+    '<div class="skel-row"></div><div class="skel-row short"></div><div class="skel-row"></div>' +
+    '</div>';
+  return true;
 }
 function boxFail(id, err, retryFn) {
   const el = $(id);

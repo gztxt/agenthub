@@ -201,6 +201,10 @@ function cmdCatalog() {
   (AGENTS || []).forEach(a => {
     rows.push({ k: 'a', id: a.id, label: a.name || a.id, sub: a.id });
   });
+  rows.push({ k: 'x', id: 'terminal', label: '打开终端（当前 Agent）', sub: '动作' });
+  rows.push({ k: 'x', id: 'settings', label: '打开设置 · 模型', sub: '动作' });
+  rows.push({ k: 'x', id: 'register', label: '注册自定义 Agent', sub: '动作' });
+  rows.push({ k: 'x', id: 'scan', label: '自动扫描本机 Agent', sub: '动作' });
   rows.push({ k: 'x', id: 'reload', label: '刷新实体与健康', sub: '动作' });
   rows.push({ k: 'x', id: 'nav-search', label: '搜索侧栏实体', sub: '动作' });
   return rows;
@@ -216,6 +220,19 @@ function cmdAction(id) {
     if (si) { si.focus(); si.select(); }
     return;
   }
+  /* F1：动作条目复用既有入口（go / gotoChat / openRegister / runScan），不新造导航。
+     终端动作不写死 agent：优先当前选中的实体，否则取第一个带 term 入口的 Agent；
+     两者都没有（首屏 AGENTS 还没到）时给一条 warn toast，而不是静默无反应。 */
+  if (id === 'terminal') {
+    const pick = chatPick || ((AGENTS || []).find(
+      a => a.kind === 'agent' && (a.entries || []).some(e => e.type === 'term')) || {}).id;
+    if (!pick) { showToast('warn', '还没有可打开终端的 Agent（列表仍在加载）'); return; }
+    gotoChat(pick, 'term');
+    return;
+  }
+  if (id === 'settings') { go('settings-model'); return; }
+  if (id === 'register') { openRegister(); return; }
+  if (id === 'scan') { runScan(); return; }
 }
 
 function openCmd() {

@@ -88,3 +88,30 @@ class TestSchemaShape(unittest.TestCase):
         i_rr = src.index("apply_rerank(module, ranked")
         i_up = src.index("_rc_kb.upsert(ranked, module, keywords)", i_rr)
         self.assertGreater(i_up, i_rr, "rerank 之后要再写一次，verdict 才有值")
+
+
+class TestKbReuseInPool(unittest.TestCase):
+    """知识库「省抓取」这一半必须真接线（2026-10-31 实测：连跑三次 kb_hits 恒 0）。
+
+    两个断点在一条链上：
+    ① `seed_rows` 对「已在池里」的仓直接 continue ⇒ `kb_hits` 数学上恒 0；
+    ② `build_pre` 不把池记录的 `enriched/branch/head/readme/paths` 带进 pre
+       ⇒ `enrich_top` 的 `p.get('enriched')` 永远为假 ⇒ 每轮重抓 3 次 API。
+    """
+
+    def test_build_pre_carries_kb_enrichment(self):
+        import refscout_collect as collect
+        src = pathlib.Path(collect.__file__).read_text(encoding="utf-8")
+        seg = src[src.index("def build_pre()"):]
+        seg = seg[:seg.index("pre = build_pre()")]
+        self.assertIn("'enriched'", seg,
+                      "build_pre 必须把已补全标记带出去，否则 enrich_top 永远重抓")
+
+    def test_seed_hit_in_pool_counts(self):
+        src = pathlib.Path(__import__("refscout_collect").__file__).read_text(encoding="utf-8")
+        seg = src[src.index("kb_rows = []"):]
+        seg = seg[:seg.index("toks = _rc_rank.tokens_of")]
+        self.assertIn("kb_hits += 1", seg,
+                      "池内命中要计入 kb_hits（旧写法在这里 continue 掉）")
+        self.assertIn("have['enriched'] = True", seg,
+                      "池内命中要把 KB 的补全结果写回池记录")

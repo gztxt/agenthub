@@ -605,12 +605,26 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int, fresh_d
         arms_log.append({'name': 'kb', 'q': '', 'ok': False, 'count': 0, 'ms': 0,
                          'cached': False, 'error': _rc_base._scrub(f'{type(e).__name__}: {e}')[:200]})
     kb_hits = 0
+    kb_new = 0
     for r in kb_rows:
         full = r.get('full_name') or ''
         if not full:
             continue
         key = full.lower()
-        if key in pool:
+        kb_ready = bool(r.get('readme_gist') and r.get('head'))
+        have = pool.get(key)
+        if have is not None:
+            # 2026-10-31 修：**池内命中也要复用 KB 的补全结果**。
+            # 旧写法 `if key in pool: continue` 让这条知识库在最常见的「同一查询重跑」上
+            # 永远不生效——搜索臂每次把同一批仓捞回来，KB 一条都用不上，
+            # `kb_hits` 数学上恒 0（实测连跑三次全 0，而表里有 63 行）。
+            if kb_ready and not have.get('enriched'):
+                have['enriched'] = True
+                have['branch'] = r.get('branch') or have['item'].get('default_branch') or 'main'
+                have['head'] = r.get('head')
+                have['readme'] = r.get('readme_gist') or ''
+                have['paths'] = []
+                kb_hits += 1
             continue
         item = {
             'full_name': full, 'html_url': r.get('url') or f'https://github.com/{full}',
@@ -630,10 +644,10 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int, fresh_d
             rec['readme'] = r.get('readme_gist') or ''
             rec['paths'] = []
         pool[key] = rec
-        kb_hits += 1
-    if kb_hits:
+        kb_new += 1
+    if kb_hits or kb_new:
         arms_log.append({'name': 'kb', 'q': '', 'ok': True, 'count': kb_hits, 'ms': 0,
-                         'cached': True, 'error': None})
+                         'cached': True, 'error': None, 'new': kb_new})
 
     toks = _rc_rank.tokens_of(keywords)
     groups = _rc_rank.alias_groups(keywords)
@@ -659,7 +673,14 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int, fresh_d
             if not _keep_in_pre(bucket, cov, matched, phrase, hits, len(groups), bool(srcs)):
                 continue
             stars = int(item.get('stargazers_count') or 0)
-            out.append({'key': key, 'item': item, 'bucket': bucket, 'cov': cov, 'hits': hits, 'seen': rec['seen'], 'sources': srcs, 'via': rec.get('via') or set(), 'pre': 0.55 * cov + 0.2 * min(1, math.log10(stars + 1) / 4) + 0.25 * min(1, hits / 3) + (_rc_base.SOURCE_BONUS if srcs else 0)})
+            row = {'key': key, 'item': item, 'bucket': bucket, 'cov': cov, 'hits': hits, 'seen': rec['seen'], 'sources': srcs, 'via': rec.get('via') or set(), 'pre': 0.55 * cov + 0.2 * min(1, math.log10(stars + 1) / 4) + 0.25 * min(1, hits / 3) + (_rc_base.SOURCE_BONUS if srcs else 0)}
+            # 2026-10-31 修：把池记录里的「已补全」标记带进 pre。
+            # 旧写法不带 ⇒ `enrich_top` 的 `p.get('enriched')` 永远为假 ⇒ 每轮重抓
+            # README/树/head（每仓 3 次 API），知识库「省抓取」这一半等于没接线。
+            for fld in ('enriched', 'branch', 'head', 'readme', 'paths'):
+                if rec.get(fld):
+                    row[fld] = rec[fld]
+            out.append(row)
         out.sort(key=lambda x: (x['bucket'] != 'impl', -x['pre']))
         return out
     pre = build_pre()

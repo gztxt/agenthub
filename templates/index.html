@@ -879,8 +879,12 @@
         .set-check input { margin-top: 2px; }
 
         /* ── 命令面板（⌘K）── */
+        .cmd-group { padding: 10px 12px 2px; font-size: var(--fs-xs); color: var(--text-2); letter-spacing: .04em; }
         .cmd-item { padding: 10px 12px; border-radius: 8px; font-size: var(--fs-base); cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
         .cmd-item:hover, .cmd-item.sel { background: var(--surface-2); }
+        /* v0.13.185：toast 的「重试」动作按钮。颜色继承所在提示的语义色（err 时是 danger-text） */
+        .toast-act { margin-left: 10px; background: none; border: 1px solid currentColor; color: inherit; border-radius: 6px; padding: 2px 8px; font-size: var(--fs-sm); cursor: pointer; }
+        .toast-act:hover { background: var(--surface-2); }
 
         #toast { position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%); z-index: 99; display: flex; flex-direction: column; gap: 8px; align-items: center; }
         #toast div { background: var(--bg); border: 1px solid var(--border); padding: 12px 20px; border-radius: 10px; font-size: var(--fs-base); animation: pulse 3s forwards; box-shadow: 0 8px 24px var(--shadow-lg); }
@@ -3006,11 +3010,11 @@
     </aside>
 
 
-    <!-- 命令面板（⌘K / Ctrl+K） -->
-    <div class="modal-mask" id="cmdMask" onclick="if(event.target===this)closeCmd()">
+    <!-- 命令面板（⌘K / Ctrl+K）—— 遮罩点击走 05 分片的委托（AGENTS.md 4.2 浮层单一出口） -->
+    <div class="modal-mask" id="cmdMask" role="dialog" aria-modal="true" aria-label="命令面板">
         <div class="modal" style="padding:12px">
-            <input id="cmdInput" placeholder="搜索实体直达工作台" style="width:100%" autocomplete="off" aria-label="命令面板搜索">
-            <div id="cmdList" style="margin-top:8px;max-height:50vh;overflow-y:auto"></div>
+            <input id="cmdInput" placeholder="搜索页面 / 实体 / 动作" style="width:100%" autocomplete="off" aria-label="命令面板搜索" role="combobox" aria-expanded="true" aria-controls="cmdList">
+            <div id="cmdList" role="listbox" aria-label="命令结果" style="margin-top:8px;max-height:50vh;overflow-y:auto"></div>
         </div>
     </div>
 
@@ -3157,6 +3161,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=f62871b4"></script>
+    <script src="/static/hub.js?v=5be0799d"></script>
 </body>
 </html>

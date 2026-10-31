@@ -135,7 +135,10 @@ class TestNoInlineOnclickJsStr(unittest.TestCase):
 
     def test_site6_cmd_go(self):
         body = self._body("05-chat-and-history.js", r"function renderCmdList\(.*?\n\}")
-        self.assertIn('data-sk-cmdgo="\' + escapeHtml(a.id)', body)
+        # v0.13.185：命令面板扩成三类目（页面/实体/动作），选择值带前缀 ⇒ 属性值
+        # 从 `a.id` 变成 `r.k + ':' + r.id`。判据不变：**整值必须过 escapeHtml**
+        # （不是查某个字段名 —— 查字段名会在字段改名时假红）。
+        self.assertRegex(body, r"""data-sk-cmdgo="' \+\s*escapeHtml\(r\.k \+ ':' \+ r\.id\)""")
 
     # ── 委托必须真的绑上（写了 data-* 没人绑 = 死按钮）──────────
     def test_delegations_defined(self):

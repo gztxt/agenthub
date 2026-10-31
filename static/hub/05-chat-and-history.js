@@ -106,6 +106,23 @@ function bindChatDelegation() {
       if (c && cmd.contains(c)) cmdGo(c.dataset.skCmdgo || '');
     });
   }
+  /* 变量名刻意不用 `mask`：02 分片的侧栏遮罩绑定就叫 mask，测试
+     test_overlay_exclusion 用 `mask.addEventListener('click'` 定位它 —— 同名会被抢到本块。 */
+  const cmdMaskEl = $('cmdMask');
+  if (cmdMaskEl && !cmdMaskEl.__cmdMaskDeleg) {
+    cmdMaskEl.__cmdMaskDeleg = true;
+    /* 遮罩单一出口（v0.13.185）：只认「点在遮罩本身」。模板原来的 inline
+       `onclick="if(event.target===this)closeCmd()"` 已删 —— 同一语义改到委托里，
+       既少一处内联处理器，也保证「导航即清浮层」只有 closeCmd 一个出口。 */
+    cmdMaskEl.addEventListener('click', e => { if (e.target === cmdMaskEl) closeCmd(); });
+    // 悬停跟随高亮：键盘 ↑↓ 与鼠标共用同一 `.sel` 语义，不维护两套选中态
+    cmdMaskEl.addEventListener('mousemove', e => {
+      const it = e.target && e.target.closest && e.target.closest('.cmd-item');
+      if (!it) return;
+      const items = Array.from(cmdMaskEl.querySelectorAll('.cmd-item'));
+      cmdHighlight(items.indexOf(it));
+    });
+  }
 }
 
 function pickTool(server, tool) {
@@ -162,7 +179,45 @@ async function callToolSel() {
   } catch (e) { $('mcCallOut').textContent = '失败: ' + e.message; }
 }
 
-/* ── T8 命令面板（⌘K/Ctrl+K）：搜实体直达工作台 ── */
+/* ── T8 命令面板（⌘K/Ctrl+K）：搜实体直达工作台 ──
+ * v0.13.185：从「只搜实体」扩成三类目（页面 / 实体 / 动作），并支持 ↑↓ 选择。
+ * 结构约束（改前先读）：
+ *  ① 浮层容器仍是**同一个** #cmdMask —— 不新建第二套遮罩（AGENTS.md 4.2 浮层唯一性）。
+ *  ② 开启/关闭仍只有 openCmd/closeCmd 两个入口，别处不许直接 classList.add('on')。
+ *  ③ 列表项一律 data-* + 委托（`onclick` 在双引号属性里会被 id 内含引号截断，
+ *     见 v0.13.131 的回归：点击静默 SyntaxError，只有控制台可见）。
+ *  ④ 选择值带前缀（p:/a:/x:）以区分动作类型；**裸 id 仍按实体处理**（向后兼容旧书签/旧节点）。 */
+const CMD_MAX_PER_GROUP = 8;
+let _cmdRows = [];        // 当前可见行（键盘 ↑↓ 用），reset 于每次 render
+
+function cmdCatalog() {
+  const rows = [];
+  // 页面：运行时按 #page-<id> 过滤 —— 静态清单会在删页/改名后指向不存在的页，
+  // 而 go() 对未知页会静默退回 classroom（用户看到「点了没反应」）。
+  Object.keys(PAGE_LABELS).forEach(p => {
+    if (!document.getElementById('page-' + p)) return;
+    rows.push({ k: 'p', id: p, label: PAGE_LABELS[p], sub: '页面' });
+  });
+  (AGENTS || []).forEach(a => {
+    rows.push({ k: 'a', id: a.id, label: a.name || a.id, sub: a.id });
+  });
+  rows.push({ k: 'x', id: 'reload', label: '刷新实体与健康', sub: '动作' });
+  rows.push({ k: 'x', id: 'nav-search', label: '搜索侧栏实体', sub: '动作' });
+  return rows;
+}
+
+function cmdAction(id) {
+  if (id === 'reload') {
+    try { loadAgents(); pollHealth(); } catch (e) { toast('刷新失败：' + e.message, 'err'); }
+    return;
+  }
+  if (id === 'nav-search') {
+    const si = $('navSearch');
+    if (si) { si.focus(); si.select(); }
+    return;
+  }
+}
+
 function openCmd() {
   bindChatDelegation();   // v0.13.131：⌘K 列表项走 data-* 委托（幂等）
   $('cmdMask').classList.add('on');
@@ -171,19 +226,72 @@ function openCmd() {
   renderCmdList('');
   i.focus();
 }
-function closeCmd() { $('cmdMask').classList.remove('on'); }
+function closeCmd() {
+  $('cmdMask').classList.remove('on');
+  _cmdRows = [];
+}
 function renderCmdList(q) {
   const box = $('cmdList');
-  // 模糊：派发时 agent 名与 id 最常被手误（`claud`/`opencode-e`）。
-  const items = AGENTS.map(a => ({ a, score: fuzzyMatch([[a.id, 3], [a.name, 2]], q) }))
-    .filter(x => !q || x.score > 0)
-    .sort((x, y) => (y.score - x.score) || String(x.a.name || '').localeCompare(String(y.a.name || '')))
-    .slice(0, 12).map(x => x.a);
-  box.innerHTML = items.map(a =>
-    '<div class="cmd-item" data-sk-cmdgo="' + escapeHtml(a.id) + '"><span>' + escapeHtml(a.name) + '</span><span class="hint">' + escapeHtml(a.id) + '</span></div>').join('') ||
-    '<div class="hint" style="padding:8px">无匹配实体</div>';
+  if (!box) return;
+  const score = r => (q ? fuzzyMatch([[r.label, 3], [r.sub, 2], [r.id, 1]], q) : 1);
+  const hit = cmdCatalog().map(r => ({ r, s: score(r) })).filter(x => !q || x.s > 0);
+  const byKind = { p: [], a: [], x: [] };
+  hit.sort((x, y) => (y.s - x.s) || String(x.r.label).localeCompare(String(y.r.label)))
+     .forEach(x => byKind[x.r.k].push(x.r));
+  const groups = [['页面', byKind.p], ['实体', byKind.a], ['动作', byKind.x]];
+  const shown = [];
+  let html = '';
+  groups.forEach(([title, list]) => {
+    const part = list.slice(0, CMD_MAX_PER_GROUP);
+    if (!part.length) return;
+    html += '<div class="cmd-group">' + escapeHtml(title) + '</div>';
+    part.forEach(r => {
+      shown.push(r);
+      html += '<div class="cmd-item" role="option" data-sk-cmdgo="' +
+        escapeHtml(r.k + ':' + r.id) + '"><span>' + escapeHtml(r.label) +
+        '</span><span class="hint">' + escapeHtml(r.sub) + '</span></div>';
+    });
+  });
+  _cmdRows = shown;
+  box.innerHTML = html || '<div class="hint" style="padding:8px">无匹配项</div>';
+  if (shown.length) cmdHighlight(0);
 }
-function cmdGo(id) { closeCmd(); gotoChat(id); }
+
+/** 键盘 ↑↓ 与鼠标悬停共用的选中态：只改 class，不重渲染（重渲染会丢焦点）。 */
+function cmdHighlight(idx) {
+  const box = $('cmdList');
+  if (!box) return;
+  const items = Array.from(box.querySelectorAll('.cmd-item'));
+  if (!items.length) return;
+  const i = (idx + items.length) % items.length;
+  items.forEach((el, n) => el.classList.toggle('sel', n === i));
+  const cur = items[i];
+  if (cur && cur.scrollIntoView) { try { cur.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
+  return i;
+}
+function cmdMove(delta) {
+  const box = $('cmdList');
+  if (!box) return;
+  const items = Array.from(box.querySelectorAll('.cmd-item'));
+  if (!items.length) return;
+  const at = items.findIndex(el => el.classList.contains('sel'));
+  cmdHighlight((at < 0 ? 0 : at) + delta);
+}
+function cmdSubmit() {
+  const box = $('cmdList');
+  const sel = box && box.querySelector('.cmd-item.sel');
+  const first = box && box.querySelector('.cmd-item');
+  const t = sel || first;
+  if (t) cmdGo(t.dataset.skCmdgo || '');
+}
+function cmdGo(sel) {
+  const s = String(sel || '');
+  closeCmd();
+  if (s.indexOf('p:') === 0) { go(s.slice(2)); return; }
+  if (s.indexOf('x:') === 0) { cmdAction(s.slice(2)); return; }
+  if (s.indexOf('a:') === 0) { gotoChat(s.slice(2)); return; }
+  gotoChat(s);   // 兼容：无前缀 = 实体 id（旧版只产出这种）
+}
 
 /* ── 启动 ─────────────────────────────────────────── */
 

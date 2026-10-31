@@ -83,13 +83,24 @@ class ToastSignatureUnchanged(unittest.TestCase):
         self.assertIsNotNone(m, "找不到 toast()")
         self.body = m.group(0)
 
-    def test_signature_is_still_two_params(self):
+    def test_signature_is_two_required_plus_optional_tail(self):
+        """v0.13.185：允许**可选**第三参 opts（动作按钮/同文去重）。
+
+        约束从"只能两个参数"放宽为"前两参不许动 + 第 3 参起必须带默认值"：
+        134 个旧调用只传 (msg, cls)，只要新增参数可选就零波及；而加必填参数
+        会让全站提示变成 undefined（这才是原测试真正要拦的东西）。
+        """
         m = re.search(r"^function toast\(([^)]*)\)", self.body, re.M)
         self.assertIsNotNone(m)
         params = [p.strip() for p in m.group(1).split(",") if p.strip()]
-        self.assertEqual(params, ["msg", "cls"],
-                         "toast() 签名变成 %s —— 加参数会波及 40+ 调用方"
-                         "（03-agents-cards.js:180-182 的注释明确警告过）" % params)
+        names = [p.split("=")[0].strip() for p in params]
+        self.assertEqual(names[:2], ["msg", "cls"],
+                         "toast() 前两参必须是 msg, cls，实际 %s"
+                         "（03-agents-cards.js:180-182 的注释警告过：改名/加必填会波及 40+ 调用方）"
+                         % names)
+        for extra in params[2:]:
+            self.assertIn("=", extra,
+                          "第 3 参起必须带默认值：%r —— 旧调用不传会得到 undefined" % extra)
 
     def test_still_returns_the_node(self):
         self.assertRegex(self.body, r"return\s+el\b",

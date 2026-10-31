@@ -285,12 +285,45 @@ async function api(path, opt) {
   return data;
 }
 
-function toast(msg, cls) {
+/* v0.13.185：toast 增强 —— 可选动作按钮 + 同文去重。
+ *
+ * 签名保持 `(msg, cls)` 向后兼容：第三参 opts 缺省时行为与旧版一致（4.2s 自动消失）。
+ * 为什么要去重：`loadAgents` 失败每 30s 一条、`pollHealth` 每 15s 一条，Hub 一挂
+ * 屏幕 4 分钟内能堆 12 条同样的字 —— 用户读到的是"页面在抖"而不是"服务不可达"。
+ * 同 msg + 同 cls 在存活期内再次出现 ⇒ 复用原节点并重置计时（不新增节点）。
+ *
+ * opts.action = {label, fn}：错误提示带上「重试」入口。fn 抛错不影响关闭
+ * （finally 里收节点），否则一次失败的重试会把提示永久钉在屏幕上。
+ */
+const _toastLive = new Map();     // "cls\u0000msg" -> 节点（同文复用）
+function toast(msg, cls, opts = {}) {
+  opts = opts || {};   // 显式传 null 也兜住（默认参数只挡 undefined）
+  const ttl = Number.isFinite(opts.ttl) ? opts.ttl : 4200;
+  const key = (cls || '') + '\u0000' + msg;
+  const live = _toastLive.get(key);
+  if (live && live.isConnected) {
+    if (live._hubT) clearTimeout(live._hubT);
+    live._hubT = setTimeout(() => { live.remove(); _toastLive.delete(key); }, ttl);
+    return live;
+  }
   const el = document.createElement('div');
   el.className = cls || '';
-  el.textContent = msg;
+  const body = document.createElement('span');
+  body.textContent = msg;
+  el.appendChild(body);
+  if (opts.action && opts.action.label && typeof opts.action.fn === 'function') {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'toast-act';
+    b.textContent = opts.action.label;
+    b.addEventListener('click', () => {
+      try { opts.action.fn(); } finally { el.remove(); _toastLive.delete(key); }
+    });
+    el.appendChild(b);
+  }
+  el._hubT = setTimeout(() => { el.remove(); _toastLive.delete(key); }, ttl);
   $('toast').appendChild(el);
-  setTimeout(() => el.remove(), 4200);
+  _toastLive.set(key, el);
   return el;   // v0.13.6：返回节点，供「链路恢复后收掉同一条提示」用（老调用方忽略返回值，行为不变）
 }
 
@@ -609,7 +642,10 @@ async function loadAgents() {
     // 那是 Hub 不可达在顶栏唯一的灯色提示，兜底就是下面这条 toast。
     agentFailStreak++;
     if (agentFailStreak === 2) {
-      toast('Hub 数据连续 ' + agentFailStreak + ' 次拉取失败：' + e.message, 'err');
+      /* v0.13.185：错误提示带「重试」动作 —— 旧行为是只报错，用户唯一出路是刷新整页
+         （会丢掉终端与对话上下文）。action 走 toast 第三参，不改 134 处旧调用。 */
+      toast('Hub 数据连续 ' + agentFailStreak + ' 次拉取失败：' + e.message, 'err',
+            { ttl: 8000, action: { label: '重试', fn: () => { agentFailStreak = 0; loadAgents(); } } });
     }
   }
 }
@@ -7194,6 +7230,23 @@ function bindChatDelegation() {
       if (c && cmd.contains(c)) cmdGo(c.dataset.skCmdgo || '');
     });
   }
+  /* 变量名刻意不用 `mask`：02 分片的侧栏遮罩绑定就叫 mask，测试
+     test_overlay_exclusion 用 `mask.addEventListener('click'` 定位它 —— 同名会被抢到本块。 */
+  const cmdMaskEl = $('cmdMask');
+  if (cmdMaskEl && !cmdMaskEl.__cmdMaskDeleg) {
+    cmdMaskEl.__cmdMaskDeleg = true;
+    /* 遮罩单一出口（v0.13.185）：只认「点在遮罩本身」。模板原来的 inline
+       `onclick="if(event.target===this)closeCmd()"` 已删 —— 同一语义改到委托里，
+       既少一处内联处理器，也保证「导航即清浮层」只有 closeCmd 一个出口。 */
+    cmdMaskEl.addEventListener('click', e => { if (e.target === cmdMaskEl) closeCmd(); });
+    // 悬停跟随高亮：键盘 ↑↓ 与鼠标共用同一 `.sel` 语义，不维护两套选中态
+    cmdMaskEl.addEventListener('mousemove', e => {
+      const it = e.target && e.target.closest && e.target.closest('.cmd-item');
+      if (!it) return;
+      const items = Array.from(cmdMaskEl.querySelectorAll('.cmd-item'));
+      cmdHighlight(items.indexOf(it));
+    });
+  }
 }
 
 function pickTool(server, tool) {
@@ -7250,7 +7303,45 @@ async function callToolSel() {
   } catch (e) { $('mcCallOut').textContent = '失败: ' + e.message; }
 }
 
-/* ── T8 命令面板（⌘K/Ctrl+K）：搜实体直达工作台 ── */
+/* ── T8 命令面板（⌘K/Ctrl+K）：搜实体直达工作台 ──
+ * v0.13.185：从「只搜实体」扩成三类目（页面 / 实体 / 动作），并支持 ↑↓ 选择。
+ * 结构约束（改前先读）：
+ *  ① 浮层容器仍是**同一个** #cmdMask —— 不新建第二套遮罩（AGENTS.md 4.2 浮层唯一性）。
+ *  ② 开启/关闭仍只有 openCmd/closeCmd 两个入口，别处不许直接 classList.add('on')。
+ *  ③ 列表项一律 data-* + 委托（`onclick` 在双引号属性里会被 id 内含引号截断，
+ *     见 v0.13.131 的回归：点击静默 SyntaxError，只有控制台可见）。
+ *  ④ 选择值带前缀（p:/a:/x:）以区分动作类型；**裸 id 仍按实体处理**（向后兼容旧书签/旧节点）。 */
+const CMD_MAX_PER_GROUP = 8;
+let _cmdRows = [];        // 当前可见行（键盘 ↑↓ 用），reset 于每次 render
+
+function cmdCatalog() {
+  const rows = [];
+  // 页面：运行时按 #page-<id> 过滤 —— 静态清单会在删页/改名后指向不存在的页，
+  // 而 go() 对未知页会静默退回 classroom（用户看到「点了没反应」）。
+  Object.keys(PAGE_LABELS).forEach(p => {
+    if (!document.getElementById('page-' + p)) return;
+    rows.push({ k: 'p', id: p, label: PAGE_LABELS[p], sub: '页面' });
+  });
+  (AGENTS || []).forEach(a => {
+    rows.push({ k: 'a', id: a.id, label: a.name || a.id, sub: a.id });
+  });
+  rows.push({ k: 'x', id: 'reload', label: '刷新实体与健康', sub: '动作' });
+  rows.push({ k: 'x', id: 'nav-search', label: '搜索侧栏实体', sub: '动作' });
+  return rows;
+}
+
+function cmdAction(id) {
+  if (id === 'reload') {
+    try { loadAgents(); pollHealth(); } catch (e) { toast('刷新失败：' + e.message, 'err'); }
+    return;
+  }
+  if (id === 'nav-search') {
+    const si = $('navSearch');
+    if (si) { si.focus(); si.select(); }
+    return;
+  }
+}
+
 function openCmd() {
   bindChatDelegation();   // v0.13.131：⌘K 列表项走 data-* 委托（幂等）
   $('cmdMask').classList.add('on');
@@ -7259,19 +7350,72 @@ function openCmd() {
   renderCmdList('');
   i.focus();
 }
-function closeCmd() { $('cmdMask').classList.remove('on'); }
+function closeCmd() {
+  $('cmdMask').classList.remove('on');
+  _cmdRows = [];
+}
 function renderCmdList(q) {
   const box = $('cmdList');
-  // 模糊：派发时 agent 名与 id 最常被手误（`claud`/`opencode-e`）。
-  const items = AGENTS.map(a => ({ a, score: fuzzyMatch([[a.id, 3], [a.name, 2]], q) }))
-    .filter(x => !q || x.score > 0)
-    .sort((x, y) => (y.score - x.score) || String(x.a.name || '').localeCompare(String(y.a.name || '')))
-    .slice(0, 12).map(x => x.a);
-  box.innerHTML = items.map(a =>
-    '<div class="cmd-item" data-sk-cmdgo="' + escapeHtml(a.id) + '"><span>' + escapeHtml(a.name) + '</span><span class="hint">' + escapeHtml(a.id) + '</span></div>').join('') ||
-    '<div class="hint" style="padding:8px">无匹配实体</div>';
+  if (!box) return;
+  const score = r => (q ? fuzzyMatch([[r.label, 3], [r.sub, 2], [r.id, 1]], q) : 1);
+  const hit = cmdCatalog().map(r => ({ r, s: score(r) })).filter(x => !q || x.s > 0);
+  const byKind = { p: [], a: [], x: [] };
+  hit.sort((x, y) => (y.s - x.s) || String(x.r.label).localeCompare(String(y.r.label)))
+     .forEach(x => byKind[x.r.k].push(x.r));
+  const groups = [['页面', byKind.p], ['实体', byKind.a], ['动作', byKind.x]];
+  const shown = [];
+  let html = '';
+  groups.forEach(([title, list]) => {
+    const part = list.slice(0, CMD_MAX_PER_GROUP);
+    if (!part.length) return;
+    html += '<div class="cmd-group">' + escapeHtml(title) + '</div>';
+    part.forEach(r => {
+      shown.push(r);
+      html += '<div class="cmd-item" role="option" data-sk-cmdgo="' +
+        escapeHtml(r.k + ':' + r.id) + '"><span>' + escapeHtml(r.label) +
+        '</span><span class="hint">' + escapeHtml(r.sub) + '</span></div>';
+    });
+  });
+  _cmdRows = shown;
+  box.innerHTML = html || '<div class="hint" style="padding:8px">无匹配项</div>';
+  if (shown.length) cmdHighlight(0);
 }
-function cmdGo(id) { closeCmd(); gotoChat(id); }
+
+/** 键盘 ↑↓ 与鼠标悬停共用的选中态：只改 class，不重渲染（重渲染会丢焦点）。 */
+function cmdHighlight(idx) {
+  const box = $('cmdList');
+  if (!box) return;
+  const items = Array.from(box.querySelectorAll('.cmd-item'));
+  if (!items.length) return;
+  const i = (idx + items.length) % items.length;
+  items.forEach((el, n) => el.classList.toggle('sel', n === i));
+  const cur = items[i];
+  if (cur && cur.scrollIntoView) { try { cur.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
+  return i;
+}
+function cmdMove(delta) {
+  const box = $('cmdList');
+  if (!box) return;
+  const items = Array.from(box.querySelectorAll('.cmd-item'));
+  if (!items.length) return;
+  const at = items.findIndex(el => el.classList.contains('sel'));
+  cmdHighlight((at < 0 ? 0 : at) + delta);
+}
+function cmdSubmit() {
+  const box = $('cmdList');
+  const sel = box && box.querySelector('.cmd-item.sel');
+  const first = box && box.querySelector('.cmd-item');
+  const t = sel || first;
+  if (t) cmdGo(t.dataset.skCmdgo || '');
+}
+function cmdGo(sel) {
+  const s = String(sel || '');
+  closeCmd();
+  if (s.indexOf('p:') === 0) { go(s.slice(2)); return; }
+  if (s.indexOf('x:') === 0) { cmdAction(s.slice(2)); return; }
+  if (s.indexOf('a:') === 0) { gotoChat(s.slice(2)); return; }
+  gotoChat(s);   // 兼容：无前缀 = 实体 id（旧版只产出这种）
+}
 
 /* ── 启动 ─────────────────────────────────────────── */
 
@@ -7847,14 +7991,17 @@ if (HOME_CHIPS) HOME_CHIPS.addEventListener('keydown', e => {
     e.preventDefault(); e.target.click();
   }
 });
-// T8：命令面板输入/键盘
+// T8：命令面板输入/键盘（v0.13.185：↑↓ 选择 + Enter 走选中项）
 $('cmdInput').addEventListener('input', e => renderCmdList(e.target.value.trim()));
 $('cmdInput').addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown') { e.preventDefault(); cmdMove(1); return; }
+  if (e.key === 'ArrowUp') { e.preventDefault(); cmdMove(-1); return; }
   if (e.key === 'Enter') {
     e.preventDefault();
-    const q = e.target.value.trim();
-    const first = $('cmdList').querySelector('.cmd-item');
-    if (first && !q) closeCmd(); else if (first) first.click();
+    /* 空查询按 Enter = 关闭，不跳转（原口径保留：⌘K 之后反悔的路径）。
+       有查询时走当前高亮项；高亮未建立则退回第一条。 */
+    if (!e.target.value.trim()) { closeCmd(); return; }
+    cmdSubmit();
   } else if (e.key === 'Escape') closeCmd();
 });
 /* 快捷键不许在"正在输入"的地方劫持按键（改前实测的两种破坏）：

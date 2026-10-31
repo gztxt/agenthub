@@ -39,7 +39,9 @@ from pydantic import BaseModel
 from starlette.middleware.gzip import GZipMiddleware
 
 sys.path.insert(0, str(Path(__file__).parent))
+import csp
 import db
+import logjson
 import modelcfg
 from config import config
 from discovery import AgentDiscovery, AgentInfo
@@ -108,7 +110,19 @@ from api_system import router as system_router   # 系统级：前端「需重�
 print(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.184"
+VERSION = "0.13.185"
+
+# v0.13.185（2026-10-31）：四件基础设施小改，来源是对《AgentHub 全面升级方案.docx》的
+#   逐条实测复核（`docs/UPGRADE-PLAN-REVIEW-20261031.md`）。其中两项文档说"完全缺失"、
+#   实测**已存在**（⌘K 命令面板、toast + boxBusy 三态），故本轮是扩展不是新建。
+#   ① 命令面板三类目（页面/实体/动作）+ ↑↓ 选择；页面按 `#page-<id>` 运行时过滤
+#      （静态清单会指向已删页，而 go() 对未知页静默退回 classroom ⇒ "点了没反应"）。
+#   ② toast 可选第三参（ttl / action）；前两参不动 ⇒ 134 处旧调用零改动。
+#      Hub 不可达时不再 4 分钟堆 12 条同样的字。
+#   ③ CSP **先 Report-Only**：模板仍有 inline onclick、xterm 有 new Function 路径，
+#      直接强制会以"终端黑屏/按钮没反应"炸且服务端零错误。HUB_CSP=enforce 才收紧。
+#   ④ JSON 日志**不接管 root/uvicorn**：接管会把访问日志也改 JSON，
+#      `journalctl -u agenthub | grep GET` 这类既有用法全废。73 处 print 不迁移。
 
 # v0.13.184（2026-10-30）：judge 加概率闸 —— 「问到了但没把握」不再伪装成一次判定。
 #   ① 病：`choice` 的 probabilities 归一化成和=1 ⇒ **必然有 argmax**；0.40/0.35/0.25 时
@@ -597,6 +611,14 @@ async def api_rate_limit(request: Request, call_next):
 #    Starlette 里后注册的中间件在最外层 ⇒ 本闸门先于 api_rate_limit：被拒的请求既不该占限流预算，
 #    更不该走到 handler 里产生副作用（rebuild 重写记忆就是这类副作用）。 ──
 app.middleware("http")(write_gate)
+
+# ── v0.13.185：CSP / 安全响应头（默认 Report-Only，见 src/csp.py 头注释）──
+# 挂在这里 = 最外层 ⇒ 401/429 与 SSE 也带同一套头，不会出现「被拒的响应没有安全头」。
+app.middleware("http")(csp.middleware)
+
+# ── v0.13.185：JSON 行日志（新增通道，不接管 root/uvicorn）──
+# 只配 `agenthub` 命名空间；既有 print 与 uvicorn 访问日志口径不变。
+logjson.setup()
 
 templates_dir = Path(__file__).parent.parent / "templates"
 static_path = Path(__file__).parent.parent / "static"

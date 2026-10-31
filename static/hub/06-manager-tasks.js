@@ -259,14 +259,17 @@ if (HOME_CHIPS) HOME_CHIPS.addEventListener('keydown', e => {
     e.preventDefault(); e.target.click();
   }
 });
-// T8：命令面板输入/键盘
+// T8：命令面板输入/键盘（v0.13.185：↑↓ 选择 + Enter 走选中项）
 $('cmdInput').addEventListener('input', e => renderCmdList(e.target.value.trim()));
 $('cmdInput').addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown') { e.preventDefault(); cmdMove(1); return; }
+  if (e.key === 'ArrowUp') { e.preventDefault(); cmdMove(-1); return; }
   if (e.key === 'Enter') {
     e.preventDefault();
-    const q = e.target.value.trim();
-    const first = $('cmdList').querySelector('.cmd-item');
-    if (first && !q) closeCmd(); else if (first) first.click();
+    /* 空查询按 Enter = 关闭，不跳转（原口径保留：⌘K 之后反悔的路径）。
+       有查询时走当前高亮项；高亮未建立则退回第一条。 */
+    if (!e.target.value.trim()) { closeCmd(); return; }
+    cmdSubmit();
   } else if (e.key === 'Escape') closeCmd();
 });
 /* 快捷键不许在"正在输入"的地方劫持按键（改前实测的两种破坏）：

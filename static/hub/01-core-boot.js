@@ -285,12 +285,45 @@ async function api(path, opt) {
   return data;
 }
 
-function toast(msg, cls) {
+/* v0.13.185：toast 增强 —— 可选动作按钮 + 同文去重。
+ *
+ * 签名保持 `(msg, cls)` 向后兼容：第三参 opts 缺省时行为与旧版一致（4.2s 自动消失）。
+ * 为什么要去重：`loadAgents` 失败每 30s 一条、`pollHealth` 每 15s 一条，Hub 一挂
+ * 屏幕 4 分钟内能堆 12 条同样的字 —— 用户读到的是"页面在抖"而不是"服务不可达"。
+ * 同 msg + 同 cls 在存活期内再次出现 ⇒ 复用原节点并重置计时（不新增节点）。
+ *
+ * opts.action = {label, fn}：错误提示带上「重试」入口。fn 抛错不影响关闭
+ * （finally 里收节点），否则一次失败的重试会把提示永久钉在屏幕上。
+ */
+const _toastLive = new Map();     // "cls\u0000msg" -> 节点（同文复用）
+function toast(msg, cls, opts = {}) {
+  opts = opts || {};   // 显式传 null 也兜住（默认参数只挡 undefined）
+  const ttl = Number.isFinite(opts.ttl) ? opts.ttl : 4200;
+  const key = (cls || '') + '\u0000' + msg;
+  const live = _toastLive.get(key);
+  if (live && live.isConnected) {
+    if (live._hubT) clearTimeout(live._hubT);
+    live._hubT = setTimeout(() => { live.remove(); _toastLive.delete(key); }, ttl);
+    return live;
+  }
   const el = document.createElement('div');
   el.className = cls || '';
-  el.textContent = msg;
+  const body = document.createElement('span');
+  body.textContent = msg;
+  el.appendChild(body);
+  if (opts.action && opts.action.label && typeof opts.action.fn === 'function') {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'toast-act';
+    b.textContent = opts.action.label;
+    b.addEventListener('click', () => {
+      try { opts.action.fn(); } finally { el.remove(); _toastLive.delete(key); }
+    });
+    el.appendChild(b);
+  }
+  el._hubT = setTimeout(() => { el.remove(); _toastLive.delete(key); }, ttl);
   $('toast').appendChild(el);
-  setTimeout(() => el.remove(), 4200);
+  _toastLive.set(key, el);
   return el;   // v0.13.6：返回节点，供「链路恢复后收掉同一条提示」用（老调用方忽略返回值，行为不变）
 }
 
@@ -609,7 +642,10 @@ async function loadAgents() {
     // 那是 Hub 不可达在顶栏唯一的灯色提示，兜底就是下面这条 toast。
     agentFailStreak++;
     if (agentFailStreak === 2) {
-      toast('Hub 数据连续 ' + agentFailStreak + ' 次拉取失败：' + e.message, 'err');
+      /* v0.13.185：错误提示带「重试」动作 —— 旧行为是只报错，用户唯一出路是刷新整页
+         （会丢掉终端与对话上下文）。action 走 toast 第三参，不改 134 处旧调用。 */
+      toast('Hub 数据连续 ' + agentFailStreak + ' 次拉取失败：' + e.message, 'err',
+            { ttl: 8000, action: { label: '重试', fn: () => { agentFailStreak = 0; loadAgents(); } } });
     }
   }
 }

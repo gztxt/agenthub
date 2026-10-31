@@ -1,3 +1,36 @@
+## v0.13.185 — 四件基础设施小改：命令面板三类目 / toast 可选第三参 / CSP Report-Only / JSON 日志
+
+> 来源：2026-10-31 对《AgentHub 全面升级方案.docx》的逐条实测复核
+> （`docs/UPGRADE-PLAN-REVIEW-20261031.md`）。复核结论是文档**框架可用、事实陈旧**：
+> 它列的"完全缺失"里，⌘K 命令面板与 toast+boxBusy 三态**实测已存在**，
+> 本轮因此是扩展而非新建；另两件（CSP / 结构化日志）确属缺口。
+
+- **命令面板（05 / 06）**：原版只搜实体。现在三类目（页面 / 实体 / 动作）+ ↑↓ 选择 +
+  鼠标悬停跟随高亮。页面按 `#page-<id>` **运行时过滤** —— `PAGE_LABELS` 是静态清单，
+  删页/改名后会指向不存在的 id，而 `go()` 对未知页静默退回 classroom，
+  用户看到的就是"点了没反应"。选择值带前缀 `p:` / `a:` / `x:`，**裸 id 仍按实体处理**
+  （旧书签/旧节点兼容）。遮罩的 inline `onclick` 删除、改 data 委托；开关仍只有
+  `openCmd` / `closeCmd` 两个入口（浮层唯一性三条）。
+- **toast 第三参（01）**：`{ttl, action:{label,fn}}`，**前两参不动** ⇒ 134 处旧调用零改动。
+  同 `msg`+`cls` 在存活期内复用节点 ⇒ Hub 挂掉时不再 4 分钟堆 12 条同样的字
+  （`loadAgents` 每 30s、`pollHealth` 每 15s，旧行为会把屏幕刷成"页面在抖"）。
+  首个接入点：`loadAgents` 连续失败提示带「重试」，重试前清 `agentFailStreak`
+  —— 不清的话下一次失败会直接跳过 `== 2` 的报错点，重试失败变成静默。
+- **CSP（`src/csp.py`）**：默认 `Content-Security-Policy-Report-Only`，`HUB_CSP=enforce`
+  才强制、`off` 全关。先 Report-Only 的原因写在模块头：模板仍有 inline `onclick`、
+  xterm 有 `new Function` 路径，直接强制会以"终端黑屏 / 按钮没反应"的形式炸，
+  且**服务端零错误可归因**。一并补 `X-Content-Type-Options` / `Referrer-Policy` /
+  `X-Frame-Options`（与 profiles.py 的 frame_deny 同口径），已设过的头不覆盖。
+- **JSON 日志（`src/logjson.py`）**：只配 `agenthub` 命名空间（`propagate=False`），
+  **不接管 root / uvicorn** —— 接管会把访问日志也变 JSON，`journalctl | grep GET` 全废。
+  73 处 `print` 不迁移：里面有启动横幅、测试断言文本、journal 可读性依赖。
+- **判据**：`tests/test_csp_headers_l0.py` 12 例 / `test_logjson_l0.py` 12 例 /
+  `test_cmdpalette_l0.py` 10 例；另更新 3 条形状闸门（toast 签名放宽为
+  "前两参固定 + 第 3 参起必须带默认值"、命令项属性值改查 `escapeHtml` 整值、
+  `cmdMask` 绑定变量改名避免与 02 的 `mask` 抢正则）。
+- **未做**：CSP 强制模式（等 Report-Only 观察一轮违规）；print→logger 迁移；
+  toast 动作按钮的高对比度/浅色主题适配（当前继承语义色，暗色下可读）。
+
 ## v0.13.184 — judge 概率闸：max_p 低于阈值不出判定
 
 > 来源：2026-10-30 讨论「GLiNER2.5-Decide / Colibri 能不能融合」。结论是不换模型

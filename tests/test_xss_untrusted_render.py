@@ -222,8 +222,11 @@ class TestCommandPanelIdEscaped(unittest.TestCase):
         self.body = _body(CHATHIST, "renderCmdList")
 
     def test_attribute_escaped_and_no_inline_js(self):
-        self.assertIn("""data-sk-cmdgo="' + escapeHtml(a.id)""", self.body,
-                      "a.id 进属性值必须走 escapeHtml")
+        # v0.13.185：清单从 AGENTS 扩到「页面/实体/动作」三类，属性值由 `a.id`
+        # 变为 `r.k + ':' + r.id`。安全性质与判据都不变：**整值走 escapeHtml**，
+        # 且仍不进 JS 求值。形状断言跟着生成式走，不钉字段名。
+        self.assertRegex(self.body, r"""data-sk-cmdgo="' \+\s*escapeHtml\(r\.k \+ ':' \+ r\.id\)""",
+                         "命令项属性值必须整体走 escapeHtml")
         self.assertNotIn("onclick", self.body,
                          "命令项不许再走 inline onclick（jsStr 双引号会截断属性）")
 

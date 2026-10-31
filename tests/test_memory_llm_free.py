@@ -100,7 +100,8 @@ class TestCallSitesWiring(unittest.TestCase):
 
     def test_decompose_keeps_manager_model(self):
         """交互式拆解（人点一下才发）不跟着走记忆档：不得改成 complete_free/memory_model。"""
-        body = _func_body(_REPO / "src" / "tasks.py", "decompose")
+        # 片3 文件级拆分：decompose 在 tasks_dag
+        body = _func_body(_REPO / "src" / "tasks_dag.py", "decompose")
         self.assertNotIn("llm.memory_model()", body)
         self.assertNotIn("llm.complete_free(", body)
 

@@ -76,9 +76,12 @@ class TestEnsureSynthesis(unittest.TestCase):
 
     def test_both_entrypoints_call_it(self):
         """decompose 与 replan 是两个入口，漏一个就有半边 run 没有汇总。"""
-        with open(os.path.join(SRC, "tasks.py"), encoding="utf-8") as f:
-            src = f.read()
-        self.assertEqual(len(re.findall(r"^\s*items, synth = ensure_synthesis\(", src, re.M)), 2)
+        # 片3 文件级拆分：两个入口分别在 tasks_dag（decompose）与 tasks_replan
+        src = ""
+        for name in ("tasks_dag.py", "tasks_replan.py"):
+            with open(os.path.join(SRC, name), encoding="utf-8") as f:
+                src += f.read()
+        self.assertEqual(len(re.findall(r"^\s*items, synth = (?:_dag\.)?ensure_synthesis\(", src, re.M)), 2)
 
 
 class TestChatTimeout(unittest.TestCase):

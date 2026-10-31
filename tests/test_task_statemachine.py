@@ -25,6 +25,8 @@ sys.path.insert(0, str(_REPO / "tests"))
 
 import db      # noqa: E402
 import tasks   # noqa: E402
+import tasks_tiers as tiers    # noqa: E402 —— 常量定义处（打桩必须打在原件）
+import tasks_runner as runner  # noqa: E402 —— _start_runner 定义处
 
 
 class _Base(unittest.TestCase):
@@ -33,16 +35,16 @@ class _Base(unittest.TestCase):
         self._saved = db._conn
         db.init_db(self.tmp / "t.db")
         tasks.ensure_schema()
-        self._saved_conc = tasks.MAX_CONCURRENCY
-        self._saved_sleep = tasks.LOOP_SLEEP_S
-        tasks.MAX_CONCURRENCY = 1
-        tasks.LOOP_SLEEP_S = 0.01
+        self._saved_conc = tiers.MAX_CONCURRENCY
+        self._saved_sleep = tiers.LOOP_SLEEP_S
+        tiers.MAX_CONCURRENCY = 1
+        tiers.LOOP_SLEEP_S = 0.01
         self.addCleanup(self._restore)
 
     def _restore(self):
         db._conn = self._saved
-        tasks.MAX_CONCURRENCY = self._saved_conc
-        tasks.LOOP_SLEEP_S = self._saved_sleep
+        tiers.MAX_CONCURRENCY = self._saved_conc
+        tiers.LOOP_SLEEP_S = self._saved_sleep
         tasks.set_context(chat_fn=None)
 
     def _insert(self, run_id, tid, deps=(), *, verify_kind="nonempty",
@@ -236,12 +238,12 @@ class TestWaitingState(_Base):
         self._insert("rw4", "t1")
         db.execute("UPDATE tasks SET status='waiting_input' WHERE task_id='t1'")
         calls = []
-        self._saved_start = tasks._start_runner
-        tasks._start_runner = lambda rid: calls.append(rid)
+        self._saved_start = runner._start_runner
+        runner._start_runner = lambda rid: calls.append(rid)
         try:
             n = tasks.requeue_waiting("rw4")
         finally:
-            tasks._start_runner = self._saved_start
+            runner._start_runner = self._saved_start
         self.assertEqual(n, 1)
         self.assertEqual(self._status("t1")["status"], "pending")
 
@@ -323,8 +325,8 @@ class TestWaitingSelfHeal(_Base):
         db.execute("UPDATE tasks SET status='waiting_input',wait_until=?,wake_count=0"
                    " WHERE task_id='t1'", (self.PAST,))
         started = []
-        saved = tasks._start_runner
-        tasks._start_runner = lambda rid: started.append(rid)
+        saved = runner._start_runner
+        runner._start_runner = lambda rid: started.append(rid)
         self.addCleanup(lambda: setattr(tasks, "_start_runner", saved))
         n = tasks.resume_expired_waits(now="2026-01-01T00:00:00+00:00")
         self.assertEqual(1, n)
@@ -353,8 +355,8 @@ class TestWaitingSelfHeal(_Base):
         self._insert("rw5", "t1")
         db.execute("UPDATE tasks SET status='waiting_input',wait_until=?,wake_count=0"
                    " WHERE task_id='t1'", (self.FUTURE,))
-        saved = tasks._start_runner
-        tasks._start_runner = lambda rid: None
+        saved = runner._start_runner
+        runner._start_runner = lambda rid: None
         self.addCleanup(lambda: setattr(tasks, "_start_runner", saved))
         tasks.requeue_waiting("rw5")
         r = self._row("t1")

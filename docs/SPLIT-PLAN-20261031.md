@@ -182,3 +182,16 @@ work/dispatch/agenthub-upgrade-20261031/public-symbols-before.txt  # refscout 10
 ```
 
 切完后逐项比对，**数字必须逐字相等**；不等即回滚该片。
+
+## 9. 执行结果（2026-11-01 收口）
+
+| 片 | 结 果 | 证据 |
+|---|---|---|
+| 1 `refscout` | ✅ 2099 → 6 文件（base/sources/rank/collect/render/门面） | `2997a11` |
+| 2 `modelcfg` | ✅ 1871 → 4 文件（shape/writers/verify/门面） | `34d5d59` |
+| 3 `tasks` | ✅ 函数级 `_run_task` 277→79；文件级 tiers/runner/dag/replan 四刀 | `1be0443`、`29c2884`、`22a8862`、见台账追加二 |
+| 4 `skill` | ⛔ **不做**（本方案 §3.4 的结论：26 引用点、验证成本 > 收益） | 台账 PT-20261031-02 |
+
+切完后实际规模：`tasks.py` **1971 → 487 行**；五个文件合计 2110 行（含新增的模块 docstring 与门面）。
+判据全过：路由集合逐字相同、`dir(tasks)` 零丢失、L0 全绿零跳过、L1 全绿。
+翻案条件（片4）：`skill.py` ≥2550 行，或出现「改一处要开 5 个函数」的实际事故。

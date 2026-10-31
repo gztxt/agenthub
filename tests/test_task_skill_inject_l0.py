@@ -21,8 +21,10 @@ sys.path.insert(0, str(ROOT / "src"))
 import tasks  # noqa: E402
 
 SRC = (ROOT / "src" / "tasks.py").read_text(encoding="utf-8")
-# 片3 拆分后常量与注入实现在 `tasks_tiers`：源码级断言必须扫**两处**
+# 片3 拆分后常量与注入实现在 `tasks_tiers`、调用顺序在 `tasks_runner`：
+# 源码级断言必须扫**定义处**，扫错文件＝空断言假绿（片1 原坑）
 SRC_TIERS = (ROOT / "src" / "tasks_tiers.py").read_text(encoding="utf-8")
+SRC_RUNNER = (ROOT / "src" / "tasks_runner.py").read_text(encoding="utf-8")
 
 
 class TestBlockShape(unittest.TestCase):
@@ -89,12 +91,12 @@ class TestFailOpen(unittest.TestCase):
 
 class TestWiring(unittest.TestCase):
     def test_injected_before_chat_call(self):
-        i_inject = SRC.index("_skill_inject_for(row.get")
-        i_chat = SRC.index("_call_chat(chat_fn, exec_agent, prompt")
+        i_inject = SRC_RUNNER.index("_skill_inject_for(row.get")
+        i_chat = SRC_RUNNER.index("_call_chat(chat_fn, exec_agent, prompt")
         self.assertLess(i_inject, i_chat, "注入必须在真正调用执行者之前")
 
     def test_meta_is_persisted(self):
-        self.assertIn('rmeta["skill_inject"] = smeta', SRC)
+        self.assertIn('rmeta["skill_inject"] = smeta', SRC_RUNNER)
 
     def test_can_be_disabled(self):
         self.assertIn("TASK_SKILL_INJECT", SRC_TIERS)

@@ -46,6 +46,8 @@ from _js_min import strip_comments  # noqa: E402
 TERM = _REPO / "static" / "hub" / "04-terminal-ws.js"
 CHATHIST = _REPO / "static" / "hub" / "05-chat-and-history.js"
 TASKS_PY = _REPO / "src" / "tasks.py"
+# 片3 文件级拆分：tid 生成与 _validate_dag 都在 tasks_dag
+TASKS_DAG = _REPO / "src" / "tasks_dag.py"
 
 
 def _body(path: Path, func: str) -> str:
@@ -288,7 +290,7 @@ class TestReachabilityDocumented(unittest.TestCase):
 
         现状 = 无字符集校验 ⇒ 渲染侧转义是**唯一**防线（这就是批 1 存在的理由）。
         """
-        src = TASKS_PY.read_text(encoding="utf-8")
+        src = TASKS_DAG.read_text(encoding="utf-8")
         self.assertIn('str(it.get("id") or f"t{i+1}")', src,
                       "tasks.py 的 tid 生成式变了 —— 请同步复核 renderTaskTable/renderDag "
                       "是否仍需渲染侧转义，并在本闸门里更新这处说明")
@@ -300,7 +302,7 @@ class TestReachabilityDocumented(unittest.TestCase):
         它会红，然后你在这里把渲染侧转义的定位从「唯一防线」改写为「纵深防御」。
         刻意不写成「必须有校验」—— 那是另一个批次的决定，不该由本闸门顺手定。
         """
-        src = strip_comments(TASKS_PY.read_text(encoding="utf-8"))
+        src = strip_comments(TASKS_DAG.read_text(encoding="utf-8"))
         body = re.search(r"^def _validate_dag\(.*?(?=\ndef |\nclass )", src, re.M | re.S)
         self.assertIsNotNone(body, "找不到 _validate_dag")
         self.assertNotRegex(body.group(0), r"re\.fullmatch\(",

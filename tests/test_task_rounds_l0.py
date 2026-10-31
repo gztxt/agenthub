@@ -39,6 +39,7 @@ os.environ.setdefault("HUB_TEST_MODE", "1")
 import db      # noqa: E402
 import llm     # noqa: E402
 import tasks   # noqa: E402
+import tasks_tiers as tiers    # noqa: E402 —— 常量定义处（打桩必须打在原件）
 
 
 def _rows(*specs):
@@ -176,8 +177,8 @@ class TestSchemaAndMeta(unittest.TestCase):
     def _restore(self):
         db._conn = self._saved
         tasks.set_context(chat_fn=None)
-        tasks.MAX_CONCURRENCY = 4
-        tasks.LOOP_SLEEP_S = 1.5
+        tiers.MAX_CONCURRENCY = 4
+        tiers.LOOP_SLEEP_S = 1.5
 
     def test_task_runs_table_and_columns(self):
         cols = {r["name"] for r in db.query("PRAGMA table_info(task_runs)")}
@@ -209,17 +210,17 @@ class TestAutoReplan(unittest.TestCase):
         self._saved = db._conn
         db.init_db(self.tmp / "t.db")
         tasks.ensure_schema()
-        self._saved_conc = tasks.MAX_CONCURRENCY
-        self._saved_sleep = tasks.LOOP_SLEEP_S
+        self._saved_conc = tiers.MAX_CONCURRENCY
+        self._saved_sleep = tiers.LOOP_SLEEP_S
         self._saved_llm = (llm.configured, llm.chat_tools_loop)
-        tasks.MAX_CONCURRENCY = 1
-        tasks.LOOP_SLEEP_S = 0.01
+        tiers.MAX_CONCURRENCY = 1
+        tiers.LOOP_SLEEP_S = 0.01
         self.addCleanup(self._restore)
 
     def _restore(self):
         db._conn = self._saved
-        tasks.MAX_CONCURRENCY = self._saved_conc
-        tasks.LOOP_SLEEP_S = self._saved_sleep
+        tiers.MAX_CONCURRENCY = self._saved_conc
+        tiers.LOOP_SLEEP_S = self._saved_sleep
         llm.configured, llm.chat_tools_loop = self._saved_llm
         tasks.set_context(chat_fn=None)
 
@@ -394,26 +395,31 @@ class TestSourceInvariants(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # 片3 文件级拆分：断言要指向**定义处**，扫错文件＝假绿（片1 的原坑）
+        def code(name):
+            txt = (_REPO / "src" / (name + ".py")).read_text(encoding="utf-8")
+            return re.sub(r'""".*?"""', "", txt, flags=re.S)
+
         cls.src = (_REPO / "src" / "tasks.py").read_text(encoding="utf-8")
-        # 片3 文件级拆分后，轮次护栏常量搬到了 `tasks_tiers`：断言要指向**定义处**
         cls.tiers = (_REPO / "src" / "tasks_tiers.py").read_text(encoding="utf-8")
-        # 去 docstring，只量会被执行的代码（同 test_task_handoff_l0 的口径）
-        cls.code = re.sub(r'""".*?"""', "", cls.src, flags=re.S)
+        cls.code = code("tasks")
+        cls.runner = code("tasks_runner")
+        cls.replan = code("tasks_replan")
 
     def test_maybe_replan_called_on_finish(self):
-        i_fin = self.code.index("if finished:")
-        i_call = self.code.index("await _maybe_replan(run_id)", i_fin)
+        i_fin = self.runner.index("if finished:")
+        i_call = self.runner.index("await _replan._maybe_replan(run_id)", i_fin)
         # 用「行首 16 空格 + return」定位真正的 return 语句：注释里也出现了 return 这个词
-        i_ret = self.code.index("\n                return", i_fin)
+        i_ret = self.runner.index("\n                return", i_fin)
         self.assertLess(i_call, i_ret, "收敛分支必须在 return 之前接下一轮")
 
     def test_child_reservation_is_conditional(self):
-        self.assertIn("AND child_run_id IS NULL", self.code,
+        self.assertIn("AND child_run_id IS NULL", self.replan,
                       "占位必须靠条件更新，否则并发重拆会生成两条子 run")
 
     def test_gate_runs_before_llm(self):
-        i_gate = self.code.index("gate = replan_gate(")
-        i_llm = self.code.index("llm.chat_tools_loop(", i_gate)
+        i_gate = self.replan.index("gate = replan_gate(")
+        i_llm = self.replan.index("llm.chat_tools_loop(", i_gate)
         self.assertLess(i_gate, i_llm, "先判闸门再问 LLM：反了会在不该花钱时花钱")
 
     def test_default_round_cap_is_two(self):
@@ -421,7 +427,7 @@ class TestSourceInvariants(unittest.TestCase):
 
     def test_round_cap_only_tightens(self):
         # 常量在 tiers，收紧逻辑仍在编排层 ⇒ 调用点写的是模块属性
-        self.assertIn("min(int(max_rounds), _tiers.MAX_ROUNDS)", self.code)
+        self.assertIn("min(int(max_rounds), _tiers.MAX_ROUNDS)", self.replan)
 
 
 class TestWiringAttrsResolvable(unittest.TestCase):

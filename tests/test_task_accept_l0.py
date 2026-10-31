@@ -27,6 +27,8 @@ sys.path.insert(0, str(_REPO / "tests"))
 
 import db          # noqa: E402
 import tasks       # noqa: E402
+import tasks_tiers as tiers    # noqa: E402 —— 常量定义处（打桩必须打在原件）
+import tasks_runner as runner  # noqa: E402 —— _start_runner 定义处
 from fastapi import HTTPException  # noqa: E402
 
 
@@ -36,22 +38,22 @@ class _Base(unittest.TestCase):
         self._saved = db._conn
         db.init_db(self.tmp / "t.db")
         tasks.ensure_schema()
-        self._saved_conc = tasks.MAX_CONCURRENCY
-        self._saved_sleep = tasks.LOOP_SLEEP_S
-        self._saved_auto = tasks.AUTO_ACCEPT
-        tasks.MAX_CONCURRENCY = 1
-        tasks.LOOP_SLEEP_S = 0.01
+        self._saved_conc = tiers.MAX_CONCURRENCY
+        self._saved_sleep = tiers.LOOP_SLEEP_S
+        self._saved_auto = tiers.AUTO_ACCEPT
+        tiers.MAX_CONCURRENCY = 1
+        tiers.LOOP_SLEEP_S = 0.01
         self.started = []
-        self._saved_start = tasks._start_runner
-        tasks._start_runner = lambda rid: self.started.append(rid)
+        self._saved_start = runner._start_runner
+        runner._start_runner = lambda rid: self.started.append(rid)
         self.addCleanup(self._restore)
 
     def _restore(self):
         db._conn = self._saved
-        tasks.MAX_CONCURRENCY = self._saved_conc
-        tasks.LOOP_SLEEP_S = self._saved_sleep
-        tasks.AUTO_ACCEPT = self._saved_auto
-        tasks._start_runner = self._saved_start
+        tiers.MAX_CONCURRENCY = self._saved_conc
+        tiers.LOOP_SLEEP_S = self._saved_sleep
+        tiers.AUTO_ACCEPT = self._saved_auto
+        runner._start_runner = self._saved_start
         tasks.set_context(chat_fn=None)
 
     def _insert(self, run_id, tid, deps=()):
@@ -90,7 +92,7 @@ class TestPureJudge(unittest.TestCase):
 
     def test_auto_accept_defaults_on(self):
         """默认必须与 P1-4 之前一致（过了 verifier 即 success），否则是行为回归。"""
-        self.assertTrue(tasks.AUTO_ACCEPT)
+        self.assertTrue(tiers.AUTO_ACCEPT)
 
     def test_submitted_is_its_own_group(self):
         self.assertNotIn("submitted", tasks.PARKED_STATUSES)
@@ -100,7 +102,7 @@ class TestPureJudge(unittest.TestCase):
 
 class TestManualAcceptance(_Base):
     def test_pass_with_manual_accept_stops_at_submitted(self):
-        tasks.AUTO_ACCEPT = False
+        tiers.AUTO_ACCEPT = False
         self._insert("r1", "t1")
         self._set_chat()
         self._run_task_once("t1")
@@ -111,7 +113,7 @@ class TestManualAcceptance(_Base):
         self.assertEqual(row["verdict"], "pass")
 
     def test_accept_moves_submitted_to_success(self):
-        tasks.AUTO_ACCEPT = False
+        tiers.AUTO_ACCEPT = False
         self._insert("r2", "t1")
         self._set_chat()
         self._run_task_once("t1")
@@ -124,7 +126,7 @@ class TestManualAcceptance(_Base):
         self.assertIn("r2", self.started, "接受后必须重启 runner 让下游就绪")
 
     def test_reject_moves_submitted_to_failed_with_reason(self):
-        tasks.AUTO_ACCEPT = False
+        tiers.AUTO_ACCEPT = False
         self._insert("r3", "t1")
         self._set_chat()
         self._run_task_once("t1")
@@ -160,7 +162,7 @@ class TestManualAcceptance(_Base):
 
 class TestRunParksOnSubmitted(_Base):
     def test_pending_downstream_not_marked_deadlocked(self):
-        tasks.AUTO_ACCEPT = False
+        tiers.AUTO_ACCEPT = False
         self._insert("p1", "t1")
         self._insert("p1", "t2", deps=["t1"])
         self._set_chat()
@@ -170,7 +172,7 @@ class TestRunParksOnSubmitted(_Base):
                          "下游 pending 是被上游等待，不得被标「疑似悬挂」")
 
     def test_accept_then_downstream_runs(self):
-        tasks.AUTO_ACCEPT = False
+        tiers.AUTO_ACCEPT = False
         self._insert("p2", "t1")
         self._insert("p2", "t2", deps=["t1"])
         self._set_chat()

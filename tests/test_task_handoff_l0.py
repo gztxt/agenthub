@@ -211,11 +211,15 @@ class TestCallSiteWired(unittest.TestCase):
         量的是**去掉 docstring 后**的代码：本项的文档串故意引用了这个旧写法
         做对比说明，不去 docstring 就会自己把自己判红（判据量错了对象）。
         """
-        live = _code_without_docstrings(_REPO / "src" / "tasks.py")
+        # 片3 文件级拆分：截断可能出现在 tasks/runner/tiers 任一处 ⇒ 四文件全扫
+        live = "\n".join(_code_without_docstrings(_REPO / "src" / n)
+                         for n in ("tasks.py", "tasks_runner.py",
+                                   "tasks_dag.py", "tasks_replan.py"))
         self.assertNotRegex(live, r"\[:\s*UPSTREAM_TRIM\s*\]")
 
     def test_call_site_uses_format_upstream(self):
-        src = (_REPO / "src" / "tasks.py").read_text(encoding="utf-8")
+        # 调用点随片3 搬到了 tasks_runner（_prepare_prompt）
+        src = (_REPO / "src" / "tasks_runner.py").read_text(encoding="utf-8")
         self.assertIn("format_upstream(d, upstream[d])", src)
 
 

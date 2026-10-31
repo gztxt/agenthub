@@ -36,6 +36,7 @@ sys.path.insert(0, str(_REPO / "tests"))
 
 import db      # noqa: E402
 import tasks   # noqa: E402
+import tasks_tiers as tiers    # noqa: E402 —— 常量定义处（打桩必须打在原件）
 import verifier  # noqa: E402
 
 
@@ -45,16 +46,16 @@ class _Base(unittest.TestCase):
         self._saved = db._conn
         db.init_db(self.tmp / "t.db")
         tasks.ensure_schema()
-        self._saved_conc = tasks.MAX_CONCURRENCY
-        self._saved_sleep = tasks.LOOP_SLEEP_S
-        tasks.MAX_CONCURRENCY = 1
-        tasks.LOOP_SLEEP_S = 0.01
+        self._saved_conc = tiers.MAX_CONCURRENCY
+        self._saved_sleep = tiers.LOOP_SLEEP_S
+        tiers.MAX_CONCURRENCY = 1
+        tiers.LOOP_SLEEP_S = 0.01
         self.addCleanup(self._restore)
 
     def _restore(self):
         db._conn = self._saved
-        tasks.MAX_CONCURRENCY = self._saved_conc
-        tasks.LOOP_SLEEP_S = self._saved_sleep
+        tiers.MAX_CONCURRENCY = self._saved_conc
+        tiers.LOOP_SLEEP_S = self._saved_sleep
         tasks.set_context(chat_fn=None)
 
     def _insert(self, run_id, tid, *, verify_kind="nonempty", budget_ms=None,
@@ -217,12 +218,12 @@ class TestVerdictPersistence(_Base):
             return {"success": True, "response": "late", "model": "m6"}
         tasks.set_context(chat_fn=slow)
         self._insert("r9", "t_to")
-        self._saved_to = tasks.TASK_TIMEOUT_S
-        tasks.TASK_TIMEOUT_S = 0.05
+        self._saved_to = tiers.TASK_TIMEOUT_S
+        tiers.TASK_TIMEOUT_S = 0.05
         try:
             self._run_task_once("t_to")
         finally:
-            tasks.TASK_TIMEOUT_S = self._saved_to
+            tiers.TASK_TIMEOUT_S = self._saved_to
         r = self._row("t_to")
         self.assertEqual("failed", r["status"])
         self.assertIsNone(r["verdict"], "超时没过 verifier")

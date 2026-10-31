@@ -16,6 +16,24 @@ from typing import Any, Dict, List, Optional
 import db
 import verifier
 
+
+# ── 运行期配置（2026-10-31 随片3 下移到本层）────────────────────────
+# 谁需要它们谁读 `_tiers.X`；**本层是唯一定义处**，别再在上层留第二份。
+TASK_TIMEOUT_S = int(os.getenv("TASK_TIMEOUT_S", "600"))
+MAX_CONCURRENCY = 4
+MAX_TASKS = 12
+#: 告诉 Leader 的条数上限 = 硬上限 − 1：**留一格给代码追加的汇总节点**
+#: （`ensure_synthesis`）。不留这一格，Leader 顶满 12 条时多叶子就拿不到汇总，
+#: 又回到「全绿无结论」。这是结构性预留，不是保守取值。
+LEADER_MAXN = MAX_TASKS - 1
+#: 调度循环步长（秒）。做成常量是为了让 L0 闸门能把它压到毫秒级（不起真等待）。
+LOOP_SLEEP_S = float(os.getenv("TASK_LOOP_SLEEP_S", "1.5"))
+
+#: 过了 verifier 后是否**自动接受**（= P1-4 之前的行为，默认开）。
+#: 置 0 则任务停在 `submitted` 等外部 `POST /accept`。
+#: 做成**模块级常量**（不是每次读 env）：与 MAX_CONCURRENCY/LOOP_SLEEP_S 同口径，测试可整体替换。
+AUTO_ACCEPT = os.getenv("TASK_AUTO_ACCEPT", "1").strip().lower() not in ("0", "false", "no", "off")
+
 UPSTREAM_TRIM = 4000
 #: P1-3：截断预算**只算正文**，标记开销另计（标记必须存在，否则下游无法分辨
 #: 「上游只写了这么多」与「被我砍掉了」—— 静默截断是最坏形态，见 format_upstream 文档串）。

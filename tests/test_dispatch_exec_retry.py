@@ -61,9 +61,10 @@ class TestExecFailureRetry(unittest.TestCase):
         **档位升档路径运行时永不生效**，claude-code 超时后换成了 codex 而不是升到 t2。
         单测发现不了，因为单测自己传了 catalog —— 只能对源码做形状断言。
         """
-        # 片3 拆分后两个调用点在 `tasks_tiers`：扫一处会漏（假绿）
-        src = ((_REPO / "src" / "tasks.py").read_text(encoding="utf-8")
-               + (_REPO / "src" / "tasks_tiers.py").read_text(encoding="utf-8"))
+        # 片3 文件级拆分后调用点散在 tiers/runner：只扫 tasks.py 会漏（假绿）
+        src = "".join((_REPO / "src" / n).read_text(encoding="utf-8")
+                      for n in ("tasks.py", "tasks_tiers.py", "tasks_runner.py",
+                                "tasks_dag.py", "tasks_replan.py"))
         calls, i = [], 0
         while True:
             i = src.find("escalate_target(", i)

@@ -31,6 +31,32 @@
 - **未做**：CSP 强制模式（等 Report-Only 观察一轮违规）；print→logger 迁移；
   toast 动作按钮的高对比度/浅色主题适配（当前继承语义色，暗色下可读）。
 
+### 同日追加（2026-10-31 15:xx，不新开版本号）
+
+> 来源：2026-10-31 用户指示「分析 agenthub → 拆小任务派给 codebuddy → pi 集成验证」。
+> 与 v0.13.185 的关系：185 已建 CSP 中间件与 logjson 通道的**骨架**，本轮补它们的**出口与消费端**，
+> 属增量而非重建（185 的复核报告写在 10:40，比 185 提交早约 20 分钟 ⇒ 任务书按「缺失」立项，
+> 实测后按「扩展」交付）。
+
+- **CSP 举报出口（`src/main.py`）**：185 只发 Report-Only 头、**没有 report-uri**，观察窗口形同虚设。
+  新增 `POST /api/csp/report`（204、64KB 上限、非 JSON 丢弃、内容截断 2000 字符），
+  并在响应头追加 `report-uri`。该端点**免写闸门**（浏览器不会带自定义头，理由写进
+  `writeauth.EXEMPT_PREFIXES`）且**免限流**（否则浏览器上报会被 429）。
+  路由路径必须是**字面量**：`tests/test_writeauth.py` 用 AST 静态核对写路由清单，
+  写成 `@app.post(CSP_REPORT_PATH)` 会让这条路由对闸门清单**永久失明**。
+- **统一 toast 门面（`01-core-boot.js`）**：新增 `showToast(kind, msg)`，kind ∈ info/ok/warn/error，
+  映射到既有 CSS 类（`error` → `.err`），**不新增色值**；未知 kind 按 info 并留 console.warn。
+  为包装而非改 `toast()` 签名 —— 后者有 134 处调用，且 03/02 依赖其返回值收掉同一条提示。
+- **骨架屏**：busy 态由一行「加载中…」改为纯几何骨架（`.skel-row`），列表区不再塌高度。
+- **命令面板动作类目（`05-chat-and-history.js`）**：新增 4 条 `x:` 动作（打开终端 / 设置·模型 /
+  注册 Agent / 自动扫描），复用既有入口 `gotoChat`/`go`/`openRegister`/`runScan`，不新造导航；
+  终端动作优先当前选中实体，取不到时给 warn toast 而非静默无反应。
+- **print 收敛**：`src/` 内 `print(` 由 **84 → 21**，诊断输出改走 `logjson` 的 logger；
+  面向用户的 argparse/`__main__` 输出保留。`HUB_LOG_JSON` 仍默认关闭（journal 口径不变）。
+
+- 测试：L0 hermetic **3492 例，0 fail / 0 skip**（收集器对账 3572=3572）；新增
+  `tests/test_f1_frontend_l0.py` 14 例（命令面板 / toast 四态 / CSP 出口）。
+
 ## v0.13.184 — judge 概率闸：max_p 低于阈值不出判定
 
 > 来源：2026-10-30 讨论「GLiNER2.5-Decide / Colibri 能不能融合」。结论是不换模型

@@ -26,7 +26,8 @@ os.environ["HOME"] = home
 import db  # noqa: E402
 db.init_db(pathlib.Path(home) / "hub.db")     # set_hub_model 要走 hub 侧库
 import modelcfg  # noqa: E402
-modelcfg._home = lambda: pathlib.Path(home)
+import modelcfg_writers
+modelcfg_writers._home = lambda: pathlib.Path(home)  # 2026-10-31 拆模块后打在使用处
 
 ok = fail = 0
 def check(name, cond, detail=""):

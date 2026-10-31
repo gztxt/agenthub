@@ -66,6 +66,71 @@ class TestExplicitSourceSlots(unittest.TestCase):
                          "非显式来源仍要过覆盖度闸门")
 
 
+class TestSourceSurvivesUpstreamGate(unittest.TestCase):
+    """上游闸门回归（2026-10-31 实测翻车点）。
+
+    保位写在**下游** `_pick_lists`，而覆盖度闸门在**上游** `build_pre`：
+    HelloGitHub × 「派发」实测 cov=0.0 / matched=0 ⇒ 被上游剔掉，保位一句未生效，
+    `list_sources` 仍是 4 个无关仓。以下三条钉住「先放行、后收敛」两段式。
+    """
+
+    def test_zero_overlap_explicit_source_passes_upstream_gate(self):
+        self.assertTrue(
+            collect._keep_in_pre("impl", 0.0, 0, False, 0, 3, True),
+            "显式来源必须活到清单展开 —— 否则下游保位等于没写")
+
+    def test_zero_overlap_plain_repo_still_filtered(self):
+        self.assertFalse(
+            collect._keep_in_pre("impl", 0.0, 0, False, 0, 3, False),
+            "非来源仓的覆盖度闸门不得因此放宽（候选池会爆）")
+        self.assertFalse(collect._keep_in_pre("impl", 0.5, 0, False, 0, 3, False))
+
+    def test_source_converged_after_list_expansion(self):
+        hello = {"full_name": "521xueweihan/HelloGitHub", "cov": 0.0, "hits": 0,
+                 "sources": ["521xueweihan/HelloGitHub"],
+                 "item": {"full_name": "521xueweihan/HelloGitHub",
+                          "description": "分享 GitHub 上有趣、入门级的开源项目",
+                          "topics": []}}
+        self.assertFalse(
+            collect._keep_after_lists(hello, ["event dispatch", "task dispatcher"]),
+            "零重叠来源在展开后必须退出候选结果，否则 44+288 个仓会涌进结果页")
+        relevant = dict(hello, cov=0.4)
+        self.assertTrue(collect._keep_after_lists(relevant, ["event dispatch"]),
+                        "与本查询相关的来源仓照常进结果")
+        plain = {"full_name": "x/y", "cov": 0.0, "hits": 0, "sources": [],
+                 "item": {"full_name": "x/y", "description": "", "topics": []}}
+        self.assertTrue(collect._keep_after_lists(plain, ["event dispatch"]),
+                        "非来源仓不受这条收敛影响")
+
+
+    def test_probe_budget_shared_per_source(self):
+        """探针预算按来源分配（2026-10-31 第二轮实测根因）。
+
+        全局预算 12 会被 288 仓的大来源烧光，小来源（用户手点的那一个）一个都没探到
+        ⇒ 仍然挑不到 HelloGitHub。这里复刻：大来源 20 个无 README 的仓，小来源 1 个真清单。
+        """
+        big = [_pre("own/r%d" % i, "impl", sources=["own"]) for i in range(20)]
+        small = _pre("521xueweihan/HelloGitHub", "impl", sources=["hand"])
+        calls = {"n": 0}
+        orig = collect._readme_text
+
+        def fake(full):
+            calls["n"] += 1
+            if full == "521xueweihan/HelloGitHub":
+                return "\n".join("[x%d](https://github.com/a/b%d)" % (i, i) for i in range(10))
+            return ""
+
+        collect._readme_text = fake
+        try:
+            got = [x["full_name"] for x in collect._pick_lists(big + [small], 3)]
+        finally:
+            collect._readme_text = orig
+        self.assertIn("521xueweihan/HelloGitHub", got,
+                      "小来源必须拿到自己的探针额（全局预算会被大来源烧光）")
+        self.assertLessEqual(calls["n"], collect._README_PROBE_CAP + 6,
+                             "探针总量仍需有界，不能因分额而无限探")
+
+
 class TestSignalGate(unittest.TestCase):
     def test_plain_own_repo_without_links_is_not_a_list(self):
         # gztxt/term-demo 这类普通仓：来源命中但它不是目录 ⇒ 不得被当清单展开，

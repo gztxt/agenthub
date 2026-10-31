@@ -86,6 +86,42 @@ def _readme_text(full: str) -> str:
 def _contents_text(full: str, path: str) -> str:
     return _blob_text(f'{_rc_base.GH_API}/repos/{full}/contents/{urllib.parse.quote(path)}')
 
+def _keep_in_pre(bucket: str, cov: float, matched: int, phrase: bool, hits: int,
+                 n_groups: int, has_sources: bool) -> bool:
+    """`build_pre` 的准入判据（纯函数，便于 L0 直测）。
+
+    **2026-10-31 修正：显式来源必须在闸门之前豁免**。原先三处覆盖度闸门一律生效，
+    而 `_pick_lists` 的「显式来源保位」写在**下游** ⇒ 上游一剔除，保位永远看不到它。
+    实测：`521xueweihan/HelloGitHub` 对「派发」cov=0.0 / matched=0 ⇒ 被剔掉，
+    保位代码一句未生效（卡 `62ebb8e53d02` 重跑仍无 HelloGitHub）。
+
+    现在：`has_sources=True` 的仓库**一律活到清单展开**；
+    「与本查询无关的来源不该进候选结果」这层收敛挪到 `_keep_after_lists`（展开之后）。
+    质量闸门仍在：`_pick_lists::is_list_like`（bucket=='list' 或 README 链接 ≥ 阈值）。
+    """
+    if has_sources:
+        return True
+    if bucket == 'impl' and cov < 0.18 and hits == 0:
+        return False
+    if bucket == 'impl' and matched < min(2, n_groups) and not phrase and hits == 0:
+        return False
+    return True
+
+
+def _keep_after_lists(p: Dict[str, Any], keywords: List[str]) -> bool:
+    """清单展开之后的收敛：显式来源若与本查询零重叠、又没命中代码，就不进候选结果。
+
+    否则「用户登记的 44+288 个仓库」会整批涌进结果页；而它们在展开阶段该出的力
+    已经出完了（清单保位 + `_trusted_lists` 免覆盖度闸门）。
+    """
+    if not p.get('sources'):
+        return True
+    if p['cov'] >= 0.18 or p['hits']:
+        return True
+    blob = _rc_rank._expand_blob(_rc_rank._norm_text(_rc_rank._name_blob(p['item'])))
+    return any((' ' in str(k) and _rc_rank._norm_text(str(k)) in blob for k in keywords))
+
+
 def _pick_lists(pre: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
     """挑要展开的清单仓，返回仓库 item 列表。
 
@@ -104,14 +140,24 @@ def _pick_lists(pre: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
     ⚠ **「显式来源」不等于「清单」**：仍有信号闸门（`bucket=='list'` 或 README 链接数
     ≥ `LIST_SIGNAL_LINKS`）。否则 `gztxt/term-demo` 这种普通仓会被当清单展开、
     然后被「清单仓本身不计入候选」摘掉 —— 那是把候选池越切越小（本闸门第一版就这么红过）。
-    对显式来源，未补全的 README 会**按需取一次**（有缓存），预算上限 `_README_PROBE_CAP`。
+    对显式来源，未补全的 README 会**按需取一次**（有缓存）。
+
+    **2026-10-31 第二轮修复：README 探针预算必须按来源分配**。第一轮只豁免了上游闸门，
+    实测仍挑不到 HelloGitHub：探针预算 `_README_PROBE_CAP=12` 是**全局计数**，
+    而轮询顺序里 `gztxt`(44 仓) / `star:gztxt`(288 仓) 排在前面，
+    它们各自要烧掉十几个探针才碰到第一个合格清单 ⇒ 轮到只有 1 个仓的
+    `521xueweihan/HelloGitHub` 时预算已尽，直接判「不像清单」——同一类病：
+    **豁免/保位在一边，预算在另一边把它的名额吃掉**。
+    现在：每个来源标签各自一份探针预算（≥3），且**小来源先轮**（仓数升序）。
     """
     picked: List[Dict[str, Any]] = []
     seen = set()
-    probes = [0]
     cache: Dict[str, bool] = {}
+    labels_all = {lb for p in pre for lb in (p.get('sources') or [])}
+    quota = max(3, _README_PROBE_CAP // max(1, len(labels_all)))
+    probes: Dict[str, int] = {lb: quota for lb in labels_all}
 
-    def is_list_like(p: Dict[str, Any]) -> bool:
+    def is_list_like(p: Dict[str, Any], label: str = '') -> bool:
         item = p['item']
         full = item.get('full_name') or ''
         if p['bucket'] == 'list':
@@ -121,8 +167,8 @@ def _pick_lists(pre: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
         if full in cache:
             return cache[full]
         text = p.get('readme') or ''
-        if not text and probes[0] < _README_PROBE_CAP:
-            probes[0] += 1
+        if not text and probes.get(label, quota) > 0:
+            probes[label] = probes.get(label, quota) - 1
             try:
                 text = _readme_text(full) or ''
             except Exception:  # noqa: BLE001 —— 探 README 失败就当不是清单，不炸整卡
@@ -144,13 +190,16 @@ def _pick_lists(pre: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
     for p in pre:
         for lb in (p.get('sources') or []):
             by_label.setdefault(lb, []).append(p)
+    # 小来源先轮：仓数少的来源（通常就是用户手点的那一个）先拿探针与名额，
+    # 否则 288 个 star 仓会把它挤到预算尽头（实测第一轮修完仍然挑不到 HelloGitHub）。
+    order = sorted(by_label.keys(), key=lambda lb: (len(by_label[lb]), lb))
     while len(picked) < limit and any(by_label.values()):
         progressed = False
-        for lb in list(by_label.keys()):
+        for lb in order:
             queue = by_label[lb]
             while queue:
                 cand = queue.pop(0)
-                if not is_list_like(cand):
+                if not is_list_like(cand, lb):
                     continue
                 if take(cand['item']):
                     progressed = True
@@ -607,11 +656,7 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int, fresh_d
             phrase = any((' ' in str(k) and _rc_rank._norm_text(str(k)) in blob for k in keywords))
             hits = len(code_hits.get(key, []))
             srcs = rec.get('sources') or []
-            if bucket == 'impl' and cov < 0.18 and (hits == 0):
-                continue
-            if bucket == 'impl' and matched < min(2, len(groups)) and (not phrase) and (hits == 0):
-                continue
-            if srcs and matched == 0 and (cov < 0.18) and (not phrase) and (hits == 0):
+            if not _keep_in_pre(bucket, cov, matched, phrase, hits, len(groups), bool(srcs)):
                 continue
             stars = int(item.get('stargazers_count') or 0)
             out.append({'key': key, 'item': item, 'bucket': bucket, 'cov': cov, 'hits': hits, 'seen': rec['seen'], 'sources': srcs, 'via': rec.get('via') or set(), 'pre': 0.55 * cov + 0.2 * min(1, math.log10(stars + 1) / 4) + 0.25 * min(1, hits / 3) + (_rc_base.SOURCE_BONUS if srcs else 0)})
@@ -653,6 +698,8 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int, fresh_d
             if found:
                 pre = build_pre()
                 enrich_top(pre)
+    # 显式来源的覆盖度收敛放在「清单展开之后」—— 见 _keep_in_pre 的说明
+    pre = [p for p in pre if _keep_after_lists(p, keywords)]
     ranked: List[Dict[str, Any]] = []
     for p in pre:
         item, bucket = (p['item'], p['bucket'])

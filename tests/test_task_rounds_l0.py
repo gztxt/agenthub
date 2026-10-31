@@ -395,6 +395,8 @@ class TestSourceInvariants(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.src = (_REPO / "src" / "tasks.py").read_text(encoding="utf-8")
+        # 片3 文件级拆分后，轮次护栏常量搬到了 `tasks_tiers`：断言要指向**定义处**
+        cls.tiers = (_REPO / "src" / "tasks_tiers.py").read_text(encoding="utf-8")
         # 去 docstring，只量会被执行的代码（同 test_task_handoff_l0 的口径）
         cls.code = re.sub(r'""".*?"""', "", cls.src, flags=re.S)
 
@@ -415,10 +417,11 @@ class TestSourceInvariants(unittest.TestCase):
         self.assertLess(i_gate, i_llm, "先判闸门再问 LLM：反了会在不该花钱时花钱")
 
     def test_default_round_cap_is_two(self):
-        self.assertIn('TASK_MAX_ROUNDS", "2"', self.code)
+        self.assertIn('TASK_MAX_ROUNDS", "2"', self.tiers)
 
     def test_round_cap_only_tightens(self):
-        self.assertIn("min(int(max_rounds), MAX_ROUNDS)", self.code)
+        # 常量在 tiers，收紧逻辑仍在编排层 ⇒ 调用点写的是模块属性
+        self.assertIn("min(int(max_rounds), _tiers.MAX_ROUNDS)", self.code)
 
 
 class TestWiringAttrsResolvable(unittest.TestCase):

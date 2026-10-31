@@ -26,6 +26,27 @@ import verifier
 
 router = APIRouter()
 
+
+# ── 纯逻辑层（tasks_tiers）────────────────────────────────────────────
+# 2026-10-31 片3 文件级拆分：状态枚举/预算/升档/检索块搬到 `tasks_tiers`。
+# 这里显式重新导出，保证 `tasks.X` 的老入口（含测试与 main）全部继续可用；
+# **本文件内部一律写 `_tiers.X`**，否则「拷进来的名字」与原件会分成两份状态。
+import tasks_tiers as _tiers
+from tasks_tiers import (  # noqa: F401  —— 对外门面
+    UPSTREAM_TRIM, UPSTREAM_HEAD, UPSTREAM_TAIL,
+    TASK_STATUSES, TERMINAL_STATUSES, PARKED_STATUSES, SUBMITTED_STATUSES,
+    TASK_RETRIEVAL, RETRIEVAL_TRIM, RETRIEVAL_TIMEOUT_S,
+    TASK_SKILL_INJECT, TASK_SKILL_MAX_CHARS, TASK_SKILL_TIMEOUT_S,
+    MAX_AUTO_RETRY, MAX_ROUNDS, WAIT_RESUME_S, MAX_WAKES,
+    set_context, budget_exceeded, set_run_budget, run_spent, run_budget_exceeded,
+    format_upstream, can_accept, should_retry, escalate_target,
+    retrieval_block, skill_inject_block,
+    # 私有名也导出：外部（测试/runner）历史上直接读它们，删掉就是**静默少符号**
+    _now, _ctx, _known_agent_ids, _next_escalation_note, _csv_env,
+    _ccr_model_agents, _catalog_snapshot, _plan_tiers, _schedule_exec_retry,
+    _skill_inject_for, _retrieval_for,
+)
+
 TASK_TIMEOUT_S = int(os.getenv("TASK_TIMEOUT_S", "600"))
 MAX_CONCURRENCY = 4
 MAX_TASKS = 12
@@ -33,89 +54,24 @@ MAX_TASKS = 12
 #: （`ensure_synthesis`）。不留这一格，Leader 顶满 12 条时多叶子就拿不到汇总，
 #: 又回到「全绿无结论」。这是结构性预留，不是保守取值。
 LEADER_MAXN = MAX_TASKS - 1
-UPSTREAM_TRIM = 4000
-#: P1-3：截断预算**只算正文**，标记开销另计（标记必须存在，否则下游无法分辨
-#: 「上游只写了这么多」与「被我砍掉了」—— 静默截断是最坏形态，见 format_upstream 文档串）。
-#: 头尾比例 1:1：结论通常在尾部，整体砍尾丢的正是结论。
-UPSTREAM_HEAD = UPSTREAM_TRIM // 2
-UPSTREAM_TAIL = UPSTREAM_TRIM - UPSTREAM_HEAD
 #: 调度循环步长（秒）。做成常量是为了让 L0 闸门能把它压到毫秒级（不起真等待）。
 LOOP_SLEEP_S = float(os.getenv("TASK_LOOP_SLEEP_S", "1.5"))
 
-# ── 状态枚举（P0-3）─────────────────────────────────────────────────
-#: 全量状态。`verifying` 是执行者交产物后、验证器判定前的**短暂态**；
-#: `waiting_*` / `paused` 是**等待态**（parked）：既不占执行资源，也不算终态。
-TASK_STATUSES = ("pending", "running", "verifying", "submitted", "success", "failed", "blocked",
-                 "cancelled", "waiting_input", "waiting_approval", "paused")
-#: 终态：run 的收敛条件。
-TERMINAL_STATUSES = ("success", "failed", "blocked", "cancelled")
-#: 等待态：让出执行资源，等外部输入/批准/恢复；run 在此**挂起**而非空转。
-PARKED_STATUSES = ("waiting_input", "waiting_approval", "paused")
-#: **待接受态（P1-4）**：执行者已交产物**且过了 verifier**，但**尚未被接受**。
-#: 手册 B12：把「执行者提交成功」与「审核方接受」分开——提交只是**候选成果**。
-#: 资源语义与等待态同类（都已让出执行槽），但**刻意不进 `PARKED_STATUSES`**：
-#: 等待态的出口是 `/resume`（→pending 重跑），而 submitted 的出口是 `/accept`→success
-#: 或 `/reject`→failed。混进 PARKED_STATUSES 会被 `requeue_waiting` 误置回 pending。
-SUBMITTED_STATUSES = ("submitted",)
 #: 过了 verifier 后是否**自动接受**（= P1-4 之前的行为，默认开）。
 #: 置 0 则任务停在 `submitted` 等外部 `POST /accept`。
 #: 做成**模块级常量**（不是每次读 env）：与 MAX_CONCURRENCY/LOOP_SLEEP_S 同口径，测试可整体替换。
 AUTO_ACCEPT = os.getenv("TASK_AUTO_ACCEPT", "1").strip().lower() not in ("0", "false", "no", "off")
 
-#: B1（2026-10-22）：子任务派发前是否跑一次接单前置检索，把线索拼进 prompt。
-#: 默认开；`TASK_RETRIEVAL=0` 关掉（回归对比 / 离线跑测用）。
-TASK_RETRIEVAL = os.getenv("TASK_RETRIEVAL", "1").strip().lower() not in ("0", "false", "no", "off")
-#: 检索块的正文预算（字符）。与 UPSTREAM_TRIM 同一口径：超了要带**显式省略标记**，
-#: 不能让下游分不清「上游只给了这么多」与「被砍掉了」。
-RETRIEVAL_TRIM = int(os.getenv("TASK_RETRIEVAL_TRIM", "1200"))
-#: 检索自身的超时（秒）。检索只是增强，**绝不能拖死一个子任务**：
-#: 超时就当「本次无线索」进 prompt（并显式写出来），子任务照跑。
-RETRIEVAL_TIMEOUT_S = float(os.getenv("TASK_RETRIEVAL_TIMEOUT_S", "8"))
 
-#: **分步任务必须先拿技能说明书**（用户 2026-10-31 裁定「执行 3」）。
-#:
-#: 背景：B1 只把「技能命中」写成一行提示（`hub_skill_auto(task=...)`），要不要去调
-#: 全靠执行者自觉 —— 实测子任务直接进 LLM，把本该照说明书做的活重新发明一遍，
-#: 既慢又偏。这里改成**派发时就把正文注入 prompt**：本地优先（BM25 归一化 ≥0.40），
-#: 不够像才走商店（受 `SKILL_STORE_AUTO` / 小时额度 / 质量门槛约束）。
-#:
-#: 三条边界，缺一条就会变成新的「静默不可用」：
-#: ① 失败**不阻塞**子任务（技能是增强，不是前提），但必须把原因写进 `retrieval_json`；
-#: ② 正文按 `TASK_SKILL_MAX_CHARS` 截断并**显式标出省略量**（同 `format_upstream` 纪律）；
-#: ③ `TASK_SKILL_INJECT=0` 可整体关掉（离线跑测 / 回归对照）。
-TASK_SKILL_INJECT = os.getenv("TASK_SKILL_INJECT", "1").strip().lower() not in ("0", "false", "no", "off")
-TASK_SKILL_MAX_CHARS = int(os.getenv("TASK_SKILL_MAX_CHARS", "6000"))
-TASK_SKILL_TIMEOUT_S = float(os.getenv("TASK_SKILL_TIMEOUT_S", "12"))
-#: B3：验证失败且**可修复**时自动重试的最大次数。默认 1（= 最多跑两遍）。
-#: 不做无限重试：验证失败如果每次原因相同，重跑只是烧钱（本仓铁律：失败即止损）。
-MAX_AUTO_RETRY = int(os.getenv("TASK_AUTO_RETRY", "1"))
 
-#: 全链路编排（2026-10-27）：一个 goal 最多自动跑几**轮**（拆解→派发→汇总→重拆）。
-#: 默认 2 = 首轮 + 最多一次重拆。轮与「attempt」不是一回事：attempt 是**同一个子任务**
-#: 重跑（MAX_AUTO_RETRY），round 是**整条 run 重新拆解**。两个上限各自独立、都可配。
-#: 依据 wiki `多轮迭代终止条件设计` / `终止条件与升级机制`：2 轮作安全上限，
-#: 连续两轮 FAIL 签名相同或 diff 无变化 ⇒ 立即升人会签（见 `replan_gate`）。
-MAX_ROUNDS = int(os.getenv("TASK_MAX_ROUNDS", "2"))
 
-_ctx: Dict[str, Any] = {}
 _runners: Dict[str, asyncio.Task] = {}
 
 
-def set_context(chat_fn=None, agent_ids_fn=None):
-    if chat_fn:
-        _ctx["chat_fn"] = chat_fn
-    if agent_ids_fn:
-        _ctx["agent_ids_fn"] = agent_ids_fn
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
-#: §7-② 等待自愈：等待态的**默认期限**（秒）与**最大唤醒次数**。
-#: 到期限未等来输入 ⇒ 自动重新排队（自愈）；唤醒次数到顶 ⇒ 如实 failed（不再永久悬空）。
-WAIT_RESUME_S = int(os.getenv("TASK_WAIT_RESUME_S", "300"))
-MAX_WAKES = int(os.getenv("TASK_MAX_WAKES", "3"))
 
 
 #: P0-3 新增列（幂等 ALTER 补建）。
@@ -178,398 +134,42 @@ _TASK_COLUMNS = (
 )
 
 
-def budget_exceeded(row: dict, spent_ms: Optional[int], spent_tokens: int = 0) -> Optional[str]:
-    """任务级预算闸（纯函数，便于单测）：返回超限原因，未超返回 None。
-
-    预算为 None = **不设限**；预算与实测同时存在才比较（判不了就不拦 —— 与 P0-4 同口径，
-    但这里“不拦”是设计选择，因为预算是成本护栏、不是正确性判据）。
-    """
-    bm = row.get("budget_ms")
-    if bm is not None and spent_ms is not None and spent_ms > bm:
-        return "耗时 %sms 超预算 %sms" % (spent_ms, bm)
-    bt = row.get("budget_tokens")
-    if bt is not None and spent_tokens is not None and spent_tokens > bt:
-        return "token %s 超预算 %s" % (spent_tokens, bt)
-    return None
 
 
-# ── §7-③ run 级预算 ────────────────────────────────────────────────────
-def set_run_budget(run_id: str, budget_ms: Optional[int] = None,
-                   budget_tokens: Optional[int] = None) -> None:
-    """设/改 run 级预算（**upsert**：一个 run 只一行）。None = 该项不设限。"""
-    db.execute("INSERT INTO task_run_budgets(run_id,budget_ms,budget_tokens,created_at)"
-               " VALUES(?,?,?,?)"
-               " ON CONFLICT(run_id) DO UPDATE SET budget_ms=excluded.budget_ms,"
-               " budget_tokens=excluded.budget_tokens",
-               (run_id, budget_ms, budget_tokens, _now()))
 
 
-def run_spent(run_id: str) -> dict:
-    """run 累计消耗 = 各任务 `spent_ms` / `spent_tokens` 之和（未跑的不计）。"""
-    r = db.query("SELECT COALESCE(SUM(spent_ms),0) ms, COALESCE(SUM(spent_tokens),0) tk"
-                 " FROM tasks WHERE run_id=?", (run_id,))[0]
-    return {"ms": int(r["ms"] or 0), "tokens": int(r["tk"] or 0)}
 
 
-def run_budget_exceeded(run_id: str) -> Optional[str]:
-    """run 级累计超限原因；**未设预算 ⇒ None**（不设限，不是「超了」）。
-
-    与任务级同一口径：只有「预算与实测同时存在」才比较 ⇒ 判不了就不拦。
-    """
-    rows = db.query("SELECT * FROM task_run_budgets WHERE run_id=?", (run_id,))
-    if not rows:
-        return None
-    b, s = rows[0], run_spent(run_id)
-    bm, bt = b.get("budget_ms"), b.get("budget_tokens")
-    if bm is not None and s["ms"] > bm:
-        return "耗时 %sms 超 run 预算 %sms" % (s["ms"], bm)
-    if bt is not None and s["tokens"] > bt:
-        return "token %s 超 run 预算 %s" % (s["tokens"], bt)
-    return None
 
 
-def format_upstream(task_id: str, text: str) -> str:
-    """上游产物注入下游 prompt 时的**交接块**（P1-3，纯函数）。
-
-    原实现是 `upstream[d][:UPSTREAM_TRIM]` —— **静默整体截断**：不留标记、不保尾部。
-    那个形态最坏，有两个独立的原因：
-
-    1. **下游无从分辨**「上游本来就只写了 4000 字」与「上游写了 8000 字被我砍到 4000」。
-       两种情况的 prompt 长得一模一样，下游只能猜；猜错就是**基于缺失内容下结论**。
-    2. **事后不可复盘**。任务表里不留「这条被截了多少」，出了错只能回放原始 DB 才知道。
-
-    所以截断必须**自带可断言的标记**：原始长度 + 省略量，且**保留头尾**
-    （结论通常在尾部，砍尾丢的正是结论）。
-
-    短文本（≤ `UPSTREAM_TRIM`）**逐字节原样返回，不加任何标记** —— 绝大多数任务走这条路，
-    给它们套一层壳纯属噪声（这也是最容易写坏的地方，见 tests 的红向自证）。
-
-    超长时返回四段：`头` + 省略标记（含原始总长与省略量）+ `尾` + 任务标题。
-    正文字符数**恒 ≤ `UPSTREAM_TRIM`**；标记与标题是固定开销，不占正文预算。
-    """
-    body = text or ""
-    if len(body) <= UPSTREAM_TRIM:
-        return "—— 任务 %s 的结果 ——\n%s" % (task_id, body)
-    omitted = len(body) - UPSTREAM_TRIM
-    return ("—— 任务 %s 的结果 ——（原文 %d 字符，已省略中间 %d 字符，"
-            "保留头 %d + 尾 %d）——\n%s\n……（以上省略 %d 字符）……\n%s"
-            % (task_id, len(body), omitted, UPSTREAM_HEAD, UPSTREAM_TAIL,
-               body[:UPSTREAM_HEAD], omitted, body[-UPSTREAM_TAIL:]))
 
 
-def can_accept(status: str) -> bool:
-    """纯函数（P1-4）：该状态可否被接受。**只有 `submitted` 可** ——
-    `success` 已经接受过（重复接受应是 no-op，不该被算成一次接受）；
-    其余状态（pending/running/failed/…）根本没有可接受的候选产物。"""
-    return status in SUBMITTED_STATUSES
 
 
-def should_retry(verdict_status: str, repairable: bool, attempts: Any) -> bool:
-    """B3 纯函数：这次验证失败该不该自动重试一次（可单测，避免把判据埋进 400 行协程）。
-
-    三条同时成立才重试：
-      ① `repairable` —— 产物**明确不合格**（缺内容/非法 JSON）。`insufficient`
-         （未知 kind / 没有产物 / 判据缺失）重跑一次不会变好，重试只是烧钱；
-      ② `attempts < MAX_AUTO_RETRY` —— 有界，防「失败→重跑→再失败」无限循环；
-      ③ 状态是 fail（passthrough 保险：调用方传错也不重试）。
-
-    为什么不在 `insufficient` 上重试：那是**判不了**，不是**做错了**。判不了时重跑同一
-    执行者、同一判据，结果只会再来一次判不了 —— 这正是「无限等待」禁令的同族。
-    """
-    try:
-        n = int(attempts or 0)
-    except (TypeError, ValueError):
-        n = MAX_AUTO_RETRY          # 读不出来就当已用完（保守：不重试）
-    return bool(repairable) and verdict_status == verifier.STATUS_FAIL and n < MAX_AUTO_RETRY
 
 
-def _known_agent_ids() -> set:
-    """当前可用派发池（`set_context` 的 agent_ids_fn，即 `dispatchable_ids()`）。"""
-    fn = _ctx.get("agent_ids_fn")
-    if not fn:
-        return set()
-    try:
-        return set(fn())
-    except Exception:  # noqa: BLE001 —— 池子读不出来只影响升档，不许带倒任务
-        return set()
 
 
-def _next_escalation_note(agent_id: str, model: Optional[str], next_attempt: int,
-                          tier: Optional[str] = None) -> str:
-    """写进 error 字段的一句话：下一次重试会升到哪 —— 没有目标就直说没有。"""
-    cat, checked = _catalog_snapshot()
-    t = escalate_target(agent_id, model, next_attempt, _known_agent_ids(), tier=tier,
-                        catalog=cat, catalog_checked=checked)
-    return t["reason"]
 
 
-def _csv_env(name: str, default: str = "") -> List[str]:
-    raw = os.getenv(name, default) or ""
-    return [x.strip() for x in raw.split(",") if x.strip()]
 
 
-def _ccr_model_agents() -> set:
-    """模型域 = CCR 的 agent（只有它们的 `--model` 能吃同一个模型 ID）。"""
-    try:
-        from adapters.cli_agent import SPECS as _CLI
-        return {"claude", "jcode"} | {a for a, sp in _CLI.items()
-                                      if sp.get("model_path") == "ccr"}
-    except Exception:  # noqa: BLE001
-        return {"claude", "jcode"}
 
 
-def _catalog_snapshot() -> tuple:
-    """CCR 当前可用模型清单 → `(ids, checked)`。取不到就 `(set(), False)`。
-
-    **升档和拆解必须用同一份清单**：2026-10-29 实测 `escalate_target` 的三处调用
-    都没传 `catalog`，`first_usable()` 恒返回 None ⇒ 档位升档路径**运行时永不生效**，
-    每次都掉到 agent 阶梯（claude-code 超时后换成了 codex，而不是升到 t2 模型）。
-    只写单测看不出来，因为单测自己传了 catalog。
-    """
-    try:
-        import modelcfg
-        cat = modelcfg.catalog_ids()
-        ids = {str(x) for x in (cat.get("ids") or set())}
-        return ids, bool(cat.get("checked")) and bool(ids)
-    except Exception:  # noqa: BLE001 — 选型是增强，不许带倒任何主流程
-        return set(), False
 
 
-def _plan_tiers(items: List[dict], pool: set) -> tuple:
-    """难度→起始档位的**接线层**：只负责取清单与池子，判断全在 `tiercfg.py`（纯函数）。
-
-    清单取不到（网关挂/无凭据）时 `checked=False` ⇒ 不注入任何模型，
-    原因写 `catalog_unavailable`。这里绝不"给个默认值凑合"——
-    那会把「不知道」伪装成「选过了」。
-    """
-    import tiercfg as tierlib
-    ids, checked = _catalog_snapshot()
-    return tierlib.plan(items, catalog=ids, checked=checked, ccr_agents=_ccr_model_agents(),
-                        pool=pool)
 
 
-def escalate_target(agent_id: str, model_choice: Optional[str], attempts: Any,
-                    known: set, ccr_agents: Optional[set] = None,
-                    tier: Optional[str] = None, tiers_cfg: Optional[dict] = None,
-                    catalog: Optional[set] = None,
-                    catalog_checked: bool = False) -> Dict[str, Any]:
-    """失败重试的**升档**目标（纯函数，可单测）。
-
-    旧行为（v0.13.174 之前）：重试＝同 agent、同模型原地再跑一遍，只是把上次的
-    `verify_reason` 塞进 prompt —— 同一执行者、同一能力，失败原因若是"能力不够"
-    就必然再失败一次，白烧一轮钱。这里改成 cascade：**换一档**再试。
-
-    两条路径，按优先级：
-      ① 模型升档：`TASK_ESCALATE_MODELS`（逗号分隔），第 N 次重试用第 N 项。
-         只对模型域 = CCR 的 agent 生效 —— 给 codebuddy/cursor 塞 CCR 模型 ID 必报
-         `unknown model`，那是把"升档"做成"必失败"。
-      ② agent 升档：没有模型通道时换阶梯里的下一个（`TASK_ESCALATE_LADDER`，
-         默认 `claude-code,codex`，工具环最完整的两家），且必须在**当前可用池**里。
-
-    都不成立时**原样重跑但写明 reason**（`no_escalation_path`）——
-    静默当已升档会让复盘把"同一档又输一次"读成"升档无效"。
-    """
-    try:
-        n = int(attempts or 0)
-    except (TypeError, ValueError):
-        n = 0
-    base = {"agent_id": agent_id, "model": model_choice, "changed": False,
-            "from_agent": agent_id, "from_model": model_choice}
-    if n <= 0:
-        return dict(base, reason="first_attempt")
-
-    # ⓪ 档位路径（v0.13.176）：难度决定了起点档，失败就**上一档**，而不是跳到一个
-    #    和当前档无关的模型。已在最高档 ⇒ 落到 agent 阶梯。永不向下（next_tier 只向上）。
-    if tier and tier not in ("explicit", "native"):
-        import tiercfg as tierlib
-        cfg = tiers_cfg if tiers_cfg is not None else tierlib.parse_tiers()
-        nxt = tierlib.next_tier(tier, cfg)
-        if nxt and agent_id in (ccr_agents if ccr_agents is not None else _ccr_model_agents()):
-            m, why = tierlib.first_usable(nxt, cfg, catalog, catalog_checked)
-            if m and m != (model_choice or ""):
-                return dict(base, agent_id=agent_id, model=m, changed=True,
-                            reason="tier:%s:%s" % (nxt, m))
-
-    chain = _csv_env("TASK_ESCALATE_MODELS")
-    if chain and agent_id in (ccr_agents if ccr_agents is not None else _ccr_model_agents()):
-        m = chain[min(n - 1, len(chain) - 1)]
-        if m and m != (model_choice or ""):
-            return dict(base, agent_id=agent_id, model=m, changed=True,
-                        reason="model:%s" % m)
-
-    for cand in _csv_env("TASK_ESCALATE_LADDER", "claude-code,codex"):
-        if cand != agent_id and cand in known:
-            return dict(base, agent_id=cand, model=None, changed=True,
-                        reason="agent:%s" % cand)
-
-    return dict(base, reason="no_escalation_path")
 
 
-def _schedule_exec_retry(run_id: str, row: dict, err: str, reason: str,
-                         attempts_done: int, exec_agent: str, exec_model: Optional[str],
-                         *, dur: int = 0, spent_tokens: int = 0,
-                         used_model: Optional[str] = None, kind: str = "",
-                         detail: Optional[dict] = None) -> bool:
-    """执行者自身失败（异常/超时/429）→ 有升档路径就排一次重试，返回是否已排。
-
-    为什么单独抽出来：`_execute_task` 里现在有**三条**执行失败出口（自称失败、
-    超时、任意异常），各写一遍重试必然漂移（2026-10-29 就是只给 verifier 失败
-    写了重试，执行失败三处全漏 ⇒ dsh 429 直接终态、汇总永远跑不到）。
-    """
-    if attempts_done >= MAX_AUTO_RETRY:
-        return False
-    cat, checked = _catalog_snapshot()
-    esc = escalate_target(exec_agent, exec_model, attempts_done + 1,
-                          _known_agent_ids(), tier=row.get("tier"),
-                          catalog=cat, catalog_checked=checked)
-    if not esc.get("changed"):
-        return False
-    db.execute("UPDATE tasks SET status='pending',attempts=?,error=?,verify_reason=?,"
-               "spent_ms=?,spent_tokens=?,model=?,finished_at=NULL,updated_at=?"
-               " WHERE run_id=? AND task_id=?",
-               (attempts_done + 1,
-                ("%s（自动重试 %d/%d，升档 %s→%s）"
-                 % (err, attempts_done + 1, MAX_AUTO_RETRY,
-                    exec_agent, esc.get("agent_id")))[:500],
-                reason[:500], dur, spent_tokens, used_model, _now(),
-                run_id, row["task_id"]))
-    db.log_profile_event("task_exec", row["agent_id"], "retry", dur,
-                         trace_id=row["trace_id"],
-                         detail=dict({"task": row["task_id"], "verify": kind,
-                                      "exec_failed": True,
-                                      "attempt": attempts_done + 1,
-                                      "escalate_to": esc.get("agent_id"),
-                                      "escalate_reason": esc.get("reason")},
-                                     **(detail or {})))
-    return True
 
 
-def retrieval_block(rep: Dict[str, Any], limit: int = RETRIEVAL_TRIM) -> str:
-    """把一份 intake 结果压成**给执行者看的**线索块（B1，纯函数，可单测）。
-
-    只取三类有动作价值的东西：
-      · 约束：带「必须/禁止/不得…」的命中 ⇒ 开工前要知道的红线；
-      · 回读：有路径的原文 ⇒ 需要细节时去读而不是凭空发挥；
-      · 技能：命中时给 `hub_skill_auto(task=...)` 调用式 ⇒ 拿到说明书。
-
-    **截断必须显式**（与 `format_upstream` 同一条纪律）：超预算时尾部写
-    「已省略 N 字符」而不是默默截掉 —— 否则下游无法区分「本来就这么少」与「被砍了」。
-    空结果返回空串（调用方据此**不加块**，不制造一个空标题占位）。
-    """
-    plan = rep.get("plan") or {}
-    lines: List[str] = []
-    for c in (plan.get("constraints") or [])[:3]:
-        lines.append("- 约束（%s）：%s" % (c.get("src") or "?", str(c.get("text") or "")[:160]))
-    for x in (plan.get("must_read") or [])[:2]:
-        lines.append("- 回读：%s —— %s" % (x.get("path") or "?", str(x.get("why") or "")[:100]))
-    sk = rep.get("skill") or {}
-    if sk.get("ok"):
-        lines.append("- 技能：%s ⇒ 需要步骤时调 hub_skill_auto(task=\"…\")" % (sk.get("name"),))
-    if not lines:
-        return ""
-    head = ("—— 检索线索（hub intake·%s 路·判定 %s；**只是线索不是结论**）——\n"
-            % (plan.get("coverage") or "?", plan.get("verdict") or "?"))
-    body = head + "\n".join(lines)
-    if len(body) <= limit:
-        return body
-    keep = max(0, limit - len(head))
-    return body[:len(head) + keep] + "\n……（检索线索已省略 %d 字符）……" % (len(body) - len(head) - keep)
 
 
-def skill_inject_block(got: Dict[str, Any], limit: int = 0) -> str:
-    """把 acquire 结果压成**注入给执行者**的技能块（纯函数，L0 可直测）。
-
-    只在真的拿到正文时出块：`ok=true` 但正文为空（`with_body=false` 场景）
-    说明「找到技能但没取内容」——那种情况给一行指引比给个空标题有用。
-    截断**显式**：尾部写省略了多少字符，否则下游分不清「说明书就这么短」与「被砍了」。
-    """
-    limit = limit or TASK_SKILL_MAX_CHARS
-    if not isinstance(got, dict) or not got.get("ok"):
-        return ""
-    name = got.get("name") or "?"
-    route = got.get("route") or "?"
-    src = got.get("source") or "local"
-    body = str(got.get("content") or "")
-    head = ("—— 技能说明书（%s · 来源 %s；**按它做，别自己重发明**）——\n" % (name, src))
-    if not body:
-        return head + "- 已定位技能 `%s`（route=%s），正文未取回：需要细节时调 `hub_skill_invoke(name=\"%s\")`。\n" % (name, route, name)
-    keep = max(0, limit - len(head))
-    if len(body) > keep:
-        tail = "\n……（技能正文已省略 %d 字符；需要全文调 hub_skill_invoke(name=\"%s\")）……" % (len(body) - keep, name)
-        body = body[:keep] + tail
-    return head + body + "\n"
 
 
-async def _skill_inject_for(goal: str, prompt: str, agent_id: str) -> tuple:
-    """派发前取一次技能说明书，返回 `(块文本, 落库用的 dict)`。**任何失败都不阻塞**。
-
-    调 `skill_store.acquire`（与 `/api/skill/auto` 同一条链路，不另立门槛 ——
-    两套门槛必然漂移，漂移形态是「同一任务两个入口选到不同技能」）。
-    """
-    import skill_store as store_mod        # 局部导入：skill_store 依赖 skill，顶层会成环
-    t0 = asyncio.get_event_loop().time()
-    meta: Dict[str, Any] = {"enabled": TASK_SKILL_INJECT, "ok": False}
-    try:
-        got = await asyncio.wait_for(
-            store_mod.acquire((goal + " :: " + prompt)[:1500], caller="task:%s" % (agent_id or "?"),
-                              task=(goal or "")[:500], allow_install=True, local_only=False),
-            timeout=TASK_SKILL_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        meta["error"] = "超时 %.0fs" % TASK_SKILL_TIMEOUT_S
-        meta["ms"] = int((asyncio.get_event_loop().time() - t0) * 1000)
-        return ("", meta)
-    except Exception as e:  # noqa: BLE001 —— 技能链路坏了不许带倒子任务
-        meta["error"] = "%s: %s" % (type(e).__name__, str(e)[:200])
-        meta["ms"] = int((asyncio.get_event_loop().time() - t0) * 1000)
-        return ("", meta)
-    meta.update({"ok": bool(got.get("ok")), "source": got.get("source"),
-                 "name": got.get("name"), "route": got.get("route"),
-                 "norm": (got.get("local") or {}).get("norm"),
-                 "installed": bool((got.get("store") or {}).get("installed")),
-                 "reason": (got.get("store") or {}).get("reason") or got.get("reason"),
-                 "ms": int((asyncio.get_event_loop().time() - t0) * 1000)})
-    return (skill_inject_block(got), meta)
 
 
-async def _retrieval_for(goal: str, prompt: str, agent_id: str) -> tuple:
-    """跑一次接单前置检索，返回 `(块文本, 落库用的 dict)`。**任何失败都不阻塞子任务**。
-
-    为什么要串这一层（B1 的全部理由）：本轮实测发现「自动拆解→检索→验证」三段
-    各自存在但**从未串联**（`grep -E 'skill|relevant|intake|memory|kb' src/tasks.py` = 0 命中），
-    生产 `tasks` 表也只有 1 个 run（2026-09-06）。拆出来的子任务直接进 LLM，
-    拿不到任何记忆/文档/技能线索 ⇒ 同一个任务，人在对话里做会先查旧账，
-    流水线做则凭空重写一遍。
-
-    ⚠ 边界：`deep=False` + `escalate="off"` —— 派发阶段**不准联网、不准查 GitHub**
-    （那是 20~90s 且吃额度），只走本地三路；且整段有 `RETRIEVAL_TIMEOUT_S` 超时，
-    超时/异常一律降级为空块，**在返回里写明原因**（不许静默当作「没有线索」）。
-    """
-    import intake as intake_mod          # 局部导入：intake 依赖 skill_store/refscout，
-                                        # 顶层导入会把启动依赖面拉爆（且可能成环）
-    t0 = asyncio.get_event_loop().time()
-    try:
-        rep = await asyncio.wait_for(
-            intake_mod.run(intake_mod.IntakeIn(
-                task=(goal + " :: " + prompt)[:2000], caller="task:%s" % (agent_id or "?"),
-                deep=False, auto_deep=False, escalate="off")),
-            timeout=RETRIEVAL_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        return "", {"ok": False, "error": "检索超时 %.1fs" % RETRIEVAL_TIMEOUT_S}
-    except Exception as e:  # noqa: BLE001 — 检索是增强，不许带倒任务
-        return "", {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
-    plan = rep.get("plan") or {}
-    meta = {
-        "ok": True,
-        "verdict": plan.get("verdict"),
-        "coverage": plan.get("coverage"),
-        "strong": plan.get("strong"),
-        "skill_strong": plan.get("skill_strong"),
-        "skill": (rep.get("skill") or {}).get("name"),
-        "constraints": len(plan.get("constraints") or []),
-        "must_read": [x.get("path") for x in (plan.get("must_read") or [])][:4],
-        "ms": int((asyncio.get_event_loop().time() - t0) * 1000),
-    }
-    return retrieval_block(rep), meta
 
 
 SCHEMA_TASKS = """
@@ -884,7 +484,7 @@ def replan_gate(round_no: Any, max_rounds: Any, rows: list,
     max_rounds 必须在 go 之前（上限是硬闸，不因原因不同而放行）。
     """
     st = {r.get("task_id"): r.get("status") for r in rows}
-    if any(s not in TERMINAL_STATUSES for s in st.values()):
+    if any(s not in _tiers.TERMINAL_STATUSES for s in st.values()):
         return {"go": False, "kind": "unfinished", "reason": "run 未收敛（仍有非终态任务）"}
     if st and all(s == "success" for s in st.values()):
         return {"go": False, "kind": "complete", "reason": "全部子任务达标"}
@@ -928,7 +528,7 @@ def _create_run(goal: str, items: List[dict], *, verify_kind: str,
     避免两处 INSERT 各自长出一套字段（那是最典型的「两套口径」起点）。
     `run_id` 可外部给：重拆要**先占位再落库**，否则并发两次重拆会生成两条子 run。"""
     run_id = run_id or uuid.uuid4().hex[:10]
-    now = _now()
+    now = _tiers._now()
     for it in items:
         db.execute(
             "INSERT INTO tasks(run_id,task_id,trace_id,goal,prompt,agent_id,deps,status,"
@@ -993,8 +593,8 @@ async def decompose(body: DecomposeIn):
     if not llm.configured():
         raise HTTPException(503, "LLM 未配置，无法拆解")
     known = set()
-    if _ctx.get("agent_ids_fn"):
-        known = set(_ctx["agent_ids_fn"]())
+    if _tiers._ctx.get("agent_ids_fn"):
+        known = set(_tiers._ctx["agent_ids_fn"]())
     default = body.default_agent or ("jcode" if "jcode" in known else (sorted(known)[0] if known else "jcode"))
     allowed = _allowed_models_for(known)
     messages = [{"role": "system", "content": (
@@ -1013,11 +613,11 @@ async def decompose(body: DecomposeIn):
         raise HTTPException(502, f"Leader 拆解失败: {e}")
     # 汇总节点在 try 之外补：它抛错是**我们的** bug，不该被报成「Leader 拆解失败」。
     items, synth = ensure_synthesis(items, default)
-    items, tier_note = _plan_tiers(items, known)
+    items, tier_note = _tiers._plan_tiers(items, known)
     if body.dry_run:
         return {"run_id": None, "goal": body.goal, "tasks": items, "running": False,
                 "dry_run": True, "round": 1, "synthesis": synth, "tiers": tier_note,
-                "auto_rounds": bool(body.auto_rounds), "max_rounds": MAX_ROUNDS,
+                "auto_rounds": bool(body.auto_rounds), "max_rounds": _tiers.MAX_ROUNDS,
                 "note": "dry_run：只拆解未落库，确认后传 dry_run=false 再调一次"}
     run_id = _create_run(body.goal, items, verify_kind=body.verify_kind,
                          budget_ms=body.budget_ms, budget_tokens=body.budget_tokens,
@@ -1026,7 +626,7 @@ async def decompose(body: DecomposeIn):
         _start_runner(run_id)
     return {"run_id": run_id, "goal": body.goal, "tasks": items,
             "running": body.auto_run, "round": 1, "synthesis": synth, "tiers": tier_note,
-            "auto_rounds": bool(body.auto_rounds), "max_rounds": MAX_ROUNDS}
+            "auto_rounds": bool(body.auto_rounds), "max_rounds": _tiers.MAX_ROUNDS}
 
 
 def _ensure_run_row(run_id: str) -> dict:
@@ -1040,7 +640,7 @@ def _ensure_run_row(run_id: str) -> dict:
         goal = (r[0]["g"] if r else "") or ""
         db.execute("INSERT OR IGNORE INTO task_runs(run_id,parent_run_id,round,goal,origin,"
                    "auto_rounds,created_at) VALUES(?,NULL,1,?,'legacy',0,?)",
-                   (run_id, goal, _now()))
+                   (run_id, goal, _tiers._now()))
     return run_meta(run_id)
 
 
@@ -1071,26 +671,26 @@ async def _replan_once(run_id: str, auto: bool = False,
     rows = db.query("SELECT * FROM tasks WHERE run_id=? ORDER BY created_at", (run_id,))
     if not rows:
         raise HTTPException(404, "run not found")
-    cap = MAX_ROUNDS
+    cap = _tiers.MAX_ROUNDS
     if max_rounds is not None:
         # 只允许**收紧**：调用方传 5 也不能突破用户裁定的 2 轮硬上限。
         try:
-            cap = max(1, min(int(max_rounds), MAX_ROUNDS))
+            cap = max(1, min(int(max_rounds), _tiers.MAX_ROUNDS))
         except (TypeError, ValueError):
-            cap = MAX_ROUNDS
+            cap = _tiers.MAX_ROUNDS
     parent_rows = None
     if meta.get("parent_run_id"):
         parent_rows = db.query("SELECT * FROM tasks WHERE run_id=?", (meta["parent_run_id"],))
     gate = replan_gate(meta.get("round") or 1, cap, rows, parent_rows,
-                       run_budget_exceeded(run_id))
+                       _tiers.run_budget_exceeded(run_id))
     if not gate["go"]:
         db.execute("UPDATE task_runs SET stop_reason=? WHERE run_id=?", (gate["kind"], run_id))
         return {"ok": True, "run_id": run_id, "gate": gate, "created": None}
     if not llm.configured():
         raise HTTPException(503, "LLM 未配置，无法重拆")
     known = set()
-    if _ctx.get("agent_ids_fn"):
-        known = set(_ctx["agent_ids_fn"]())
+    if _tiers._ctx.get("agent_ids_fn"):
+        known = set(_tiers._ctx["agent_ids_fn"]())
     default = ("jcode" if "jcode" in known else (sorted(known)[0] if known else "jcode"))
     allowed = _allowed_models_for(known)
     goal = meta.get("goal") or rows[0].get("goal") or ""
@@ -1124,7 +724,7 @@ async def _replan_once(run_id: str, auto: bool = False,
                    ("replan_invalid: %s" % str(e.detail)[:150], run_id))
         return {"ok": False, "run_id": run_id, "gate": gate,
                 "error": "重拆 DAG 非法: %s" % e.detail, "created": None}
-    items, _tier_note = _plan_tiers(items, known)
+    items, _tier_note = _tiers._plan_tiers(items, known)
     # 占位：只有第一个调用者能把 child_run_id 从 NULL 改掉 ⇒ 并发重拆不会产生两条子 run。
     child_id = uuid.uuid4().hex[:10]
     won = db.execute("UPDATE task_runs SET child_run_id=? WHERE run_id=? AND child_run_id IS NULL",
@@ -1192,8 +792,8 @@ async def dispatch_pool():
     status = registry.adapter_status()
     return {"ids": registry.dispatchable_ids(), "agents": status,
             "tiers": tierlib.parse_tiers(),
-            "escalate": {"models": _csv_env("TASK_ESCALATE_MODELS"),
-                         "ladder": _csv_env("TASK_ESCALATE_LADDER", "claude-code,codex")}}
+            "escalate": {"models": _tiers._csv_env("TASK_ESCALATE_MODELS"),
+                         "ladder": _tiers._csv_env("TASK_ESCALATE_LADDER", "claude-code,codex")}}
 
 
 @router.get("/api/tasks/tiers")
@@ -1319,7 +919,7 @@ async def get_run(run_id: str):
     for r in rows:
         r["deps"] = json.loads(r["deps"] or "[]")
     return {"run_id": run_id, "goal": rows[0]["goal"], "tasks": rows,
-            "run": run_meta(run_id), "max_rounds": MAX_ROUNDS}
+            "run": run_meta(run_id), "max_rounds": _tiers.MAX_ROUNDS}
 
 
 @router.post("/api/tasks/{run_id}/start")
@@ -1335,10 +935,10 @@ async def start_run(run_id: str):
 async def retry_run(run_id: str, body: RetryIn):
     if body.task_id:
         db.execute("UPDATE tasks SET status='pending',error=NULL,updated_at=? "
-                   "WHERE run_id=? AND task_id=?", (_now(), run_id, body.task_id))
+                   "WHERE run_id=? AND task_id=?", (_tiers._now(), run_id, body.task_id))
     else:
         db.execute("UPDATE tasks SET status='pending',error=NULL,updated_at=? "
-                   "WHERE run_id=? AND status IN ('failed','blocked')", (_now(), run_id))
+                   "WHERE run_id=? AND status IN ('failed','blocked')", (_tiers._now(), run_id))
     _start_runner(run_id)
     return {"run_id": run_id, "status": "retry-scheduled"}
 
@@ -1350,7 +950,7 @@ async def accept_run(run_id: str, body: AcceptIn = AcceptIn()):
     **只有 `submitted` 接受**：重复接受是 no-op（不篡改已 success 的行，
     也不把 failed/running 洗成成功）。接受后重启 runner，让下游就绪。
     """
-    now = _now()
+    now = _tiers._now()
     who = (body.by or "user")[:64]
     sql = ("UPDATE tasks SET status='success',accepted_at=?,accepted_by=?,"
            "finished_at=?,updated_at=? WHERE run_id=? AND status='submitted'")
@@ -1371,7 +971,7 @@ async def reject_run(run_id: str, body: RejectIn = RejectIn()):
 
     驳回后下游按「上游失败」阻塞（`_execute_run` 的既有判据），而不是默默带着
     不合格产物继续跑。"""
-    now = _now()
+    now = _tiers._now()
     why = ("驳回: " + (body.reason or "未说明"))[:500]
     sql = ("UPDATE tasks SET status='failed',error=?,finished_at=?,updated_at=? "
            "WHERE run_id=? AND status='submitted'")
@@ -1394,13 +994,13 @@ def requeue_waiting(run_id: str) -> int:
     §7-②：人工唤醒**也计数**（`wake_count+1`）并清掉旧期限 —— 否则可被无限人工续命，
     「有界」就名存实亡。
     """
-    now = _now()
-    ph = ",".join("?" * len(PARKED_STATUSES))
+    now = _tiers._now()
+    ph = ",".join("?" * len(_tiers.PARKED_STATUSES))
     return db.execute(
         "UPDATE tasks SET status='pending',error=NULL,wait_until=NULL,"
         "wake_count=COALESCE(wake_count,0)+1,updated_at=? "
         "WHERE run_id=? AND status IN (%s)" % ph,
-        (now, run_id, *PARKED_STATUSES))
+        (now, run_id, *_tiers.PARKED_STATUSES))
 
 
 def resume_expired_waits(now: Optional[str] = None) -> int:
@@ -1410,19 +1010,19 @@ def resume_expired_waits(now: Optional[str] = None) -> int:
     · 到上限 ⇒ `failed`（`等待超时（已唤醒 N 次仍无输入）`）—— 「等不来」如实失败，
       而不是无限期地当一个看似正常的中间态。
     """
-    now = now or _now()
-    ph = ",".join("?" * len(PARKED_STATUSES))
+    now = now or _tiers._now()
+    ph = ",".join("?" * len(_tiers.PARKED_STATUSES))
     rows = db.query("SELECT run_id, task_id, wake_count FROM tasks"
                     " WHERE status IN (%s) AND wait_until IS NOT NULL AND wait_until <= ?" % ph,
-                    (*PARKED_STATUSES, now))
+                    (*_tiers.PARKED_STATUSES, now))
     if not rows:
         return 0
     resumed_runs = set()
     for r in rows:
-        if int(r["wake_count"] or 0) >= MAX_WAKES:
+        if int(r["wake_count"] or 0) >= _tiers.MAX_WAKES:
             db.execute("UPDATE tasks SET status='failed',error=?,finished_at=?,updated_at=?"
                        " WHERE run_id=? AND task_id=?",
-                       ("等待超时（已唤醒 %d 次仍无输入）" % MAX_WAKES, now, now,
+                       ("等待超时（已唤醒 %d 次仍无输入）" % _tiers.MAX_WAKES, now, now,
                         r["run_id"], r["task_id"]))
         else:
             db.execute("UPDATE tasks SET status='pending',error=NULL,wait_until=NULL,"
@@ -1447,7 +1047,7 @@ async def resume_run(run_id: str):
 @router.post("/api/tasks/{run_id}/pause")
 async def pause_run(run_id: str):
     """把可停的任务（pending / 等待态）置 paused。**不动正在执行的任务**。"""
-    now = _now()
+    now = _tiers._now()
     n = db.execute(
         "UPDATE tasks SET status='paused',updated_at=? "
         "WHERE run_id=? AND status IN ('pending','waiting_input','waiting_approval')",
@@ -1463,7 +1063,7 @@ async def cancel_run(run_id: str):
     if run_id in _runners:
         _runners[run_id].cancel()
         _runners.pop(run_id)
-    now = _now()
+    now = _tiers._now()
     n = db.execute(
         "UPDATE tasks SET status='cancelled',finished_at=?,updated_at=? "
         "WHERE run_id=? AND status NOT IN ('success','failed','blocked','cancelled')",
@@ -1557,7 +1157,7 @@ async def _prepare_prompt(run_id: str, row: dict) -> str:
     dep_outputs = []
     for d in json.loads(row["deps"] or "[]"):
         if d in upstream:
-            dep_outputs.append(format_upstream(d, upstream[d]))
+            dep_outputs.append(_tiers.format_upstream(d, upstream[d]))
     if dep_outputs:
         prompt = f"总目标：{row['goal']}\n\n你的子任务：{prompt}\n\n" + "\n\n".join(dep_outputs)
 
@@ -1565,7 +1165,7 @@ async def _prepare_prompt(run_id: str, row: dict) -> str:
     attempts_done = int(row.get("attempts") or 0)
     if attempts_done:
         prompt = ("—— 上一次验证未通过（自动重试 %d/%d）：%s ——\n\n"
-                  % (attempts_done, MAX_AUTO_RETRY,
+                  % (attempts_done, _tiers.MAX_AUTO_RETRY,
                      str(row.get("verify_reason") or "")[:300])) + prompt
     return prompt
 
@@ -1580,14 +1180,14 @@ def _resolve_exec_target(run_id: str, row: dict, attempts_done: int) -> Tuple[st
     # 三列三口径：model_planned（按档位决议）> model_choice（Leader 显式）>
     # None（用该 agent 自己的默认）。执行前一律以"决议值"为准。
     exec_model = row.get("model_planned") or row.get("model_choice")
-    cat, cat_ok = _catalog_snapshot()
-    esc = escalate_target(exec_agent, exec_model, attempts_done, _known_agent_ids(),
+    cat, cat_ok = _tiers._catalog_snapshot()
+    esc = _tiers.escalate_target(exec_agent, exec_model, attempts_done, _tiers._known_agent_ids(),
                           tier=row.get("tier"), catalog=cat, catalog_checked=cat_ok)
     if esc["changed"]:
         exec_agent, exec_model = esc["agent_id"], esc["model"]
         db.execute("UPDATE tasks SET agent_id=?,escalated_from_agent=?,escalated_from_model=?,"
                    "updated_at=? WHERE run_id=? AND task_id=?",
-                   (exec_agent, esc["from_agent"], esc["from_model"], _now(),
+                   (exec_agent, esc["from_agent"], esc["from_model"], _tiers._now(),
                     run_id, row["task_id"]))
         db.log_profile_event("task_exec", exec_agent, "escalate", 0,
                              trace_id=row["trace_id"],
@@ -1606,13 +1206,13 @@ async def _attach_retrieval(run_id: str, row: dict, prompt: str, exec_agent: str
     2026-10-31 从 `_run_task` 拆出：这段是「取增强」，与执行/结算无关。
     """
     rmeta: Dict[str, Any] = {}
-    if TASK_RETRIEVAL:
-        block, rmeta = await _retrieval_for(row.get("goal") or "", prompt,
+    if _tiers.TASK_RETRIEVAL:
+        block, rmeta = await _tiers._retrieval_for(row.get("goal") or "", prompt,
                                             row.get("agent_id") or "")
         if block:
             prompt = block + "\n\n" + prompt
-    if TASK_SKILL_INJECT:
-        sblock, smeta = await _skill_inject_for(row.get("goal") or "", row["prompt"] or "",
+    if _tiers.TASK_SKILL_INJECT:
+        sblock, smeta = await _tiers._skill_inject_for(row.get("goal") or "", row["prompt"] or "",
                                                 exec_agent)
         if sblock:
             prompt = sblock + "\n\n" + prompt
@@ -1622,7 +1222,7 @@ async def _attach_retrieval(run_id: str, row: dict, prompt: str, exec_agent: str
         try:
             db.execute("UPDATE tasks SET retrieval_json=?,updated_at=? "
                        "WHERE run_id=? AND task_id=?",
-                       (json.dumps(rmeta, ensure_ascii=False)[:6000], _now(),
+                       (json.dumps(rmeta, ensure_ascii=False)[:6000], _tiers._now(),
                         run_id, row["task_id"]))
         except Exception:  # noqa: BLE001 — 落库失败不得带倒子任务（检索是增强）
             pass
@@ -1645,7 +1245,7 @@ async def _settle_self_failure(run_id: str, row: dict, result: dict, attempts_do
         # §7-①：复核走**线程**（`to_thread`）而非就地同步调用 —— 否则协程从不 yield，
         # 置下的 `verifying` 在 DB 上没人读得到。
         db.execute("UPDATE tasks SET status='verifying',verify_started_at=?,updated_at=?"
-                   " WHERE run_id=? AND task_id=?", (_now(), _now(), run_id, row["task_id"]))
+                   " WHERE run_id=? AND task_id=?", (_tiers._now(), _tiers._now(), run_id, row["task_id"]))
         v0 = asyncio.get_event_loop().time()
         verdict = await asyncio.to_thread(verifier.verify, kind,
                                           output=result.get("response"),
@@ -1667,7 +1267,7 @@ async def _settle_self_failure(run_id: str, row: dict, result: dict, attempts_do
         # 的典型场景 —— 不重试等于把可恢复故障记成终态。
         # 判据用 `escalate_target` 的 `changed`：**没有升档路径就不重试**（同 agent 同模型
         # 原地再赌一次是纯浪费，那正是 v0.13.174 之前的错）。
-        if _schedule_exec_retry(run_id, row, err, reason, attempts_done,
+        if _tiers._schedule_exec_retry(run_id, row, err, reason, attempts_done,
                                 exec_agent, exec_model, dur=dur,
                                 spent_tokens=spent_tokens, used_model=used_model,
                                 kind=kind):
@@ -1681,7 +1281,7 @@ async def _settle_self_failure(run_id: str, row: dict, result: dict, attempts_do
                    "duration_ms=?,spent_ms=?,spent_tokens=?,model=?,finished_at=?,updated_at=?"
                    " WHERE run_id=? AND task_id=?",
                    (err, reason, verify_ms, dur, dur, spent_tokens, used_model,
-                    _now(), _now(), run_id, row["task_id"]))
+                    _tiers._now(), _tiers._now(), run_id, row["task_id"]))
         db.log_profile_event("task_exec", row["agent_id"], event, dur,
                              trace_id=row["trace_id"],
                              detail={"task": row["task_id"], "verify": kind,
@@ -1702,7 +1302,7 @@ async def _verify_and_settle(run_id: str, row: dict, result: dict, attempts_done
     kind = row.get("verify_kind") or verifier.DEFAULT_KIND
     db.execute("UPDATE tasks SET status='verifying',spent_ms=?,spent_tokens=?,updated_at=?,"
                "verify_started_at=? WHERE run_id=? AND task_id=?",
-               (dur, spent_tokens, _now(), _now(), run_id, row["task_id"]))
+               (dur, spent_tokens, _tiers._now(), _tiers._now(), run_id, row["task_id"]))
     v0 = asyncio.get_event_loop().time()
     # §7-①：走线程 ⇒ 协程在此 yield，外部读得到 `verifying`
     verdict = await asyncio.to_thread(verifier.verify, kind,
@@ -1737,7 +1337,7 @@ async def _verify_and_settle(run_id: str, row: dict, result: dict, attempts_done
                        "finished_at=?,updated_at=?"
                        " WHERE run_id=? AND task_id=?",
                        (out, dur, dur, spent_tokens, used_model, verdict["status"], None,
-                        verify_ms, judge_json, _now(), _now(), "auto", _now(), _now(),
+                        verify_ms, judge_json, _tiers._now(), _tiers._now(), "auto", _tiers._now(), _tiers._now(),
                         run_id, row["task_id"]))
         else:
             # need_review 时这里就是「verifier 过了但判定说答非所问」——原因写进
@@ -1748,7 +1348,7 @@ async def _verify_and_settle(run_id: str, row: dict, result: dict, attempts_done
                        "judge_json=?,submitted_at=?,updated_at=?"
                        " WHERE run_id=? AND task_id=?",
                        (out, dur, dur, spent_tokens, used_model, verdict["status"], reason,
-                        verify_ms, judge_json, _now(), _now(), run_id, row["task_id"]))
+                        verify_ms, judge_json, _tiers._now(), _tiers._now(), run_id, row["task_id"]))
         db.log_profile_event("task_exec", row["agent_id"],
                              "success" if (AUTO_ACCEPT and not need_review) else "submitted",
                              dur,
@@ -1765,19 +1365,19 @@ async def _verify_and_settle(run_id: str, row: dict, result: dict, attempts_done
         # ── B3：可修复的验证失败，自动重试 MAX_AUTO_RETRY 次（默认 1）──
         # 只对 `repairable` 重试：`insufficient`（未知 kind / 无产物）重跑也不会变好。
         # 次数写进 `attempts` 列并在重跑时把上次的 verify_reason 接进 prompt（否则就是原样再赌）。
-        if should_retry(verdict["status"], verdict.get("repairable"), attempts_done):
+        if _tiers.should_retry(verdict["status"], verdict.get("repairable"), attempts_done):
             db.execute("UPDATE tasks SET status='pending',attempts=?,error=?,verify_reason=?,"
                        "verdict=?,verify_ms=?,spent_ms=?,spent_tokens=?,model=?,"
                        "finished_at=NULL,updated_at=?"
                        " WHERE run_id=? AND task_id=?",
                        (attempts_done + 1,
                         ("%s（自动重试 %d/%d，升档 %s）"
-                         % (err, attempts_done + 1, MAX_AUTO_RETRY,
-                            _next_escalation_note(exec_agent, exec_model,
+                         % (err, attempts_done + 1, _tiers.MAX_AUTO_RETRY,
+                            _tiers._next_escalation_note(exec_agent, exec_model,
                                                   attempts_done + 1,
                                                   row.get("tier"))))[:500],
                         gaps[:500], verdict["status"], verify_ms, dur, spent_tokens,
-                        used_model, _now(), run_id, row["task_id"]))
+                        used_model, _tiers._now(), run_id, row["task_id"]))
             db.log_profile_event("task_exec", row["agent_id"], "retry", dur,
                                  trace_id=row["trace_id"],
                                  detail={"task": row["task_id"], "verify": kind,
@@ -1790,17 +1390,17 @@ async def _verify_and_settle(run_id: str, row: dict, result: dict, attempts_done
                    "finished_at=?,updated_at=?"
                    " WHERE run_id=? AND task_id=?",
                    (err, dur, dur, spent_tokens, used_model, verdict["status"], gaps[:500],
-                    _now(), _now(), run_id, row["task_id"]))
+                    _tiers._now(), _tiers._now(), run_id, row["task_id"]))
         db.log_profile_event("task_exec", row["agent_id"], "fail", dur,
                              trace_id=row["trace_id"],
                              detail={"task": row["task_id"], "verify": kind,
                                      "verify_status": verdict["status"],
                                      "model": used_model})
 async def _run_task(run_id: str, row: dict):
-    chat_fn = _ctx.get("chat_fn")
+    chat_fn = _tiers._ctx.get("chat_fn")
     if not chat_fn:
         db.execute("UPDATE tasks SET status='failed',error='chat 引擎未就绪',updated_at=? "
-                   "WHERE run_id=? AND task_id=?", (_now(), run_id, row["task_id"]))
+                   "WHERE run_id=? AND task_id=?", (_tiers._now(), run_id, row["task_id"]))
         return
     prompt = await _prepare_prompt(run_id, row)
     attempts_done = int(row.get("attempts") or 0)
@@ -1821,26 +1421,26 @@ async def _run_task(run_id: str, row: dict):
         used_model = result.get("model") or None
         # ① 等待态：执行者说「卡在等人/等批」⇒ 让出执行资源，不占槽、不算终态。
         waiting = result.get("waiting")
-        if waiting in PARKED_STATUSES:
+        if waiting in _tiers.PARKED_STATUSES:
             # §7-②：等待**必须有期限**（旧实现不写期限 ⇒ 无人叫醒就永久悬空）
             deadline = (datetime.now(timezone.utc)
-                        + timedelta(seconds=WAIT_RESUME_S)).isoformat()
+                        + timedelta(seconds=_tiers.WAIT_RESUME_S)).isoformat()
             db.execute("UPDATE tasks SET status=?,spent_ms=?,spent_tokens=?,model=?,wait_until=?,"
                        "wake_count=COALESCE(wake_count,0),updated_at=?"
                        " WHERE run_id=? AND task_id=?",
-                       (waiting, dur, spent_tokens, used_model, deadline, _now(),
+                       (waiting, dur, spent_tokens, used_model, deadline, _tiers._now(),
                         run_id, row["task_id"]))
             db.log_profile_event("task_exec", row["agent_id"], "parked", dur,
                                  trace_id=row["trace_id"],
                                  detail={"task": row["task_id"], "waiting": waiting})
             return
         # ② 预算：超限一律 failed（不静默放过）。
-        over = budget_exceeded(row, dur, spent_tokens)
+        over = _tiers.budget_exceeded(row, dur, spent_tokens)
         if over:
             db.execute("UPDATE tasks SET status='failed',error=?,spent_ms=?,spent_tokens=?,"
                        "model=?,finished_at=?,updated_at=? WHERE run_id=? AND task_id=?",
                        ("预算耗尽: " + over, dur, spent_tokens, used_model,
-                        _now(), _now(), run_id, row["task_id"]))
+                        _tiers._now(), _tiers._now(), run_id, row["task_id"]))
             db.log_profile_event("task_exec", row["agent_id"], "fail", dur,
                                  trace_id=row["trace_id"],
                                  detail={"task": row["task_id"], "budget": over})
@@ -1856,25 +1456,25 @@ async def _run_task(run_id: str, row: dict):
         # 在**超时这个异常处理器内部**抛出，任务永远停在 running，且异常冒泡进
         # `_execute_run`。改成正常绑定，顺带把 model 一起记上。
         _err = "超时熔断 %ds" % TASK_TIMEOUT_S
-        if _schedule_exec_retry(run_id, row, _err, _err, int(row.get("attempts") or 0),
+        if _tiers._schedule_exec_retry(run_id, row, _err, _err, int(row.get("attempts") or 0),
                                 row.get("agent_id") or "",
                                 row.get("model_planned") or row.get("model_choice"),
                                 dur=TASK_TIMEOUT_S * 1000):
             return
         db.execute("UPDATE tasks SET status='failed',error=?,finished_at=?,updated_at=?"
                    " WHERE run_id=? AND task_id=?",
-                   (_err, _now(), _now(), run_id, row["task_id"]))
+                   (_err, _tiers._now(), _tiers._now(), run_id, row["task_id"]))
         db.log_profile_event("task_exec", row["agent_id"], "fail", TASK_TIMEOUT_S * 1000,
                              trace_id=row["trace_id"], detail={"task": row["task_id"], "timeout": True})
     except Exception as e:  # noqa: BLE001
         _err = repr(e)[:500]
-        if _schedule_exec_retry(run_id, row, _err, _err, int(row.get("attempts") or 0),
+        if _tiers._schedule_exec_retry(run_id, row, _err, _err, int(row.get("attempts") or 0),
                                 row.get("agent_id") or "",
                                 row.get("model_planned") or row.get("model_choice")):
             return
         db.execute("UPDATE tasks SET status='failed',error=?,finished_at=?,updated_at=?"
                    " WHERE run_id=? AND task_id=?",
-                   (_err, _now(), _now(), run_id, row["task_id"]))
+                   (_err, _tiers._now(), _tiers._now(), run_id, row["task_id"]))
 
 
 async def _execute_run(run_id: str):
@@ -1884,7 +1484,7 @@ async def _execute_run(run_id: str):
         while True:
             rows = db.query("SELECT * FROM tasks WHERE run_id=? ORDER BY created_at", (run_id,))
             status = {r["task_id"]: r["status"] for r in rows}
-            finished = all(s in TERMINAL_STATUSES for s in status.values())
+            finished = all(s in _tiers.TERMINAL_STATUSES for s in status.values())
             if finished:
                 # 2026-10-27 全链路编排：收敛后若本轮声明了 `auto_rounds`，在这里接下一轮。
                 # 放在 return 前而不是收尾处，是因为「收敛」只在这一处判定 —— 另起一个
@@ -1898,17 +1498,17 @@ async def _execute_run(run_id: str):
                 if any(status.get(d) in ("failed", "blocked", "cancelled") for d in deps):
                     db.execute("UPDATE tasks SET status='blocked',error='上游失败',finished_at=?,"
                                "updated_at=? WHERE run_id=? AND task_id=?",
-                               (_now(), _now(), run_id, r["task_id"]))
+                               (_tiers._now(), _tiers._now(), run_id, r["task_id"]))
                     continue
                 if all(status.get(d) == "success" for d in deps):
                     # §7-③ run 级预算：在**派发前**查累计消耗（事后算 = 已经花完了）。
                     # 放内层（逐 pending）而非整轮 continue：不为预算引入新的循环出口，
                     # 避免与 parked/submitted 的挂起逻辑打架。
-                    r_over = run_budget_exceeded(run_id)
+                    r_over = _tiers.run_budget_exceeded(run_id)
                     if r_over:
                         db.execute("UPDATE tasks SET status='failed',error=?,finished_at=?,"
                                    "updated_at=? WHERE run_id=? AND task_id=?",
-                                   ("run 预算耗尽: " + r_over, _now(), _now(),
+                                   ("run 预算耗尽: " + r_over, _tiers._now(), _tiers._now(),
                                     run_id, r["task_id"]))
                         db.log_profile_event("task_exec", r.get("agent_id") or "-", "fail", None,
                                              trace_id=r.get("trace_id"),
@@ -1917,15 +1517,15 @@ async def _execute_run(run_id: str):
                         continue
                     db.execute("UPDATE tasks SET status='running',started_at=?,updated_at=?"
                                " WHERE run_id=? AND task_id=?",
-                               (_now(), _now(), run_id, r["task_id"]))
+                               (_tiers._now(), _tiers._now(), run_id, r["task_id"]))
 
                     async def guarded(row=r):
                         async with sem:
                             await _run_task(run_id, row)
                     live[r["task_id"]] = asyncio.create_task(guarded())
             if not live:
-                parked = [t for t, s in status.items() if s in PARKED_STATUSES]
-                awaiting = [t for t, s in status.items() if s in SUBMITTED_STATUSES]
+                parked = [t for t, s in status.items() if s in _tiers.PARKED_STATUSES]
+                awaiting = [t for t, s in status.items() if s in _tiers.SUBMITTED_STATUSES]
                 pend = [t for t, s in status.items() if s == "pending"]
                 if parked or awaiting:
                     # 整条 run 挂起：等外部输入/批准/恢复（parked），或等 `/accept`（submitted）
@@ -1933,7 +1533,7 @@ async def _execute_run(run_id: str):
                     return
                 if pend:
                     db.execute("UPDATE tasks SET status='failed',error='无法调度(疑似悬挂)',"
-                               "updated_at=? WHERE run_id=? AND status='pending'", (_now(), run_id))
+                               "updated_at=? WHERE run_id=? AND status='pending'", (_tiers._now(), run_id))
                     return
                 return
             done = [tid for tid, t in live.items() if t.done()]
@@ -1949,7 +1549,7 @@ async def _execute_run(run_id: str):
 async def sweep_stale_tasks():
     """服务启动恢复 + 周期兜底：running 超时→failed（上游 sweeper 语义）"""
     db.execute("UPDATE tasks SET status='failed',error='服务重启恢复:标记中断',finished_at=?,"
-               "updated_at=? WHERE status='running'", (_now(), _now()))
+               "updated_at=? WHERE status='running'", (_tiers._now(), _tiers._now()))
     while True:
         await asyncio.sleep(30)
         try:
@@ -1963,7 +1563,7 @@ async def sweep_stale_tasks():
                 if started < cutoff:
                     db.execute("UPDATE tasks SET status='failed',error='超时兜底',finished_at=?,"
                                "updated_at=? WHERE run_id=? AND task_id=?",
-                               (_now(), _now(), r["run_id"], r["task_id"]))
+                               (_tiers._now(), _tiers._now(), r["run_id"], r["task_id"]))
             # §7-②：等待态自愈（过期唤醒 / 到顶失败）——挂在这里是为了共用这个已有的心跳，
             # 不为等待态另起一个 loop。
             resume_expired_waits()

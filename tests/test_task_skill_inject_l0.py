@@ -21,6 +21,8 @@ sys.path.insert(0, str(ROOT / "src"))
 import tasks  # noqa: E402
 
 SRC = (ROOT / "src" / "tasks.py").read_text(encoding="utf-8")
+# 片3 拆分后常量与注入实现在 `tasks_tiers`：源码级断言必须扫**两处**
+SRC_TIERS = (ROOT / "src" / "tasks_tiers.py").read_text(encoding="utf-8")
 
 
 class TestBlockShape(unittest.TestCase):
@@ -68,18 +70,19 @@ class TestFailOpen(unittest.TestCase):
     def test_timeout_does_not_raise(self):
         import skill_store
         old = skill_store.acquire
-        old_to = tasks.TASK_SKILL_TIMEOUT_S
+        import tasks_tiers
+        old_to = tasks_tiers.TASK_SKILL_TIMEOUT_S
 
         async def slow(*a, **k):
             await asyncio.sleep(5)
             return {"ok": True, "content": "late"}
         skill_store.acquire = slow
-        tasks.TASK_SKILL_TIMEOUT_S = 0.05
+        tasks_tiers.TASK_SKILL_TIMEOUT_S = 0.05
         try:
             blk, meta = asyncio.run(tasks._skill_inject_for("目标", "子任务", "claude"))
         finally:
             skill_store.acquire = old
-            tasks.TASK_SKILL_TIMEOUT_S = old_to
+            tasks_tiers.TASK_SKILL_TIMEOUT_S = old_to
         self.assertEqual(blk, "")
         self.assertIn("超时", meta["error"])
 
@@ -94,5 +97,5 @@ class TestWiring(unittest.TestCase):
         self.assertIn('rmeta["skill_inject"] = smeta', SRC)
 
     def test_can_be_disabled(self):
-        self.assertIn("TASK_SKILL_INJECT", SRC)
-        self.assertIn('os.getenv("TASK_SKILL_INJECT", "1")', SRC)
+        self.assertIn("TASK_SKILL_INJECT", SRC_TIERS)
+        self.assertIn('os.getenv("TASK_SKILL_INJECT", "1")', SRC_TIERS)

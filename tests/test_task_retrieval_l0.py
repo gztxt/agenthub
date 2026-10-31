@@ -32,6 +32,7 @@ sys.path.insert(0, str(_REPO / "src"))
 sys.path.insert(0, str(_REPO / "tests"))
 
 import tasks      # noqa: E402
+import tasks_tiers  # noqa: E402  —— 常量定义处：打桩要打在**读它的模块**上
 import verifier   # noqa: E402
 import intake     # noqa: E402
 
@@ -118,12 +119,12 @@ class TestRetrievalDegrades(unittest.TestCase):
             await asyncio.sleep(1.0)
             return _rep(constraints=["不该到这一步"])
         intake.run = slow
-        old = tasks.RETRIEVAL_TIMEOUT_S
-        tasks.RETRIEVAL_TIMEOUT_S = 0.01
+        old = tasks_tiers.RETRIEVAL_TIMEOUT_S
+        tasks_tiers.RETRIEVAL_TIMEOUT_S = 0.01
         try:
             blk, meta = asyncio.run(tasks._retrieval_for("总目标", "子任务", "codex"))
         finally:
-            tasks.RETRIEVAL_TIMEOUT_S = old
+            tasks_tiers.RETRIEVAL_TIMEOUT_S = old
         self.assertEqual(blk, "")
         self.assertFalse(meta["ok"])
         self.assertIn("超时", meta["error"])

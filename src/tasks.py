@@ -82,6 +82,8 @@ _TASK_COLUMNS = (
     # P0-b：验收裁决。三态照 verifier.STATUS_*；NULL = 未走到验收这一步。
     ("verdict", "TEXT"),
     ("verify_reason", "TEXT"),
+    # 2026-11-01：重启恢复注记（派发时拼进 prompt 最前，拼完即清空）
+    ("recovery_note", "TEXT"),
     # §7-①：让「正在验」可被外部读到并**可度量**（旧实现是同一协程内的瞬时态）
     ("verify_started_at", "TEXT"),
     ("verify_ms", "INTEGER"),
@@ -141,6 +143,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     status TEXT NOT NULL DEFAULT 'pending',  -- TASK_STATUSES（P0-3 起含等待态/verifying）
     output TEXT,
     error TEXT,
+    -- 2026-11-01 重启恢复注记（正文见 tasks_runner.RECOVERY_NOTE）。NULL = 正常派发；
+    -- 非空 = 上次被服务重启打断，派发时拼进 prompt 最前面，**拼完即清空**（单次使用）。
+    recovery_note TEXT,
     verify_kind TEXT NOT NULL DEFAULT 'nonempty',  -- 产物由哪个验证器判（P0-3）
     -- P0-a：把「任务 → Agent → 模型 → token」变成可 JOIN 的记录。
     -- 数据本来就在 adapter 返回里（openai_compat.py 返回 model+usage），此前被丢弃。

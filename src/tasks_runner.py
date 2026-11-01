@@ -136,6 +136,11 @@ async def _prepare_prompt(run_id: str, row: dict) -> str:
         prompt = ("—— 上一次验证未通过（自动重试 %d/%d）：%s ——\n\n"
                   % (attempts_done, _tiers.MAX_AUTO_RETRY,
                      str(row.get("verify_reason") or "")[:300])) + prompt
+
+    # ── 重启恢复注记：放最前（它定的是「先核对现场再动手」的总纪律，优先于其余上下文）──
+    note = str(row.get("recovery_note") or "").strip()
+    if note:
+        prompt = "—— 上一次执行被服务重启中断 ——\n%s\n\n" % note + prompt
     return prompt
 
 
@@ -373,6 +378,13 @@ async def _run_task(run_id: str, row: dict):
                    "WHERE run_id=? AND task_id=?", (_tiers._now(), run_id, row["task_id"]))
         return
     prompt = await _prepare_prompt(run_id, row)
+    if row.get("recovery_note"):
+        # 单次使用：拼进 prompt 即失效，避免自动重试时重复同一段提示（会稀释成噪音）。
+        # 再崩也不会丢：下一次启动按 status='running' 重新生成注记，不依赖这个旧值。
+        db.execute("UPDATE tasks SET recovery_note=NULL,updated_at=?"
+                   " WHERE run_id=? AND task_id=?",
+                   (_tiers._now(), run_id, row["task_id"]))
+        row["recovery_note"] = None
     attempts_done = int(row.get("attempts") or 0)
     exec_agent, exec_model = _resolve_exec_target(run_id, row, attempts_done)
     prompt = await _attach_retrieval(run_id, row, prompt, exec_agent)
@@ -517,10 +529,55 @@ async def _execute_run(run_id: str):
         raise
 
 
+#: 重启恢复注记（2026-11-01，照 DeepSeek dsh-superagent `docs/003-execution.md:144-152`）。
+#:
+#: 为什么改：旧实现启动时无条件 `running → failed`（'服务重启恢复:标记中断'），把
+#: **服务重启**与**任务失败**混成同一件事 —— 一次重启等于把当时所有在跑的活判死，
+#: 且不留现场提示，重跑只能从零开始。dsh 的做法是：中断的 Assignment 以
+#: "host restarted" 结束，新 Assignment **带一条 recovery note**，明确要求执行者
+#: 先查自己的目录、git 历史与外部系统，再重复任何对外动作。
+#:
+#: 代价（dsh 原文同样承认）：重启那一刻可能已经产生了副作用，恢复重跑有**重复对外动作**
+#: 的风险。用「注记 + 让执行者先核对现场」换「不静默丢活」，这是有意识的取舍，不是遗漏。
+RECOVERY_NOTE = (
+    "服务重启打断了上一次执行。先核对现场再继续：检查你的工作目录（未提交/未完成的改动）、"
+    "git 历史与外部系统（GitHub / CI / 已经发出的消息）当前状态，判断上次实际做到哪一步。"
+    "核对完成之前，不要重复任何对外动作（提交、推送、发消息、改线上配置）；"
+    "已经做完的沿用结果，不要从头重做。"
+)
+
+
+def recover_interrupted_tasks() -> int:
+    """启动时把被重启打断的 `running` 拉回 `pending`，写恢复注记并重新拉起 runner。
+
+    返回被恢复的 task 数。三条设计约束：
+
+    ① **只动 `running`**：`pending` 本来就没派发、`waiting_*` 是主动让出槽位，都不需要
+       恢复注记；`verifying`/`submitted` 已有产物，重跑会浪费钱。
+    ② **必须重新拉起 runner**：旧实现把所有行推到终态，run 自然收敛；改成 pending 之后
+       若不起 runner，run 就永远停在那儿 —— 从「静默判死」变成「静默挂死」，更糟。
+    ③ **注记单次使用**（由 `_run_task` 拼完 prompt 后清空）：否则每次自动重试都会重复
+       一遍「先核对现场」，把注记稀释成噪音。若这次又崩在中途，下一次启动会重新写入
+       一条新注记 —— 因为恢复是按 `status='running'` 重新生成的，不依赖旧值。
+    """
+    rows = db.query("SELECT run_id, task_id FROM tasks WHERE status='running'")
+    if not rows:
+        return 0
+    now = _tiers._now()
+    runs = set()
+    for r in rows:
+        db.execute("UPDATE tasks SET status='pending',recovery_note=?,error=NULL,updated_at=?"
+                   " WHERE run_id=? AND task_id=? AND status='running'",
+                   (RECOVERY_NOTE, now, r["run_id"], r["task_id"]))
+        runs.add(r["run_id"])
+    for rid in runs:
+        _start_runner(rid)
+    return len(rows)
+
+
 async def sweep_stale_tasks():
-    """服务启动恢复 + 周期兜底：running 超时→failed（上游 sweeper 语义）"""
-    db.execute("UPDATE tasks SET status='failed',error='服务重启恢复:标记中断',finished_at=?,"
-               "updated_at=? WHERE status='running'", (_tiers._now(), _tiers._now()))
+    """服务启动恢复 + 周期兜底：打断的 running 拉回 pending，running 超时→failed。"""
+    recover_interrupted_tasks()
     while True:
         await asyncio.sleep(30)
         try:

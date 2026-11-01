@@ -341,25 +341,80 @@ def _lan_ip() -> str:
         s.close()
 
 
-def listen_host_for(port: int, default: str = "0.0.0.0") -> str:
-    """桥监听地址 = 上游自己的可达面（不外扩暴露面）。
+#: 回环/未声明地址的字面量（比较前统一 strip("[]").lower()）
+_LOOPBACK_HOSTS = {"", "127.0.0.1", "localhost", "::1"}
+#: 起法里表达「监听地址」的旗标（opencode --hostname / zcode --host / reasonix --addr）
+_BIND_FLAGS = ("--host", "--hostname", "--host-ip", "--addr", "--address",
+               "--bind", "--listen")
 
-    判据：从**本机 LAN IP** 连一次上游端口，连得上说明上游已对局域网开放 ⇒ 桥也绑 0.0.0.0；
-    连不上（上游只绑 127.0.0.1）⇒ 桥绑 127.0.0.1。不这么分，等于把只监听回环的
-    claude-mem / qoder 之类经桥抬到局域网上，凭空多出一批无鉴权入口。
-    探测失败（拿不到 LAN IP）一律按回环处理：宁可 LAN 用不了，也不静默扩面。
+
+def _start_binds_wide(start) -> bool:
+    """起法参数里是否把监听地址写成通配或具体网卡。
+
+    只读 `start["cmd"]`（unit 式起法读不到绑定地址，走运行时探测）。判据窄到只认
+    上面 `_BIND_FLAGS` 后面跟的一个值：`--host 0.0.0.0` / `--addr 0.0.0.0:8787` /
+    `--host=192.168.5.102` 都算「上游自己就要对局域网开放」。
     """
+    cmd = (start or {}).get("cmd") or []
+    for i, a in enumerate(cmd):
+        s = a if isinstance(a, str) else ""
+        val = ""
+        for flag in _BIND_FLAGS:
+            if s == flag and i + 1 < len(cmd):
+                val = str(cmd[i + 1])
+            elif s.startswith(flag + "="):
+                val = s.split("=", 1)[1]
+        if not val:
+            continue
+        host = val.split(":")[0].strip("[]").lower()
+        if host in {"0.0.0.0", "::", "*"}:
+            return True
+        if host and host not in _LOOPBACK_HOSTS:
+            return True
+    return False
+
+
+def listen_host_for(port: int, default: str = "0.0.0.0", *,
+                    upstream_host: str = "", start=None) -> str:
+    """桥监听地址 = 上游**会**有的可达面（不外扩暴露面）。
+
+    2026-11-02 改判：旧实现只看「此刻从本机 LAN IP 连不连得上上游」，而按需拉起的
+    agent 常态是停着的 —— hub 启动那一刻连不上就把桥**永久**锁在回环。实测后果：
+    hub 于 2026-11-01 23:51 启动（dsh 已停），桥 :3202 绑 127.0.0.1，局域网访问
+    `http://192.168.5.102:3202/` 恒 ERR_CONNECTION_REFUSED，而 `/ui-status` 判的是
+    上游 3080（活着）⇒ 前端认为「就绪」、不挂覆盖层，用户看到的是一张裸的拒绝连接页。
+    同批被绑死的还有 opencode/zcode/qoder/cloudcli（都是启动时停着的）。
+
+    所以静态可达面优先、运行时探测兜底：
+    ① 声明地址是具体网卡/通配（dsh 写死 192.168.5.102）⇒ 上游本来就是 LAN 可达；
+    ② 起法里显式 `--host 0.0.0.0` 之类（opencode/zcode/reasonix）⇒ 同上；
+    ③ 两者都没有（claude-mem / qoder 这类只绑回环的面板）⇒ 才连一次实测，
+       连不上就保持 127.0.0.1，绝不把无鉴权面板经桥抬到局域网。
+    探测拿不到 LAN IP 一律按回环处理：宁可 LAN 用不了，也不静默扩面。
+    """
+    host = (upstream_host or "").strip().strip("[]").lower()
+    if host in {"0.0.0.0", "::", "*"}:
+        return default
+    if host not in _LOOPBACK_HOSTS:
+        return default
+    if _start_binds_wide(start):
+        return default
+    return default if _upstream_lan_reachable(port) else "127.0.0.1"
+
+
+def _upstream_lan_reachable(port: int) -> bool:
+    """此刻从本机 LAN IP 能不能连上上游端口（只给 listen_host_for 的兜底分支用）。"""
     ip = _lan_ip()
     if not ip:
-        return "127.0.0.1"
+        return False
     import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(0.3)
     try:
         s.connect((ip, port))
-        return default
+        return True
     except OSError:
-        return "127.0.0.1"
+        return False
     finally:
         s.close()
 

@@ -122,7 +122,16 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.187"
+VERSION = "0.13.188"
+
+# v0.13.188（2026-11-02）：桥的监听面不再由「hub 启动那一刻上游活没活」决定。
+#   ① 病：v0.13.187 的 listen_host_for 用运行时探测判可达面，而按需拉起的 agent 常态是
+#      停着的 ⇒ hub 启动时 dsh 没跑，桥 :3202 被永久锁在 127.0.0.1；局域网嵌页
+#      `192.168.5.102:3202` 恒 ERR_CONNECTION_REFUSED，而 /ui-status 判的是上游 3080
+#      （活着）⇒ 前端认为就绪、不挂覆盖层，用户只看到一张裸的拒绝连接页。
+#   ② 药：静态可达面优先、探测兜底 —— 声明地址是具体网卡（dsh 192.168.5.102）或起法写了
+#      --host 0.0.0.0（opencode/zcode/reasonix）⇒ 桥绑宽；两者都没有（claude-mem/qoder）
+#      才实测，仍是回环。
 
 # v0.13.187（2026-11-01）：跨源嵌页的 ⌘/Ctrl+K 打通 + 左栏搜索框下线（PT-20261101-09）。
 #   ① 病：v0.13.186 只修了父页。会话页「原生界面」是**跨源 iframe**（各占一个端口），
@@ -1265,7 +1274,9 @@ async def startup():
                 px = embed_proxy_mod.EmbedProxy(
                     "桥:%s" % t["id"], t["host"], int(t["port"]),
                     listen_host=embed_proxy_mod.listen_host_for(
-                        int(t["port"]), os.getenv("EMBED_PROXY_HOST", config.host)),
+                        int(t["port"]), os.getenv("EMBED_PROXY_HOST", config.host),
+                        upstream_host=str(t.get("host") or ""),
+                        start=t.get("start")),
                     listen_port=port, keys=True)
                 if await px.start():
                     _embed_bridges.append(px)

@@ -66,7 +66,10 @@ def embed_proxy_targets() -> List[Dict[str, object]]:
             continue
         if port == EMBED_PROXY_PORT:      # 已经在本进程的另一个代理上
             continue
-        out.append({"id": p["id"], "host": sp.hostname or "127.0.0.1", "port": port})
+        # `start` 一起带上：桥的监听面要按「上游会怎么绑」判，而 2026-11-02 之前的
+        # 判据只看「此刻从 LAN 连不连得上」⇒ 停着的按需 agent 一律被锁在回环。
+        out.append({"id": p["id"], "host": sp.hostname or "127.0.0.1", "port": port,
+                    "start": ui_start_for(p["id"])})
     return out
 
 

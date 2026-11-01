@@ -8,7 +8,9 @@ input=HTTP 418…」）。根因不是某条用例写错，而是**跑 L0 时继
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import os
 import subprocess
 import sys
@@ -75,7 +77,8 @@ class HomeIsolationL0(unittest.TestCase):
         self.rt._run = fake_run
         self.rt._parity = lambda: 0
         os.environ["HOME"] = self.real
-        rc = self.rt.main(["hermetic"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = self.rt.main(["hermetic"])
         self.assertEqual(seen["home"], seen["hub_test_home"])
         self.assertNotEqual(seen["home"], self.real)
         self.assertTrue(str(seen["home"]).startswith(self.real + os.sep), seen["home"])
@@ -93,7 +96,8 @@ class HomeIsolationL0(unittest.TestCase):
         self.rt._run = fake_run
         self.rt._parity = lambda: 0
         os.environ["HOME"] = self.real
-        self.rt.main(["hermetic", "--real-home"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.rt.main(["hermetic", "--real-home"])
         self.assertEqual(seen["home"], self.real)
 
     def test_pytest_passthrough_mode_isolates_home(self):
@@ -110,7 +114,8 @@ class HomeIsolationL0(unittest.TestCase):
 
         os.environ["HOME"] = self.real
         with mock.patch("os.execv", side_effect=fake_execv):
-            self.rt.main(["pytest", "-q"])
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.rt.main(["pytest", "-q"])
         self.assertEqual(calls["home"], calls["hub"], "exec 前 HOME 必须已指向隔离目录")
         self.assertNotEqual(calls["home"], self.real)
         self.assertIn("-m", calls["args"])

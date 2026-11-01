@@ -27,6 +27,10 @@ UUID_RE = re.compile(r"\A[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z", re.I)
 JCODE_RE = re.compile(r"\Asession_[a-z]+_\d{13}_[0-9a-f]{6,16}\Z")
 HERMES_RE = re.compile(r"\A\d{8}_\d{6}_[0-9a-f]{6}\Z")
 OPENCODE_RE = re.compile(r"\Ases_[0-9a-zA-Z]{6,64}\Z")   # 实测 1.18.32：ses_ + 22 位 base62
+# codebuddy 允许 --session-id 自定义（实测 cb-par-test 这类短名会落成 <id>.jsonl），
+# 不是 UUID ⇒ 只认 UUID 会「列得出来却点不动」。仍禁路径分隔符与 shell 元字符，
+# 且有实盘存在校验兜底（`_exists_on_disk`）。
+CB_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 OPENCODE_DB = HOME / ".local" / "share" / "opencode" / "opencode.db"
 # cursor（Cursor Agent CLI，实装名 cursor-agent）—— 会话分散在两处，见 _t_cursor：
 #   ① ~/.cursor/projects/<slug>/agent-transcripts/<agentId>/<agentId>.jsonl  转录（有正文）
@@ -825,7 +829,7 @@ SESSION_STORES: Dict[str, dict] = {
     # codebuddy：**必须写绝对路径**（同profiles.py 的 CODEBUDDY_CLI 理由）——该 CLI 只在
     # WorkBuddy 包内、不在 PATH，写 "codebuddy" 会被 term.py 的 which() 判定失败、会话拉不起来。
     # 这里 import profiles 是安全的：profiles 不 import本模块（反向 term.py 才 import 两者）。
-    "codebuddy": {"kind": "codebuddy_json", "id_re": UUID_RE, "resume": [_cb_cli(), "--resume", "{id}"], "fn": _t_codebuddy},
+    "codebuddy": {"kind": "codebuddy_json", "id_re": CB_RE, "resume": [_cb_cli(), "--resume", "{id}"], "fn": _t_codebuddy},
     # dsh（DeepSeek Harness，2026-10-24）：`dsh` 在 ~/.local/bin，profiles.which() 的兜底目录
     # 已覆盖，不必写绝对路径；但**必须带 `--profile tui`**——裸 dsh 会变成 `dsh web`（判例 252 §四.2）。
     # `--resume` 接裸 uuid（TUI 自己的退出提示就是这个形状）。

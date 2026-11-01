@@ -97,11 +97,17 @@ class TestTable(unittest.TestCase):
         self.assertTrue(st["cursor"]["id_re"].match("4a0d0eb5-8712-4d5a-bf0d-83215584ce28"))
         self.assertFalse(st["cursor"]["id_re"].match("4a0d0eb587124d5abf0d83215584ce28"))   # 无连字符 ⇒ 拒
         self.assertFalse(st["cursor"]["id_re"].match("4a0d0eb5-8712-4d5a-bf0d-83215584ce28; rm -rf /"))
-        # v0.13.93 codebuddy：73/73 全是标准带连字符 UUID ⇒ 同样复用 UUID_RE。
+        # v0.13.93 codebuddy：73/73 全是标准带连字符 UUID。
+        # 2026-11-01 改判（L1 抓到）：CLI 允许 `--session-id` 自定义，实测 `cb-par-test`
+        # 这类短名会落成 <id>.jsonl，只认 UUID 就「列得出来却点不动」⇒ 形状门放宽为
+        # 「首字符字母数字 + 其后字母数字._-」，路径分隔符与 shell 元字符仍拒。
         # 同时钉住 resume argv 的**首元素是绝对路径**：该 CLI 只在 WorkBuddy 包内、不在 PATH，
         # 写 "codebuddy" 会被 term.py 的 which() 判失败、会话拉不起来（profiles.py 同款理由）。
         self.assertTrue(st["codebuddy"]["id_re"].match("373e4969-47e2-4aa4-bf59-a0ad09279726"))
-        self.assertFalse(st["codebuddy"]["id_re"].match("373e496947e24aa4bf59a0ad09279726"))
+        self.assertTrue(st["codebuddy"]["id_re"].match("cb-par-test"))
+        self.assertFalse(st["codebuddy"]["id_re"].match("../etc/passwd"))
+        self.assertFalse(st["codebuddy"]["id_re"].match("cb-par-test; rm -rf /"))
+        self.assertFalse(st["codebuddy"]["id_re"].match(""))
         self.assertEqual(st["codebuddy"]["resume"][1:], ["--resume", "{id}"])
         self.assertTrue(st["codebuddy"]["resume"][0].startswith("/"),
                         "codebuddy CLI 必须在 PATH 之外 ⇒ resume argv 必须写绝对路径")

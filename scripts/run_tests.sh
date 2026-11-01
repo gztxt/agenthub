@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # 测试与实况探针的统一入口（口径唯一真相源：tests/tiers.py + tests/README.md）
 #
-#   bash scripts/run_tests.sh hermetic        # L0：干净机器/CI 上可跑，且要求零跳过
-#   bash scripts/run_tests.sh hermetic-clean  # 同上，但把 HOME 换成空目录，真模拟干净 runner
-#   bash scripts/run_tests.sh all             # L0 + L1（本机全量）
+#   bash scripts/run_tests.sh hermetic        # L0：干净机器/CI 上可跑，且要求零跳过（默认隔离 HOME）
+#   bash scripts/run_tests.sh hermetic-clean  # 同上（历史别名，HOME 隔离已是默认）
+#   bash scripts/run_tests.sh all             # L0 + L1（本机全量；L0 段隔离 HOME，L1 段还原）
 #   bash scripts/run_tests.sh host            # 只 L1（本机真实仓库形态断言）
-#   bash scripts/run_tests.sh changed [文件...]   # 按改动挑子集（**开发用，不是闸门**）
+#   bash scripts/run_tests.sh changed [文件...]   # 按改动挑子集（**开发用，不是闸门**；同样隔离 HOME）
+#   bash scripts/run_tests.sh pytest          # 直通 pytest（隔离 HOME，不判闸门）
 #   bash scripts/run_tests.sh probe verify_p1_backend.py [http://127.0.0.1:3199]
 #   bash scripts/run_tests.sh                 # 不带参数 = all
+#
+# 任何跑 L0 的档都默认把 HOME 换成一次性空目录（--real-home 可退出，仅排障）：
+# 否则测试里一次 `codebuddy --session-id X` 就会写进用户的 ~/.codebuddy 历史。
 #
 # 每次 hermetic/host/all 跑完都会附带一步**收集器对账**：unittest 收进几例 vs
 # pytest 收进几例，两者不等即红。防的正是「标准套件全绿，可它压根没跑某些闸门」
@@ -27,7 +31,7 @@ case "$MODE" in
   host)           exec "$VENV" scripts/run_tier.py host ;;
   all)            exec "$VENV" scripts/run_tier.py all ;;
   changed)        exec "$VENV" scripts/run_changed.py "$@" ;;
-  pytest)         exec "$VENV" -m pytest tests -v ;;
+  pytest)         exec "$VENV" scripts/run_tier.py pytest "$@" ;;
   probe)
     f="${1:?用法：run_tests.sh probe <verify_*.py|probe_*.py> [base-url]}"; shift
     [ -f "tests/$f" ] || { echo "找不到 tests/$f"; exit 2; }

@@ -7,11 +7,19 @@
   都没测）。本脚本按 tiers.is_host 把两层拆开，各自给数，并据此判闸。
 
 用法：
-  venv/bin/python scripts/run_tier.py hermetic   # 只 L0；出现任何 skip 即 FAIL
+  venv/bin/python scripts/run_tier.py hermetic   # 只 L0；**默认把 HOME 换成空目录**
   venv/bin/python scripts/run_tier.py host       # 只 L1（换机时应整层显式跳过）
-  venv/bin/python scripts/run_tier.py all        # 两层都跑并分别报告
-  venv/bin/python scripts/run_tier.py hermetic --fake-home   # 造一个空 HOME，模拟干净 runner
+  venv/bin/python scripts/run_tier.py all        # 两层都跑，L0 段隔离 HOME、L1 段还原
+  venv/bin/python scripts/run_tier.py hermetic --real-home  # 排障用：保持真实 HOME（危险）
 退出码：0 全绿；1 有用例失败；2 分层被放错（L0 里出现 skip）。
+
+HOME 隔离为什么是**默认**而不是开关（2026-11-02）：
+  只要跑 L0 的地方继承真实 HOME，用例里任何一次 `codebuddy --session-id X`
+  都会把会话写进 `~/.codebuddy/projects/<真实项目>/X.jsonl` —— 用户历史列表里
+  就多出一条测试残留（实测 cb-par-test/2/3 + 一条 UUID，四条只能手删）。
+  这不是「用例写错了」，是**默认值没把宿主隔开**：同一个用例在干净 runner 上
+  写入的是临时目录，在这台机上写进用户的真实历史。`--fake-home` 早就存在，
+  但默认关着 ⇒ 谁都不加。现改为默认开，并把 `--fake-home` 保留为兼容别名。
 """
 from __future__ import annotations
 
@@ -158,10 +166,55 @@ def _parity() -> int:
     return 0
 
 
+def isolate_home(saved_home: str | None, log=print) -> str:
+    """把 HOME 换成一次性的空目录，返回该目录。
+
+    假 HOME 必须落在 `<真实 HOME>/hub-l0test-fixtures` 下、**不能落 /tmp**：
+    v0.13.31 P1 扫描闸把 /tmp 整前缀剔除（EXCLUDE_PATH_PREFIXES），假 HOME
+    一旦在 /tmp，test_localprojects/test_github_projects 的夹具全被排除
+    ⇒ hermetic-clean 12 例假红（2026-09-26 排障定案：换台机器/换 TMPDIR
+    就时绿时红，正是这种环境耦合）。与其它 L0 夹具同域即可。
+
+    `HUB_TEST_HOME` 是给子进程的自述标记：用例/探针据此断言「我在隔离档里」，
+    而不是靠 `HOME != /home/xxx` 这种碰运气的比较。
+    """
+    _base = Path(saved_home or str(Path.home())) / "hub-l0test-fixtures"
+    _base.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="hub-clean-home-", dir=str(_base))
+    os.environ["HOME"] = tmp
+    os.environ["HUB_TEST_HOME"] = tmp
+    os.environ["HUB_HOST_TESTS"] = "0"      # 干净 runner 上 host 层必须整层跳过
+    log(f"[tier] 已把 HOME 换成空目录 {tmp}（L0 不写真实 ~/.codebuddy / ~/.claude）")
+    return tmp
+
+
+def restore_home(saved_home: str | None, saved_host_tests: str | None) -> None:
+    if saved_home is None:
+        os.environ.pop("HOME", None)
+    else:
+        os.environ["HOME"] = saved_home
+    os.environ.pop("HUB_TEST_HOME", None)
+    if saved_host_tests is None:
+        os.environ.pop("HUB_HOST_TESTS", None)
+    else:
+        os.environ["HUB_HOST_TESTS"] = saved_host_tests
+
+
 def main(argv):
     tier = (argv[0] if argv else "all").lower()
-    fake_home = "--fake-home" in argv
+    if tier == "pytest":
+        # `run_tests.sh pytest` 的直通档：不走分层闸门，但**同样不许碰真实 HOME**
+        # ——否则「只想快速看全绿」的人会用这条路径把测试会话写进用户历史。
+        isolate_home(os.environ.get("HOME"))
+        sys.stdout.flush()      # execv 不 flush：不打这一行，调用者就看不到自己已进隔离档
+        os.execv(sys.executable, [sys.executable, "-m", "pytest", "tests", "-v", *argv[1:]])
+        return 2    # execv 成功即进程已被替换；只有它被替身接管（测试）才走得到这行
+    real_home = "--real-home" in argv
+    if "--fake-home" in argv and not real_home:
+        # 默认已是隔离档；旧脚本/文档还在传这个开关，保留别名继续可用
+        print("[tier] --fake-home 已是默认行为（保留为兼容别名）")
     saved_home = os.environ.get("HOME")
+    saved_host_tests = os.environ.get("HUB_HOST_TESTS")
     saved_memdb = os.environ.get("MEMINDEX_DB")
 
     # 2026-10-02：L0 hermetic 层的**投影隔离**，对所有会跑 L0 的档位生效
@@ -189,27 +242,27 @@ def main(argv):
     # L0 的定义是「结论必须一模一样」——继承调用者的终端着色显然不在这个定义内。
     os.environ.pop("FORCE_COLOR", None)
 
-    if fake_home:
-        # 假 HOME 必须落在 ~/hub-l0test-fixtures 下、**不能落 /tmp**：
-        # v0.13.31 P1 扫描闸把 /tmp 整前缀剔除（EXCLUDE_PATH_PREFIXES），假 HOME
-        # 一旦在 /tmp，test_localprojects/test_github_projects 的夹具全被排除
-        # ⇒ hermetic-clean 12 例假红（2026-09-26 排障定案：换台机器/换 TMPDIR
-        # 就时绿时红，正是这种环境耦合）。与其它 L0 夹具同域即可。
-        _base = Path(saved_home or str(Path.home())) / "hub-l0test-fixtures"
-        _base.mkdir(parents=True, exist_ok=True)
-        tmp = tempfile.mkdtemp(prefix="hub-clean-home-", dir=str(_base))
-        os.environ["HOME"] = tmp
-        os.environ["HUB_HOST_TESTS"] = "0"      # 干净 runner 上 host 层必须整层跳过
-        print(f"[tier] 已把 HOME 换成空目录 {tmp}（模拟干净 CI runner）")
+    herm, host, other = _split("test_*.py")
+    pairs = {"hermetic": [("L0-hermetic", herm)],
+             "host": [("L1-host", host)],
+             "all": [("L0-hermetic", herm), ("L1-host", host)]}.get(
+        tier if tier in ("hermetic", "host", "all") else "all")
+    # 判据：**只要这一趟会跑 L0，就默认隔离 HOME**；L1 需要真实安装，跑之前还原。
+    isolate = (not real_home) and any(lbl.startswith("L0") for lbl, _ in pairs)
+    if isolate:
+        isolate_home(saved_home)
+    elif real_home:
+        print("[tier] ⚠ --real-home：HOME 保持真实值 —— L0 会读写 ~/.codebuddy / ~/.claude，"
+              "只用于排障，别当默认")
     try:
-        herm, host, other = _split("test_*.py")
         rc = 0
-        pairs = {"hermetic": [("L0-hermetic", herm)],
-                 "host": [("L1-host", host)],
-                 "all": [("L0-hermetic", herm), ("L1-host", host)]}.get(
-            tier if tier in ("hermetic", "host", "all") else "all")
         print(f"[tier] L0 hermetic={len(herm)} 例   L1 host={len(host)} 例")
         for label, tests in pairs:
+            if label.startswith("L1") and isolate:
+                # L1 断言的是真实安装面（CLI 在不在、能不能拉起），隔离 HOME 会把它跑成
+                # 假红；还原只在这一段生效，L0 已经跑完、结果已落盘。
+                restore_home(saved_home, saved_host_tests)
+                print("[tier] L1 段：HOME 已还原为真实值（host 用例要真实安装面）")
             if not tests:
                 print(f"[tier] {label}: 0 例（本层无用例）")
                 # P0-4：「0 例」不是「全绿」——它是**什么都没证明**（判据没被发现=
@@ -238,8 +291,9 @@ def main(argv):
         rc = max(rc, _parity())
         return rc
     finally:
-        if fake_home and saved_home:
-            os.environ["HOME"] = saved_home
+        # 幂等：L1 段可能已经还原过一次；这里再收一次，保证本进程后续逻辑不继承夹具值
+        if isolate:
+            restore_home(saved_home, saved_host_tests)
         # 还原投影落位，避免本进程后续逻辑（如被当库 import）继承了夹具值
         if saved_memdb is None:
             os.environ.pop("MEMINDEX_DB", None)

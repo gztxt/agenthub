@@ -85,8 +85,23 @@ def changed_files(argv: list[str]) -> list[str]:
     return sorted(f for f in files if not f.startswith(("venv/", ".git/")))
 
 
+def _isolate_home() -> None:
+    """子集档也隔离 HOME —— 与 run_tier 共用同一份实现，不另写一套。
+
+    理由同 run_tier 的默认值：本机跑测试时 `codebuddy --session-id X` 会落成
+    `~/.codebuddy/projects/<真实项目>/X.jsonl`，用户历史里就多出一条测试残留。
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from run_tier import isolate_home          # 局部导入：避免本工具的 --help 也去 discovery
+    isolate_home(os.environ.get("HOME"))
+
+
 def main(argv: list[str]) -> int:
+    real_home = "--real-home" in argv
+    argv = [a for a in argv if a != "--real-home"]
     allow_partial = "--allow-partial" in argv
+    if not real_home:
+        _isolate_home()
     changed = changed_files(argv)
     if not changed:
         print("[changed] 工作区无改动（或未指定文件）⇒ 无可跑子集。")

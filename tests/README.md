@@ -38,14 +38,18 @@
 ## 怎么跑
 
 ```bash
-bash scripts/run_tests.sh hermetic         # 只 L0，以"零跳过"为闸
-bash scripts/run_tests.sh hermetic-clean   # L0 + 把 HOME 换成空目录 ⇒ 真模拟干净 runner
-bash scripts/run_tests.sh all              # L0 + L1（本机全量）
+bash scripts/run_tests.sh hermetic         # 只 L0，以"零跳过"为闸（**默认隔离 HOME**）
+bash scripts/run_tests.sh hermetic-clean   # 同上（历史别名；隔离已是默认，不用再加开关）
+bash scripts/run_tests.sh all              # L0 + L1（L0 段隔离 HOME，L1 段还原真实 HOME）
 bash scripts/run_tests.sh host             # 只 L1
-bash scripts/run_tests.sh changed [文件...]  # ★ 开发迭代用：按改动挑子集（**不是闸门**）
-bash scripts/run_tests.sh pytest           # 整层交 pytest 跑（对账用途，标准入口不用它）
+bash scripts/run_tests.sh changed [文件...]  # ★ 开发迭代用：按改动挑子集（**不是闸门**，同样隔离 HOME）
+bash scripts/run_tests.sh pytest           # 整层交 pytest 跑（对账用途，标准入口不用它；同样隔离 HOME）
 bash scripts/run_tests.sh probe verify_p1_backend.py http://127.0.0.1:3199
-venv/bin/python -m unittest discover -s tests -p "test_*.py"   # 老口径（L0+L1 混在一起）
+
+# 为什么默认隔离：测试里一次 `codebuddy --session-id X` 会把会话写进
+# ~/.codebuddy/projects/<真实项目>/X.jsonl ⇒ 用户历史列表多出测试残留
+# （2026-11-01 实测 cb-par-test/2/3 + 一条 UUID，只能手删）。
+# 排障要看真实 HOME 时显式传 --real-home，**别改成默认**。venv/bin/python -m unittest discover -s tests -p "test_*.py"   # 老口径（L0+L1 混在一起）
 ```
 
 **`changed` 是子集，不是闸门**：它按"测试正文是否提及被改的模块"挑文件（`scripts/run_changed.py`），

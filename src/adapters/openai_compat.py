@@ -2,13 +2,70 @@
 
 Agent_Manager 的 llm.rs 同款协议：POST {base}/v1/chat/completions
 支持非流式与 SSE 流式（stream=true, data: [DONE]）。
+
+2026-10-24（PT-20261024-04）：`chat()` 接入 `resilience` 韧性层（重试 + 指数退避 +
+熔断 + attempt 留痕）。实测动机（生产库 profile_events，2026-09-06→10-24）：人工对话
+101 次中 25 次失败——18 次 CCR「HTTP 400 All target providers failed」（上游全切的
+聚合外壳，状态码不可重试但语义瞬时）、2 次零星 429/超时。**外部契约不变**（仍返回
+dict、错误串格式保持 "HTTP {status}: {text}"），调用方零改动；`AGENT_CHAT_ATTEMPTS=1`
+可整体关回旧行为。流式路径不接重试（首字节后重试会把已 yield 的内容重复一遍）。
 """
 import json
+import os
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import aiohttp
 
+import resilience  # noqa: E402 —— 平铺导入（src 在 sys.path；adapters/tdai.py 同款）
 from .base import BaseAdapter
+
+#: agent_chat 通道的重试上限（**总**尝试次数）与退避总时长预算（秒）。
+#: 逐点显式给，与 llm.py 的 LLM_ATTEMPTS/LLM_RETRY_BUDGET_S 同口径
+#: （resilience 模块 docstring：「接入是逐点显式决定的，不是全局默认」）。
+#: ⚠ 计费口径：每次 attempt 都是发往**同一 CCR 网关、同一 model** 的真实请求；
+#: 失败的 attempt 一般不产生计费，但重试成功的那次照常计费 —— 无法确定的一律按扣费处理。
+AGENT_CHAT_ATTEMPTS = max(1, int(os.getenv("AGENT_CHAT_ATTEMPTS", "2")))
+AGENT_CHAT_RETRY_BUDGET_S = float(os.getenv("AGENT_CHAT_RETRY_BUDGET_S", "2.0"))
+
+
+class AdapterHTTPError(RuntimeError):
+    """上游非 200。**结构化携带** `status`/`headers` —— 与 llm.LLMGatewayError 同构。
+
+    为什么不能继续把状态码只塞进字符串：`resilience` 的分类器（`_http_code`/`_headers`
+    鸭子类型）要靠它们把 429 判成 rate_limit、把 5xx 判成 server；降级成猜文本，
+    重试判定就只能碰运气。
+    """
+
+    def __init__(self, status: int, text: str, headers: Optional[Dict[str, str]] = None):
+        super().__init__("HTTP %s: %s" % (status, (text or "")[:500]))
+        self.status = int(status)
+        self.headers = {str(k).lower(): str(v) for k, v in dict(headers or {}).items()}
+
+
+#: CCR 网关把「我自己切换过的多个上游全部失败」包在 **HTTP 400** 里返回
+#: （body 形如 "All target providers failed."）。400 在 resilience 默认策略里属
+#: 「请求本身不合法，重试纯浪费」，但对本机它是**上游瞬时故障的聚合外壳**
+#: （2026-10-24 实测占人工对话失败 18/25）⇒ 经 `_decide` 的 `extra_retryable` 参数
+#: **补充**进可重试集合（与默认判定取并集，只加不减）。判据收紧在「400 + 该文案」，
+#: 不扩大化——普通 400 仍不重试。
+_GATEWAY_UPSTREAM_TEXT = "target providers failed"
+
+
+def _is_gateway_upstream_failure(exc: BaseException) -> bool:
+    """调用点补充判定：CCR 400「All target providers failed」算瞬时，可重试。"""
+    return getattr(exc, "status", None) == 400 and _GATEWAY_UPSTREAM_TEXT in str(exc).lower()
+
+
+def _record_attempt(rec: Dict[str, Any]) -> None:
+    """把每次尝试落 `profile_events`（source=resilience）。与 llm._record_attempt
+    同口径：**记账绝不允许带倒一次真实对话**。"""
+    try:
+        import db
+        db.log_profile_event("resilience", "agent_chat",
+                             "ok" if rec.get("ok") else (rec.get("kind") or "fail"),
+                             rec.get("elapsed_ms"), trace_id=rec.get("call_id"), detail=rec)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class OpenAICompatAdapter(BaseAdapter):
@@ -36,6 +93,22 @@ class OpenAICompatAdapter(BaseAdapter):
                 headers["Authorization"] = f"Bearer {self.auth_token}"
         return headers
 
+    async def _post_once(self, url: str, body: Dict[str, Any],
+                         total_s: float = 120.0) -> Dict[str, Any]:
+        """单次 POST（**独立成函数作为测试接缝**：重试编排可被替身验证，不必真连网关）。
+
+        非 200 抛 `AdapterHTTPError`（结构化带 status/headers）——由 `chat()` 在外层
+        转回旧 dict 契约；ClientError/超时原样抛出，交 resilience 分类。
+        """
+        async with aiohttp.ClientSession() as s:
+            async with s.post(url, headers=self.build_headers(), json=body,
+                              timeout=aiohttp.ClientTimeout(total=total_s)) as resp:
+                if resp.status != 200:
+                    text = (await resp.text())[:500]
+                    raise AdapterHTTPError(resp.status, text,
+                                           dict(getattr(resp, "headers", {}) or {}))
+                return await resp.json()
+
     async def chat(self, message: str, session_id: Optional[str] = None,
                    model: Optional[str] = None, history: Optional[List[dict]] = None,
                    cwd: Optional[str] = None, **kwargs) -> Dict[str, Any]:
@@ -54,31 +127,39 @@ class OpenAICompatAdapter(BaseAdapter):
         # 外层闸门是 `TASK_TIMEOUT_S=600`（tasks.py）。写死 120 会让外层闸门永不触发，
         # 长任务一律表现成 `success=False`（"执行者失败"），而真实原因是客户端先断了 ——
         # 归因直接错一层。调用方能传就按它传，传不了才退默认。
+        # 重试接进来（2026-10-24 PT-20261024-04）后口径不变：**每次 attempt 都用同一个
+        # total_s**，不是「整串共享一个超时」——后者会让「第一次吃满 120s」直接耗尽预算。
         try:
             total_s = float(kwargs.get("timeout_s") or 120.0)
         except (TypeError, ValueError):
             total_s = 120.0
+        key = resilience.breaker_key(self.base_url, "agent_chat")
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(url, headers=self.build_headers(), json=body,
-                                  timeout=aiohttp.ClientTimeout(total=total_s)) as resp:
-                    if resp.status != 200:
-                        text = (await resp.text())[:500]
-                        return {"success": False, "agent": self.agent_id,
-                                "error": f"HTTP {resp.status}: {text}"}
-                    data = await resp.json()
-                    choice = (data.get("choices") or [{}])[0]
-                    return {
-                        "success": True,
-                        "agent": self.agent_id,
-                        "response": (choice.get("message") or {}).get("content", ""),
-                        "model": data.get("model"),
-                        "usage": data.get("usage"),
-                    }
+            data = await resilience.instance.acall(
+                key, lambda: self._post_once(url, body, total_s),
+                attempts=AGENT_CHAT_ATTEMPTS, sleep_budget_s=AGENT_CHAT_RETRY_BUDGET_S,
+                record=_record_attempt, call_id=resilience.new_call_id(),
+                extra_retryable=_is_gateway_upstream_failure)
+        except resilience.BreakerOpen:
+            # 熔断挡住的调用**没有发出去**，与「上游拒绝」必须可区分（llm.py:139
+            # breaker_state() 同族判据：把熔断当普通失败会看不出「对端正在被保护」）。
+            cd = resilience.instance.cooldown_remaining_s(key)
+            return {"success": False, "agent": self.agent_id,
+                    "error": f"网关熔断中（请求未发出，约 {cd:.0f}s 后放行探针）"}
+        except AdapterHTTPError as e:
+            return {"success": False, "agent": self.agent_id, "error": str(e)}
         except aiohttp.ClientError as e:
             return {"success": False, "agent": self.agent_id, "error": str(e)}
         except Exception as e:  # noqa: BLE001
             return {"success": False, "agent": self.agent_id, "error": repr(e)}
+        choice = (data.get("choices") or [{}])[0]
+        return {
+            "success": True,
+            "agent": self.agent_id,
+            "response": (choice.get("message") or {}).get("content", ""),
+            "model": data.get("model"),
+            "usage": data.get("usage"),
+        }
 
     async def chat_stream(self, message: str, session_id: Optional[str] = None,
                           model: Optional[str] = None, history: Optional[List[dict]] = None,

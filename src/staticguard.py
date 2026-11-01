@@ -35,9 +35,15 @@ from __future__ import annotations
 import gzip
 import hashlib
 import mimetypes
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
+
+try:                      # 2026-10-30：brotli 是可选的加速件，缺了就自动退回 gzip
+    import brotli as _brotli
+except Exception:         # noqa: BLE001
+    _brotli = None
 
 
 def resolve_serveable(static_root: Path, file_path: str) -> Optional[Path]:
@@ -96,6 +102,10 @@ def cache_policy(vtoken: str, f: Path) -> Tuple[str, str]:
 _GZ_SUFFIX = {".js", ".css", ".svg", ".json", ".map"}
 _GZ_MIN = 1024
 _gz_cache: dict = {}   # "路径|mtime_ns|size" -> gzip 字节；键随文件变，天然失效
+_br_cache: dict = {}   # 同上，brotli 版
+# 静态件默认 brotli q9：实测 hub.js 566KB 下 q9=167KB/35ms，q11=156KB/929ms
+# ⇒ q11 省下的 11KB 换 0.9s 首次响应不值得（且每进程每文件只付一次，但仍会卡首屏）。
+BR_QUALITY = int(os.getenv("HUB_BR_QUALITY", "9"))
 
 
 @dataclass(frozen=True)
@@ -139,6 +149,68 @@ def _gzip_body(f: Path, st) -> bytes:
     return body
 
 
+def _br_body(f: Path, st) -> bytes:
+    """有界（32 项）brotli 缓存；口径同 _gzip_body。"""
+    key = f"{f}|{st.st_mtime_ns}|{st.st_size}"
+    body = _br_cache.get(key)
+    if body is None:
+        body = _brotli.compress(f.read_bytes(), quality=BR_QUALITY)
+        if len(_br_cache) > 32:
+            _br_cache.clear()
+        _br_cache[key] = body
+    return body
+
+
+def _accepts(accept_encoding: str, token: str) -> bool:
+    """Accept-Encoding 里是否接受 token（支持 q=0 拒绝与 `*` 通配）。"""
+    best = None
+    wildcard = None
+    for part in (accept_encoding or "").split(","):
+        name, _, params = part.strip().partition(";")
+        name = name.strip().lower()
+        q = 1.0
+        if params.strip().startswith("q="):
+            try:
+                q = float(params.strip()[2:])
+            except ValueError:
+                q = 0.0
+        if name == token:
+            best = q
+        elif name == "*":
+            wildcard = q
+    if best is not None:
+        return best > 0
+    return bool(wildcard and wildcard > 0)
+
+
+def accepts(accept_encoding: str, token: str) -> bool:
+    """公开版 Accept-Encoding 判定（首页 HTML 也用同一套规则，避免两处各写一份）。"""
+    return _accepts(accept_encoding, token)
+
+
+def br_compress(body: bytes) -> Optional[bytes]:
+    """动态体（如渲染后的首页）的 brotli 压缩；brotli 缺失时返回 None 交给 gzip 兜底。"""
+    if _brotli is None:
+        return None
+    return _brotli.compress(body, quality=BR_QUALITY)
+
+
+def _pick_encoding(f: Path, st, accept_encoding: str) -> Optional[str]:
+    """挑压缩编码：br 优先于 gzip（同尺寸下 br 总量小 15~20%）。
+
+    准入与 gzip 同口径：后缀在 _GZ_SUFFIX、体积 ≥ _GZ_MIN、客户端真的接受。
+    brotli 未安装时静默退回 gzip —— 缺件不得让静态资源变成 500。
+    """
+    if f.suffix.lower() not in _GZ_SUFFIX or st.st_size < _GZ_MIN:
+        return None
+    if _brotli is not None and _accepts(accept_encoding, "br"):
+        return "br"
+    if _accepts(accept_encoding, "gzip"):
+        return "gzip"
+    return None
+
+
+
 def serve(static_root: Path, file_path: str, vtoken: str = "",
           accept_encoding: str = "", if_none_match: str = "") -> ServePlan:
     """静态资源服务的**唯一外部入口**：给定请求要素，回一个纯值 ServePlan。
@@ -149,6 +221,8 @@ def serve(static_root: Path, file_path: str, vtoken: str = "",
         （09-23 事故：ETag 是 mtime+size 的函数，与 URL 提手无关 ⇒ 不同 ?v= 共用同一 ETag）。
       · revalidate 分支发 ETag；If-None-Match 命中 ⇒ 304，且 304 **带 Vary**。
       · gzip 仅对 _GZ_SUFFIX 且 size≥_GZ_MIN 且客户端 Accept-Encoding 含 gzip 时生效。
+      · 2026-10-30 新增：客户端接受 br 且 brotli 已安装时优先 br（q=HUB_BR_QUALITY，默认 9），
+        否则退回 gzip；两者共用同一套后缀/体积门槛与 ETag，编码差异靠 Vary 区分。
       · immutable 与 gzip 分支给全量字节（不走 FileResponse，避免它补出与提手无关的 etag）。
     """
     f = resolve_serveable(static_root, file_path)
@@ -166,10 +240,11 @@ def serve(static_root: Path, file_path: str, vtoken: str = "",
         if if_none_match == etag:
             return ServePlan(status=304, headers=headers)
     media = mimetypes.guess_type(f.name)[0] or "application/octet-stream"
-    if (f.suffix.lower() in _GZ_SUFFIX and st.st_size >= _GZ_MIN
-            and "gzip" in (accept_encoding or "")):
-        return ServePlan(status=200, media_type=media, body=_gzip_body(f, st),
-                         headers={**headers, "Content-Encoding": "gzip",
+    enc = _pick_encoding(f, st, accept_encoding)
+    if enc is not None:
+        body = _br_body(f, st) if enc == "br" else _gzip_body(f, st)
+        return ServePlan(status=200, media_type=media, body=body,
+                         headers={**headers, "Content-Encoding": enc,
                                   "Vary": "Accept-Encoding"})
     if policy == "immutable":
         return ServePlan(status=200, media_type=media, body=f.read_bytes(), headers=headers)

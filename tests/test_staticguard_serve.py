@@ -124,6 +124,30 @@ class TestServeGoldenMatrix(unittest.TestCase):
             g.serve(self.root, f.name, g.content_token(f), "gzip")
         self.assertLessEqual(len(g._gz_cache), 33)         # 上界：>32 即清空，故最多 33
 
+    # ── ④b brotli（2026-10-30）────────────────────────────────────────────
+    @unittest.skipIf(g._brotli is None, "brotli 未安装")
+    def test_br_preferred_over_gzip(self):
+        p = g.serve(self.root, "hub.js", self.tok, "gzip, deflate, br")
+        self.assertEqual(p.headers["Content-Encoding"], "br")
+        self.assertNotIn("ETag", p.headers)               # immutable 不发校验器，与 gzip 同口径
+        self.assertEqual(g._brotli.decompress(p.body), self.big.read_bytes())
+
+    @unittest.skipIf(g._brotli is None, "brotli 未安装")
+    def test_br_revalidate_keeps_etag(self):
+        p = g.serve(self.root, "hub.js", "", "br")
+        self.assertEqual(p.headers["Content-Encoding"], "br")
+        self.assertIn("ETag", p.headers)
+
+    def test_br_q0_falls_back_to_gzip(self):
+        """q=0 是显式拒绝：不得因为写了 br 就发 br。"""
+        p = g.serve(self.root, "hub.js", self.tok, "br;q=0, gzip")
+        self.assertEqual(p.headers["Content-Encoding"], "gzip")
+
+    def test_identity_only_not_compressed(self):
+        p = g.serve(self.root, "hub.js", self.tok, "identity")
+        self.assertNotIn("Content-Encoding", p.headers)
+        self.assertEqual(p.body, self.big.read_bytes())
+
     # ── ⑤ 404 语义 ───────────────────────────────────────────────────────
     def test_404_for_missing_backup_and_escape(self):
         for fp in ("nope.js", "hub.js.bak-x", "../%s_evil/secret.txt" % self.root.name):

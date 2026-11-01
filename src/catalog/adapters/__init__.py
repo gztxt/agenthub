@@ -1,6 +1,7 @@
-"""catalog.adapters —— 只读适配器集合（PT-20261025-12 P0）。
+"""catalog.adapters —— 只读适配器集合（PT-20261025-12 P0+P1）。
 
 P0 三域：`agents` / `skills` / `projects`。
+P1 四域：`sessions` / `docs` / `memory` / `logs`。
 
 **全部只读**：没有任何适配器写回原生位置。
 **单一事实来源**：本包只做「归一化 + 落编目库」，扫描逻辑一律**复用现有模块**
@@ -13,6 +14,10 @@ P0 三域：`agents` / `skills` / `projects`。
 from . import agents as _agents  # noqa: F401
 from . import skills as _skills  # noqa: F401
 from . import projects as _projects  # noqa: F401
+from . import sessions as _sessions  # noqa: F401 P1
+from . import docs as _docs  # noqa: F401 P1
+from . import memory as _memory  # noqa: F401 P1
+from . import logs as _logs  # noqa: F401 P1
 from ..adapter import REGISTRY  # noqa: F401
 
 __all__ = ["REGISTRY"]

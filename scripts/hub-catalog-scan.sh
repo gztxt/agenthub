@@ -7,7 +7,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --source) SOURCE="${2:?--source 需要 src_id}"; shift 2 ;;
     -h|--help)
-      printf '用法：%s [--source agents.registry|skills.disk|projects.local]\n' "$0"
+      printf '用法：%s [--source <src_id>]\n' "$0"
+      printf '  P0: agents.registry skills.disk projects.local\n'
+      printf '  P1: sessions.archived docs.filesystem memory.archive logs.hub\n'
+      printf '  省略 --source = 全部已注册源（run_all）\n' "$0"
       exit 0 ;;
     *) printf '未知参数：%s\n' "$1" >&2; exit 2 ;;
   esac

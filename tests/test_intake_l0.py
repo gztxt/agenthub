@@ -21,6 +21,7 @@ _REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
 
 import intake  # noqa: E402
+import refscout  # noqa: E402
 import refscout_base  # B4 切分：token 住在 refscout_base，补丁要打在那里
 
 
@@ -745,6 +746,53 @@ class TestSkillAutoAndAccount(unittest.TestCase):
     def test_miss_records_nothing(self):
         _, seen = self._run({"ok": False, "reason": "norm 0.092 < 0.40"})
         self.assertEqual(seen, [], "没有候选就没有曝光，不许留空名流水")
+
+
+class RefCachedBranchTest(unittest.TestCase):
+    """查询级缓存命中（**没有 job 行**）不许去轮询 job。
+
+    回归点（2026-10-31 生产闸门⑦）：卡一旦落库，同参数 24h 内都走 `submit` 的缓存分支，
+    它回 `job_id=""` 且只在库里插了卡、没插 job ⇒ 旧代码拿空 id 去 `job_view`，必然
+    404「任务不存在」，参考库被判 `unavailable`，简报把「秒出」写成故障。
+    """
+
+    def setUp(self):
+        self._old = (refscout.token, refscout.submit, refscout.card_view, refscout.job_view)
+        self.polled = []
+        refscout.token = lambda: "t"
+        refscout.submit = lambda body: {"job_id": "", "card_id": "qabc", "deduped": True,
+                                        "cached": True, "cached_age_s": 60}
+        refscout.card_view = lambda cid, **k: {
+            "id": cid, "status": "reranked",
+            "candidates": [{"bucket": "impl", "repo": "a/b", "stars": 1, "func": "f",
+                            "impl": "i", "judge": "ok", "readme_gist": "g"}]}
+
+        def _boom(jid):
+            self.polled.append(jid)
+            raise AssertionError("缓存命中不该轮询 job（库里没有 job 行，必 404）")
+
+        refscout.job_view = _boom
+
+    def tearDown(self):
+        (refscout.token, refscout.submit,
+         refscout.card_view, refscout.job_view) = self._old
+
+    def test_cached_hit_returns_card_without_polling(self):
+        out = intake._ref("服务健康探针与自动看护", 8, "", early_card=True)
+        self.assertEqual(self.polled, [])
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["state"], "ok")
+        self.assertEqual(out["card_id"], "qabc")
+        self.assertTrue(out.get("cached"))
+        self.assertEqual(out["rows"][0]["repo"], "a/b")
+
+    def test_cached_hit_without_card_is_pending_not_error(self):
+        """卡号都没回（极端）时也只能说「还没落库」，不许报故障。"""
+        refscout.submit = lambda body: {"job_id": "", "card_id": ""}
+        out = intake._ref("服务健康探针与自动看护", 8, "")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["state"], "pending")
+        self.assertIn("尚未落库", out["reason"])
 
 
 if __name__ == "__main__":

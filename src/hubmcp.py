@@ -509,9 +509,12 @@ def hub_ref_scout(module: str, keywords: str = "", lang: str = "",
     data = _post("/api/ref/scout", body)
     if "error" in data:
         return json.dumps(data, ensure_ascii=False)
-    return json.dumps({**data,
-                       "next": "轮询 hub_ref_get(job_id=...)；status=done 后读 card_id 的 md"},
-                      ensure_ascii=False)
+    # 查询级缓存命中（REF_QUERY_TTL_H）**没有 job_id** ⇒ 不能给「轮询 job」的指引：
+    # 拿空 job_id 去 hub_ref_get 会 404「任务不存在」。缓存命中的正确读法是直接按 card_id 取。
+    nxt = ("命中查询缓存（同参数 24h 内不重跑、不烧 token）：直接 hub_ref_get(card_id=...)"
+           if data.get("cached") or not data.get("job_id") else
+           "轮询 hub_ref_get(job_id=...)；status=done 后读 card_id 的 md")
+    return json.dumps({**data, "next": nxt}, ensure_ascii=False)
 
 
 @server.tool()

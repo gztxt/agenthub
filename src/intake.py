@@ -595,9 +595,23 @@ def _ref(task: str, wait_s: int, lang: str, early_card: bool = False) -> Dict[st
                                                allow_paid=False, trigger="manual"))
     except Exception as e:  # noqa: BLE001 —— 含 HTTPException(503)
         return {"ok": False, "state": "unavailable", "error": f"{type(e).__name__}: {e}"}
-    job_id = job.get("job_id")
+    job_id = job.get("job_id") or ""
     # ⚠️ 去重分支只回 `{job_id, deduped}`，**不带 card_id**（见 refscout.submit）⇒ 必须补。
     card_id = job.get("card_id")
+    # 查询级缓存命中（refscout._cached_card）**不建 job 行**且 `job_id` 为空 ⇒ 再去
+    # `job_view` 轮询必然 404「任务不存在」。2026-10-31 生产实测：卡已落库后每单都走缓存，
+    # 闸门 ⑦ 因此把参考库判成 unavailable，简报把「秒出」报成故障。缓存本身就是「卡可用」。
+    if not job_id:
+        card = {}
+        if card_id:
+            try:
+                card = refscout.card_view(card_id)
+            except Exception as e:  # noqa: BLE001 —— 卡号在、卡不在才是真故障
+                return {"ok": False, "state": "unavailable", "job_id": "", "card_id": card_id,
+                        "error": f"{type(e).__name__}: {e}"}
+        out = _ref_result(card, card_id, str(card.get("status") or "cached"), 0.0, "")
+        out["cached"] = True
+        return out
     t0 = time.monotonic()
     deadline = t0 + max(0, wait_s)
     status, card, err = "queued", None, None
@@ -614,6 +628,12 @@ def _ref(task: str, wait_s: int, lang: str, early_card: bool = False) -> Dict[st
                 or time.monotonic() >= deadline:
             break
         time.sleep(1.0)
+    return _ref_result(card, card_id, status, round(time.monotonic() - t0, 1), job_id,
+                       err=err)
+
+
+def _ref_rows(card: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """卡里的实现桶 → 简报行（最多 5 条）。"""
     rows: List[Dict[str, Any]] = []
     for c in ((card or {}).get("candidates") or []):
         if c.get("bucket") != "impl":
@@ -624,6 +644,17 @@ def _ref(task: str, wait_s: int, lang: str, early_card: bool = False) -> Dict[st
                      "gist": (c.get("readme_gist") or "")[:120]})
         if len(rows) >= 5:
             break
+    return rows
+
+
+def _ref_result(card: Optional[Dict[str, Any]], card_id: Optional[str], status: str,
+                waited_s: float, job_id: str, err: Optional[str] = None) -> Dict[str, Any]:
+    """把「卡 + 任务状态」归一成 `_ref` 的返回。
+
+    两条路径（轮询到卡 / 缓存直接取卡）**必须共用这一个出口**，否则「卡在但取法不同」
+    就会长出两种 state 语义——2026-10-31 的 404 就是这么来的。
+    """
+    rows = _ref_rows(card)
     if rows:
         state = "ok"
     elif card:
@@ -634,7 +665,7 @@ def _ref(task: str, wait_s: int, lang: str, early_card: bool = False) -> Dict[st
         state = "pending"
     out: Dict[str, Any] = {"ok": bool(rows), "state": state, "job_id": job_id,
                            "card_id": card_id, "status": status,
-                           "waited_s": round(time.monotonic() - t0, 1), "rows": rows}
+                           "waited_s": waited_s, "rows": rows}
     if not rows:
         out["reason"] = {
             "pending": REF_PENDING_HINT,

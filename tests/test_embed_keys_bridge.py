@@ -209,5 +209,79 @@ class TestParentSide(unittest.TestCase):
         self.assertNotIn("nav-search", JS05, "左栏搜索框已删，面板里不该再留这条动作")
 
 
+class TestListenHost(unittest.TestCase):
+    """桥的监听面（2026-11-02 报障「点 dsh 局域网恒拒绝连接」的 L0 闸门）。
+
+    判据：桥绑多宽，必须由**上游会怎么绑**决定，而不是由「hub 启动那一刻上游活没活」
+    决定 —— 按需拉起的 agent 常态是停着的，用运行时探测决定静态属性就会把它永久锁回环。
+    """
+
+    def setUp(self):
+        self._orig_probe = embed_proxy._upstream_lan_reachable
+        self._probe_calls = 0
+
+    def tearDown(self):
+        embed_proxy._upstream_lan_reachable = self._orig_probe
+
+    def _probe(self, alive):
+        def f(port):
+            self._probe_calls += 1
+            return alive
+        embed_proxy._upstream_lan_reachable = f
+
+    def test_declared_lan_host_binds_wide_even_if_down(self):
+        # dsh 画像写死 192.168.5.102；服务停着也必须是 0.0.0.0
+        self._probe(False)
+        self.assertEqual(
+            embed_proxy.listen_host_for(3080, "0.0.0.0", upstream_host="192.168.5.102"),
+            "0.0.0.0")
+        self.assertEqual(self._probe_calls, 0, "声明了具体网卡就不该再探测（探测会给出假死）")
+
+    def test_declared_wildcard_binds_wide(self):
+        self._probe(False)
+        self.assertEqual(
+            embed_proxy.listen_host_for(8083, "0.0.0.0", upstream_host="0.0.0.0"),
+            "0.0.0.0")
+
+    def test_start_cmd_wide_host_binds_wide(self):
+        # opencode / zcode / reasonix：画像声明 127.0.0.1，起法却 --host 0.0.0.0
+        self._probe(False)
+        for cmd in (["opencode", "web", "--hostname", "0.0.0.0", "--port", "4096"],
+                    ["node", "z.mjs", "--web", "--host", "0.0.0.0"],
+                    ["reasonix", "web", "--addr", "0.0.0.0:8787"]):
+            self.assertEqual(
+                embed_proxy.listen_host_for(4096, "0.0.0.0", upstream_host="127.0.0.1",
+                                            start={"cmd": cmd}),
+                "0.0.0.0", cmd)
+
+    def test_loopback_only_panel_stays_private(self):
+        # claude-mem / qoder：声明回环、unit 式起法读不到绑定地址、此刻连不上 ⇒ 保持回环
+        self._probe(False)
+        self.assertEqual(
+            embed_proxy.listen_host_for(37700, "0.0.0.0", upstream_host="127.0.0.1",
+                                        start={"unit": "claude-mem"}),
+            "127.0.0.1")
+
+    def test_loopback_declared_but_alive_on_lan_binds_wide(self):
+        self._probe(True)
+        self.assertEqual(
+            embed_proxy.listen_host_for(8083, "0.0.0.0", upstream_host="127.0.0.1"),
+            "0.0.0.0")
+        self.assertEqual(self._probe_calls, 1)
+
+    def test_start_binds_wide_negative(self):
+        self.assertFalse(embed_proxy._start_binds_wide({"cmd": ["x", "--host", "127.0.0.1"]}))
+        self.assertFalse(embed_proxy._start_binds_wide({"unit": "dsh"}))
+        self.assertFalse(embed_proxy._start_binds_wide(None))
+        self.assertTrue(embed_proxy._start_binds_wide({"cmd": ["x", "--host=10.0.0.5"]}))
+        self.assertFalse(embed_proxy._start_binds_wide({"cmd": ["x", "--host"]}),
+                         "旗标后面没值不能当成绑定声明")
+
+    def test_targets_carry_start(self):
+        """桥的判据依赖 `embed_proxy_targets()` 带上起法；漏带等于退回旧判据。"""
+        for t in profiles.embed_proxy_targets():
+            self.assertIn("start", t, t["id"])
+
+
 if __name__ == "__main__":
     unittest.main()

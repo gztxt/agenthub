@@ -314,14 +314,24 @@ def _emit_attempt(record: Optional[Callable[[Dict[str, Any]], None]], **rec: Any
 
 
 def _decide(exc: BaseException, attempt: int, attempts: int, spent: float,
-            sleep_budget_s: float, rand: Callable[[], float]) -> Dict[str, Any]:
+            sleep_budget_s: float, rand: Callable[[], float],
+            extra_retryable: Optional[Callable[[BaseException], bool]] = None) -> Dict[str, Any]:
     """重试决策（**纯函数**）：同步 `call()` 与异步 `acall()` **共用这一份**。
 
     抽出来就是为了不漂移：两条入口若各写一遍「何时重试/退避多少/预算不够怎么办」，
     日后只改一边就会出现「同一错误在同步路径重试、在异步路径不重试」这种最难查的不一致。
     返回 `{cls, action, delay}`，`action ∈ return|retry|abort|budget_exhausted`。
+
+    `extra_retryable`（2026-10-24 增）：调用点补充的「也算瞬时」判定，与 `is_retryable`
+    的默认结论取**并集**（只加不减——调用点不需要缩窄默认策略，缩窄是危险方向）。
+    存在的理由：有的对端用一个**状态码上不可重试、语义上却瞬时**的外壳表达自己的上游
+    全挂——本机实测 CCR 网关把「我切换过的多个上游全部失败」包在 HTTP 400 里
+    （占人工对话失败 18/25，2026-10-24），而 400 在默认策略里属「请求本身不合法，
+    重试纯浪费」。谁在对端身边谁知道那是瞬时：**判定补充权给调用点，决策仍只此一处**。
     """
     cls = classify_error(exc)
+    if extra_retryable is not None and bool(extra_retryable(exc)):
+        cls = dict(cls, retryable=True, action="retry")
     last_attempt = attempt >= attempts - 1
     action = "abort" if (last_attempt or not cls["retryable"]) else "retry"
     delay = 0.0
@@ -395,7 +405,8 @@ class CircuitBreakers:
     def call(self, key: str, fn: Callable[[], Any], *, attempts: int = 1,
              sleep_budget_s: float = 0.0,
              record: Optional[Callable[[Dict[str, Any]], None]] = None,
-             call_id: str = "") -> Any:
+             call_id: str = "",
+             extra_retryable: Optional[Callable[[BaseException], bool]] = None) -> Any:
         """在熔断保护下调用 `fn()`，失败按 `is_retryable` 退避重试。
 
         参数
@@ -410,6 +421,9 @@ class CircuitBreakers:
         · `call_id`（P1-6）：一次**逻辑调用**的标识，**跨 attempt 不变**。
           重试前先按它查「上次到底发生没发生」，是幂等的前提（写路径另用
           `idempotency_key()` 构键）。
+        · `extra_retryable`（2026-10-24）：调用点补充的「也算瞬时」判定，与
+          `is_retryable` 取并集（只加不减，见 `_decide` docstring：CCR 400
+          「All target providers failed」那类「状态码不可重试、语义瞬时」的外壳）。
         """
         attempts = max(1, int(attempts))
         self._enter(key)
@@ -420,7 +434,8 @@ class CircuitBreakers:
                 try:
                     out = fn()
                 except BaseException as exc:  # noqa: BLE001 —— 要原样重抛，仅在此处拦
-                    dec = _decide(exc, attempt, attempts, spent, sleep_budget_s, self._rand)
+                    dec = _decide(exc, attempt, attempts, spent, sleep_budget_s,
+                                  self._rand, extra_retryable)
                     cls, action, delay = dec["cls"], dec["action"], dec["delay"]
                     self._record(key, exc, limited=(cls["kind"] == "rate_limit"))
                     _emit_attempt(record, call_id=call_id, attempt=attempt, kind=cls["kind"],
@@ -447,7 +462,8 @@ class CircuitBreakers:
     async def acall(self, key: str, fn: Callable[[], Awaitable[Any]], *, attempts: int = 1,
                     sleep_budget_s: float = 0.0,
                     record: Optional[Callable[[Dict[str, Any]], None]] = None,
-                    call_id: str = "") -> Any:
+                    call_id: str = "",
+                    extra_retryable: Optional[Callable[[BaseException], bool]] = None) -> Any:
         """`call()` 的**异步孪生**（`fn` 是 coroutine function）。
 
         与同步版共享 `_enter/_leave`、`_record/_record_ok` 与 `_decide`（分类/退避/预算）
@@ -455,7 +471,8 @@ class CircuitBreakers:
         唯一差别是 `await fn()` 与 `await asyncio.sleep()`。
 
         为何必需：`llm.py` 走 aiohttp（异步）——拿同步 `call()` 包会把事件循环
-        **整段阻塞**在退避睡眠里，一次 429 就能让全站卡住。参数语义与 `call()` 逐字相同。
+        **整段阻塞**在退避睡眠里，一次 429 就能让全站卡住。参数语义与 `call()` 逐字相同
+        （含 `extra_retryable` 调用点补充，见 `call()` docstring）。
         """
         attempts = max(1, int(attempts))
         self._enter(key)
@@ -466,7 +483,8 @@ class CircuitBreakers:
                 try:
                     out = await fn()
                 except BaseException as exc:  # noqa: BLE001 —— 要原样重抛，仅在此处拦
-                    dec = _decide(exc, attempt, attempts, spent, sleep_budget_s, self._rand)
+                    dec = _decide(exc, attempt, attempts, spent, sleep_budget_s,
+                                  self._rand, extra_retryable)
                     cls, action, delay = dec["cls"], dec["action"], dec["delay"]
                     self._record(key, exc, limited=(cls["kind"] == "rate_limit"))
                     _emit_attempt(record, call_id=call_id, attempt=attempt, kind=cls["kind"],

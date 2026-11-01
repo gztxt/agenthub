@@ -57,6 +57,27 @@ INJECT_CSS = """<style id="agent-hub-embed-unify">
 }
 </style>"""
 
+# 跨源嵌页的 ⌘/Ctrl+K 桥（PT-20261101-09）
+# ------------------------------------------------
+# 为什么必须注入到嵌页里：iframe 是**跨源**（各占一个端口），帧内的 keydown 不会冒泡到
+# 父页，父页写多少监听都收不到；用户实测「鼠标点过页面最顶部（父页外框）之后才能唤起」
+# 正是这个原因。唯一出路是嵌页自己接键、postMessage 回父页。
+# 逐家改 12 个宿主不现实（其中 6 个是第三方二进制），所以复用本代理的注入点：HTML 出栈前
+# 插这段 script，宿主仍然"住在自己的根"，零 URL 改写。
+# 父页收端见 static/hub/05-chat-and-history.js 的 message 监听（校验 e.source）。
+KEYS_JS = """<script id="agent-hub-keys">
+(function () {
+  if (window.parent === window) return;            // 独立打开时不抢浏览器自己的 ⌘K
+  document.addEventListener('keydown', function (e) {
+    if (!((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'k' || e.key === 'K'))) return;
+    if (e.isComposing || e.keyCode === 229) return; // 中文输入法组字中不抢
+    e.preventDefault();
+    e.stopPropagation();
+    try { window.parent.postMessage({ hub: 'cmd-k' }, '*'); } catch (_) {}
+  }, true);
+})();
+</script>"""
+
 _END = b"\r\n\r\n"
 _HDR_SPLIT = re.compile(rb"\r?\n")
 _HTML_PATH = re.compile(rb"\.html?$", re.I)
@@ -84,14 +105,47 @@ def _is_document(head_line: bytes, header: bytes) -> bool:
     return b"." not in last              # 无扩展名 = SPA 路由，服务端回的是 index.html → 要注入
 
 
-def _inject(body: bytes) -> bytes:
-    if b"<head" not in body.lower():
+def _dechunk(body: bytes) -> bytes | None:
+    """解 `Transfer-Encoding: chunked`。解析失败返回 None（调用方原样透传，不猜）。
+
+    为什么必须有（2026-11-01 实测）：dsh 的 web 服务（Node）**所有响应都是 chunked**，
+    而 _document 会把响应头的 transfer-encoding 剥掉、按 `len(rb)` 重算 Content-Length。
+    不解码时 rb 仍是 `929b\\r\\n<html>…\\r\\n0\\r\\n\\r\\n`，浏览器把十六进制块长当正文首行、
+    把终止块 `0` 当正文末行 ⇒ 页面左上角显示 `929b`、左下角显示 `0`（用户报障原话）。
+    直连 :3080 正常、只有 hub 嵌页异常，正因为只有这条注入路径改了响应头。
+    """
+    out = []
+    i, n = 0, len(body)
+    while i < n:
+        j = body.find(b"\r\n", i)
+        if j < 0:
+            return None
+        line = body[i:j].split(b";", 1)[0].strip()
+        try:
+            size = int(line, 16)
+        except ValueError:
+            return None
+        if size == 0:                      # 终止块；后面是 trailer，正文到此为止
+            return b"".join(out)
+        start = j + 2
+        if start + size > n:
+            return None
+        out.append(body[start:start + size])
+        i = start + size + 2               # 跳过块尾 CRLF
+    return None
+
+
+def _inject(body: bytes, extra: bytes) -> bytes:
+    """把 extra（<style>/<script>）插到 </head> 之前；没有 <head> 就退回 </body> 之前。"""
+    if not extra:
         return body
     low = body.lower()
     i = low.rfind(b"</head>")
     if i < 0:
+        i = low.rfind(b"</body>")
+    if i < 0:
         return body
-    return body[:i] + INJECT_CSS.encode() + body[i:]
+    return body[:i] + extra + body[i:]
 
 
 def _strip_hop_headers(header: bytes) -> bytes:
@@ -145,15 +199,22 @@ async def _tunnel(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
 
 async def _document(writer: asyncio.StreamWriter, head_line: bytes, header: bytes,
                     up_w: asyncio.StreamWriter, up_r: asyncio.StreamReader,
-                    pre_body: bytes, authority: bytes) -> None:
+                    pre_body: bytes, authority: bytes, extra: bytes = b"") -> None:
     """HTML：整份读回 → 插 <style> → 重算 Content-Length。上游强制 identity + close。
 
-    Host 改写成上游 authority：_strip_hop_headers 会把客户端 Host 摘掉，不带 Host 的
-    HTTP/1.1 请求有些服务端直接 400。实测 qwenpaw 不做跳转（SPA 兼底 200），
-    所以改写 Host 不会把浏览器甩回 :8088。
+    Host 必须用**客户端原值**，不能改写成上游 authority（2026-11-01 实测定案）：
+    _strip_hop_headers 会把客户端 Host 摘掉，但 HTTP/1.1 不带 Host 有些服务端直接 400，
+    所以要补回来——补的是原值。原因：dsh 用 Host 签发 auth cookie 的 `authority` 字段
+    并在每次校验时比对当前 Host；HTML 走本函数（曾改写成 192.168.5.102:3080），
+    而 WebSocket/SSE/静态资源走 `_tunnel`（原样透传，Host 仍是 127.0.0.1:3202）⇒
+    两侧 authority 不一致 ⇒ `/api/remote.mux` 每次 401，前端无限重连，页面永远"加载中"。
+    （netlog 实测同一页面 27 次 ws 重连，而 JS 总体积只有 pi 的 5.7 倍、传输仅 238ms，
+    慢的不是下载。）两侧统一用客户端 Host 后与浏览器 origin 一致，cookie 才自洽。
     """
+    mh = re.search(rb"^host:\s*(?P<v>[^\r\n]+)", header, re.I | re.M)
+    host_hdr = mh.group("v").strip() if mh else authority
     req = (head_line + b"\r\n" + _strip_hop_headers(header) +
-           b"\r\nHost: " + authority +
+           b"\r\nHost: " + host_hdr +
            b"\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n" + pre_body)
     up_w.write(req)
     await up_w.drain()
@@ -169,15 +230,29 @@ async def _document(writer: asyncio.StreamWriter, head_line: bytes, header: byte
         writer.close()
         return
     rh, rb = raw.split(_END, 1)
+    if re.search(rb"^transfer-encoding:\s*chunked", rh, re.I | re.M):
+        # 剥头前先解帧：下面会把 transfer-encoding 摘掉并回 Content-Length，
+        # 不解码就等于把 chunk 长度行当正文交给浏览器（见 _dechunk 注释）。
+        dec = _dechunk(rb)
+        if dec is None:
+            log.warning("[embed] chunked 解码失败，原样透传（保留上游 transfer-encoding 头）")
+            writer.write(raw)
+            try:
+                await writer.drain()
+            except (ConnectionError, OSError):
+                pass
+            writer.close()
+            return
+        rb = dec
     m = _ENC.search(rh)
     if m and m.group("v").strip().lower() != b"identity":
         # 上游无视 identity：放弃注入，原样吐回（宁可不统一外框，也不破坏页面）
         log.warning("上游返回 %s 编码，跳过 style 注入（原样透传）", m.group("v").decode(errors="replace"))
         writer.write(raw)   # 注意：raw 已含结尾空行，别再补 _END，否则多一个 CRLF
     else:
-        rb = _inject(rb)
-        log.info("[embed] 文档注入: %s -> body %d bytes (style %d)" % (
-            head_line.decode(errors="replace")[:38], len(rb), len(INJECT_CSS)))
+        rb = _inject(rb, extra)
+        log.info("[embed] 文档注入: %s -> body %d bytes (注入 %d)" % (
+            head_line.decode(errors="replace")[:38], len(rb), len(extra)))
         lines = [ln for ln in _HDR_SPLIT.split(rh)
                  if ln.strip()
                  and not _ENC.match(ln)
@@ -212,7 +287,7 @@ def _authority(host: str, port: int) -> bytes:
 
 
 async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                  upstream: tuple[str, int]) -> None:
+                  upstream: tuple[str, int], extra: bytes = b"") -> None:
     try:
         header = await reader.readuntil(_END)
     except (asyncio.IncompleteReadError, ConnectionError, asyncio.LimitOverrunError):
@@ -248,27 +323,69 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
         log.info("[embed] GET+html Accept 但判为非文档，走隧道: %s" % head_line.decode(errors="replace")[:48])
     if doc:
         await _document(writer, head_line, rest, up_w, up_r, pre_body,
-                        _authority(host, port))
+                        _authority(host, port), extra)
     else:
         await _tunnel(reader, writer, header + pre_body, up_w, up_r)
 
 
+def _lan_ip() -> str:
+    """本机默认路由出口 IP（UDP connect 不发包，只让内核选路）。取不到返回空串。"""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 53))
+        return s.getsockname()[0]
+    except OSError:
+        return ""
+    finally:
+        s.close()
+
+
+def listen_host_for(port: int, default: str = "0.0.0.0") -> str:
+    """桥监听地址 = 上游自己的可达面（不外扩暴露面）。
+
+    判据：从**本机 LAN IP** 连一次上游端口，连得上说明上游已对局域网开放 ⇒ 桥也绑 0.0.0.0；
+    连不上（上游只绑 127.0.0.1）⇒ 桥绑 127.0.0.1。不这么分，等于把只监听回环的
+    claude-mem / qoder 之类经桥抬到局域网上，凭空多出一批无鉴权入口。
+    探测失败（拿不到 LAN IP）一律按回环处理：宁可 LAN 用不了，也不静默扩面。
+    """
+    ip = _lan_ip()
+    if not ip:
+        return "127.0.0.1"
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.3)
+    try:
+        s.connect((ip, port))
+        return default
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
 class EmbedProxy:
-    """一个实例 = 一个本地端口 = 一个上游。多宿主时再各起一个实例。"""
+    """一个实例 = 一个本地端口 = 一个上游。多宿主时各起一个实例。
+
+    `css` 只为外框统一（qwenpaw 顶栏）；`keys=True` 给每个嵌页注入 ⌘/Ctrl+K 桥。
+    两个注入项都走同一条字节级插入路径，互不依赖：CSS 空而 KEYS 在也照常工作。
+    """
 
     def __init__(self, name: str, upstream_host: str, upstream_port: int,
-                 listen_host: str = "0.0.0.0", listen_port: int = 3103):
+                 listen_host: str = "0.0.0.0", listen_port: int = 3103,
+                 css: str = "", keys: bool = True):
         self.name = name
         self.upstream = (upstream_host, int(upstream_port))
         self.listen = (listen_host, int(listen_port))
         self.server: asyncio.base_events.Server | None = None
+        self.extra = (css.encode() if css else b"") + (KEYS_JS.encode() if keys else b"")
 
     async def start(self) -> bool:
         if self.server is not None:
             return True
         try:
             self.server = await asyncio.start_server(
-                lambda r, w: _handle(r, w, self.upstream), *self.listen)
+                lambda r, w: _handle(r, w, self.upstream, self.extra), *self.listen)
         except OSError as e:
             log.warning("[%s] 注入代理监听 %s:%s 失败：%s —— 嵌入视图将回落直连", self.name, *self.listen, e)
             return False

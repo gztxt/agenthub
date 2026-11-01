@@ -30,14 +30,29 @@ MAIN = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
 
 class TestCommandPaletteShortcut(unittest.TestCase):
     def test_ctrl_and_cmd_k_open_toggle(self):
-        keydown = JS06.split("document.addEventListener('keydown'")[1]
-        self.assertIn("(e.metaKey || e.ctrlKey)", keydown, "缺 Cmd/Ctrl 组合键判断")
-        self.assertIn("(e.key === 'k' || e.key === 'K')", keydown, "缺 K 键判断")
-        self.assertIn("? closeCmd() : openCmd()", keydown,
-                      "Ctrl/Cmd+K 必须是开/关切换，不是只开")
+        """⌘/Ctrl+K 必须在**捕获阶段**接管（2026-11-01 用户裁定「全局唤起，任何页面」）。
+
+        为什么绑捕获：xterm 把 keydown 挂在自己的 helper textarea 上，冒泡阶段拦已经
+        晚了 —— 键先送进 pty（\\x0b），面板再跟着开，等于"删掉半行 + 弹出面板"。
+        判据因此连同 `, true)` 一起断：只断言"有开/关两个分支"会漏掉这条。
+        """
+        seg = JS06.split("document.addEventListener('keydown'")[1]
+        capture = seg[:seg.find("}, true);")] if "}, true);" in seg else ""
+        self.assertNotEqual(capture, "", "⌘/Ctrl+K 不再注册在捕获阶段（第三个参数 true）")
+        self.assertIn("(e.metaKey || e.ctrlKey)", capture, "缺 Cmd/Ctrl 组合键判断")
+        self.assertIn("(e.key === 'k' || e.key === 'K')", capture, "缺 K 键判断")
+        self.assertIn("closeCmd()", capture, "缺关闭分支")
+        self.assertIn("openCmd()", capture, "缺打开分支")
+        self.assertIn("e.stopPropagation()", capture,
+                      "捕获阶段必须 stopPropagation，否则键仍下沉到 xterm（pty 会吃 kill-line）")
+        self.assertIn("isComposing", capture, "缺 IME 组字守卫：中文输入法里敲 k 会被吃掉")
 
     def test_editing_target_does_not_hijack(self):
-        """终端/输入位里 Ctrl+K 归 pty（bash 的 kill-line），不许被面板抢走。"""
+        """守卫仍只管 `/` 与 Esc：`/` 是路径分隔符、Esc 归 pty（vim 要用）。
+
+        ⌘/Ctrl+K 已不属于这一组 —— 它在捕获阶段全局生效，不受 editing 守卫约束
+        （2026-11-01 用户报障「会话页有时唤不起」的根因就是它被这道守卫挡住了）。
+        """
         body = JS06.split("function keyTargetIsEditing")[1].split("document.addEventListener")[0]
         self.assertIn("t.closest('.xterm')", body)
         self.assertIn("tag === 'INPUT'", body)

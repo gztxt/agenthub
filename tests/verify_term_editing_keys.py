@@ -344,7 +344,10 @@ try:
 
     # ── K 组：真输入位不得被劫持（P2-11 口径不破）─────────────────────────
     print("\n── K3 真输入位不得被投递 ──")
-    s = center(c, "#navSearch")
+    # 2026-11-01：左侧搜索框已删 ⇒ 改用命令面板输入框 #cmdInput（仍是真输入位）
+    c.eval("openCmd()")
+    time.sleep(0.3)
+    s = center(c, "#cmdInput")
     click_xy(c, s[0], s[1])
     before, _ = tail(c)
     press(c, "ArrowRight", "Right", 39)
@@ -355,6 +358,7 @@ try:
     chk("K3 搜索框里按方向键/Delete：pty 收 0 份", d.strip() == "", repr(d))
     chk("★R5 键盘修复没有破坏滚轮（复测一次，护栏闭环）", True, "见上方 R1~R4")
 
+    c.eval("closeCmd()")
     chk("全程零 JS 异常", not st3["errs"], st3["errs"])
 finally:
     for s in spawned:

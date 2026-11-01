@@ -169,7 +169,9 @@ class AgentDiscovery:
                 _st = profiles.ui_start_for(p["id"])
                 _ui_es = []
                 for _t, _lbl in (("embed", "原生会话"), ("open", "↗UI")):
-                    _e = {"type": _t, "label": _lbl, "url": ui["url"]}
+                    # 只有嵌入形态过桥代理（⌘K）：新窗口直连原地址，不解代理
+                    _u = profiles._embed_proxy_url(p["id"], ui["url"]) if _t == "embed" else ui["url"]
+                    _e = {"type": _t, "label": _lbl, "url": _u}
                     if _st:
                         _e["start"] = _st
                     _ui_es.append(_e)

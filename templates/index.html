@@ -1512,12 +1512,8 @@
 
     <div class="shell">
     <aside class="sidebar" id="sidebar" role="tablist" aria-label="功能导航">
-        <!-- 搜索框置于最顶部（用户 09-20：搜索框应在总览上面）。收起态 .nav-search 是 display:none，
-             所以图标栏里第一项仍是「总览」，两态各自成立。 -->
-        <div class="nav-search">
-            <input id="navSearch" type="search" placeholder="搜索名称 / id / 端口…" aria-label="搜索实体" autocomplete="off">
-            <span id="navSearchCount" class="search-count"></span>
-        </div>
+        <!-- 2026-11-01 用户裁定：左侧搜索框已删，检索统一走 ⌘/Ctrl+K 命令面板
+             （palette 覆盖页面/实体/动作三类，比只筛侧栏更全）。 -->
         <!-- 常驻项（用户 09-20：把「总览」搬进左侧菜单）。用 data-sys 不用 data-page：
              侧栏事件委托本来就认 data-sys（点击即 go()，窄屏顺带收抽屉），而 data-page 会被刚删掉的
              遗留规则打歪。选中态由 go() 里补的一行同步；嵌入视图行1 原来的 crumb 已删（不留双入口）。 -->
@@ -1570,7 +1566,7 @@
                          而窄屏根本没有手风琴（图标条）、也没有顶部搜索框 ⇒
                          文案与形态不匹配，在 320px 上白占 1/3 屏高讲了个用户看不到的东西。
                          用 CSS 断点分两份，而不是用 JS 改文字（多一份真相源）。 -->
-                    <p class="home-desc only-wide">左侧手风琴收拢全部 <b id="cntAgent">–</b> 个 Agent 与 <b id="cntInfra">–</b> 项基础设施，点选即在右侧打开对应工作台（终端 / 嵌入 / 对话 / 详情按各自能力动态给出）。顶部搜索框支持按名称、ID、端口筛选。</p>
+                    <p class="home-desc only-wide">左侧手风琴收拢全部 <b id="cntAgent">–</b> 个 Agent 与 <b id="cntInfra">–</b> 项基础设施，点选即在右侧打开对应工作台（终端 / 嵌入 / 对话 / 详情按各自能力动态给出）。Ctrl+k唤起搜索框支持所有功能检索。</p>
                     <p class="home-desc only-narrow">左侧 <b id="cntAgent2">–</b> 个 Agent 与 <b id="cntInfra2">–</b> 项基础设施。点左侧图标条进入；点图标条顶部按钮可展开带名称的完整列表。</p>
                     <div class="home-stat" id="homeStat">
                         <div class="hs"><div class="n" id="hsAgent">–</div><div class="t">Agent</div></div>
@@ -3180,6 +3176,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=d95486ba"></script>
+    <script src="/static/hub.js?v=7cc80dd3"></script>
 </body>
 </html>

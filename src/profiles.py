@@ -29,6 +29,59 @@ EMBED_UNIFY = os.getenv("EMBED_UNIFY", "1") == "1"
 EMBED_PROXY_PORT = int(os.getenv("EMBED_PROXY_PORT", "3103"))
 QWENPAW_UI = ("http://127.0.0.1:%d" % EMBED_PROXY_PORT) if EMBED_UNIFY else "http://127.0.0.1:8088"
 
+# 跨源嵌页 ⌘/Ctrl+K 桥（PT-20261101-09）：每个 embed 目标一个本地注入代理，
+# 端口从 3200 起顺序分配（main.py 启动时填充）。表里没有该 id ⇒ 直连原地址。
+# 关掉：EMBED_KEYS=0（只停桥，qwenpaw 的外框注入不受影响）。
+EMBED_KEYS = os.getenv("EMBED_KEYS", "1") == "1"
+EMBED_KEYS_BASE = int(os.getenv("EMBED_KEYS_BASE", "3200"))
+EMBED_PROXY_MAP: Dict[str, str] = {}
+
+
+def embed_proxy_targets() -> List[Dict[str, object]]:
+    """列出需要 ⌘K 桥代注入的 embed 上游（id / host / port）。
+
+    与 `_entries()` 的生成条件**同源**：frame_deny 不出 embed、Basic 面板不出 embed。
+    qwenpaw 排除：它的 ui 已经指向外框注入代理 :3103（那个实例另有 CSS 注入）。
+    """
+    from urllib.parse import urlsplit
+    out: List[Dict[str, object]] = []
+    for p in PROFILES:
+        if p.get("frame_deny"):
+            continue
+        ui = p.get("ui")
+        if isinstance(ui, dict):          # 独立宿主（cloudcli :3010）由 discovery 注入 embed
+            url = ui.get("url")
+        elif isinstance(ui, str):
+            url = ui
+        else:
+            url = None
+        if not url and p.get("panel") and not p.get("panel_auth"):
+            url = p["panel"]
+        if not url:
+            continue
+        sp = urlsplit(url)
+        try:
+            port = sp.port or (443 if sp.scheme == "https" else 80)
+        except ValueError:
+            continue
+        if port == EMBED_PROXY_PORT:      # 已经在本进程的另一个代理上
+            continue
+        out.append({"id": p["id"], "host": sp.hostname or "127.0.0.1", "port": port})
+    return out
+
+
+def _embed_proxy_url(pid: str, url: str) -> str:
+    """把 embed 地址换成本地注入代理，**保留 path/query/fragment**
+    （dsh 的 token 在 query、reasonix 的在 fragment；缺了哪段都是 401/白屏）。"""
+    base = EMBED_PROXY_MAP.get(pid)
+    if not base or not url:
+        return url
+    from urllib.parse import urlsplit
+    sp = urlsplit(url)
+    return (base + (sp.path or "/")
+            + (("?" + sp.query) if sp.query else "")
+            + (("#" + sp.fragment) if sp.fragment else ""))
+
 # CodeBuddy Code 的 CLI 只在 WorkBuddy 包内，不在 PATH（2026-09-27 实测：
 # `which codebuddy` 落空，`shutil.which(<绝对路径>)` 原样返回）。终端入口因此必须写
 # 绝对路径，否则 term.py 的 `which(cmd[0])` 判定失败、会话拉不起来。
@@ -937,14 +990,14 @@ def entries_for(p: dict, status: str) -> List[dict]:
         start = ui_start_for(p["id"])
         health = p.get("ui_probe")
 
-        def _ui_entry(etype: str, label: str, url: str) -> dict:
+        def _ui_entry(etype: str, label: str, url: str, pin: bool = True) -> dict:
             e = {"type": etype, "label": label, "url": url}
             if start:
                 e["start"] = start
             if health:
                 e["health_url"] = health
             # 绑定具体网卡的 agent（dsh）：地址原样给出，前端不得按访问名改写。
-            if p.get("ui_pin_host"):
+            if pin and p.get("ui_pin_host"):
                 e["pin_host"] = True
             return e
         if isinstance(ui, str):
@@ -961,7 +1014,11 @@ def entries_for(p: dict, status: str) -> List[dict]:
             # probeEmbed 出「目标界面未响应」覆盖层（含切模式/重试），按钮本身必须在。
             # probe_port 只保留给 panel 类入口（services 的面板，与 agent 按需政策无关）。
             if not p.get("frame_deny"):
-                es.append(_ui_entry("embed", "嵌入会话", ui))
+                # 桥接代理下地址变成 127.0.0.1:<本地端口>（代理监听 0.0.0.0），
+                # 已不再需要 pin_host 冻结原网卡地址。
+                es.append(_ui_entry("embed", "嵌入会话",
+                                    _embed_proxy_url(p["id"], ui),
+                                    pin=False))
             es.append(_ui_entry("open", "新窗口", ui))
         if p.get("terminal") and status in ("running", "installed", "stopped"):
             es.append({"type": "term", "label": "终端", "agent": p["id"]})
@@ -973,7 +1030,8 @@ def entries_for(p: dict, status: str) -> List[dict]:
                        "probe_port": panel_port(p)})
             # Basic 鉴权面板不生成 embed：浏览器禁止跨源 iframe 内弹认证框，嵌入必然 401 白屏
             if not p.get("panel_auth"):
-                es.append({"type": "embed", "label": "嵌入会话", "url": p["panel"],
+                es.append({"type": "embed", "label": "嵌入会话",
+                           "url": _embed_proxy_url(p["id"], p["panel"]),
                            "probe_port": panel_port(p)})
         if p.get("terminal"):
             es.append({"type": "term", "label": "终端", "agent": p["id"]})

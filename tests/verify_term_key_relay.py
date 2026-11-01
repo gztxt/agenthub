@@ -102,7 +102,7 @@ STATE = r"""(() => { const b = term.buffer.active; const vp = document.querySele
   return { all: all, docScroll: Math.round(de.scrollTop || document.body.scrollTop),
            vpScroll: vp ? Math.round(vp.scrollTop) : -1,
            focus: document.activeElement ? (document.activeElement.className || document.activeElement.tagName) : null,
-           search: (document.getElementById('navSearch') || {}).value || '',
+           search: (document.getElementById('cmdInput') || {}).value || '',
            ws: termWs ? termWs.readyState : null, sid: termSid,
            panes: ['embedPane','termPane','chatPane'].filter(i => document.getElementById(i).classList.contains('on')),
            errs: (window.__errs || []).slice(0, 3) }; })()"""
@@ -195,7 +195,10 @@ try:
         "doc %s→%s / vp %s→%s" % (st0["docScroll"], st1["docScroll"], st0["vpScroll"], st1["vpScroll"]))
 
     print("\n── C. 真输入位不得被劫持（P2-11 口径不破）──")
-    s = center(c, "#navSearch")
+    # 2026-11-01：左侧搜索框已删 ⇒ 改用命令面板输入框 #cmdInput（仍是真输入位）
+    c.eval("openCmd()")
+    time.sleep(0.3)
+    s = center(c, "#cmdInput")
     click_xy(c, s[0], s[1])
     before, st2 = tail(c)
     type_text(c, "e f")
@@ -205,6 +208,7 @@ try:
     chk("C 搜索框里敲 'e f'：pty 收 0 份", delta == "", repr(delta))
     chk("C 搜索框里确实是 'e f'", st3["search"] == "e f", repr(st3["search"]))
 
+    c.eval("closeCmd()")
     chk("E 全程零 JS 异常", not st3["errs"], st3["errs"])
 finally:
     for s in spawned:

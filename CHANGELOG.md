@@ -1,3 +1,50 @@
+## v0.13.187 — 跨源嵌页 ⌘/Ctrl+K 打通（注入代理 + postMessage）/ 左栏搜索框下线
+
+> 承 v0.13.186。那一版只修了父页，用户随即报：「原生界面 鼠标要点击页面最顶部后才可以唤起，
+> 请执行 PT-20261101-09」；同时裁定删掉左侧搜索框，检索统一走命令面板。
+
+- **根因**：embed 形态是跨源 iframe（12 个宿主端口互不相同），帧内 keydown 不冒泡到父页，
+  父页写多少监听都收不到 —— 点一下页面最顶部（父页外框）拿回焦点后同一个键立刻能用。
+- **修法**：复用 `src/embed_proxy.py` 已有的字节级注入点（qwenpaw 外框统一用的那条路），
+  给每个 embed 目标起一个只注入 `<script id="agent-hub-keys">` 的本地代理（端口 3200 起），
+  嵌页捕获阶段接 ⌘/Ctrl+K → `postMessage({hub:'cmd-k'})` → 父页 `openCmd()`。
+  父页收端校验 `e.source === embedFrame.contentWindow`；URL 改写保留 query/fragment
+  （dsh token 在 query、reasonix 在 fragment，丢任何一段都是 401/白屏）。
+- **同批**：删除左侧搜索框（`#navSearch`）与其防抖监听，`/` 改为直接开命令面板，
+  总览说明改为「Ctrl+k唤起搜索框支持所有功能检索。」
+- **代价**：嵌页里宿主自己的 ⌘/Ctrl+K（若有）同样让位给面板；与 v0.13.186 终端取舍同源。
+- **边界**：动态扫描出来的 agent（如 reasonix）不在 PROFILES ⇒ 拿不到桥端口，仍直连；
+  `EMBED_KEYS=0` 可整段关桥。
+- **不扩暴露面**：桥的监听地址跟上游对齐（`listen_host_for`：从本机 LAN IP 连不上的上游
+  ⇒ 桥只绑 127.0.0.1）。否则等于把只监听回环的 claude-mem / qoder 抬到局域网上，
+  凭空多出一批无鉴权入口；上游此刻停着时按回环处理（宁 LAN 用不了，不静默扩面）。
+- **证据**：`work/probe-bridge/probe_bridge.py` 红（:3102 直连，iframe 内打不开 = 复现）
+  / 绿（:3199 注入代理，能打开）8 条全绿；`tests/test_embed_keys_bridge.py` 14 条 L0。
+
+## v0.13.186 — ⌘/Ctrl+K 全局化：捕获阶段接管，输入位与终端里也能唤起命令面板
+
+> 报障原文（2026-11-01）：「ctrl+k 在本会话页面无法唤起，有时就是在会话页面无法唤起，
+> 有时好像又可以，应该全局唤起，任何页面都可以才行」——「有时行」不是玄学，是焦点位置。
+
+- **根因（06-manager-tasks.js）**：Ctrl+K 分支排在 `if (editing) return;` 之后，而
+  会话页默认焦点就在 `#chatInput`（发完消息焦点不离框）、终端里 `.xterm` 也被判成
+  editing ⇒ 按了没反应；点一下页面空白处焦点回 body，同一个键立刻能用。
+  **红况实测**（`work/probe-ctrlg/probe_ctrlg.py` 把 HEAD 版 hub.js 用 Fetch 拦截灌回）：
+  chatInput `False` / navSearch `False` / body `True`，与用户描述逐条吻合。
+- **修法**：单开一个**捕获阶段**监听，只接 ⌘/Ctrl+K，`preventDefault` + `stopPropagation`。
+  必须捕获——xterm 把 keydown 挂在自己的 helper textarea 上，冒泡阶段拦已经晚了：
+  键先送进 pty（`\x0b`）面板再跟着开，等于"删掉半行 + 弹出面板"。
+  IME 组字中（`isComposing` / `keyCode 229`）不抢，否则中文输入法里敲 k 会吃掉组字。
+  冒泡阶段那份监听保留 Esc 与 `/` 的输入位豁免（终端 `/` 是路径分隔符，一天几百次）。
+- **代价（已当场告知用户）**：终端里 bash/zsh 的 `Ctrl+K`（kill-line）、vim 的
+  `Ctrl+K`（digraph）从此归面板、不再送达 pty。要还给 pty 就在捕获监听里对 `.xterm`
+  早退——但那正是本次报障的复现条件，别默认改回。
+- **已知边界（未修）**：内嵌「原生界面」是**跨源 iframe**（实测 12 个不同端口：
+  3010 / 3103 / 35431 / 3080 / 3458 …）⇒ 帧内按键父页面收不到，浏览器层的 Ctrl+K 还会
+  去抢地址栏。要覆盖那一层，必须各嵌页自己把按键 `postMessage` 给父页面，另立任务。
+- **判据**：`work/probe-ctrlg/probe_ctrlg.py` 7 条断言全绿；其中两条专防"假绿"——
+  红况必须失败、绿况终端内 Ctrl+K 打开面板且**该键不再下沉到 xterm textarea**。
+
 ## v0.13.185 — 四件基础设施小改：命令面板三类目 / toast 可选第三参 / CSP Report-Only / JSON 日志
 
 > 来源：2026-10-31 对《AgentHub 全面升级方案.docx》的逐条实测复核

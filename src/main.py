@@ -122,7 +122,34 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.185"
+VERSION = "0.13.187"
+
+# v0.13.187（2026-11-01）：跨源嵌页的 ⌘/Ctrl+K 打通 + 左栏搜索框下线（PT-20261101-09）。
+#   ① 病：v0.13.186 只修了父页。会话页「原生界面」是**跨源 iframe**（各占一个端口），
+#      帧内 keydown 不冒泡 ⇒ 必须先点页面最顶部（父页外框）再按键才唤起。
+#   ② 药：复用 embed_proxy 的字节级注入点，给每个 embed 目标各起一个只注入 <script> 的
+#      本地注入代理（3200 起），嵌页捕获阶段接键 → postMessage → 父页 openCmd。
+#      父页收端校验 e.source === embedFrame.contentWindow（别让任意窗口替你开面板）。
+#      URL 改写保留 path/query/fragment：dsh 的 token 在 query、reasonix 的在 fragment。
+#   ③ 左栏搜索框删除（用户裁定）：检索统一走命令面板，「/」也直接开面板；总览文案同步改。
+#   ④ 边界：动态扫描出来的 agent（如 reasonix）不在 PROFILES 里 ⇒ 拿不到桥端口，
+#      仍直连；EMBED_KEYS=0 可整段关掉桥（qwenpaw 的外框注入不受影响）。
+#   判据：work/probe-bridge/probe_bridge.py 红/绿各一次真鼠标+真按键，8 条全绿；
+#      tests/test_embed_keys_bridge.py 14 条 L0 契约（注入形状 / URL 保真 / 来源校验）。
+
+# v0.13.186（2026-11-01）：⌘/Ctrl+K 全局化 ——「会话页有时唤不起命令面板」的根因是输入位早退。
+#   ① 病：Ctrl+K 分支排在 `if (editing) return` 之后，而会话页默认焦点就在 #chatInput
+#      （发完消息焦点不离框）⇒ 按了什么都不发生；点一下页面空白处焦点回 body，同一个键
+#      立刻能用 ⇒ 用户报的正是「有时行、有时不行」，不是键没绑上。
+#   ② 药：单开一个**捕获阶段**监听只接 ⌘/Ctrl+K（preventDefault + stopPropagation）。
+#      必须捕获：xterm 把 keydown 挂在自己的 helper textarea 上，冒泡阶段拦已经晚了 ——
+#      键先送进 pty（\x0b）、面板再跟着开，等于"删掉半行 + 弹出面板"。IME 组字中不抢。
+#   ③ 代价（已当场告知用户）：终端里 bash/zsh 的 kill-line、vim 的 digraph 归面板；
+#      要把 Ctrl+K 还给 pty 只需在捕获监听里对 `.xterm` 早退，但那正是本次报障的复现条件。
+#   ④ 边界：内嵌「原生界面」是**跨源 iframe**（12 个不同端口）⇒ 帧内按键父页面收不到，
+#      本轮不修；要覆盖那一层得各嵌页自己把按键 postMessage 给父页面（另立任务）。
+#   判据：work/probe-ctrlg/probe_ctrlg.py 红/绿对照（红况用 Fetch 拦截把 HEAD 版 hub.js
+#      灌回页面），7 条断言全绿；红况必须复现「chatInput 打不开 / body 能打开」。
 
 # v0.13.185（2026-10-31）：四件基础设施小改，来源是对《AgentHub 全面升级方案.docx》的
 #   逐条实测复核（`docs/UPGRADE-PLAN-REVIEW-20261031.md`）。其中两项文档说"完全缺失"、
@@ -1002,6 +1029,7 @@ async def get_memory_alias(request: Request, query: Optional[str] = None, limit:
 
 
 _embed_proxy = None      # 外框注入代理句柄（EMBED_UNIFY=0 时保持 None）
+_embed_bridges = []      # ⌘K 桥：每个 embed 目标一个注入代理（PT-20261101-09）
 
 
 async def prov_loop():
@@ -1134,7 +1162,7 @@ async def vitals_loop():
 
 @app.on_event("startup")
 async def startup():
-    global _embed_proxy
+    global _embed_proxy, _embed_bridges
     db.init_db(config.db_path)
     # 关掉 hub 主连接的**自动**检查点，改由 wal_checkpoint_loop 定时做（见该循环注释：
     # 自动检查点每 1000 页就在「触发它的那条写语句」里同步 fsync，而 term_record 的
@@ -1220,6 +1248,37 @@ async def startup():
         except Exception as e:
             log.warning(f"[Agent Hub] 注入代理启动失败（不影响其他功能）：{type(e).__name__}: {e}")
             _embed_proxy = None
+    # ⌘/Ctrl+K 桥（PT-20261101-09）：跨源嵌页收不到父页按键，只能由嵌页自己接键
+    # postMessage 回来。逐家改 12 个宿主不现实 ⇒ 复用上面那个代理，给每个 embed 目标
+    # 各起一个只注入 <script> 的实例，端口 3200 起顺序分配（EMBED_KEYS=0 可整段关掉）。
+    # 起不来／端口被占：该 id 不进 EMBED_PROXY_MAP ⇒ 该卡回落直连（等于没有桥，
+    # 至少不比改前更差）。
+    _embed_bridges = []
+    if profiles_mod.EMBED_KEYS:
+        try:
+            port = profiles_mod.EMBED_KEYS_BASE
+            for t in profiles_mod.embed_proxy_targets():
+                if port == profiles_mod.EMBED_PROXY_PORT:
+                    port += 1
+                # 监听面跟上游对齐（listen_host_for）：上游只绑回环的，桥也只绑回环。
+                # 否则经桥把 claude-mem/qoder 这类无鉴权面板抬到局域网 = 凭空扩攻击面。
+                px = embed_proxy_mod.EmbedProxy(
+                    "桥:%s" % t["id"], t["host"], int(t["port"]),
+                    listen_host=embed_proxy_mod.listen_host_for(
+                        int(t["port"]), os.getenv("EMBED_PROXY_HOST", config.host)),
+                    listen_port=port, keys=True)
+                if await px.start():
+                    _embed_bridges.append(px)
+                    profiles_mod.EMBED_PROXY_MAP[str(t["id"])] = "http://127.0.0.1:%d" % port
+                    port += 1
+                else:
+                    log.warning("[Agent Hub] ⌘K 桥 %s 起不来（端口 %d），该卡回落直连", t["id"], port)
+                    port += 1
+            log.info("[Agent Hub] ⌘K 桥就绪 %d 个：%s", len(_embed_bridges),
+                     ", ".join(sorted(profiles_mod.EMBED_PROXY_MAP)))
+        except Exception as e:
+            log.warning(f"[Agent Hub] ⌘K 桥启动失败（嵌页内快捷键不可用，其余功能不受影响）："
+                        f"{type(e).__name__}: {e}")
     sa = selfattest.boot()   # 记下启动那一刻的 sha，供 /health 判 code_stale
     log.info(f"[Agent Hub] 启动完成 v{VERSION} sha={sa['git_sha_boot'] or '?'}，"
              f"监听 {config.host}:{config.port}")
@@ -1238,6 +1297,8 @@ async def shutdown():
         _bg_tasks.clear()
     if _embed_proxy is not None:
         await _embed_proxy.stop()
+    for _px in _embed_bridges:
+        await _px.stop()
     term_mod.kill_all()
 
 

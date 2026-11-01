@@ -208,14 +208,8 @@ function initSidebar() {
     apply(true);
     if (window.syncOverlayMask) syncOverlayMask();
   });
-  const si = document.getElementById('navSearch');
-  if (si) {
-    let _t;
-    si.addEventListener('input', () => {
-      clearTimeout(_t);
-      _t = setTimeout(renderNav, 250);  // 防抖 250ms
-    });
-  }
+  /* 左侧搜索框已删（2026-11-01 用户裁定：改由 ⌘/Ctrl+K 命令面板承担全功能检索），
+     输入监听一并摘掉；renderNav 里 `$('navSearch')` 的读取都是空值守卫，保持不动。 */
 }
 
 function setBadge(page, n) {
@@ -272,13 +266,27 @@ $('cmdInput').addEventListener('keydown', e => {
     cmdSubmit();
   } else if (e.key === 'Escape') closeCmd();
 });
-/* 快捷键不许在"正在输入"的地方劫持按键（改前实测的两种破坏）：
-   · 终端里敲 `/`（路径分隔符，一天几百次）→ preventDefault + 焦点跳搜索框，
-     之后所有输入都进了搜索框，画面看起来像"打字没反应"；
-   · bash 的 Ctrl+K（kill-line）→ 被拿去开命令面板；
-   · vim 的 Esc → 归 pty 的用，不能顺手去关我的浮层。
-   规则：输入位（含 xterm 自己的 textarea）里只放行"搜索框的 Esc 清空"这一条，
-   其余一律 return；非输入位维持原有行为。 */
+/* 快捷键的作用域（2026-11-01 用户报障 + 裁定：
+   「Ctrl+K 在本会话页面无法唤起，有时又好像可以，应该全局唤起，任何页面都可以」）
+
+   根因不是键没绑上，而是**它被放在"输入位一律 return"之后**：会话页默认焦点就在
+   #chatInput（发完消息焦点不会离开），按 Ctrl+K 什么都不发生；点一下页面空白处焦点
+   回到 body，同一个键立刻能用 ⇒ 用户看到的就是"有时行、有时不行"。
+
+   现在按**应用级**快捷键处理：⌘/Ctrl+K 在任何焦点下都生效（聊天输入框、侧栏搜索框、
+   详情抽屉里的输入位、终端 xterm）。为此拆成两个监听：
+
+   ① 捕获阶段（第三个参数 true）只接 ⌘/Ctrl+K。
+      **必须捕获**：xterm 把 keydown 挂在自己的 helper textarea 上，冒泡阶段拦已经晚了
+      —— 键先被送进 pty（\x0b），面板再跟着开，等于"删掉半行 + 弹出面板"。捕获阶段
+      preventDefault + stopPropagation 才真把键从 pty 手里拿走。
+      代价（已知、已告知用户）：终端里 bash/zsh 的 Ctrl+K（kill-line）、vim 的 Ctrl+K
+      （digraph）从此归面板，不再送达 pty。要还给 pty 就在此对 `.xterm` 直接 return ——
+      但那正是本次报障的复现条件，别默认改回。
+   ② 冒泡阶段保留 Esc 与 `/` 的输入位豁免（原注释保留在下方）：终端里敲 `/`（路径
+      分隔符，一天几百次）不能被跳转搜索框；vim 的 Esc 归 pty，不顺手关浮层。
+
+   IME：组字中（isComposing / keyCode 229）一律不抢，否则中文输入法里敲 k 会吃掉组字。 */
 function keyTargetIsEditing(e) {
   const t = e && e.target;
   if (!t || !t.closest) return false;
@@ -286,6 +294,13 @@ function keyTargetIsEditing(e) {
   const tag = t.tagName;
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable === true;
 }
+document.addEventListener('keydown', e => {
+  if (!((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'k' || e.key === 'K'))) return;
+  if (e.isComposing || e.keyCode === 229) return;      // IME 组字中不抢
+  e.preventDefault();
+  e.stopPropagation();                                  // 别让 xterm 再把 \x0b 送进 pty
+  if ($('cmdMask') && $('cmdMask').classList.contains('on')) closeCmd(); else openCmd();
+}, true);                                               // ★捕获阶段，见上方①
 document.addEventListener('keydown', e => {
   const editing = keyTargetIsEditing(e);
   if (e.key === 'Escape') {
@@ -300,18 +315,13 @@ document.addEventListener('keydown', e => {
     if (e.target && e.target.closest && e.target.closest('.xterm')) return;   // 终端 Esc 归 pty
     if (window.overlayAnyOpen && overlayAnyOpen()) { closeDrawers(); return; }   // 单一出口：关干净所有抽屉
     if ($('cmdMask') && $('cmdMask').classList.contains('on')) { closeCmd(); return; }
-    const si = $('navSearch');
-    if (si && si.value) { si.value = ''; renderNav(); return; }
     if (editing) return;
     return;
   }
   if (editing) return;
-  if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+  if (e.key === '/') {          // 搜索框已删：`/` 直接开命令面板（与 ⌘K 同一入口）
     e.preventDefault();
-    $('cmdMask').classList.contains('on') ? closeCmd() : openCmd();
-  } else if (e.key === '/') {
-    const si = $('navSearch');
-    if (si) { e.preventDefault(); si.focus(); si.select(); }
+    openCmd();
   }
 });
 /* 终端页不许把按键丢在地上（2026-09-25 用户报障「Grok 会话窗口空格不能用，一按就出现重复的文字内容」）。

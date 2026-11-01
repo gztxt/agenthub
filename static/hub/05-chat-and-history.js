@@ -206,18 +206,12 @@ function cmdCatalog() {
   rows.push({ k: 'x', id: 'register', label: '注册自定义 Agent', sub: '动作' });
   rows.push({ k: 'x', id: 'scan', label: '自动扫描本机 Agent', sub: '动作' });
   rows.push({ k: 'x', id: 'reload', label: '刷新实体与健康', sub: '动作' });
-  rows.push({ k: 'x', id: 'nav-search', label: '搜索侧栏实体', sub: '动作' });
   return rows;
 }
 
 function cmdAction(id) {
   if (id === 'reload') {
     try { loadAgents(); pollHealth(); } catch (e) { toast('刷新失败：' + e.message, 'err'); }
-    return;
-  }
-  if (id === 'nav-search') {
-    const si = $('navSearch');
-    if (si) { si.focus(); si.select(); }
     return;
   }
   /* F1：动作条目复用既有入口（go / gotoChat / openRegister / runScan），不新造导航。
@@ -247,6 +241,19 @@ function closeCmd() {
   $('cmdMask').classList.remove('on');
   _cmdRows = [];
 }
+/* 跨源嵌页的 ⌘/Ctrl+K（PT-20261101-09）───────────────────────────────────
+   iframe 是跨源（每个宿主一个端口），帧内 keydown 不会冒泡到本页 —— 用户报障
+   「必须先点页面最顶部才能唤起」就是这个。发送端是 hub 自己的注入代理往嵌页 HTML 里
+   插的那段 script（src/embed_proxy.py 的 KEYS_JS）。
+   校验两件：来源必须是当前 embedFrame 的 window（别让任意窗口/广告帧开面板），
+   消息形状必须是 {hub:'cmd-k'}。 */
+window.addEventListener('message', e => {
+  const f = $('embedFrame');
+  if (!f || e.source !== f.contentWindow) return;
+  const d = e.data;
+  if (!d || d.hub !== 'cmd-k') return;
+  if ($('cmdMask') && $('cmdMask').classList.contains('on')) closeCmd(); else openCmd();
+});
 function renderCmdList(q) {
   const box = $('cmdList');
   if (!box) return;

@@ -84,10 +84,13 @@ class TestKeyGuard(unittest.TestCase):
         self.body = ""
         for m in re.finditer(r"document\.addEventListener\('keydown'", SRC):
             tail = SRC[m.start():]
-            end = tail.find("\n});")
-            if end <= 0:
-                continue                      # 收尾形状不匹配：不是我们要的那个，继续找
-            body = tail[:end]
+            # 先切到「下一处 keydown 监听」之前，再找收尾 —— 否则捕获阶段那个
+            # 以 `}, true);` 结尾的监听器（v0.13.186 的 ⌘K）会被一起吞进来，
+            # 于是"Ctrl+K 不许出现在受限监听器里"这条判据永远为假红。
+            nxt = tail.find("document.addEventListener", 10)
+            if nxt > 0:
+                tail = tail[:nxt]
+            body = tail                      # 到这里只剩一个监听器
             if "keyTargetIsEditing" in body:
                 self.body = body
                 break
@@ -99,17 +102,22 @@ class TestKeyGuard(unittest.TestCase):
                     r"isContentEditable"):
             self.assertRegex(SRC, pat, f"keyTargetIsEditing 少了 {pat} 这一类输入位的识别")
 
-    def test_editing_return_before_shortcuts(self):
-        """`if (editing) return` 必须在 / 与 Ctrl+K 分支之前，否则守卫形同虚设。"""
-        # str.find 吃的是字面量，喂正则进去只会永远找不到（第一版就在这条上红）：
-        # 要比"位置先后"就统一用 re.search 比 span。
+    def test_editing_return_before_slash_but_not_ctrl_k(self):
+        """守卫只挡 `/`；⌘/Ctrl+K 自 2026-11-01 起在捕获阶段全局生效，不再受它约束。
+
+        改前本用例断言「Ctrl+K 必须排在守卫之后（让给 pty）」。用户当天报障
+        「Ctrl+K 在会话页有时唤不起」并裁定「应该全局唤起，任何页面都可以」——
+        焦点在 #chatInput 时正是被这道守卫挡住的。契约随之改变，判据同步改判，
+        但**另一半没变**：`/` 仍必须被守卫挡住（终端里 `/` 是路径分隔符，一天几百次）。
+        """
         gate = re.search(r"if \(editing\) return", self.body)
         self.assertIsNotNone(gate, "编辑器守卫没接进监听器")
-        for name, pat in (("Ctrl+K", r"e\.key === 'k' \|\| e\.key === 'K'"),
-                          ("/ 聚焦搜索", r"e\.key === '/'")):
-            j = re.search(pat, self.body)
-            self.assertIsNotNone(j, f"{name} 分支不见了")
-            self.assertLess(gate.end(), j.start(), f"{name} 分支排在守卫之前＝仍然劫持终端按键")
+        j = re.search(r"e\.key === '/'", self.body)
+        self.assertIsNotNone(j, "/ 分支不见了")
+        self.assertLess(gate.end(), j.start(), "/ 分支排在守卫之前＝仍然劫持终端按键")
+        # Ctrl+K 若回到这个受限监听器里，会话页又会「有时能开有时不能开」
+        self.assertNotIn("=== 'k'", self.body,
+                         "⌘/Ctrl+K 又回到受 editing 守卫约束的监听器里了")
 
     def test_escape_defers_to_pty_except_search_box(self):
         """Esc 在终端里必须原样给 pty（vim 要用），只有搜索框自己认领清空。

@@ -21,6 +21,11 @@
           **只在调用方显式传 allow_install=true 时**才可能落盘；默认值见工具说明）
           / hub_skill_auto（v0.13.138：任务描述 → 自动选中并**激活**，一次调用回正文。
           与 acquire 同一条选人逻辑，差别是记账分桶 auto_invoke 且语义是「拿来用」）
+          / hub_skill_install / hub_skill_remove（PT-20261024-02 P5：技能部署面。
+          install=建软链把权威副本投影到别的发现点；remove=只删软链、拒删真实目录。
+          两者过 REST 层 writeauth + asset_event 审计，与 invoke/acquire/auto 同族
+          **不过 ALLOW_WRITE 门**——那门管的是 hub 配置类工具；技能面写工具的门禁
+          在 REST 层的边界校验与凭据，见 `_delete` 注释）
           / hub_ref_scout / hub_ref_get（PT-20261021-04：功能模块 → GitHub 借鉴源情报卡。
           scout 是异步任务，先回 job_id；get 读任务进度或整张卡。**只读采集**：
           不克隆、不改项目、不自动加依赖）
@@ -133,6 +138,48 @@ def _post(path: str, body: dict, _timeout: float = 0, **params) -> dict:
     except urllib.error.HTTPError as e:
         # 409 的 candidates / 400 的可用值清单都在上游正文里——剥掉它等于在 MCP 层
         # 把 hub 的失败表态再灭一次（与 _get 同一条教训）。
+        detail = ""
+        try:
+            detail = tdai_client.scrub(e.read().decode("utf-8", "replace"))[:400]
+        except Exception:  # noqa: BLE001 — 取不到正文不该盖掉原本的 HTTP 码
+            pass
+        return {"error": f"hub REST {e.code}", "path": path,
+                "http": e.code, "detail": detail}
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}", "path": path}
+
+
+def _delete(path: str, _timeout: float = 0, **params) -> dict:
+    """转发 DELETE 到 hub 自身 REST（PT-20261024-02 P5：`hub_skill_remove` 用）。
+
+    与 `_post` 的三处同源，都是踩过的坑换来的，别单独"优化"掉：
+    ① **带凭据**：DELETE 过 writeauth 全局中间件（x-hub-token），凭据名同源
+       （`TERM_TOKEN`/`HUB_PASSCODE`，.env 经 load_dotenv 进 os.environ）⇒
+       零新增凭据、不写任何配置文件；取不到时如实回 `missing-credential`，
+       不静默发一个必然 401 的请求。
+    ② **不过 ALLOW_WRITE 门**：技能面写工具（install/remove）与 invoke/acquire/auto
+       同族——它们改的是**技能投影**（软链），不是 hub 配置；门禁在 REST 层：
+       writeauth 凭据 + remove 只删软链的硬边界 + asset_event 审计。
+       ALLOW_WRITE 管的是 hub_memindex_rebuild / hub_memory_add 那类配置写工具。
+       若把部署工具也关进那门，未开 HUB_MCP_ALLOW_WRITE 的部署就没有 agent 驱动
+       入口（PT-20261019-01 P2 接线的目的就是让 agent 经 hub 部署）。
+    ③ 4xx 正文透传 scrub 后的 detail：409「真实目录拒删」/400「未知发现点+可用清单」
+       都在上游正文里，剥掉它等于在 MCP 层把 hub 的失败表态再灭一次（与 _get/_post
+       同一条教训）。正文过 scrub：技能与记忆正文是凭据高危面。
+    """
+    token = os.getenv("TERM_TOKEN", "") or os.getenv("HUB_PASSCODE", "")
+    if not token:
+        return {"error": "missing-credential", "path": path,
+                "detail": "hub 进程未配置 TERM_TOKEN/HUB_PASSCODE，DELETE 类工具不可用"}
+    qs = urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "")})
+    url = f"{HUB_URL}{path}" + (f"?{qs}" if qs else "")
+    req = urllib.request.Request(url, method="DELETE",
+                                 headers={"x-hub-token": token,
+                                          "x-hub-channel": "mcp"})
+    try:
+        with urllib.request.urlopen(req, timeout=_timeout or TIMEOUT_S) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
         detail = ""
         try:
             detail = tdai_client.scrub(e.read().decode("utf-8", "replace"))[:400]
@@ -484,6 +531,54 @@ def hub_skill_catalog(q: str = "", limit: int = 200) -> str:
         "note": "正文不在本目录里：对某条技能感兴趣就 hub_skill_invoke(name=...) 点名取指令",
         "took_ms": data.get("took_ms"),
     }, ensure_ascii=False)
+
+
+@server.tool()
+def hub_skill_install(name: str, from_route: str, targets: str) -> str:
+    """**把一个技能部署到其他 agent 的发现点**（PT-20261024-02 P5）：在目标发现点
+    建一条指向权威副本的软链，让原本看不见这个技能的 agent 立即可见。
+
+    什么时候用：确认某 agent 需要一个本机已有的技能时。**先 hub_skill_list /
+    hub_skill_status 确认 name 与 from_route**（权威副本所在路）再调；手里只有
+    任务描述、还不知道技能叫什么，用 hub_skill_acquire / hub_skill_auto 更合适。
+
+    `targets` 逗号分隔（如 "claude,pi,codex"）；可用发现点与 hub_skill_list 的
+    `routes` 同一套，写错值上游 400 并附可用清单，不会静默跳过。
+
+    语义与边界（与 REST 端点同源，不另造一套）：
+    · **只建软链，不复制文件**——同源唯一副本，重复副本必然漂移；
+    · **幂等**：同源软链已就位的目标进 `existed`，不报错、不重复；
+    · 目标已有**指向别的 realpath 的副本** ⇒ 409 拒绝覆盖，先人工处置，
+      本工具不替任何人决定「哪个副本算权威」；
+    · `from_route` 不能同时在 targets 里（自链无意义，400）；
+    · 每次安装记 `asset_event`（action=bind）审计，资产面板可回查。
+
+    失败态：404 源技能不存在 / 400 参数或发现点错（detail 带可用清单）/
+    409 目标有异源副本（detail 带现有 realpath）。
+    """
+    body = {"name": name, "from_route": from_route,
+            "targets": [t.strip() for t in targets.split(",") if t.strip()]}
+    return json.dumps(_post("/api/skill/install", body), ensure_ascii=False)
+
+
+@server.tool()
+def hub_skill_remove(name: str, route: str) -> str:
+    """**卸下某发现点上的技能软链**（PT-20261024-02 P5）。
+
+    ⚠️ **即时生效**：该 agent 当场少一个技能可见性。动手前先 hub_skill_list 确认
+    `name`/`route` 没写反——`route` 是要**卸下的那个发现点**，不是权威副本所在路
+    （那一路通常没有软链可删，会 404）。
+
+    边界（硬）：**只删软链，拒删真实目录**。真实目录是权威副本，从本工具删本体
+    属不可逆破坏，一律 409。删软链不伤本体——权威副本仍在原处，想恢复再跑一次
+    hub_skill_install 即可（这也是为什么默认部署模式是软链）。
+    每次卸载记 `asset_event`（action=unbind）审计，资产面板可回查。
+
+    失败态：404 该发现点上没有这个技能 / 409 是真实目录拒删（detail 说明）/
+    400 参数或发现点错（detail 带可用清单）。
+    """
+    return json.dumps(_delete("/api/skill/remove", name=name, route=route),
+                      ensure_ascii=False)
 
 
 @server.tool()

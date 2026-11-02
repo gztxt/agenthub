@@ -299,8 +299,8 @@
         .nav-search { flex: 0 0 auto; }
         .nav-search input { width: 100%; font-size: var(--fs-base); padding: 9px 11px; background: var(--field); }
         /* ── 手风琴（单开）── */
-        .nav-acc { display: flex; flex-direction: column; gap: 1px; }
-        .nav-acc-head { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+        .nav-acc { display: flex; flex-direction: column; gap: 1px; flex: 0 0 auto; min-height: 0; }
+        .nav-acc-head { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; flex: 0 0 auto;
                         background: transparent; border: 1px solid transparent; color: var(--muted);
                         padding: 9px 10px; font-size: var(--fs-base); letter-spacing: .02em; line-height: 1.4; border-radius: 8px; transition: .12s; }
         .nav-acc-head:hover { background: var(--hover); color: var(--text-2); }
@@ -310,7 +310,13 @@
         .nav-acc-head .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .nav-acc-body { display: none; flex-direction: column; gap: 1px; margin: 2px 0 4px 10px;
                         padding-left: 7px; border-left: 1px solid var(--border); }
-        .nav-acc.open .nav-acc-body { display: flex; }
+        /* 2026-11-02 用户报「点开基础设施后下滑，上面 AGENTS/系统/设置 的菜单就被隐藏」：
+           滚动下沉到打开的那一组内部 —— 分组头固定，只有 .nav-acc-body 上下滑。
+           打开组可压缩（内容超长时让位），内容短时不撑高 ⇒ 后面各组紧跟其下，不留空白。 */
+        .nav-acc.open { flex: 0 1 auto; }
+        .nav-acc.open .nav-acc-body { display: flex; flex: 0 1 auto; min-height: 0;
+                                      overflow-y: auto; scrollbar-width: none; }
+        .nav-acc.open .nav-acc-body::-webkit-scrollbar { display: none; }
         .nav-sub { font-size: var(--fs-xs); color: var(--muted); letter-spacing: .04em; padding: 6px 7px 3px; }
         /* v0.10.1：设置项从顶栏搬进菜单栏。`.side-item` 直接加入下面这组选择器，
            与菜单项共用同一套规则（不是拄一份），以后改菜单样式两者一起变，不会再两套长相。 */
@@ -354,9 +360,13 @@
         }
         /* v0.12.2：滚动只发生在菜单列表内部。搜索框 / 总览 / 设置 / 收起 是常驻控件，
            不该被 16 项基础设施挤出可视区（整栏滚时它们落在折线以下，而滚动条已隐藏、无从指认）。
-           min-height:0 让 #navTree 在 .sidebar 的 flex 列里可压缩，overflow-y:auto 承接滚动。 */
-        #navTree { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: none; }
-        #navTree::-webkit-scrollbar { display: none; }
+           min-height:0 让 #navTree 在 .sidebar 的 flex 列里可压缩。
+           v0.12.2 之后补充（2026-11-02 用户报）：滚动再下沉一层——只滚「当前展开的那一组」。
+           旧实现让 #navTree 整条滚，点开基础设施后下滑会把 AGENTS（以及系统/设置）的分组头
+           一起滚出视口，用户侧就是「上方菜单被直接隐藏」。现在分组头固定、其余组常驻，
+           打开组的 .nav-acc-body 自己承接上下滑动。 */
+        #navTree { flex: 1 1 auto; min-height: 0; overflow: hidden;
+                   display: flex; flex-direction: column; }
         /* 操作按钮组 */
         .nav-acts { display: flex; gap: 1px; flex: none; margin-left: 1px; }
         /* P1-18：导航徽章。setBadge(page, n) 一直在写 #badge-<page> 的 textContent，

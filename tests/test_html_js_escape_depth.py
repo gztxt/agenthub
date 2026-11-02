@@ -73,6 +73,39 @@ class TestJsStringLiteralEscaping(unittest.TestCase):
                     self.fail("%s:%d 的 onclick 参数里出现 escapeHtml（HTML 层），应改 jsStr：%s"
                               % (p.name, ln, m.group(0)[:120]))
 
+    def test_no_new_string_argv_in_inline_onclick(self):
+        """inline `onclick` 带**字符串实参插值**不许**新增**——新代码一律 data-* + 委托。
+
+        2026-11-03 混排核验实测的闸门盲区：上一条用例的正则
+        `onclick="f\\(([^)]*)\\)"` 要求**第一个 `)` 之后立刻是 `"`**，
+        而 `onclick="openRun(\\''+ run_id +'\\')"` 在第一个 `)` 后面跟的是 ` +`
+        ⇒ 结构性不匹配。于是 6 处双语境漏转义（4 处零层转义 + 2 处把 escapeHtml 当 JS
+        转义用）全被放过，pytest 照样 10 passed。**闸门绿 ≠ 转义对。**
+
+        这里用**棘轮**（ratchet）而不是一次清零：存量 12 处散在 02/03/05 三个分片里，
+        一次全改的爆炸半径远超本次改动面（军规：发现既存问题→停手报请，不顺手修）。
+        所以基线落盘、只判「有没有新增」；存量清了就同步删基线行。
+        """
+        base = REPO / "tests" / "fixtures" / "inline_onclick_string_argv.txt"
+        self.assertTrue(base.exists(), "缺基线文件 %s（棘轮必须有基线，否则等于没有闸门）" % base)
+        allowed = {ln.strip() for ln in base.read_text(encoding="utf-8").splitlines()
+                   if ln.strip() and not ln.startswith("#")}
+        offenders = []
+        for p in SHARDS:
+            src = _src(p)          # 去注释：注释里的反例不算违规
+            for m in re.finditer(r"onclick=\"", src):
+                tail = src[m.end():m.end() + 400]
+                cut = re.search(r'(?<!\\)"', tail)   # 到本段 JS 字符串结束
+                seg = tail[:cut.start()] if cut else tail[:400]
+                if "\\'" not in seg:
+                    continue
+                key = "%s|%s" % (p.name, re.sub(r"\s+", " ", seg)[:60].strip())
+                if key not in allowed:
+                    offenders.append("%s:%d %s" % (p.name, src[:m.start()].count("\n") + 1, seg[:80]))
+        self.assertEqual([], offenders,
+                         "新增了 inline onclick 带字符串实参（双语境漏转义）⇒ "
+                         "改 data-* + 事件委托；确属存量请登记基线并说明理由：%s" % offenders)
+
 
 class TestResourceActionsDelegation(unittest.TestCase):
     """P2-D：资源页 inline onclick → data-* 委托（inline 旁路「点完收场」）。"""

@@ -2775,7 +2775,7 @@ async function kbSearch() {
       const KB_ROOTS = ['MEMORY.md', 'memory', 'agent-knowledge', 'digest'];
       const drill = (srcName === 'workspace_files' || srcName === 'archived_sessions') &&
                     KB_ROOTS.indexOf(seg) >= 0
-        ? ' <button class="btn ghost sm" onclick="kbBrowse(\'' + escapeHtml(seg) + '\')" title="在文档树中查看">↖ ' + escapeHtml(seg) + '</button>' : '';
+        ? ' <button class="btn ghost sm" data-kb-path="' + escapeHtml(seg) + '" title="在文档树中查看">↖ ' + escapeHtml(seg) + '</button>' : '';
       return '<div class="mem-item">' + srcTag(srcName) +
       '<p>' + escapeHtml(String(r.title || r.path || r.id || '').slice(0, 100)) +
       '<br><span class="hint">' + escapeHtml(String(r.content || r.preview || '').slice(0, 200)) + '</span>' +
@@ -2845,7 +2845,22 @@ async function loadKbStatus() {
  * 根内子目录如实渲染为不可点+hint，不扩后端）。面包屑 KB_SUB 记当前层。
  * var 防外层引用时的 TDZ 静态序风险（test_tdz_order 钉着）。 */
 var KB_SUB = '';
+/* KB 下钻同族：`onclick="kbBrowse('目录名')"` 的实参是**文件系统目录名**，
+   escapeHtml 只保 HTML 层，目录名带引号就会穿进 JS 字面量。改 data-kb-path + 委托。 */
+var kbPathBound = false;
+function bindKbPath() {
+  var host = $('kbBrowse');
+  if (!host || kbPathBound) return;
+  kbPathBound = true;
+  host.addEventListener('click', function (ev) {
+    var el = ev.target.closest('[data-kb-path]');
+    if (!el || !host.contains(el)) return;
+    kbBrowse(el.getAttribute('data-kb-path') || '');
+  });
+}
+
 async function kbBrowse(sub) {
+  bindKbPath();
   KB_SUB = sub || '';
   boxBusy('kbBrowse');
   try {
@@ -2859,7 +2874,7 @@ async function kbBrowse(sub) {
       // 顶层（无 sub）目录条目可点下钻；进了 sub 之后，后端只支持单层——如实说
       const clickable = !KB_SUB && e.dir;
       return clickable
-        ? '<div class="mem-item" style="cursor:pointer" onclick="kbBrowse(\'' + escapeHtml(e.name) + '\')" title="下钻 ' + escapeHtml(e.name) + '">' +
+        ? '<div class="mem-item" style="cursor:pointer" data-kb-path="' + escapeHtml(e.name) + '" title="下钻 ' + escapeHtml(e.name) + '">' +
           '📁 <b>' + escapeHtml(e.name) + '</b> <span class="hint">' + meta + '</span></div>'
         : '<div class="mem-item">' + (e.dir ? '📁' : '📄') + ' ' + escapeHtml(e.name) +
           ' <span class="hint">' + meta + (KB_SUB && e.dir ? '（暂只支持下钻一层）' : '') + '</span></div>';
@@ -3114,7 +3129,37 @@ function bindHandoff() {
   });
 }
 
+/* 协同页的行内动作走**事件委托**，不用 inline onclick 带字符串实参。
+   原因（2026-11-03 混排核验实测）：`onclick="openRun(\'' + run_id + '\')"` 是
+   **双语境**——HTML 先解码、JS 再解析，`escapeHtml` 只保 HTML 那一层；run_id 现在是
+   `uuid4().hex[:10]` 所以打不进来，但那是数据的性质不是前端的保证。闸门
+   `test_html_js_escape_depth` 的正则对「实参里含括号」结构性失明（首个 `)` 之后不是
+   `"` 就不匹配），6 处漏转义它全放过、pytest 照样全绿。 */
+var runActBound = false;
+function bindRunActions() {
+  var body = $('runsBody');
+  var chain = $('runChain');
+  if (!body && !chain) return;
+  if (runActBound) return;
+  runActBound = true;
+  [body, chain].forEach(function (host) {
+    if (!host) return;
+    host.addEventListener('click', function (ev) {
+      var el = ev.target.closest('[data-run-act]');
+      if (!el || !host.contains(el)) return;
+      var id = el.getAttribute('data-run-id') || '';
+      if (!id) return;
+      ev.preventDefault();
+      var act = el.getAttribute('data-run-act');
+      if (act === 'open') openRun(id);
+      else if (act === 'start') startRun(id);
+      else if (act === 'replan') replanRun(id);
+    });
+  });
+}
+
 async function loadRuns(append) {
+  bindRunActions();
   if (!append) runsOffset = 0;
   var p = new URLSearchParams();
   p.set('limit', '20');
@@ -3131,11 +3176,11 @@ async function loadRuns(append) {
       var modelTxt = models.length ? (models[0].split('/').pop() + (models.length > 1 ? ' +' + (models.length - 1) : '')) : '-';
       var roundTxt = (r.round || 1) + '/' + (r.max_rounds || '?');
       var st = ({ running: ico('play', 'xs') + '执行中', success: ico('check-circle', 'xs') + '成功', failed: ico('alert', 'xs') + '失败', partial: ico('circle', 'xs') + '部分', pending: ico('clock', 'xs') + '待跑', waiting: ico('clock', 'xs') + '等待', awaiting_accept: ico('clock', 'xs') + '待接受' }[r.state] || escapeHtml(r.state));
-      var act = '<button class="btn sm ghost" onclick="openRun(\'' + r.run_id + '\')">查看</button>' +
+      var act = '<button class="btn sm ghost" data-run-act="open" data-run-id="' + escapeHtml(r.run_id) + '">查看</button>' +
         (r.state === 'running' || r.state === 'pending' || r.state === 'waiting'
-          ? ' <button class="btn sm ghost" onclick="startRun(\'' + r.run_id + '\')">续跑</button>' : '') +
+          ? ' <button class="btn sm ghost" data-run-act="start" data-run-id="' + escapeHtml(r.run_id) + '">续跑</button>' : '') +
         ((r.state === 'failed' || r.state === 'partial') && (r.round || 1) < (r.max_rounds || 2)
-          ? ' <button class="btn sm ghost" onclick="replanRun(\'' + r.run_id + '\')">重拆下一轮</button>' : '');
+          ? ' <button class="btn sm ghost" data-run-act="replan" data-run-id="' + escapeHtml(r.run_id) + '">重拆下一轮</button>' : '');
       return '<tr><td style="font-family:var(--font-mono)">' + escapeHtml(r.run_id) + '</td>' +
         '<td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(r.goal || '') + '">' + escapeHtml((r.goal || '').slice(0, 40)) + '</td>' +
         '<td>' + escapeHtml(agents) + '</td><td class="hint">' + escapeHtml(modelTxt) + '</td>' +
@@ -3223,7 +3268,7 @@ async function loadRunChain(runId) {
     el.innerHTML = '轮次链：' + chain.map(function (n) {
       var st = RUN_STOP_TEXT[n.stop_reason] || n.stop_reason || '进行中';
       var cur = n.run_id === runId ? ' style="font-weight:bold"' : '';
-      return '<a href="javascript:void(0)" onclick="openRun(\'' + n.run_id + '\')"' + cur + '>第' + (n.round || 1) + '轮 ' +
+      return '<a href="javascript:void(0)" data-run-act="open" data-run-id="' + escapeHtml(n.run_id) + '"' + cur + '>第' + (n.round || 1) + '轮 ' +
         (n.success || 0) + '/' + (n.total || 0) + ' · ' + escapeHtml(st) + '</a>';
     }).join(' → ');
   } catch (e) { el.textContent = '轮次链拉取失败：' + e.message; }
@@ -3374,6 +3419,7 @@ async function enterTasksPage() {
     if (pool && pool.rounds) fillRoundSelect(pool.rounds);
   } catch (e) { fillRoundSelect(null); }
   fillTaskModelSelect();
+  bindRunActions();
   loadRuns();
   loadTaskStats();
 }

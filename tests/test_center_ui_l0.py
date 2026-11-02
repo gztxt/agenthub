@@ -221,7 +221,14 @@ class TestCenterUi(unittest.TestCase):
         m = re.search(r"async function kbSearch\(.*?\n\}", self.w04, re.S)
         body = m.group(0)
         self.assertIn("r.path", body, "路径行必须取 r.path")
-        self.assertIn("kbBrowse(", body, "下钻按钮必须接 kbBrowse()")
+        # 2026-11-03 改判：下钻按钮由 `onclick="kbBrowse(\'目录名\')"` 改成
+        # `data-kb-path` + `bindKbPath` 委托。原因不是洁癖——inline onclick 是**双语境**
+        # （HTML 先解码、JS 再解析），目录名带引号能穿进 JS 字面量；而闸门
+        # test_html_js_escape_depth 的旧正则对「实参含括号」结构性失明，改完才看得见。
+        self.assertIn("data-kb-path", body, "下钻按钮必须带 data-kb-path（不许回到 inline onclick）")
+        anchor = re.search(r"function bindKbPath\(.*?\n\}", self.w04, re.S)
+        self.assertIsNotNone(anchor, "缺 bindKbPath 委托入口 ⇒ 按钮点了没反应")
+        self.assertIn("kbBrowse(", anchor.group(0), "委托必须真的调 kbBrowse（不许只挂 data-*）")
 
 
 class TestMemoryLegacyMerged(unittest.TestCase):

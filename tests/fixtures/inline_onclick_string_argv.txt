@@ -1,0 +1,15 @@
+# inline onclick 带字符串实参的**存量**清单（棘轮基线，2026-11-03 立）
+# 键 = 分片文件名|归一化后的属性值片段（不含行号：行号会漂）。
+# 新增一律禁止：改 data-* + 事件委托。清一处就删一行。
+02-nav-and-poll.js|pickChatEntity(\'' + a.id + '\')
+02-nav-and-poll.js|switchMode(\'chat\')
+02-nav-and-poll.js|switchMode(\'term\')
+03-agents-cards.js|termKillOne(\'' + s.id + '\')
+03-agents-cards.js|termOpenChip(\'' + s.id + '\',\'' + s.agent_id + '\')
+05-chat-and-history.js|delJob(\'' + j.id + '\')
+05-chat-and-history.js|delServer(\'' + x.id + '\')
+05-chat-and-history.js|event.stopPropagation();gotoChat(\'' + a.id + '\',\'embed\')
+05-chat-and-history.js|event.stopPropagation();gotoChat(\'' + a.id + '\',\'term\')
+05-chat-and-history.js|event.stopPropagation();startAgent(\'' + a.id + '\')
+05-chat-and-history.js|runJobNow(\'' + j.id + '\')
+05-chat-and-history.js|toggleJob(\'' + j.id + '\',' + (j.enabled ? 0 : 1) + ')

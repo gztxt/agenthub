@@ -423,11 +423,19 @@ class TestSourceInvariants(unittest.TestCase):
         self.assertLess(i_gate, i_llm, "先判闸门再问 LLM：反了会在不该花钱时花钱")
 
     def test_default_round_cap_is_two(self):
+        # 2026-11-03 改判（用户裁定「协同页轮次框」）：`MAX_ROUNDS` 仍保留 2 作**默认值**
+        # （老调用方拿不到新字段时行为逐字不变），硬闸换成 `ROUNDS_CEILING=5`。
+        # 本条不变：默认值就是 2，改成 5 等于给所有老调用方悄悄多跑三轮。
         self.assertIn('TASK_MAX_ROUNDS", "2"', self.tiers)
 
     def test_round_cap_only_tightens(self):
-        # 常量在 tiers，收紧逻辑仍在编排层 ⇒ 调用点写的是模块属性
-        self.assertIn("min(int(max_rounds), _tiers.MAX_ROUNDS)", self.replan)
+        # 2026-11-03 改判：上限由「MAX_ROUNDS=2」改为「ROUNDS_CEILING=5」，
+        # 但「只能收紧、不能放宽」的形状仍然钉着 —— 夹取必须写模块属性（不拷名字）。
+        self.assertIn("min(int(stated), _tiers.ROUNDS_CEILING)", self.replan,
+                      "轮次夹取必须走 ROUNDS_CEILING；拷一份常量名会让补丁静默失效")
+        self.assertIn('stated = max_rounds if max_rounds is not None else meta.get("max_rounds")',
+                      self.replan,
+                      "落库轮次必须能被显式值收紧（传 1 = 关掉自动重拆）")
 
 
 class TestWiringAttrsResolvable(unittest.TestCase):

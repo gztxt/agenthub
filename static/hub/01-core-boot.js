@@ -568,7 +568,8 @@ function go(page) {
   if (page === 'resources' && !resLoaded) { resLoaded = true; loadResources(); }
   // v0.13.47：原运行日志页的进页钩子随页面一并删除（内容并入设置→日志）
   if (page === 'chat') renderChatSide();
-  if (page === 'tasks') { fillAgentSelect($('taskAgent'), true); loadRuns(); }
+  // 2026-11-03 四框改版：进页只调一个入口（Agent/模型/轮次三框 + 历史 + 汇总）
+  if (page === 'tasks') enterTasksPage();
   if (page === 'jobs') { fillAgentSelect($('jobAgent'), false); loadJobs(); }
   if (page === 'mcp') { loadMcp(); loadAcl(); }
   if (page === 'assets') loadAssets();   // P4 资产面板（只读门面聚合，07-asset-panel.js）

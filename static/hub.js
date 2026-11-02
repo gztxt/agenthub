@@ -568,7 +568,8 @@ function go(page) {
   if (page === 'resources' && !resLoaded) { resLoaded = true; loadResources(); }
   // v0.13.47：原运行日志页的进页钩子随页面一并删除（内容并入设置→日志）
   if (page === 'chat') renderChatSide();
-  if (page === 'tasks') { fillAgentSelect($('taskAgent'), true); loadRuns(); }
+  // 2026-11-03 四框改版：进页只调一个入口（Agent/模型/轮次三框 + 历史 + 汇总）
+  if (page === 'tasks') enterTasksPage();
   if (page === 'jobs') { fillAgentSelect($('jobAgent'), false); loadJobs(); }
   if (page === 'mcp') { loadMcp(); loadAcl(); }
   if (page === 'assets') loadAssets();   // P4 资产面板（只读门面聚合，07-asset-panel.js）
@@ -6905,23 +6906,133 @@ async function runScan() {
   } catch (e) { toast(e.message, 'err'); }
 }
 
-/* ── S3 协同 DAG ──────────────────────────────────── */
+/* ── S3 协同 DAG（2026-11-03 四框改版）──────────────────────────────
+   四框 = 目标 / Agent / 模型 / 未完成轮次。三条设计判据（都来自实物运维）：
+   ① **预览与执行分开**：预览走 `dry_run=true`（不落库不花钱），执行才真派活。
+      原来一个按钮直接开跑，选错模型或选错轮次就是一轮 token 打水漂。
+   ② **模型框跟着 Agent 走**：钉死模型只对模型域是 CCR 的 Agent 生效；未选 Agent 时
+      模型框只有「自动」一项，并明写原因（塞 CCR ID 给 codebuddy 必报 unknown model）。
+   ③ **轮次是预算不是开关**：档位由后端 `ROUND_CHOICES` 下发（唯一真值），默认 1 =
+      不自动重拆；前端不写死 [1,2,3,5]，否则后端调上限时前端还挂着旧档。 */
 
 let currentRun = null;
 let currentRunGoal = '';        // v0.13.171：口令桥要用 run 的总目标
 let currentRunTasks = {};       // task_id → task（含 prompt），供复制时取正文
+let runsOffset = 0;             // 历史分页游标（0 = 首屏/重新筛选）
+let runsTotal = 0;
+let taskRoundChoices = [1, 2, 3, 5];   // 后端 /api/tasks/pool 下发前的兜底（仅首屏一次）
+
+function taskFmtDur(ms) {
+  if (ms == null) return '-';
+  var n = Number(ms);
+  if (!isFinite(n) || n <= 0) return '-';
+  return n < 1000 ? n + 'ms' : (Math.round(n / 100) / 10) + 's';
+}
+
+function taskFmtTokens(n) {
+  var v = Number(n || 0);
+  return v >= 1000 ? (Math.round(v / 100) / 10) + 'k' : String(v);
+}
+
+/* 轮次下拉：档位与上限都来自后端（`/api/tasks/pool` 的 rounds 段）。
+   后端没下发时才用兜底值，且下拉里只有兜底那一次 —— 不在前端另写第二份真值表。 */
+function fillRoundSelect(d) {
+  var sel = $('taskRounds');
+  if (!sel) return;
+  if (d && d.choices && d.choices.length) taskRoundChoices = d.choices;
+  var cur = sel.value || '1';
+  sel.innerHTML = taskRoundChoices.map(function (n) {
+    return '<option value="' + n + '">' + (n == 1 ? '1 轮 · 不自动重拆' : n + ' 轮 · 未完成自动重拆') + '</option>';
+  }).join('');
+  sel.value = cur;
+}
+
+/* 模型下拉：按当前 Agent 的 `/api/models` 填充。未选 Agent（自动混排）时不列任何具体模型
+   —— 自动混排下「钉死一个模型」与「让不同 agent 各自最合适」是互斥的，列出就是误导。 */
+async function fillTaskModelSelect() {
+  var sel = $('taskModel');
+  if (!sel) return;
+  var agent = $('taskAgent') ? $('taskAgent').value : '';
+  if (!agent) {
+    sel.innerHTML = '<option value="">模型：自动（按难度 t1/t2/t3）</option>';
+    sel.value = '';
+    var hint = $('taskPreview');
+    if (hint) hint.textContent = '未指定 Agent = 自动混排：模型由难度→档位决定（失败自动升档）。要钉死模型请先选一个 Agent。';
+    return;
+  }
+  sel.innerHTML = '<option value="">模型：自动（按难度 t1/t2/t3）</option>';
+  try {
+    var d = await api('/api/models?agent_id=' + encodeURIComponent(agent));
+    var list = (d && d.models) || [];
+    if (!list.length) {
+      var msg = (d && d.error) ? ('模型清单取不到：' + d.error) : '该 Agent 没有可列模型（模型域不在 CCR）';
+      var h = $('taskPreview');
+      if (h) h.textContent = msg + '。钉死模型对它不生效，请用「自动」。';
+      return;
+    }
+    sel.innerHTML += list.map(function (m) {
+      var tag = m.billing === 'free' ? ' · 免费' : '';
+      return '<option value="' + escapeHtml(m.id) + '">' + escapeHtml(m.id) + tag + '</option>';
+    }).join('');
+  } catch (e) {
+    var h2 = $('taskPreview');
+    if (h2) h2.textContent = '模型清单拉取失败：' + e.message + '（不影响「自动」）';
+  }
+}
+
+function onTaskAgentChange() { fillTaskModelSelect(); }
+
+function taskBodyFromUi() {
+  var body = { goal: $('taskGoal').value.trim(), auto_run: true };
+  if ($('taskAgent') && $('taskAgent').value) body.default_agent = $('taskAgent').value;
+  if ($('taskModel') && $('taskModel').value) body.model = $('taskModel').value;
+  if ($('taskRounds') && $('taskRounds').value) body.rounds = parseInt($('taskRounds').value, 10);
+  return body;
+}
+
+function taskPreviewText(d) {
+  var tasks = d.tasks || [];
+  var pin = d.model_policy || {};
+  var parts = ['拆出 ' + tasks.length + ' 个子任务；最多 ' + (d.rounds || 1) + ' 轮'];
+  var combos = tasks.map(function (t) { return (t.agent_id || '?') + ':' + (t.model || t.model_planned || '默认'); });
+  parts.push('组合：' + (combos.slice(0, 4).join('，') || '—') + (combos.length > 4 ? ' …' : ''));
+  if (pin.mode === 'pinned') parts.push(pin.note || '');
+  if (d.synthesis && d.synthesis.added) parts.push('已追加汇总节点 ' + d.synthesis.id);
+  return parts.filter(Boolean).join(' · ');
+}
+
+async function previewRun() {
+  var body = taskBodyFromUi();
+  if (!body.goal) return toast('请输入目标', 'err');
+  body.dry_run = true; body.auto_run = false;
+  var btn = $('btnPreview');
+  if (btn) { btn.disabled = true; btn.textContent = '预览中…'; }
+  var hint = $('taskPreview');
+  try {
+    if (hint) hint.textContent = '拆解中（不落库、不派活）…';
+    var d = await api('/api/tasks/decompose', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (hint) hint.textContent = taskPreviewText(d);
+    // 预览结果回填轮次档位（后端唯一真值），避免前端与后端档位漂移
+    if (d.round_choices) { taskRoundChoices = d.round_choices; fillRoundSelect({ choices: d.round_choices }); }
+    toast('预览完成：未落库，确认后点「拆解并启动」', 'ok');
+  } catch (e) {
+    if (hint) hint.textContent = '预览失败：' + e.message;
+    toast(e.message, 'err');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '仅预览'; }
+}
 
 async function decomposeRun() {
-  const goal = $('taskGoal').value.trim();
-  if (!goal) return toast('请输入目标', 'err');
-  const btn = $('btnDecompose'); btn.disabled = true; btn.textContent = '拆解中…';
+  var body = taskBodyFromUi();
+  if (!body.goal) return toast('请输入目标', 'err');
+  var btn = $('btnDecompose'); btn.disabled = true; btn.textContent = '拆解中…';
   try {
-    const body = { goal: goal, auto_run: true };
-    if ($('taskAgent').value) body.default_agent = $('taskAgent').value;
-    const d = await api('/api/tasks/decompose', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    var d = await api('/api/tasks/decompose', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     currentRun = d.run_id;
-    toast('已拆解 ' + d.tasks.length + ' 个子任务并启动', 'ok');
-    loadRuns(); openRun(d.run_id);
+    toast('已拆解 ' + d.tasks.length + ' 个子任务并启动（最多 ' + (d.rounds || 1) + ' 轮）', 'ok');
+    var hint = $('taskPreview');
+    if (hint) hint.textContent = taskPreviewText(d);
+    runsOffset = 0; loadRuns(); loadTaskStats(); openRun(d.run_id);
   } catch (e) { toast(e.message, 'err'); }
   btn.disabled = false; btn.textContent = '拆解并启动';
 }
@@ -6977,31 +7088,175 @@ function bindHandoff() {
   });
 }
 
-async function loadRuns() {
+async function loadRuns(append) {
+  if (!append) runsOffset = 0;
+  var p = new URLSearchParams();
+  p.set('limit', '20');
+  p.set('offset', String(runsOffset));
+  if ($('runQ') && $('runQ').value.trim()) p.set('q', $('runQ').value.trim());
+  if ($('runState') && $('runState').value) p.set('state', $('runState').value);
   try {
-    const d = await api('/api/tasks/runs');
-    $('runsBody').innerHTML = (d.runs || []).map(r =>
-      '<tr><td style="font-family:var(--font-mono)">' + r.run_id + '</td>' +
-      '<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(r.goal || '') + '">' + escapeHtml((r.goal || '').slice(0, 40)) + '</td>' +
-      '<td>' + ({ running: ico('play', 'xs') + '执行中', success: ico('check-circle', 'xs') + '成功', failed: ico('alert', 'xs') + '失败', partial: ico('circle', 'xs') + '部分', pending: ico('clock', 'xs') + '待跑' }[r.state] || r.state) + '</td>' +
-      '<td>' + r.success + '/' + r.total + '</td><td class="hint">' + (r.created_at || '').slice(5, 16).replace('T', ' ') + '</td>' +
-      '<td><button class="btn sm ghost" onclick="openRun(\'' + r.run_id + '\')">查看</button></td></tr>').join('') ||
-      '<tr><td colspan="6" class="hint">尚无协同任务</td></tr>';
-  } catch (e) { /* ignore */ }
+    var d = await api('/api/tasks/runs?' + p.toString());
+    runsTotal = d.total || 0;
+    var rows = d.runs || [];
+    var html = rows.map(function (r) {
+      var agents = (r.agents || '').split(',').filter(Boolean).slice(0, 3).join('+') || '-';
+      var models = (r.models || '').split(',').filter(Boolean);
+      var modelTxt = models.length ? (models[0].split('/').pop() + (models.length > 1 ? ' +' + (models.length - 1) : '')) : '-';
+      var roundTxt = (r.round || 1) + '/' + (r.max_rounds || '?');
+      var st = ({ running: ico('play', 'xs') + '执行中', success: ico('check-circle', 'xs') + '成功', failed: ico('alert', 'xs') + '失败', partial: ico('circle', 'xs') + '部分', pending: ico('clock', 'xs') + '待跑', waiting: ico('clock', 'xs') + '等待', awaiting_accept: ico('clock', 'xs') + '待接受' }[r.state] || escapeHtml(r.state));
+      var act = '<button class="btn sm ghost" onclick="openRun(\'' + r.run_id + '\')">查看</button>' +
+        (r.state === 'running' || r.state === 'pending' || r.state === 'waiting'
+          ? ' <button class="btn sm ghost" onclick="startRun(\'' + r.run_id + '\')">续跑</button>' : '') +
+        ((r.state === 'failed' || r.state === 'partial') && (r.round || 1) < (r.max_rounds || 2)
+          ? ' <button class="btn sm ghost" onclick="replanRun(\'' + r.run_id + '\')">重拆下一轮</button>' : '');
+      return '<tr><td style="font-family:var(--font-mono)">' + escapeHtml(r.run_id) + '</td>' +
+        '<td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(r.goal || '') + '">' + escapeHtml((r.goal || '').slice(0, 40)) + '</td>' +
+        '<td>' + escapeHtml(agents) + '</td><td class="hint">' + escapeHtml(modelTxt) + '</td>' +
+        '<td>' + escapeHtml(roundTxt) + (r.stop_reason ? '<div class="hint">' + escapeHtml(r.stop_reason) + '</div>' : '') + '</td>' +
+        '<td>' + st + '</td>' +
+        '<td>' + (r.success || 0) + '/' + (r.total || 0) + '</td>' +
+        '<td>' + taskFmtDur(r.duration_ms) + '</td>' +
+        '<td class="hint">' + escapeHtml((r.created_at || '').slice(5, 16).replace('T', ' ')) + '</td>' +
+        '<td>' + act + '</td></tr>';
+    }).join('');
+    if (!append) $('runsBody').innerHTML = html || '<tr><td colspan="10" class="hint">没匹配的协同任务</td></tr>';
+    else $('runsBody').insertAdjacentHTML('beforeend', html);
+    runsOffset = runsOffset + rows.length;
+    var cnt = $('runsCount'); if (cnt) cnt.textContent = '共 ' + runsTotal + ' 条 · 已列 ' + runsOffset + ' 条';
+    var more = $('runsMore');
+    if (more) more.innerHTML = (runsOffset < runsTotal)
+      ? '<button class="btn ghost sm" onclick="loadRuns(true)">加载更多（还有 ' + (runsTotal - runsOffset) + ' 条）</button>'
+      : (runsTotal ? '<span class="hint">已列全部</span>' : '');
+  } catch (e) {
+    var mo = $('runsMore'); if (mo) mo.textContent = '历史拉取失败：' + e.message;
+  }
 }
 
 async function openRun(runId) {
   currentRun = runId;
   try {
-    const d = await api('/api/tasks/' + runId);
-    $('runPanel').style.display = '';   // v0.13.40：卡是 flex 列，显隐只切 inline 值
+    var d = await api('/api/tasks/' + runId);
+    var panel = $('runPanel');
+    if (panel) panel.style.display = '';   // v0.13.40：卡是 flex 列，显隐只切 inline 值
     $('runTitle').textContent = 'Run ' + runId + ' · ' + (d.goal || '').slice(0, 60);
     currentRunGoal = d.goal || '';
     currentRunTasks = {};
-    (d.tasks || []).forEach(t => { currentRunTasks[t.task_id] = t; });
+    (d.tasks || []).forEach(function (t) { currentRunTasks[t.task_id] = t; });
+    renderRunSummary(d);
     renderTaskTable(d.tasks);
     renderDag(d.tasks);
+    loadRunChain(runId);
+    loadRunEvents(runId);
   } catch (e) { toast(e.message, 'err'); }
+}
+
+/* run 级结论行（需求④）：总数/成功/失败/阻塞/耗时/token/stop_reason。
+   `stop_reason` 直接翻成人话，否则 `same_failure` / `max_rounds` 这两个关键状态
+   只能靠用户自己记 —— 它们是「该转人工了」的唯一信号。 */
+var RUN_STOP_TEXT = {
+  complete: '已完工（全部达标）',
+  complete_by_model: '已完工（Leader 判定无缺口）',
+  max_rounds: '到轮次上限，转人工',
+  same_failure: '连续两轮同一批失败，原地打转，转人工',
+  budget: '预算耗尽',
+  unfinished: '仍有未收敛任务'
+};
+
+function renderRunSummary(d) {
+  var ts = d.tasks || [];
+  var cnt = {};
+  ts.forEach(function (t) { cnt[t.status] = (cnt[t.status] || 0) + 1; });
+  var ms = 0, tok = 0;
+  ts.forEach(function (t) { ms += Number(t.duration_ms || 0); tok += Number(t.spent_tokens || 0); });
+  var meta = d.run || {};
+  /* stop_reason 只有「自动重拆链」才会写（`_maybe_replan` 对 auto_rounds=0 直接返回）⇒
+     手动 run 全绿时它仍是 null。这里**不伪造** stop_reason，只在展示层把“已收敛但没声明
+     重拆”与“真在跑”分开：该字段的语义是“重拆为什么停”，不是“run 成没成”。 */
+  var open = ts.some(function (t) {
+    return ['pending', 'running', 'verifying', 'waiting_input', 'waiting_approval', 'submitted'].indexOf(t.status) >= 0;
+  });
+  var stop;
+  if (meta.stop_reason) stop = RUN_STOP_TEXT[meta.stop_reason] || meta.stop_reason;
+  else if (open) stop = '进行中';
+  else stop = (cnt.failed || cnt.blocked) ? '已停（有失败项，可重试/重拆）' : '已完工（全部达标）';
+  var el = $('runSummary');
+  if (!el) return;
+  el.textContent = '第 ' + (meta.round || 1) + '/' + (d.max_rounds || '?') + ' 轮 · '
+    + (cnt.success || 0) + ' 成功 / ' + (cnt.failed || 0) + ' 失败 / ' + (cnt.blocked || 0) + ' 阻塞 / '
+    + ts.length + ' 总 · 耗时 ' + taskFmtDur(ms) + ' · ' + taskFmtTokens(tok) + ' tokens · ' + stop;
+}
+
+async function loadRunChain(runId) {
+  var el = $('runChain');
+  if (!el) return;
+  try {
+    var d = await api('/api/tasks/' + encodeURIComponent(runId) + '/chain');
+    var chain = d.chain || [];
+    if (chain.length <= 1) { el.textContent = '单轮 run（未重拆）'; return; }
+    el.innerHTML = '轮次链：' + chain.map(function (n) {
+      var st = RUN_STOP_TEXT[n.stop_reason] || n.stop_reason || '进行中';
+      var cur = n.run_id === runId ? ' style="font-weight:bold"' : '';
+      return '<a href="javascript:void(0)" onclick="openRun(\'' + n.run_id + '\')"' + cur + '>第' + (n.round || 1) + '轮 ' +
+        (n.success || 0) + '/' + (n.total || 0) + ' · ' + escapeHtml(st) + '</a>';
+    }).join(' → ');
+  } catch (e) { el.textContent = '轮次链拉取失败：' + e.message; }
+}
+
+async function loadRunEvents(runId) {
+  var el = $('runEvents');
+  if (!el) return;
+  try {
+    var d = await api('/api/tasks/' + encodeURIComponent(runId) + '/events?limit=200');
+    var evs = d.events || [];
+    if (!evs.length) { el.innerHTML = '<span class="hint">无事件记录（存量 run 或尚未派发）</span>'; return; }
+    el.innerHTML = '<table><thead><tr><th>时间</th><th>类型</th><th>主体</th><th>状态</th><th>明细</th></tr></thead><tbody>' +
+      evs.map(function (e) {
+        return '<tr><td class="hint">' + escapeHtml((e.created_at || '').slice(5, 19).replace('T', ' ')) + '</td>' +
+          '<td>' + escapeHtml(e.source || '') + '</td><td>' + escapeHtml(e.subject || '') + '</td>' +
+          '<td>' + escapeHtml(e.status || '') + '</td>' +
+          '<td class="hint" style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(e.detail || '') + '">' + escapeHtml(e.detail || '') + '</td></tr>';
+      }).join('') + '</tbody></table>';
+  } catch (e) { el.textContent = '时间线拉取失败：' + e.message; }
+}
+
+/* 需求③④：执行结果汇总。三块表格 + 一行 verdict；样本量永远跟着比率一起上屏。 */
+async function loadTaskStats() {
+  var days = $('statsDays') ? $('statsDays').value : '30';
+  try {
+    var d = await api('/api/tasks/stats?days=' + encodeURIComponent(days) + '&top=6');
+    var s = d.summary || {};
+    var v = $('taskStatsVerdict');
+    if (v) {
+      v.innerHTML = '<div class="hint" style="padding:0 0 8px">' + escapeHtml(d.verdict || '') + '</div>' +
+        '<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:var(--fs-sm)">' +
+        '<span>run ' + (s.runs || 0) + ' · 全绿 ' + (s.runs_success || 0) + '</span>' +
+        '<span>任务 ' + (s.tasks || 0) + ' · 成功 ' + (s.success || 0) + ' / 失败 ' + (s.failed || 0) + ' / 阻塞 ' + (s.blocked || 0) + '</span>' +
+        '<span>重试 ' + (s.retried || 0) + '</span>' +
+        '<span>总耗时 ' + taskFmtDur(s.duration_ms) + ' · 中位 ' + (s.p50_ms == null ? '?' : taskFmtDur(s.p50_ms)) + '</span>' +
+        '<span>' + taskFmtTokens(s.tokens) + ' tokens</span></div>';
+    }
+    var cb = $('statsCombos');
+    if (cb) cb.innerHTML = (d.combos || []).map(function (c) {
+      return '<tr><td>' + escapeHtml(c.agent_id || '-') + '</td><td style="font-family:var(--font-mono)">' + escapeHtml(c.model_eff || '') + '</td>' +
+        '<td>' + c.n + '</td><td>' + c.ok + '</td><td>' + c.failed + '</td><td>' + c.blocked + '</td>' +
+        '<td>' + Math.round((c.rate || 0) * 100) + '%</td><td>' + taskFmtDur(c.avg_ms) + '</td></tr>';
+    }).join('') || '<tr><td colspan="8" class="hint">该时间窗内没有任务记录</td></tr>';
+    var fb = $('statsFailures');
+    if (fb) fb.innerHTML = (d.failures || []).map(function (f) {
+      var ags = (f.agents || []).map(function (kv) { return kv[0] + '×' + kv[1]; }).join('，');
+      return '<tr><td>' + escapeHtml(f.bucket) + '</td><td>' + f.n + '</td><td class="hint">' + escapeHtml(ags) + '</td>' +
+        '<td class="hint" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(f.sample || '') + '">' + escapeHtml((f.sample || '').slice(0, 60)) + '</td></tr>';
+    }).join('') || '<tr><td colspan="4" class="hint">该时间窗内没有失败</td></tr>';
+    var rb = $('statsRounds');
+    if (rb) rb.innerHTML = (d.rounds || []).map(function (r) {
+      var rate = r.n ? Math.round((r.ok || 0) / r.n * 100) : 0;
+      return '<tr><td>第 ' + r.round + ' 轮</td><td>' + r.runs + '</td><td>' + r.n + '</td><td>' + (r.ok || 0) + '</td><td>' + rate + '%</td></tr>';
+    }).join('') || '<tr><td colspan="5" class="hint">无轮次数据</td></tr>';
+  } catch (e) {
+    var v2 = $('taskStatsVerdict');
+    if (v2) v2.textContent = '汇总拉取失败：' + e.message;
+  }
 }
 
 // 色值必须是具体十六进制：下面 fill = 描边色 + '22' 透明度派生，拿到 "var(--x)" 会变成非法色值
@@ -7018,8 +7273,9 @@ function renderTaskTable(tasks) {
   (tasks || []).forEach(t => { currentRunTasks[t.task_id] = t; });
   $('taskBody').innerHTML = (tasks || []).map(t =>
     '<tr><td><b>' + escapeHtml(t.task_id) + '</b></td><td>' + escapeHtml(t.agent_id || '-') + '</td>' +
+    '<td style="font-family:var(--font-mono);font-size:var(--fs-xs)">' + escapeHtml(t.model || t.model_planned || t.model_choice || '默认') + '</td>' +
     '<td>' + escapeHtml((t.deps || []).join(',')) + '</td><td>' + escapeHtml(t.status) + '</td>' +
-    '<td>' + (t.duration_ms != null ? t.duration_ms + 'ms' : '-') + '</td>' +
+    '<td>' + taskFmtDur(t.duration_ms) + '</td>' +
     '<td><details><summary class="hint">' + escapeHtml((t.output || t.error || '').slice(0, 50)) + '</summary><pre style="white-space:pre-wrap;font-size:var(--fs-sm);max-height:220px;overflow:auto">' + escapeHtml(t.output || t.error || '') + '</pre></details></td>' +
     '<td><button class="btn ghost sm" data-bb-copy="' + escapeHtml(t.task_id) + '" title="生成可粘贴到 DS Bot 的派活文本">复制派活</button></td></tr>').join('');
   bindHandoff();
@@ -7066,7 +7322,35 @@ function renderDag(tasks) {
   $('dagSvg').innerHTML = svg;
 }
 
-async function startRun(id) { if (!id) return; try { await api('/api/tasks/' + id + '/start', { method: 'POST' }); toast('已调度', 'ok'); setTimeout(() => openRun(id), 1200); } catch (e) { toast(e.message, 'err'); } }
+async function startRun(id) { if (!id) return; try { await api('/api/tasks/' + id + '/start', { method: 'POST' }); toast('已调度', 'ok'); setTimeout(() => { openRun(id); loadRuns(); }, 1200); } catch (e) { toast(e.message, 'err'); } }
+
+/* 重拆下一轮（需求②「继续执行」的另一半）：已失败/部分完成时人工推一轮。
+   闸门在后端同一套 `replan_gate` —— 这里不做前置判断，只把结论如实转述，
+   否则前端自己判一遍就又变成「两个入口两套口径」（2026-10-27 的教训）。 */
+async function replanRun(id) {
+  if (!id) return;
+  if (!confirm('对 run ' + id + ' 重拆下一轮？会真的调用 LLM 并消耗 token。')) return;
+  try {
+    var d = await api('/api/tasks/' + id + '/replan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"auto_run":true}' });
+    var g = d.gate || {};
+    if (d.created) { toast('已生成下一轮 ' + d.created, 'ok'); openRun(d.created); }
+    else toast('闸门未放行：' + (g.reason || g.kind || '未知原因'), 'err');
+    loadRuns(); loadTaskStats();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* 进入协同页的**唯一入口**（boot 里只调这一个）：先拉 Agent/轮次/模型三框，再拉历史+汇总。
+   顺序有依赖：模型下拉靠 Agent 清单判定域，所以 fillAgentSelect 必须先行。 */
+async function enterTasksPage() {
+  fillAgentSelect($('taskAgent'), true);
+  try {
+    var pool = await api('/api/tasks/pool');
+    if (pool && pool.rounds) fillRoundSelect(pool.rounds);
+  } catch (e) { fillRoundSelect(null); }
+  fillTaskModelSelect();
+  loadRuns();
+  loadTaskStats();
+}
 async function retryRun(id) { if (!id) return; try { await api('/api/tasks/' + id + '/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); toast('失败项已重置', 'ok'); setTimeout(() => openRun(id), 1200); } catch (e) { toast(e.message, 'err'); } }
 async function delRun(id) { if (!id || !confirm('删除 run ' + id + '？')) return; try { await api('/api/tasks/' + id, { method: 'DELETE' }); currentRun = null; $('runPanel').style.display = 'none'; loadRuns(); } catch (e) { toast(e.message, 'err'); } }
 

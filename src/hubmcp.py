@@ -721,7 +721,7 @@ def hub_intake(task: str, deep: bool = False, auto_deep: bool = True,
 @server.tool()
 def hub_dispatch(goal: str, agent: str = "", confirm: bool = False,
                  auto_run: bool = True, auto_rounds: bool = False,
-                 verify_kind: str = "nonempty") -> str:
+                 verify_kind: str = "nonempty", model: str = "", rounds: int = 0) -> str:
     """**全链路派发**（PT-20261027-04）：把一句目标变成 DAG → 派给各 agent 执行 →
     验收 → 若未达标**自动重拆一轮**（最多 2 轮，硬上限不可放宽）。
 
@@ -745,6 +745,12 @@ def hub_dispatch(goal: str, agent: str = "", confirm: bool = False,
             "dry_run": not confirm,
             "auto_run": bool(auto_run) and bool(confirm),
             "auto_rounds": bool(auto_rounds) and bool(confirm)}
+    # 2026-11-03（协同页四框）：与界面同一套参数。`rounds` 只在确认时落库，理由同
+    # `auto_rounds`（预览不得产生能跑的 run）；`model` 只影响拆解结果，预览无害。
+    if model:
+        body["model"] = model
+    if rounds:
+        body["rounds"] = int(rounds)
     if agent:
         body["default_agent"] = agent
     data = _post("/api/tasks/decompose", body, _timeout=120)
@@ -755,6 +761,8 @@ def hub_dispatch(goal: str, agent: str = "", confirm: bool = False,
         "dry_run": data.get("dry_run", False),
         "round": data.get("round"),
         "max_rounds": data.get("max_rounds"),
+        "rounds": data.get("rounds"),
+        "model_policy": data.get("model_policy"),
         "auto_rounds": data.get("auto_rounds"),
         "running": data.get("running"),
         "tasks": [{"id": t.get("id"), "agent": t.get("agent_id"),

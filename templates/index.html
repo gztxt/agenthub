@@ -2058,51 +2058,110 @@
             </div>
         </section>
 
-        <!-- 协同 DAG（v0.13.40 统一骨架）：① 目标输入 + 动作合成一张「新建协同」卡；
-             ② 列表卡补「操作」表头（原来是空 <th>，表头行左边 5 列有标题、最后
-             一列空白，视觉上像缺了一格）；③ 运行详情从 .panel 改 .sp-card，
-             runTitle 从 h3 移到卡头。 -->
+        <!-- 协同（2026-11-03 四框改版）：目标 / Agent / 模型 / 未完成轮次 四框一组，
+             「仅预览」走 dry_run（不落库不派活），「拆解并启动」才真跑。
+             下方依次三张卡：执行结果汇总（需求④）/ 协同历史（需求②）/ 运行详情
+             （需求③：DAG + 逐任务 组合/状态 + 轮次链 + 时间线）。
+             #runPanel 显隐只切 inline 值（.sp-card 是 flex 列，写 display:block 会错位，
+             tests/test_sys_pages_layout.py 钉着这一条）。 -->
         <section class="page sys" id="page-tasks">
             <div class="sp">
                 <div class="sp-card">
                     <div class="sp-hd">
                         <h3>新建协同</h3>
-                        <div class="sp-r"><span class="hint">Leader 拆解 · DAG 执行（SQLite 状态机，重启可恢复）</span></div>
+                        <div class="sp-r"><span class="hint">Leader 拆解 · 多 agent 混排 · 未完成自动重拆（SQLite 状态机，重启可恢复）</span></div>
                     </div>
                     <div class="sp-tools">
                         <div class="toolbar">
                             <textarea id="taskGoal" class="doc" style="min-height:64px" placeholder="复杂任务目标，例如：分别介绍 A 与 B（并行），再汇总对比"></textarea>
                         </div>
                         <div class="toolbar">
-                            <select id="taskAgent" style="max-width:240px"><option value="">自动选择执行 Agent</option></select>
+                            <select id="taskAgent" style="max-width:200px" onchange="onTaskAgentChange()"><option value="">自动选择执行 Agent</option></select>
+                            <select id="taskModel" style="max-width:280px" title="钉死模型只对模型域是 CCR 的 Agent 生效"><option value="">模型：自动（按难度 t1/t2/t3）</option></select>
+                            <select id="taskRounds" style="max-width:220px" title="未完成时最多自动重拆几轮"></select>
                             <button class="btn" id="btnDecompose" onclick="decomposeRun()">拆解并启动</button>
-                            <button class="btn ghost" onclick="loadRuns()"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新列表</button>
+                            <button class="btn ghost" id="btnPreview" onclick="previewRun()">仅预览</button>
+                            <button class="btn ghost" onclick="loadRuns();loadTaskStats()"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
                         </div>
+                        <div class="hint" id="taskPreview" style="padding-bottom:4px">未指定 Agent = 自动混排：模型由难度→档位决定。要钉死模型请先选一个 Agent。</div>
                     </div>
                 </div>
                 <div class="sp-card">
                     <div class="sp-hd">
-                        <h3>协同任务</h3>
-                        <div class="sp-r"><span class="hint">点「查看」展开该 run 的 DAG 与逐任务输出</span></div>
+                        <h3>执行结果汇总</h3>
+                        <div class="sp-r">
+                            <select id="statsDays" style="max-width:130px" onchange="loadTaskStats()">
+                                <option value="7">近 7 天</option>
+                                <option value="30" selected>近 30 天</option>
+                                <option value="0">全部</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="sp-bd" id="taskStatsVerdict"><span class="hint">加载中…</span></div>
+                    <div class="sp-grid" style="padding:0 16px 12px">
+                        <div class="sp-bd box flush tscroll" style="max-height:300px">
+                            <table><thead><tr><th>Agent</th><th>模型（实测优先）</th><th>n</th><th>成功</th><th>失败</th><th>阻塞</th><th>成功率</th><th>均耗时</th></tr></thead>
+                            <tbody id="statsCombos"></tbody></table>
+                        </div>
+                        <div class="sp-bd box flush tscroll" style="max-height:300px">
+                            <table><thead><tr><th>失败原因</th><th>n</th><th>主要 Agent</th><th>样例</th></tr></thead>
+                            <tbody id="statsFailures"></tbody></table>
+                        </div>
+                    </div>
+                    <div class="sp-bd box flush tscroll" style="max-height:200px">
+                        <table><thead><tr><th>轮次</th><th>run 数</th><th>任务数</th><th>成功</th><th>成功率</th></tr></thead>
+                        <tbody id="statsRounds"></tbody></table>
+                    </div>
+                </div>
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>协同历史</h3>
+                        <div class="sp-r"><span class="hint" id="runsCount"></span></div>
+                    </div>
+                    <div class="sp-tools">
+                        <div class="toolbar">
+                            <input id="runQ" placeholder="搜 run / 目标关键字（回车）" style="max-width:300px" onkeydown="if(event.key==='Enter'){loadRuns();}">
+                            <select id="runState" style="max-width:170px" onchange="loadRuns()">
+                                <option value="">全部状态</option>
+                                <option value="running">执行中</option>
+                                <option value="success">成功</option>
+                                <option value="failed">失败</option>
+                                <option value="partial">部分</option>
+                                <option value="pending">待跑</option>
+                                <option value="waiting">等待输入</option>
+                                <option value="awaiting_accept">待接受</option>
+                            </select>
+                            <button class="btn ghost" onclick="loadRuns()">筛选</button>
+                        </div>
                     </div>
                     <div class="sp-bd box flush tscroll">
-                        <table><thead><tr><th>Run</th><th>目标</th><th>状态</th><th>进度</th><th>创建</th><th>操作</th></tr></thead>
+                        <table><thead><tr><th>Run</th><th>目标</th><th>Agent 组合</th><th>模型</th><th>轮次</th><th>状态</th><th>进度</th><th>耗时</th><th>创建</th><th>操作</th></tr></thead>
                         <tbody id="runsBody"></tbody></table>
+                    </div>
+                    <div class="sp-tools" style="padding-top:8px">
+                        <div class="toolbar" style="margin-bottom:0"><span class="hint" id="runsMore"></span></div>
                     </div>
                 </div>
                 <div class="sp-card" id="runPanel" style="display:none">
-                    <div class="sp-hd"><h3 id="runTitle"></h3></div>
+                    <div class="sp-hd"><h3 id="runTitle"></h3><div class="sp-r"><span class="hint" id="runSummary"></span></div></div>
+                    <div class="sp-bd"><div id="runChain" class="hint"></div></div>
                     <div class="sp-bd">
                         <div id="dagSvg" class="tscroll"></div>
                     </div>
                     <div class="sp-bd box flush tscroll">
-                        <table><thead><tr><th>任务</th><th>Agent</th><th>依赖</th><th>状态</th><th>耗时</th><th>输出/错误（点击行展开）</th><th>操作</th></tr></thead>
+                        <table><thead><tr><th>任务</th><th>Agent</th><th>模型</th><th>依赖</th><th>状态</th><th>耗时</th><th>输出/错误（点击行展开）</th><th>操作</th></tr></thead>
                         <tbody id="taskBody"></tbody></table>
+                    </div>
+                    <div class="sp-bd">
+                        <details><summary class="hint">执行时间线（派发 / 升档 / 验证 / 重拆）</summary>
+                            <div id="runEvents" class="tscroll" style="max-height:240px;padding-top:8px"></div>
+                        </details>
                     </div>
                     <div class="sp-tools" style="padding-top:12px">
                         <div class="toolbar" style="margin-bottom:0">
                             <button class="btn ghost sm" onclick="startRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-play"/></svg>启动/续跑</button>
                             <button class="btn ghost sm" onclick="retryRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>重试失败项</button>
+                            <button class="btn ghost sm" onclick="replanRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>重拆下一轮</button>
                             <button class="btn ghost sm" onclick="copyAllHandoff()"><svg class="i xs" aria-hidden="true"><use href="#i-copy"/></svg>复制全部派活文本</button>
                             <button class="btn danger sm" onclick="delRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-trash"/></svg>删除</button>
                         </div>
@@ -3186,6 +3245,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=7cc80dd3"></script>
+    <script src="/static/hub.js?v=beedea22"></script>
 </body>
 </html>

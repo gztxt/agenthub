@@ -15,7 +15,7 @@
     {"status", "kind", "gaps":[{"id","detail"}…], "repairable", "detail"}
 
 【kind 与各自判据】
-    nonempty    产物去空白后非空
+    nonempty    产物去空白后非空，且不算「自述没做成」/「拒答」/「审核标签」
     json_array  产物（剥围栏后）可解析为 JSON 数组
     contains    产物包含 `expect` 子串
 
@@ -68,6 +68,38 @@ _PUNT_PATTERNS = (
 )
 _PUNT_RE = re.compile("|".join(_PUNT_PATTERNS), re.I)
 
+#: 「我把活跑了但环境不让跑」——**自述没做成**。与 `_PUNT_RE` 同族但触发面不同：
+#: `_PUNT_RE` 认的是「我没有能力，请你粘贴」；这一组认的是「本任务未执行 / 命令全被
+#: 拒绝 / 沙箱起不来」。2026-11-03 实弹：dsh 执行者回包首句就是
+#: 「本任务**未执行**：环境出现故障，工具调用指令无法运行」，带着逐条 NOT RUN 的取证，
+#: 长度足够 ⇒ `nonempty` 判 pass、整条派发以 success 收敛，而产出是「我什么都没做」。
+#: 判据只能覆盖**说法**：先去掉 markdown 强调符再匹配，否则 `**未执行**` 会漏。
+#: 方向是保守的：误判的代价是多重试一次，漏判的代价是把零产出记成成功。
+_NOT_RUN_PATTERNS = (
+    r"本任务未执行",
+    r"未执行本任务",
+    r"本任务(?:无法|未能|没能)(?:执行|完成|开始)",
+    r"(?:所有|全部)[^。，,；;\n]{0,16}(?:失败|被拒绝|无法运行|执行不了)",
+    r"工具调用(?:指令)?无法(?:运行|执行)",
+    r"(?:没有|无)\s*(?:一条|任何|一个)\s*(?:PASS|通过|实测|结论)",
+    r"sandbox\s+backend",
+)
+_NOT_RUN_RE = re.compile("|".join(_NOT_RUN_PATTERNS), re.I)
+#: 只看开头：自述没做成的人一定**先说**；埋在长报告第 3000 字的「无法执行」多半是
+#: 描述某个可选步骤，按首句判能同时保住召回与精度。
+_NOT_RUN_PREFIX = 400
+
+
+def _strip_md_prefix(text: str) -> str:
+    """去掉 markdown 强调符与**引号内的引用**再匹配。
+
+    引号那一步不是洁癖：正常报告会写「判不了的写不可判定，不写『本任务未执行』这种套话」，
+    把引号里的字当成自述就会误判。自述没做成的人不会把它放在引号里当反例引用。
+    """
+    head = text[:_NOT_RUN_PREFIX]
+    head = re.sub(r"[「『“\"]([^」』”\"]{0,120})[」』”\"]", " ", head)
+    return re.sub(r"[*_`]", "", head)
+
 #: 「整条回包只是审核标签」——免费池会路由到 content-safety 类模型，返回
 #: `User Safety: safe` 而不是正文（判例见 AGENTS.md §1 军规 4）。
 #: 2026-10-27 实弹取证：任务「只输出整数」回 `User Safety: safe`，
@@ -91,6 +123,12 @@ def _verify_nonempty(output: Optional[str], expect=None) -> Tuple[str, List[dict
         return (STATUS_FAIL,
                 [_gap("refusal", "执行者自述未执行（%r），产物不是结果" % m.group(0)[:40])],
                 True, "回包是拒答/索要输入，不是产物")
+    m2 = _NOT_RUN_RE.search(_strip_md_prefix(text))
+    if m2:
+        return (STATUS_FAIL,
+                [_gap("self_reported_not_run",
+                      "执行者自述没跑成（%r），产物是「没做成」的说明" % m2.group(0)[:40])],
+                True, "环境/权限导致未执行：换执行者或补能力后重跑，别记成成功")
     return (STATUS_PASS, [], False, "产物非空")
 
 

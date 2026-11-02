@@ -38,6 +38,8 @@ from tasks_tiers import (  # noqa: F401  —— 对外门面
     TASK_SKILL_INJECT, TASK_SKILL_MAX_CHARS, TASK_SKILL_TIMEOUT_S,
     TASK_TIMEOUT_S, MAX_CONCURRENCY, MAX_TASKS, LEADER_MAXN, LOOP_SLEEP_S, AUTO_ACCEPT,
     MAX_AUTO_RETRY, MAX_ROUNDS, WAIT_RESUME_S, MAX_WAKES,
+    # 2026-11-03 协同页四框：轮次上限与配置模型归因（纯函数，测试直测）
+    ROUNDS_CEILING, ROUND_CHOICES, clamp_rounds, error_bucket,
     set_context, budget_exceeded, set_run_budget, run_spent, run_budget_exceeded,
     format_upstream, can_accept, should_retry, escalate_target,
     retrieval_block, skill_inject_block,
@@ -59,7 +61,7 @@ from tasks_runner import (  # noqa: F401
 from tasks_dag import (  # noqa: F401
     LEADER_PROMPT, DecomposeIn, _agent_model_block, _extract_json_array,
     _model_allowed, _clamp_difficulty, _validate_dag, _create_run,
-    _allowed_models_for, _model_choices, decompose,
+    _allowed_models_for, _model_choices, _apply_pinned_model, decompose,
     SYNTH_ID, SYNTH_TASK, _leaves, ensure_synthesis,
 )
 from tasks_replan import (  # noqa: F401
@@ -183,6 +185,10 @@ CREATE TABLE IF NOT EXISTS task_runs (
     goal TEXT,
     origin TEXT NOT NULL DEFAULT 'api', -- api / replan / auto
     auto_rounds INTEGER NOT NULL DEFAULT 0,  -- 1 = 本轮跑完自动重拆（受 MAX_ROUNDS 约束）
+    -- 2026-11-03（协同页轮次框）：本轮声明的**总轮次上限**。NULL = 存量行/老调用方
+    -- ⇒ 重拆层回落 `TASK_MAX_ROUNDS`（默认 2），行为与改版前逐字一致。
+    -- 单轮 run 也存 1：那张 run 的 LEFT JOIN 自然属于它自己。
+    max_rounds INTEGER,
     child_run_id TEXT,                  -- 已重拆出的下一轮（幂等占位，防空转重拆）
     stop_reason TEXT,                   -- complete / max_rounds / same_failure / budget / unfinished
     created_at TEXT NOT NULL
@@ -198,6 +204,11 @@ def ensure_schema():
     for col, decl in _TASK_COLUMNS:
         if col not in have:
             db.execute("ALTER TABLE tasks ADD COLUMN %s %s" % (col, decl))
+    # 2026-11-03：`task_runs.max_rounds` 同样幂等补列。存量库上 `CREATE TABLE IF NOT EXISTS`
+    # 不会改已存在表，不补这一步新列就永远不存在 ⇒ 新建 run 的轮次上限落不了库。
+    rcols = {r["name"] for r in db.query("PRAGMA table_info(task_runs)")}
+    if "max_rounds" not in rcols:
+        db.execute("ALTER TABLE task_runs ADD COLUMN max_rounds INTEGER")
 
 
 class RetryIn(BaseModel):
@@ -228,6 +239,11 @@ async def dispatch_pool():
     status = registry.adapter_status()
     return {"ids": registry.dispatchable_ids(), "agents": status,
             "tiers": tierlib.parse_tiers(),
+            # 2026-11-03：轮次档位与硬上限的**唯一真值**（前端下拉只渲染这份，
+            # 不另存 [1,2,3,5]，否则后端调上限时前端仍挂旧档）。
+            "rounds": {"choices": list(_tiers.ROUND_CHOICES),
+                       "ceiling": _tiers.ROUNDS_CEILING,
+                       "default": 1},
             "escalate": {"models": _tiers._csv_env("TASK_ESCALATE_MODELS"),
                          "ladder": _tiers._csv_env("TASK_ESCALATE_LADDER", "claude-code,codex")}}
 
@@ -321,30 +337,265 @@ async def dispatch_tiers():
             "resolved": resolved, "audit": audit, "verdict": verdict}
 
 
+#: run 聚合的**唯一 SQL 口径**（列表 / 汇总 / 筛选三处共用）。
+#: 拆成常量而不是写三遍：三份 GROUP BY 各自漂移过一次（「列表说失败、筛选说部分」）。
+#: `agents` / `models` 用 GROUP_CONCAT 去重后供「按组合筛」用；`COALESCE(model, model_planned,
+#: model_choice)` 的优先级是**观测值优先**（`model` 是回包真实模型，2026-10-29 网关改写
+#: 的证据就在这个差异里）。
+_RUN_AGG_SQL = """
+    SELECT t.run_id, MIN(t.trace_id) trace_id, MAX(t.goal) goal, COUNT(*) total,
+           SUM(CASE WHEN t.status='success' THEN 1 ELSE 0 END) success,
+           SUM(CASE WHEN t.status='failed' THEN 1 ELSE 0 END) failed,
+           SUM(CASE WHEN t.status='blocked' THEN 1 ELSE 0 END) blocked,
+           SUM(CASE WHEN t.status='running' THEN 1 ELSE 0 END) running,
+           SUM(CASE WHEN t.status='pending' THEN 1 ELSE 0 END) pending,
+           SUM(CASE WHEN t.status IN ('waiting_input','waiting_approval','paused')
+                    THEN 1 ELSE 0 END) waiting,
+           SUM(CASE WHEN t.status='submitted' THEN 1 ELSE 0 END) submitted,
+           MIN(t.created_at) created_at, MAX(t.finished_at) finished_at,
+           MAX(COALESCE(r.round,1)) round, MAX(r.parent_run_id) parent_run_id,
+           MAX(r.child_run_id) child_run_id, MAX(r.stop_reason) stop_reason,
+           MAX(r.max_rounds) max_rounds, MAX(r.auto_rounds) auto_rounds,
+           GROUP_CONCAT(DISTINCT t.agent_id) agents,
+           GROUP_CONCAT(DISTINCT COALESCE(NULLIF(t.model,''), NULLIF(t.model_planned,''),
+                                          NULLIF(t.model_choice,''), '')) models,
+           COALESCE(SUM(t.duration_ms),0) duration_ms,
+           COALESCE(SUM(t.spent_tokens),0) tokens,
+           MAX(t.updated_at) updated_at
+    FROM tasks t LEFT JOIN task_runs r ON r.run_id = t.run_id
+    GROUP BY t.run_id
+"""
+
+#: run 状态判定（唯一定义处，同 `_RUN_AGG_SQL`）。
+_RUN_STATE_SQL = """CASE WHEN a.running > 0 THEN 'running'
+      WHEN a.success = a.total THEN 'success'
+      WHEN a.submitted > 0 THEN 'awaiting_accept'
+      WHEN a.waiting > 0 THEN 'waiting'
+      WHEN a.failed > 0 AND a.pending = 0 AND a.running = 0 THEN 'failed'
+      WHEN a.pending = a.total THEN 'pending'
+      ELSE 'partial' END"""
+
+
 @router.get("/api/tasks/runs")
-async def list_runs(limit: int = Query(default=20, le=100)):
-    rows = db.query("""
-        SELECT t.run_id, MIN(t.trace_id) trace_id, MAX(t.goal) goal, COUNT(*) total,
-               SUM(CASE WHEN t.status='success' THEN 1 ELSE 0 END) success,
-               SUM(CASE WHEN t.status='failed' THEN 1 ELSE 0 END) failed,
-               SUM(CASE WHEN t.status='running' THEN 1 ELSE 0 END) running,
-               SUM(CASE WHEN t.status='pending' THEN 1 ELSE 0 END) pending,
-               SUM(CASE WHEN t.status IN ('waiting_input','waiting_approval','paused')
-                        THEN 1 ELSE 0 END) waiting,
-               SUM(CASE WHEN t.status='submitted' THEN 1 ELSE 0 END) submitted,
-               MIN(t.created_at) created_at, MAX(t.finished_at) finished_at,
-               MAX(COALESCE(r.round,1)) round, MAX(r.parent_run_id) parent_run_id,
-               MAX(r.child_run_id) child_run_id, MAX(r.stop_reason) stop_reason
-        FROM tasks t LEFT JOIN task_runs r ON r.run_id = t.run_id
-        GROUP BY t.run_id ORDER BY created_at DESC LIMIT ?""", (limit,))
-    for r in rows:
-        r["state"] = ("running" if r["running"] else
-                      "success" if r["success"] == r["total"] else
-                      "awaiting_accept" if r["submitted"] else
-                      "waiting" if r["waiting"] else
-                      "failed" if r["failed"] and r["pending"] == r["running"] == 0 else
-                      "pending" if r["pending"] == r["total"] else "partial")
-    return {"runs": rows}
+async def list_runs(limit: int = Query(default=20, ge=1, le=100),
+                    offset: int = Query(default=0, ge=0),
+                    q: str = Query(default="", max_length=120),
+                    state: str = Query(default="", max_length=24),
+                    agent: str = Query(default="", max_length=64),
+                    model: str = Query(default="", max_length=120),
+                    days: int = Query(default=0, ge=0, le=3650)):
+    """协同历史（2026-11-03）：搜索 / 状态 / agent / 模型 / 时间窗 / 分页。
+
+    为何改成 CTE 两层：`state` 是聚合出来的派生列，SQLite 不允许在 WHERE 里引用 SELECT 别名；
+    原实现是在 Python 里逐行补 `state` 后直接返回 20 条——那样「按状态筛」只能筛前 20 条，
+    等于给了个只能看到最近 20 条的筛子。现在过滤与分页都在 SQL 里做，`total` 是同口径计数。
+    """
+    where, args = [], []
+    if q.strip():
+        where.append("(run_id LIKE ? OR goal LIKE ?)")
+        like = "%" + q.strip() + "%"
+        args += [like, like]
+    if state:
+        where.append("state = ?")
+        args.append(state)
+    if agent.strip():
+        where.append("COALESCE(agents,'') LIKE ?")
+        args.append("%" + agent.strip() + "%")
+    if model.strip():
+        where.append("COALESCE(models,'') LIKE ?")
+        args.append("%" + model.strip() + "%")
+    if days:
+        where.append("created_at >= ?")
+        args.append(_days_ago(days))
+    w = (" WHERE " + " AND ".join(where)) if where else ""
+    cte = ("WITH a AS (%s), st AS (SELECT a.*, %s AS state FROM a)" % (_RUN_AGG_SQL, _RUN_STATE_SQL))
+    total = db.query(cte + " SELECT COUNT(*) c FROM st" + w, tuple(args))[0]["c"]
+    rows = db.query(cte + " SELECT * FROM st" + w +
+                    " ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                    tuple(args) + (limit, offset))
+    return {"runs": rows, "total": total, "limit": limit, "offset": offset,
+            "has_more": offset + len(rows) < total,
+            "filters": {"q": q, "state": state, "agent": agent, "model": model, "days": days}}
+
+
+def _days_ago(days: int) -> str:
+    """**UTC** 的 `days` 天前，与 `tasks.created_at`（`datetime.now(timezone.utc).isoformat()`）
+    同口径、可字符串比大小。
+
+    2026-11-03 实盘缺陷（不是隐患）：初版用了 `datetime.now()`（本地无时区），
+    而落库值是 `...+00:00` 的 UTC ⇒ 两者相差 8 小时，窗口边界上的任务会被错判进出。
+    当时实盘看着“对”只是碰巧（本地比 UTC 快 8 小时，边界误差落在没人看的那一侧）；
+    不能用“数字对得上”当通过。
+    """
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(days=int(days))).replace(
+        microsecond=0).isoformat()
+
+
+@router.get("/api/tasks/stats")
+async def task_stats(days: int = Query(default=30, ge=0, le=3650),
+                     top: int = Query(default=5, ge=1, le=20)):
+    """执行结果汇总（2026-11-03）：「哪套 agent×模型 真能跑成、跑不成是因为什么」。
+
+    三块，每块都带**样本量**：没有 n 的比率不许上屏（本仓假绿判例反复昭昭）。
+      · summary  —— run 级分布 / 成功率 / 耗时 / token；
+      · combos   —— agent × 模型（观测优先）的成败、重试、升档、均耗时；
+      · failures —— 失败原因归因桶（`error_bucket`）+ 每个桶的代表 agent 与样例。
+    样本不足 10 条时 `verdict` 明写「样本不足」，不拿 3 条样本算百分比当结论。
+    """
+    since = _days_ago(days) if days else ""
+
+    def _win(col: str = "created_at") -> str:
+        """时间窗子句（`col` 供 JOIN 时加表别名）；空窗返回空串 —— 不拼半截 WHERE。"""
+        return (" WHERE " + col + " >= ?") if since else ""
+
+    def _win_and(col: str = "created_at") -> str:
+        return (" AND " + col + " >= ?") if since else ""
+
+    targs = (since,) if since else ()
+
+    # 时间窗必须与任务侧**同一个**：初版漏了这一句，于是 days=7 时「run 15 个」与
+    # 「轮次表 14 个 run」同时上屏（同一份数据的两个窗口，2026-11-03 实盘）。
+    run_rows = db.query(
+        "WITH a AS (%s), st AS (SELECT a.*, %s AS state FROM a)"
+        " SELECT state, COUNT(*) n FROM st" % (_RUN_AGG_SQL, _RUN_STATE_SQL)
+        + _win() + " GROUP BY state", targs)
+    state_counts = {r["state"]: int(r["n"] or 0) for r in run_rows}
+    runs_total = sum(state_counts.values())
+    ok = state_counts.get("success", 0)
+
+    agg = db.query(
+        "SELECT COUNT(*) n,"
+        " SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) ok,"
+        " SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed,"
+        " SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) blocked,"
+        " SUM(CASE WHEN COALESCE(attempts,0)>0 THEN 1 ELSE 0 END) retried,"
+        " COALESCE(SUM(duration_ms),0) ms, COALESCE(SUM(spent_tokens),0) tokens,"
+        " AVG(duration_ms) avg_ms"
+        " FROM tasks" + _win(), targs)[0]
+    n = int(agg["n"] or 0)
+    # 中位数：SQLite 没有 median，取排序后两条中间值（偶数取平均）。样本少时同一份算法。
+    dur = [r["duration_ms"] for r in db.query(
+        "SELECT duration_ms FROM tasks WHERE duration_ms IS NOT NULL"
+        + _win_and() + " ORDER BY duration_ms", targs)]
+    p50 = None
+    if dur:
+        mid = len(dur) // 2
+        p50 = int(dur[mid]) if len(dur) % 2 else int((dur[mid - 1] + dur[mid]) / 2)
+
+    combos = db.query(
+        "SELECT agent_id,"
+        " COALESCE(NULLIF(model,''),NULLIF(model_planned,''),NULLIF(model_choice,''),'')"
+        "   AS model_eff, COUNT(*) n,"
+        " SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) ok,"
+        " SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed,"
+        " SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) blocked,"
+        " SUM(CASE WHEN COALESCE(attempts,0)>0 THEN 1 ELSE 0 END) retried,"
+        " SUM(CASE WHEN COALESCE(escalated_from_agent,'')<>''"
+        "           OR COALESCE(escalated_from_model,'')<>'' THEN 1 ELSE 0 END) escalated,"
+        " COALESCE(SUM(duration_ms),0) ms, COALESCE(SUM(spent_tokens),0) tokens,"
+        " AVG(duration_ms) avg_ms"
+        " FROM tasks" + _win() + " GROUP BY agent_id, model_eff ORDER BY n DESC", targs)
+    for c in combos:
+        c["model_eff"] = c["model_eff"] or "(未指定)"
+        c["rate"] = round(int(c["ok"] or 0) / int(c["n"] or 1), 3)
+        c["avg_ms"] = int(c["avg_ms"] or 0)
+
+    fail_rows = db.query("SELECT agent_id, error FROM tasks WHERE status IN ('failed','blocked')"
+                         + _win_and(), targs)
+    buckets: dict = {}
+    for r in fail_rows:
+        b = _tiers.error_bucket(r["error"])
+        e = buckets.setdefault(b, {"bucket": b, "n": 0, "agents": {}, "sample": ""})
+        e["n"] += 1
+        e["agents"][r["agent_id"] or "-"] = e["agents"].get(r["agent_id"] or "-", 0) + 1
+        if not e["sample"]:
+            e["sample"] = str(r["error"] or "")[:160]
+    failures = sorted(buckets.values(), key=lambda x: -x["n"])[:top]
+    for f in failures:
+        f["agents"] = sorted(f["agents"].items(), key=lambda kv: -kv[1])[:3]
+
+    rounds = db.query(
+        "SELECT COALESCE(r.round,1) round, COUNT(DISTINCT t.run_id) runs,"
+        " COUNT(*) n, SUM(CASE WHEN t.status='success' THEN 1 ELSE 0 END) ok"
+        " FROM tasks t LEFT JOIN task_runs r ON r.run_id=t.run_id" + _win("t.created_at") +
+        # 必须 GROUP BY **表达式**，不能写 `GROUP BY round`：SQLite 同名时会优先绑到
+        # 源列 `r.round`，于是「无 task_runs 行的存量 run（NULL）」会与「round=1」分成
+        # 两组，两行都经 COALESCE 显示成「第 1 轮」（2026-11-03 实盘：1 组 3 条 / 1 组 35 条）。
+        " GROUP BY COALESCE(r.round,1) ORDER BY COALESCE(r.round,1)", targs)
+
+    verdict = "样本不足（%d 条任务）：不给结论，继续观察" % n if n < 10 else (
+        "成功率 %.1f%%（%d/%d 个 run 全绿）；%d 条任务里 %d 条失败"
+        % (100.0 * ok / runs_total if runs_total else 0.0, ok, runs_total,
+           n, int(agg["failed"] or 0)))
+    return {"ok": True, "days": days, "window_from": since or None,
+            "summary": {"runs": runs_total, "runs_success": ok,
+                        "runs_rate": round(ok / runs_total, 3) if runs_total else None,
+                        "states": state_counts, "tasks": n,
+                        "success": int(agg["ok"] or 0), "failed": int(agg["failed"] or 0),
+                        "blocked": int(agg["blocked"] or 0),
+                        "retried": int(agg["retried"] or 0),
+                        "duration_ms": int(agg["ms"] or 0), "p50_ms": p50,
+                        "tokens": int(agg["tokens"] or 0)},
+            "combos": combos, "failures": failures, "rounds": rounds,
+            "verdict": verdict}
+
+
+@router.get("/api/tasks/{run_id}/events")
+async def run_events(run_id: str, limit: int = Query(default=200, ge=1, le=1000)):
+    """run 的执行时间线（派发/升档/验证/重拆）。
+
+    数据源是 `profile_events`：`_create_run` 把 `trace_id` 直接写成 `run_id`，
+    所以这里零迁移就能取到整条链——新建一张事件表反而会变成第二份同义记录。
+    """
+    rows = db.query("SELECT id,source,subject,status,duration_ms,detail,created_at"
+                    " FROM profile_events WHERE trace_id=? ORDER BY id DESC LIMIT ?",
+                    (run_id, limit))
+    return {"run_id": run_id, "events": rows}
+
+
+@router.get("/api/tasks/{run_id}/chain")
+async def run_chain(run_id: str):
+    """轮次链：往上游找 parent，往下游找 child，按 round 排序返回每一轮的汇总。
+
+    用于「继续执行」：看到第 N 轮的 `stop_reason`（`max_rounds`/`same_failure`/`complete`）
+    才知道下一步该点「续跑」还是「重拆」。链深度硬上限 10：环/脏数据不得把接口拖死。
+    """
+    seen, order = set(), []
+
+    def _node(rid: str):
+        r = db.query("SELECT * FROM task_runs WHERE run_id=?", (rid,))
+        meta = dict(r[0]) if r else {"run_id": rid, "round": 1, "auto_rounds": 0,
+                                     "parent_run_id": None, "child_run_id": None,
+                                     "stop_reason": None, "max_rounds": None,
+                                     "goal": None, "created_at": None}
+        agg = db.query("SELECT COUNT(*) total,"
+                       " SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) success,"
+                       " SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed,"
+                       " SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) blocked"
+                       " FROM tasks WHERE run_id=?", (rid,))
+        a = dict(agg[0]) if agg else {}
+        meta.update({k: int(v or 0) for k, v in a.items()})
+        return meta
+
+    cur, guard = run_id, 0
+    while cur and cur not in seen and guard < 10:
+        seen.add(cur)
+        node = _node(cur)
+        order.append(node)
+        cur = node.get("parent_run_id")
+        guard += 1
+    order.reverse()
+    cur, guard = (order[-1].get("child_run_id") if order else None), 0
+    while cur and cur not in seen and guard < 10:
+        seen.add(cur)
+        node = _node(cur)
+        order.append(node)
+        cur = node.get("child_run_id")
+        guard += 1
+    order.sort(key=lambda x: (x.get("round") or 1, x.get("created_at") or ""))
+    return {"run_id": run_id, "chain": order, "rounds": len(order),
+            "ceiling": _tiers.ROUNDS_CEILING}
 
 
 @router.get("/api/tasks/{run_id}")
@@ -355,7 +606,11 @@ async def get_run(run_id: str):
     for r in rows:
         r["deps"] = json.loads(r["deps"] or "[]")
     return {"run_id": run_id, "goal": rows[0]["goal"], "tasks": rows,
-            "run": _replan.run_meta(run_id), "max_rounds": _tiers.MAX_ROUNDS}
+            "run": _replan.run_meta(run_id),
+            # 界面上「第 N/M 轮」用这个 M：run 落库值优先，存量 run 回落全局默认。
+            "max_rounds": (_replan.run_meta(run_id).get("max_rounds")
+                           or _tiers.MAX_ROUNDS),
+            "rounds_ceiling": _tiers.ROUNDS_CEILING}
 
 
 @router.post("/api/tasks/{run_id}/start")

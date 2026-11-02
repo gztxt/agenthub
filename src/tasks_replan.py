@@ -100,8 +100,11 @@ def run_meta(run_id: str) -> dict:
     rows = db.query("SELECT * FROM task_runs WHERE run_id=?", (run_id,))
     if rows:
         return dict(rows[0])
-    return {"run_id": run_id, "parent_run_id": None, "round": 1, "auto_rounds": 0,
-            "child_run_id": None, "stop_reason": None, "origin": "api"}
+    default = {"run_id": run_id, "parent_run_id": None, "round": 1, "auto_rounds": 0,
+               "child_run_id": None, "stop_reason": None, "origin": "api",
+               # 2026-11-03：存量行没有这一列值 ⇒ NULL；重拆层回落到 `MAX_ROUNDS`。
+               "max_rounds": None}
+    return default
 
 
 def _ensure_run_row(run_id: str) -> dict:
@@ -147,10 +150,13 @@ async def _replan_once(run_id: str, auto: bool = False,
     if not rows:
         raise HTTPException(404, "run not found")
     cap = _tiers.MAX_ROUNDS
-    if max_rounds is not None:
-        # 只允许**收紧**：调用方传 5 也不能突破用户裁定的 2 轮硬上限。
+    # 2026-11-03：轮次优先级 = 调用方显式 > 本 run 落库值（界面轮次框）> `MAX_ROUNDS`，
+    # 三者一律夹到 `ROUNDS_CEILING`（默认 5）。旧口径「只能收紧到 2」已由用户裁定改判，
+    # 但收紧方向仍保留：调用方传 1 就是关掉自动重拆，不会被落库值反向放宽。
+    stated = max_rounds if max_rounds is not None else meta.get("max_rounds")
+    if stated is not None:
         try:
-            cap = max(1, min(int(max_rounds), _tiers.MAX_ROUNDS))
+            cap = max(1, min(int(stated), _tiers.ROUNDS_CEILING))
         except (TypeError, ValueError):
             cap = _tiers.MAX_ROUNDS
     parent_rows = None
@@ -213,7 +219,10 @@ async def _replan_once(run_id: str, auto: bool = False,
                 budget_ms=first.get("budget_ms"), budget_tokens=first.get("budget_tokens"),
                 parent_run_id=run_id, origin=("auto" if auto else "replan"),
                 auto_rounds=bool(meta.get("auto_rounds")),
-                round_no=int(meta.get("round") or 1) + 1, run_id=child_id)
+                round_no=int(meta.get("round") or 1) + 1, run_id=child_id,
+                # 子 run 继承父 run 声明的轮次上限：否则界面选的 3 轮到第二轮就掉回
+                # `MAX_ROUNDS`，表现为「选了三轮只跑两轮」。
+                max_rounds=(meta.get("max_rounds") or cap))
     if auto:
         _runner._start_runner(child_id)
     db.log_profile_event("task_replan", "-", "replan", None, trace_id=run_id,

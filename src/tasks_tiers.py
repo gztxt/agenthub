@@ -10,6 +10,7 @@
 """
 import asyncio
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -96,6 +97,25 @@ MAX_AUTO_RETRY = int(os.getenv("TASK_AUTO_RETRY", "1"))
 #: 连续两轮 FAIL 签名相同或 diff 无变化 ⇒ 立即升人会签（见 `replan_gate`）。
 MAX_ROUNDS = int(os.getenv("TASK_MAX_ROUNDS", "2"))
 
+#: 2026-11-03 用户裁定（协同页四框）：轮次改成**界面可选的预算旋钮**，默认 1 = 不自动重拆，
+#: 可选 2/3/5。因此 `MAX_ROUNDS` 的语义收窄为「调用方没给值时的默认值」，真正的硬闸是
+#: `ROUNDS_CEILING` —— 传 5 允许，传 50 夹到 5（轮次是预算而不是契约，超了截断不报错，
+#: 与 `budget_ms` 同口径）。为什么不直接把 MAX_ROUNDS 改成 5：存量调用方（MCP 的
+#: `hub_replan`、老脚本）拿不到新字段时行为必须**逐字不变**，否则一次界面改版会悄悄
+#: 给所有老调用方多跑三轮。
+ROUNDS_CEILING = int(os.getenv("TASK_ROUNDS_CEILING", "5"))
+#: 界面下拉的三档（+ 默认 1）。只做提示，不做校验 —— 校验一律走 `clamp_rounds`。
+ROUND_CHOICES = (1, 2, 3, 5)
+
+
+def clamp_rounds(value: Any, default: int = 1) -> int:
+    """界面/调用方给的轮次 → `1..ROUNDS_CEILING`。读不出来用 `default`（不猜 0）。"""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = int(default)
+    return max(1, min(ROUNDS_CEILING, n))
+
 
 _ctx: Dict[str, Any] = {}
 
@@ -105,6 +125,45 @@ def set_context(chat_fn=None, agent_ids_fn=None):
         _ctx["chat_fn"] = chat_fn
     if agent_ids_fn:
         _ctx["agent_ids_fn"] = agent_ids_fn
+
+
+#: 失败原因归因规则（2026-11-03，协同页「为什么失败」栏）。顺序即优先级：
+#: 先认「模型/凭据/限流」这类**能立刻行动**的原因，再退到 exit code 与原文前 40 字。
+#: 为什么不在 SQL 里做：SQLite 的 LOWER/INSTR 组合表达不出这几档优先级，写进 SQL 就是
+#: 一份永远改不动的大字符串；而这是纯函数，能 L0 直测（`tests/test_task_stats_l0.py`）。
+_ERROR_BUCKETS = (
+    ("模型不在册", r"unrecognized_model|unknown model|model_not_found|invalid model"
+     r"|不支持该模型"),
+    ("限流/配额", r"rate.?limit|429|too many requests|quota"),
+    ("超时", r"timeout|timed out|超时|deadline"),
+    ("预算耗尽", r"预算|budget"),
+    ("上游失败(传导)", r"^上游失败$"),
+    ("鉴权/凭据", r"\b401\b|\b403\b|unauthor|forbidden|api[ _-]?key|credential|未配置口令"),
+    ("验证未过", r"verifier|verify|产物"),
+    ("空产物", r"empty|为空|nonempty"),
+)
+
+
+def error_bucket(err: Any) -> str:
+    """失败原文 → 可统计的归因桶（纯函数）。
+
+    没命中任何规则时返回 `exit:<code>`（有退出码）或原文前 40 字 —— **不返回“其他”**：
+    把 20 种不同失败全归成“其他”，汇总表就只是一块好看的空白。
+    """
+    s = str(err or "").strip()
+    if not s:
+        return "无错误信息"
+    low = s.lower()
+    for name, pat in _ERROR_BUCKETS:
+        if re.search(pat, low, re.I):
+            return name
+    m = re.match(r"exit:(\d+)", low)
+    if m:
+        return "exit:%s" % m.group(1)
+    m = re.search(r"\[([a-z0-9_-]+):([a-z0-9_-]+)\]", low)
+    if m:
+        return "%s:%s" % (m.group(1), m.group(2))
+    return s.replace("\n", " ")[:40]
 
 
 def _now() -> str:

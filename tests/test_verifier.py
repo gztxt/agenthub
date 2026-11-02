@@ -189,3 +189,43 @@ class TestVerdictShape(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestSelfReportedNotRun(unittest.TestCase):
+    """2026-11-03 实弹：dsh 回「本任务**未执行**…」+ 逐条 NOT RUN 取证 ⇒ 旧 nonempty 判 pass。
+
+    判据只能覆盖说法：全角/半角引号、markdown 强调符都要能穿过去。方向保守——
+    误判代价是多跑一次，漏判代价是零产出被记成成功。
+    """
+
+    def _v(self, text):
+        return verifier.verify("nonempty", output=text)
+
+    def test_dsh_style_lead_is_fail(self):
+        out = ("本任务**未执行**：环境出现故障，工具调用指令无法运行。取证文件已经写入，"
+               "内容只是阻塞证据。" + "填充" * 200)
+        r = self._v(out)
+        self.assertEqual(r["status"], verifier.STATUS_FAIL)
+        self.assertEqual(r["gaps"][0]["id"], "self_reported_not_run")
+
+    def test_sandbox_backend_message_is_fail(self):
+        self.assertEqual(self._v("sandbox mode \"workspace-write\" is requested but no "
+                                 "sandbox backend is usable on this host")["status"],
+                         verifier.STATUS_FAIL)
+
+    def test_all_commands_refused_is_fail(self):
+        self.assertEqual(self._v("所有 bash 命令都被拒绝，三次同样报错")["status"],
+                         verifier.STATUS_FAIL)
+
+    def test_no_single_pass_is_fail(self):
+        out = "结论：两条断言都不可判定（INCONCLUSIVE），没有一条 PASS。" + "说明" * 100
+        self.assertEqual(self._v(out)["status"], verifier.STATUS_FAIL)
+
+    def test_legit_report_mentioning_words_late_still_passes(self):
+        out = ("核验完成：10 个 th、10 个 td，字段齐全。结论 PASS。\n" + "细节\n" * 300 +
+               "若环境缺少沙箱后端则该步骤无法运行，本次不涉及。")
+        r = self._v(out)
+        self.assertEqual(r["status"], verifier.STATUS_PASS, r)
+
+    def test_hedge_in_first_line_is_not_misjudged(self):
+        out = "判据逐条写 PASS/FAIL，判不了的写不可判定，不写「本任务未执行」这种套话。"
+        self.assertEqual(self._v(out)["status"], verifier.STATUS_PASS)

@@ -60,8 +60,11 @@ class TestHandoffStatic(unittest.TestCase):
         self.assertNotIn("api('/api/bot", self.js, "禁止越权直调 api/bot")
 
     def test_template_header_and_button(self):
+        # 2026-11-03：窗口从「page-tasks 后固定 6000 字符」改成 **到 `</section>` 为止**。
+        # 四框改版给页面加了两张卡（汇总 / 历史），总长越过 6000，旧写法把详情卡的按钮
+        # 切到窗口外 —— 判的是「入口在不在这一页」，不是「在不在前 6000 字符里」。
         i = self.html.index('id="page-tasks"')
-        seg = self.html[i:i + 6000]
+        seg = self.html[i:self.html.index("</section>", i)]
         self.assertIn("<th>操作</th>", seg, "表头没加列 ⇒ 行内按钮会错位到最后一列外")
         self.assertIn("copyAllHandoff()", seg, "缺「复制全部派活文本」入口")
         self.assertIn('id="i-copy"', self.html, "图标不在 sprite 里 ⇒ 按钮空白")

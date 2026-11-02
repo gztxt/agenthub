@@ -37,6 +37,15 @@ class DecomposeIn(BaseModel):
     # 只拆不落库：给「先看拆解再决定跑不跑」用（MCP hub_dispatch 的默认路径）。
     # 不做的话每次预览都会在 tasks 表里留一条没人要的 run，把真 run 顶出列表。
     dry_run: bool = False
+    # ── 2026-11-03 用户裁定（协同页四框）────────────────────────────────
+    # 模型框：非空 = **钉死整条 run** 用这个模型（`tier="explicit"`）；空 = 沿用
+    # difficulty→tiercfg 的自动档。只对模型域是 CCR 的 agent 生效，其余任务跳过并
+    # 在返回的 `model_policy.skipped_agents` 里点名（塞 CCR ID 给 codebuddy/cursor
+    # 必报 unknown model，静默降级会把「选了没生效」藏起来）。
+    model: Optional[str] = Field(default=None, max_length=200)
+    # 轮次框：1 = 不自动重拆（默认），2/3/5 = 未达标自动重拆，代码夹到 `ROUNDS_CEILING`。
+    # `None` 时回落到老开关 `auto_rounds`（true→2，false→1），保证 MCP 老路径逐字不变。
+    rounds: Optional[int] = None
 
 
 LEADER_PROMPT = """你是任务编排器。把用户目标拆解为子任务 DAG，只输出 JSON 数组（不要围栏、不要解释）。
@@ -209,7 +218,8 @@ def _create_run(goal: str, items: List[dict], *, verify_kind: str,
                 budget_ms: Optional[int], budget_tokens: Optional[int],
                 parent_run_id: Optional[str] = None, origin: str = "api",
                 auto_rounds: bool = False, round_no: int = 1,
-                run_id: Optional[str] = None) -> str:
+                run_id: Optional[str] = None,
+                max_rounds: Optional[int] = None) -> str:
     """落一条 run（tasks 行 + task_runs 行）。decompose 与 replan 共用，
     避免两处 INSERT 各自长出一套字段（那是最典型的「两套口径」起点）。
     `run_id` 可外部给：重拆要**先占位再落库**，否则并发两次重拆会生成两条子 run。"""
@@ -226,10 +236,13 @@ def _create_run(goal: str, items: List[dict], *, verify_kind: str,
              it.get("difficulty"), it.get("model"),
              it.get("tier"), it.get("model_planned"), it.get("tier_reason"),
              it.get("agent_promoted_from") or "", now, now))
-    db.execute("INSERT INTO task_runs(run_id,parent_run_id,round,goal,origin,auto_rounds,created_at)"
-               " VALUES(?,?,?,?,?,?,?)",
+    # `max_rounds`：界面轮次框的**落库值**（2026-11-03）。存 NULL = 存量/老调用方，
+    # 重拆层回落到 `MAX_ROUNDS`，行为与改版前逐字一致（不因新列出现就多跑几轮）。
+    db.execute("INSERT INTO task_runs(run_id,parent_run_id,round,goal,origin,auto_rounds,"
+               "max_rounds,created_at) VALUES(?,?,?,?,?,?,?,?)",
                (run_id, parent_run_id, round_no, goal, origin,
-                1 if auto_rounds else 0, now))
+                1 if auto_rounds else 0,
+                (_tiers.clamp_rounds(max_rounds) if max_rounds is not None else None), now))
     return run_id
 
 
@@ -259,6 +272,51 @@ def _allowed_models_for(known_agents: set) -> Optional[Dict[str, set]]:
     except Exception:  # noqa: BLE001
         ccr = set()
     return {a: ids for a in ({"claude", "jcode"} | ccr) if a in known_agents} or None
+
+
+def _apply_pinned_model(items: List[dict], model: Optional[str],
+                        allowed_models: Optional[Dict[str, set]]) -> tuple:
+    """界面「模型」框 → 整条 run 钉死一个模型。返回 `(items, note)`。
+
+    为什么在 `_plan_tiers` **之后** 调：档位层会先按难度提升执行者（`promote_agent`），
+    钉模型必须以**最终执行者**判模型域；反过来先钉再抬，抬到 codebuddy 上就是必失败。
+
+    四条边界：
+      · 空值 ⇒ 不动（`mode=auto`，按难度→档位）；
+      · 清单取得了但 ID 不在册 ⇒ **400**（界面只列在册 ID，到这里说明调用方写错了；
+        静默降级会让用户把「没生效」当成模型太弱）；
+      · 清单取不到（`checked=False`）⇒ 判不了就不拦，只给 CCR 域 agent 钉；
+      · 模型域不是 CCR 的 agent ⇒ 跳过并点名（与 `_allowed_models_for` 同一口径）。
+    """
+    m = (model or "").strip()
+    if not m:
+        return items, {"mode": "auto",
+                       "note": "未钉死模型：按难度→档位（t1/t2/t3），失败自动升档"}
+    checked = allowed_models is not None
+    if checked:
+        allowed_ids = set().union(*allowed_models.values()) if allowed_models else set()
+        if m not in allowed_ids:
+            raise HTTPException(400, "模型 %s 不在网关清单里（界面只列在册 ID）；"
+                                     "清单取不到时不会走到这条判据" % m)
+        target = set(allowed_models.keys())
+    else:
+        target = _tiers._ccr_model_agents()
+    applied, skipped = [], []
+    for it in items:
+        if it.get("agent_id") in target:
+            it["model"] = m
+            it["tier"] = "explicit"
+            it["model_planned"] = m
+            it["tier_reason"] = "pinned:界面钉死模型"
+            applied.append(it["id"])
+        else:
+            skipped.append(it.get("agent_id") or "-")
+    note = {"mode": "pinned", "model": m, "applied": applied,
+            "skipped_agents": sorted(set(skipped)), "catalog_checked": checked}
+    note["note"] = ("已钉死 %s（%d 个任务）" % (m, len(applied)) if applied else
+                    "该模型不适用于本条 run 的 agent（%s），已跳过"
+                    % ",".join(sorted(set(skipped))))
+    return items, note
 
 
 def _model_choices(known_agents: set) -> Optional[List[str]]:
@@ -300,16 +358,27 @@ async def decompose(body: DecomposeIn):
     # 汇总节点在 try 之外补：它抛错是**我们的** bug，不该被报成「Leader 拆解失败」。
     items, synth = ensure_synthesis(items, default)
     items, tier_note = _tiers._plan_tiers(items, known)
+    # 钉死模型必须在档位层**之后**（见 `_apply_pinned_model` 文档串）：档位层会提升执行者，
+    # 先钉再抬可能把 CCR 模型 ID 抬到一个不吃它的 agent 上。
+    items, pin_note = _apply_pinned_model(items, body.model, allowed)
+    # 轮次：显式 `rounds` 优先，其次老开关 `auto_rounds`（true→2/false→1），最后默认 1。
+    rounds = _tiers.clamp_rounds(
+        body.rounds if body.rounds is not None else (2 if body.auto_rounds else 1))
+    auto_rounds = rounds >= 2
     if body.dry_run:
         return {"run_id": None, "goal": body.goal, "tasks": items, "running": False,
                 "dry_run": True, "round": 1, "synthesis": synth, "tiers": tier_note,
-                "auto_rounds": bool(body.auto_rounds), "max_rounds": _tiers.MAX_ROUNDS,
+                "model_policy": pin_note,
+                "auto_rounds": auto_rounds, "rounds": rounds, "max_rounds": rounds,
+                "round_choices": list(_tiers.ROUND_CHOICES),
                 "note": "dry_run：只拆解未落库，确认后传 dry_run=false 再调一次"}
     run_id = _create_run(body.goal, items, verify_kind=body.verify_kind,
                          budget_ms=body.budget_ms, budget_tokens=body.budget_tokens,
-                         auto_rounds=body.auto_rounds)
+                         auto_rounds=auto_rounds, max_rounds=rounds)
     if body.auto_run:
         _runner._start_runner(run_id)
     return {"run_id": run_id, "goal": body.goal, "tasks": items,
             "running": body.auto_run, "round": 1, "synthesis": synth, "tiers": tier_note,
-            "auto_rounds": bool(body.auto_rounds), "max_rounds": _tiers.MAX_ROUNDS}
+            "model_policy": pin_note,
+            "auto_rounds": auto_rounds, "rounds": rounds, "max_rounds": rounds,
+            "round_choices": list(_tiers.ROUND_CHOICES)}

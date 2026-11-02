@@ -123,7 +123,21 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.188"
+VERSION = "0.13.189"
+
+# v0.13.189（2026-11-03）：协同页四框改版 —— 参数可干预，但**统计口径比功能更容易骗人**。
+#   ① 用户裁定「轮次是预算不是契约」：`ROUNDS_CEILING=5`，`MAX_ROUNDS` 降级为「调用方没给
+#      值时的默认值」，老调用方行为逐字不变；`task_runs.max_rounds` 落库，子 run 继承父 run
+#      （否则界面选 3 轮、实际只跑 2 轮）。
+#   ② 钉模型必须在 `_plan_tiers` **之后**：分档层会 `promote_agent`，先钉再抬就把模型钉到
+#      模型域不是 CCR 的 agent 上（回 `unrecognized_model`）。清单可取而 ID 不在册 ⇒ 400，
+#      清单不可取 ⇒ 不拦（网关抖动不得阻塞施工），非 CCR 域 agent 跳过并点名。
+#   ③ 交付前三个实盘缺陷，全是「读数看着对」：`GROUP BY round` 被 SQLite 绑到源列
+#      `r.round` ⇒ NULL 与 1 分成两组、两行都显示「第 1 轮」；`_days_ago` 用本地无时区
+#      时间与落库的 `+00:00` 比大小 ⇒ 窗口边界差 8 小时，本地比 UTC 快 8 小时所以当时
+#      读数全对；stats 的 run 侧漏时间窗 ⇒ `days=7` 时「run 15」与「轮次表 14 两个窗口」
+#      同屏。修法各留一条断言，判据写成行数/相等，不写「数字看着对不对」。
+#   ④ 未闭合：页面渲染与窄屏属**端侧判据**，本机只证到接口层与静态标记。
 
 # v0.13.188（2026-11-02）：桥的监听面不再由「hub 启动那一刻上游活没活」决定。
 #   ① 病：v0.13.187 的 listen_host_for 用运行时探测判可达面，而按需拉起的 agent 常态是

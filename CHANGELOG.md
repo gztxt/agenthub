@@ -1,3 +1,53 @@
+## v0.13.189 — 协同页四框改版：模型/轮次可选 + 协同历史可筛 + 执行结果汇总
+
+> 用户 2026-11-03 裁定「按推荐跑」：模型粒度＝自动档 + 钉死可选；轮次＝默认 1、可选
+> 2/3/5、代码夹到 5；验收＝单测 + dry_run + 1 条真跑。
+
+- **病**：协同页只有「目标 + 单选 Agent + 一个按钮」。① 模型完全不可干预（全由
+  difficulty→t1/t2/t3 决定），选个便宜/强模型只能改代码；② 没有轮次旋钮，
+  `auto_rounds` 是个布尔且上限写死在 env；③ 历史固定 `limit=20`、无搜索无分页，
+  过 20 条就查不到；④ 成败只有「27/38」这种总数，问「哪套 agent×模型 能跑成、
+  跑不成是因为什么」只能自己翻库。
+- **四框**（`templates/index.html` + `static/hub/04-terminal-ws.js`）：目标 / Agent /
+  模型 / 未完成轮次。「仅预览」走 `dry_run`（不落库不派活），「拆解并启动」才真跑。
+  模型框**跟着 Agent 走**：未选 Agent 时不列具体模型并写明原因（自动混排下钉死
+  一个模型与「各用最合适的」互斥）；选了 Agent 才拉 `/api/models?agent_id=`。
+  轮次档位由后端 `/api/tasks/pool` 的 `rounds` 段下发，前端不存第二份真值。
+- **后端参数**：`DecomposeIn` 增 `model` / `rounds`；`_apply_pinned_model` 在
+  `_plan_tiers` **之后**钉（档位层会 `promote_agent`，先钉再抬可能抬到不吃 CCR ID
+  的 agent 上）。非法 ID 在清单可取时 **400**，清单取不到则不拦（P0-4 同口径）；
+  模型域不是 CCR 的 agent 跳过并点名 `skipped_agents`。
+- **轮次**：`task_runs.max_rounds`（幂等 ALTER）+ `ROUNDS_CEILING=5`。
+  `MAX_ROUNDS`（env 默认 2）语义收窄为「调用方没给值时的默认值」——老调用方拿不到
+  新字段时行为逐字不变。优先级：显式 > 落库值 > `MAX_ROUNDS`，一律夹到 5。
+- **历史**（`GET /api/tasks/runs`）：`q` / `state` / `agent` / `model` / `days` /
+  `offset` + 同口径 `total`。状态判定与汇总共用 `_RUN_AGG_SQL` / `_RUN_STATE_SQL`
+  两个常量（三处各写一份 GROUP BY 必然漂移）。
+- **汇总**（`GET /api/tasks/stats`）：summary / combos（agent×模型，**观测优先**）/
+  failures（`error_bucket` 归因桶）/ rounds，全部带样本量；任务数 <10 时 verdict 明写
+  「样本不足」。另加 `GET /api/tasks/{run}/chain`（轮次链）与 `/events`
+  （时间线读 `profile_events`，`trace_id=run_id` 是既有约定，零迁移）。
+- **三个实盘缺陷（都在本次自测里抓到，不是"以后再说"）**：
+  ① `GROUP BY round` 在 SQLite 里绑到源列 `r.round`，NULL 与 1 分成两组、两行都显示
+  「第 1 轮」（实盘 3 条 / 35 条）⇒ 改 `GROUP BY COALESCE(r.round,1)`；
+  ② `_days_ago` 用本地无时区时间与 `+00:00` 落库值比较，窗口边界差 8 小时 ⇒ 改 UTC；
+  ③ stats 的 run 侧漏了时间窗，`days=7` 时「run 15」与「轮次表 14」同屏 ⇒ 统一窗口。
+- **闸门**：`tests/test_task_stats_l0.py` 24 例（夹取/归因/钉模型/筛选/汇总/链/窗口）；
+  `test_task_rounds_l0` 的上限断言按新裁定改写（`ROUNDS_CEILING`，收紧方向不变）；
+  `test_dispatch_handoff` 的「页面窗口」由固定 6000 字符改成切到 `</section>`
+  （页面加卡后旧窗口把详情按钮切到窗口外）。
+- **真跑取证**：`run 186cafc828`（codex + claude-code 混排，钉死
+  `alibaba/deepseek-v4.1-flash`，rounds=1）3/3 成功，回包 `model` 与钉死值一致；
+  汇总里 codex 该组合 11/11（含本条 2 条），`/events` 3 条 `task_exec` 齐全。
+- **待端侧确认**（本机只能证到接口层）：页面渲染/窄屏表现需人工过一遍。
+- **本版第二次混排实跑抓到的第 4 个缺陷（同一族，不同说法）**：混排 run `58562e9e87`
+  里 dsh 执行者回包首句「本任务**未执行**：环境出现故障，工具调用指令无法运行」+
+  逐条 NOT RUN 取证 ⇒ 长度足够，`nonempty` 判 **pass**、任务记 `success`，
+  汇总里还会算进「成功组合」。修法：`verifier._NOT_RUN_RE`（只看开头 400 字、
+  先剥 markdown 强调符与**引号内引用**再匹配，避免把「不写『本任务未执行』这种套话」
+  误判），gap id `self_reported_not_run`；6 条新用例（含两条「不许误伤正常报告」）。
+  方向保守：误判只是多跑一次，漏判是把零产出记成成功。
+
 ## v0.13.188 — 桥监听面按「上游会怎么绑」判，不再按启动那一刻活没活判
 
 > 承 v0.13.187。用户 2026-11-02 报：「点击 dsh 会自动启动原生界面，且第一次无法正常启动，

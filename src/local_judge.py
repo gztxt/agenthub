@@ -86,12 +86,13 @@ ALERT_AFTER = int(os.getenv("JUDGE_ALERT_AFTER", "3"))
 DEFAULT_SCRIPT = (Path(__file__).resolve().parents[2] / "skills" / "@user_36623aa7"
                   / "jev-decision" / "scripts" / "decision.py")
 
-#: 判定后端：`remote`（CCR agnes-2.5-flash，默认）/ `ollama`（本机技能，已删除）。
+#: 判定后端：`remote`（CCR `alibaba/qwen3.8-max`，默认）/ `ollama`（本机技能，已删除）。
 #: 切换后**必须**重启 hub：模块常量在导入时定型（与其它开关一致）。
 BACKEND = os.getenv("JUDGE_BACKEND", "remote").strip().lower()
 
 #: 判定总开关。默认值按后端给：remote 默认开（用户 2026-10-23 裁定接远端模型，
-#: 2026-10-29 换成 agnes-2.5-flash），ollama 默认关（技能已删，开着只会每轮刷 script_missing 告警）。
+#: 2026-10-29 换成 agnes-2.5-flash，2026-11-02 换 `alibaba/qwen3.8-max`），ollama 默认关
+#: （技能已删，开着只会每轮刷 script_missing 告警）。
 #: `LOCAL_JUDGE=0` 仍是**一键关**——关掉后 judge() 立即抛 Unavailable，不起请求、
 #: 不计失败、不写缓存，运维看到的是「按设计关闭」而不是「判定一直坏」。
 ENABLED = os.getenv("LOCAL_JUDGE", "1" if BACKEND == "remote" else "0").strip().lower() in (

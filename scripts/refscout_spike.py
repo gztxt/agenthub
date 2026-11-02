@@ -170,7 +170,8 @@ def _llm_call(prompt: str, max_tokens: int = 2600, timeout: int = 60,
               model: str | None = None) -> str:
     base = os.environ.get("MANAGER_LLM_BASE_URL", "http://127.0.0.1:3456").rstrip("/")
     key = os.environ.get("MANAGER_LLM_API_KEY", "")
-    model = model or os.environ.get("MEMORY_LLM_MODEL", "agnes/agnes-2.5-flash")
+    # 2026-11-02：agnes 已从 CCR 清单摘除，默认跟 .env 的 MEMORY_LLM_MODEL 同步。
+    model = model or os.environ.get("MEMORY_LLM_MODEL", "alibaba/deepseek-v4.1-flash")
     if not key:
         return ""
     body = json.dumps({"model": model, "max_tokens": max_tokens,
@@ -373,7 +374,7 @@ def llm_rerank(module: str, cands: list[dict], allow_paid: bool = False) -> tupl
             except (KeyError, TypeError, ValueError):
                 continue
         if out and max(max(v["func"], v["impl"], v["design"]) for v in out.values()) >= 0.05:
-            return out, "", (model or "agnes/agnes-2.5-flash")
+            return out, "", (model or "alibaba/deepseek-v4.1-flash")
         errors.append(f"{model or 'default'}:degenerate")
     return {}, "; ".join(errors), ""
 

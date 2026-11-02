@@ -55,7 +55,7 @@ def embed_proxy_targets() -> List[Dict[str, object]]:
             url = ui
         else:
             url = None
-        if not url and p.get("panel") and not p.get("panel_auth"):
+        if not url and p.get("panel") and (not p.get("panel_auth") or p.get("bridge_secret")):
             url = p["panel"]
         if not url:
             continue
@@ -68,8 +68,11 @@ def embed_proxy_targets() -> List[Dict[str, object]]:
             continue
         # `start` 一起带上：桥的监听面要按「上游会怎么绑」判，而 2026-11-02 之前的
         # 判据只看「此刻从 LAN 连不连得上」⇒ 停着的按需 agent 一律被锁在回环。
-        out.append({"id": p["id"], "host": sp.hostname or "127.0.0.1", "port": port,
-                    "start": ui_start_for(p["id"])})
+        out.append({"id": p["id"], "name": p.get("name") or p["id"],
+                    "host": sp.hostname or "127.0.0.1", "port": port,
+                    "start": ui_start_for(p["id"]),
+                    # Basic 面板：桥拿到口令文件才肯出 embed（桥自己当门，见 embed_proxy）
+                    "secret": p.get("bridge_secret") or ""})
     return out
 
 
@@ -622,7 +625,13 @@ PROFILES: List[dict] = [
     {"id": "proxy-panel", "name": "Proxy Panel", "kind": "service",
      "detect": {"proc": [r"proxy-panel/server.py"], "systemd": ["proxy-panel"]},
      "cli": None, "port": 8083, "ui": None, "panel": "http://127.0.0.1:8083",
-     "desc": "xray 订阅/配置面板 :8083"},
+     # 2026-11-02：server.py 回 401 + `WWW-Authenticate: Basic`，而浏览器**不在跨源
+     # iframe 里弹**认证框 ⇒ 嵌页只显示上游的 `auth required`（用户报障「3208 没有登录
+     # 框、直接报错」）。`bridge_secret` 指向面板口令文件 ⇒ 桥自己做登录页并在登录后
+     # 代补 Authorization（见 src/embed_proxy.py 的 LOGIN_HTML 段），所以这里仍出 embed。
+     "panel_auth": "basic",
+     "bridge_secret": os.path.expanduser("~/.config/proxy-panel.secret"),
+     "desc": "xray 订阅/配置面板 :8083（Basic 鉴权→嵌页里由 hub 桥出登录页，一次登录）"},
     {"id": "claude-mem", "name": "claude-mem", "kind": "service",
      "detect": {"systemd": ["claude-mem"], "proc": [r"claude-mem"]},
      "cli": None, "port": 37700, "ui": None, "panel": "http://127.0.0.1:37700",
@@ -725,12 +734,15 @@ AGENT_PROBE: Dict[str, dict] = {
     "qoder":  {"aliases": ["qodercli", "qoder"], "verify_argv": ["qodercli", "-p", "{p}"]},
     # opencode：一次性非交互真请求 `opencode run -m <provider/model> "<提示>"`。
     # rt_model 必须带 **provider 前缀** 且用 CCR 的斜杠形式（本机全局配置里 provider id = ccr）；
-    # 不能沿用默认 RT_MODEL=Agnes-2.0-flash —— 那是 claude/jcode 才认的写法。
+    # 不能沿用默认 RT_MODEL —— 那是 claude/jcode 才认的裸 ID 写法。
     # 选 stable 非 :free 模型：CCR 每日 12:00 轮换会摘掉 429/403 成员，写死免费模型必然中午失效。
     # 2026-10-29 用户裁定统一 agnes-2.5-flash（deepseek 的 provider 已 402，会被网关回退到免费池）。
+    # 🚩 2026-11-02：agnes 已被上游摘掉，改 `ccr/alibaba/qwen3.8-flash`。
+    # 形状规则见 `modelcfg_shape.py` 的 `VALUE_PREFIX`：清单给**裸 ID**（`alibaba/xxx`），
+    # opencode 的 `-m` 收 `provider/model_id` ⇒ 两项拼起来才是合法值。
     "opencode": {"aliases": ["opencode", "fcc-opencode"],
                  "verify_argv": ["opencode", "run", "-m", "{m}", "{p}"],
-                 "rt_model": "ccr/agnes/agnes-2.5-flash"},
+                 "rt_model": "ccr/alibaba/qwen3.8-flash"},
 }
 
 
@@ -1031,8 +1043,10 @@ def entries_for(p: dict, status: str) -> List[dict]:
         if p.get("panel"):
             es.append({"type": "open", "label": "打开面板", "url": p["panel"],
                        "probe_port": panel_port(p)})
-            # Basic 鉴权面板不生成 embed：浏览器禁止跨源 iframe 内弹认证框，嵌入必然 401 白屏
-            if not p.get("panel_auth"):
+            # Basic 鉴权面板默认不生成 embed：浏览器禁止跨源 iframe 内弹认证框，嵌入必然 401 白屏。
+            # 例外（2026-11-02）：画像声明了 `bridge_secret` ⇒ 由 hub 的桥自出登录页并代补
+            # Authorization，此时嵌页可用（proxy-panel 即此路径）。
+            if not p.get("panel_auth") or p.get("bridge_secret"):
                 es.append({"type": "embed", "label": "嵌入会话",
                            "url": _embed_proxy_url(p["id"], p["panel"]),
                            "probe_port": panel_port(p)})

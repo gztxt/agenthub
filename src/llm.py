@@ -1,5 +1,12 @@
 """LLM 网关客户端（Anthropic 协议 → 本机 FCC:8082 /v1/messages）
 
+🚩 2026-11-02 改判倒幅：下面「2026-10-29 全部默认 agnes-2.5-flash」**已不成立**。
+agnes 三个 ID 已被上游从 CCR 清单摘掉（`GET :3456/v1/models` 实测 9 个，全 `alibaba/*`，
+`grep agnes` 零命中）；直打实测 400 `model_resolution`。后果很重：三个槽填同一个死 ID
+⇒ `complete_free()` 恒定返 `('','')`，L2 压缩 / 技能重排 / judge 全部静默降级。
+新默认值改为网关清单内在役模型，且三个槽**不同源**（不同时死）。
+**取值口径不变**：一律以 `curl 127.0.0.1:3456/v1/models` 实测为准，不凭记忆与凭证。
+
 2026-09-06 实测校正：FCC 推理入口只有 /v1/messages(Anthropic) 与
 /v1/responses(OpenAI Responses, 仅流式)，**没有** /v1/chat/completions。
 FCC→tokenrouter/qwen3.8-flash 的 tool_use 已由 PT-20260905-01 端到端验证。
@@ -7,12 +14,12 @@ FCC→tokenrouter/qwen3.8-flash 的 tool_use 已由 PT-20260905-01 端到端验�
 配置（.env）：
   MANAGER_LLM_BASE_URL   默认 http://127.0.0.1:8082
   MANAGER_LLM_API_KEY    FCC PROXY_AUTH token（Bearer）
-  MANAGER_LLM_MODEL      默认 agnes/agnes-2.5-flash
-  MEMORY_LLM_MODEL       非会话/后台工具调用的模型（默认 agnes/agnes-2.5-flash）
-  MEMORY_LLM_FALLBACK_MODEL  兜底位（默认 agnes/agnes-2.5-flash）
+  MANAGER_LLM_MODEL      默认 alibaba/qwen3.8-flash
+  MEMORY_LLM_MODEL       非会话/后台工具调用的模型（默认 alibaba/deepseek-v4.1-flash）
+  MEMORY_LLM_FALLBACK_MODEL  兜底位（默认 alibaba/qwen3.8-flash；0731 已被摘，2026-11-02 23:05）
 
-2026-10-29 用户裁定：全部默认走 agnes-2.5-flash，取消 deepseek 与免费模型池。
-代码默认值与环境变量同源，`.env` 缺失时也落到 agnes，不再回落到 `openrouter/free`。
+【历史】2026-10-29 用户裁定：全部默认走 agnes-2.5-flash，取消 deepseek 与免费模型池。
+（该裁定前提=agnes 在网关上；前提已消失 ⇒ 2026-11-02 改判，见上倒幅。原文不删。）
 
 ⚠️ 两个模型 ID 不可互串（军规：取值一律实测，凭据/ID 不凭记忆）：
   · 经 **CCR**（:3456）要写 provider 前缀 ⇒ `openrouter/openrouter/free`;
@@ -31,7 +38,7 @@ import resilience
 
 BASE_URL = os.getenv("MANAGER_LLM_BASE_URL", "http://127.0.0.1:8082").rstrip("/")
 API_KEY = os.getenv("MANAGER_LLM_API_KEY", "")
-MODEL = os.getenv("MANAGER_LLM_MODEL", "agnes/agnes-2.5-flash")
+MODEL = os.getenv("MANAGER_LLM_MODEL", "alibaba/qwen3.8-flash")
 
 
 def memory_model() -> str:
@@ -39,8 +46,9 @@ def memory_model() -> str:
 
     为什么要跟 `MODEL` 分开：`MANAGER_LLM_MODEL` 还服务**交互式**的
     `/api/tasks/decompose`（人点一下才发），而 L2 记忆压缩、后台提炼是**非会话**
-    工具调用 —— 两者可分别配模型。2026-10-29 用户裁定：**两者都默认 agnes-2.5-flash**，
-    免费池与 deepseek 一并取消（免费池会把请求路由到审核模型并返回标签）。
+    工具调用 —— 两者可分别配模型。2026-11-02 改判：后台槽用 `alibaba/deepseek-v4.1-flash`
+    （实测 844ms，压缩/重排不需要结构化 JSON）；2026-10-29 的「两者都 agnes」作废
+    ——agnes 已被上游摘掉，两个槽同填死 ID = 只试一次无兜底。
 
     读成函数而不是模块常量：`.env` 由 config 在导入后覆盖，常量会把旧值钉死；
     函数每次读当前 env，也让 L0 测试能直接改环境而不必 reload 模块。
@@ -48,23 +56,29 @@ def memory_model() -> str:
     失败语义：不可用时由 `complete_free()` 换兜底并把「不可用」显式返回，
     **不静默切成别的模型**（坏兜底比显式失败更贵）。
     """
-    return os.getenv("MEMORY_LLM_MODEL", "agnes/agnes-2.5-flash")
+    return os.getenv("MEMORY_LLM_MODEL", "alibaba/deepseek-v4.1-flash")
 
 
 def free_fallback_model() -> str:
-    """免费档的兜底位：必须是**具体** `:free`，不能再用路由器。
+    """免费档的兜底位：**必须与 `memory_model()` 不同源**，否则两槽一起死。
 
-    2026-10-29 裁定：免费池不稳定（路由到审核模型、429、空正文），
-    兜底位改为 `agnes/agnes-2.5-flash`（经 CCR 实测可用，回复正常）。
+    2026-11-02 23:05 再改：原定 `alibaba/deepseek-v4-flash-0731` 也被上游摘掉（清单 11 个 ID
+    无此条）⇒ 换 `alibaba/qwen3.8-flash`（不同厂、实测 883ms、可 chat）。
+    历史：2026-10-29 曾定为 `agnes/agnes-2.5-flash`，与主槽同值 —— 那次上游一摘
+    两个槽同时失效，`complete_free()` 连一次可用尝试都没有就返空。
     通过 MEMORY_LLM_FALLBACK_MODEL 环境变量仍可覆盖。
     """
     return os.getenv("MEMORY_LLM_FALLBACK_MODEL",
-                     "agnes/agnes-2.5-flash")
+                     "alibaba/qwen3.8-flash")
 
 
-#: 免费档输出「可用」的最小长度。低于此值按失败处理（宁可降级为机械拼接，
+#: 后台输出「可用」的最小长度。低于此值按失败处理（宁可降级为机械拼接，
 #: 也不把空串/标签写进 L2 权威文档）。
-_FREE_MIN_CHARS = 20
+#: 2026-11-02 23:06 由 20 降到 6：20 是**英文**量级，中文一个完整结论常只有 10~15 字
+#: （实测 `complete_free("把这句话压成一句：…")` 两个模型都返回 13 字合法结果，
+#: 但被 20 字门槛判成"不可用" ⇒ 回 `('', '')` = 又一条静默降级）。
+#: 空串与审核标签仍由下方前缀表挡住，长度门槛不再兼任"质量判断"。
+_FREE_MIN_CHARS = 6
 _FREE_LABEL_PREFIXES = ("user safety", "content safety", "safe", "moderation")
 
 

@@ -36,11 +36,18 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 #: 默认档位。ID 必须在 CCR 清单里（运行时逐个校验，不在就跳过并给原因）。
-#: t1 放两家：首选挂了还有备胎，且都是 flash 级；t3 只有一个，宁缺不滥。
+#: 2026-11-02 重排：原 t1 第二员 agnes 与 t2 首位 deepseek/deepseek-v4-pro、t3 唯一成员
+#: openrouter/openai/gpt-6.1-terra-pro 均已不在网关清单 ⇒ 全部换掉。现全部为在役
+#: `alibaba/*`，且三档确实不同档（快 / 中 / 强），不再是三个同源 ID。
+#: 档内成员只做「挂了换一个」，所以同档成员能力应接近；跨档才是能力阶梯。
+#: 2026-11-02 23:05 再修：t1 第二员 `deepseek-v4-flash-0731` 也被从清单摘掉（清单现 11 个 ID，
+#: 无此条）⇒ 换成 `deepseek-v4.1-flash-1017`（同族、实测 871ms）。t2 的第二员换成
+#: `deepseek-v4-pro`（清单内、比 flash 强，充当中档降级位）。
+#: ⚠ 档位顺序本身**仍无测量支撑**（只有时延实测），别把本表当成能力排序的证据。
 DEFAULT_TIERS: Dict[str, Tuple[str, ...]] = {
-    "t1": ("alibaba/deepseek-v4.1-flash", "agnes/agnes-2.5-flash"),
-    "t2": ("deepseek/deepseek-v4-pro", "alibaba/deepseek-v4-pro-0813"),
-    "t3": ("openrouter/openai/gpt-6.1-terra-pro",),
+    "t1": ("alibaba/deepseek-v4.1-flash", "alibaba/deepseek-v4.1-flash-1017"),
+    "t2": ("alibaba/qwen3.8-flash", "alibaba/deepseek-v4-pro"),
+    "t3": ("alibaba/qwen3.8-max", "alibaba/deepseek-v4-pro-0813"),
 }
 
 #: difficulty 1/2/3 → 档位。

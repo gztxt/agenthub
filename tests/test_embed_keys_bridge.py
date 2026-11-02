@@ -254,6 +254,27 @@ class TestListenHost(unittest.TestCase):
                                             start={"cmd": cmd}),
                 "0.0.0.0", cmd)
 
+    def test_unit_declared_bind_binds_wide_even_if_down(self):
+        """pi-web 是 unit 式起法（读不到命令行），必须靠 `bind` 静态声明。
+
+        反例（2026-11-02 用户报障「pi 原生界面打不开」）：hub 06:50:41 启动、pi-web
+        06:55:01 才起 ⇒ 探测假死 ⇒ 桥 :3201 绑 127.0.0.1，而前端把回环换成了当前主机
+        （`01-core-boot.js:613`）⇒ 局域网/Tailscale 一律 ERR_CONNECTION_REFUSED。
+        """
+        self._probe(False)
+        self.assertEqual(
+            embed_proxy.listen_host_for(30141, "0.0.0.0", upstream_host="127.0.0.1",
+                                        start={"unit": "pi-web", "bind": "0.0.0.0"}),
+            "0.0.0.0")
+        self.assertEqual(self._probe_calls, 0, "声明了绑定面就不该再探测（探测会给出假死）")
+
+    def test_unit_declared_bind_loopback_stays_private(self):
+        self._probe(True)
+        self.assertEqual(
+            embed_proxy.listen_host_for(30141, "0.0.0.0", upstream_host="127.0.0.1",
+                                        start={"unit": "x", "bind": "127.0.0.1"}),
+            "0.0.0.0", "bind 写回环时仍走运行时探测（活着才对 LAN 开放）")
+
     def test_loopback_only_panel_stays_private(self):
         # claude-mem / qoder：声明回环、unit 式起法读不到绑定地址、此刻连不上 ⇒ 保持回环
         self._probe(False)
@@ -276,6 +297,12 @@ class TestListenHost(unittest.TestCase):
         self.assertTrue(embed_proxy._start_binds_wide({"cmd": ["x", "--host=10.0.0.5"]}))
         self.assertFalse(embed_proxy._start_binds_wide({"cmd": ["x", "--host"]}),
                          "旗标后面没值不能当成绑定声明")
+        # bind 声明（unit 式起法唯一能静态判的面）
+        self.assertTrue(embed_proxy._start_binds_wide({"unit": "pi-web", "bind": "0.0.0.0"}))
+        self.assertTrue(embed_proxy._start_binds_wide({"unit": "x", "bind": "192.168.5.102"}))
+        self.assertTrue(embed_proxy._start_binds_wide({"unit": "x", "bind": "[::]:8080"}))
+        self.assertFalse(embed_proxy._start_binds_wide({"unit": "x", "bind": "127.0.0.1"}))
+        self.assertFalse(embed_proxy._start_binds_wide({"unit": "x", "bind": "[::1]:8080"}))
 
     def test_targets_carry_start(self):
         """桥的判据依赖 `embed_proxy_targets()` 带上起法；漏带等于退回旧判据。"""

@@ -31,9 +31,10 @@ import db               # noqa: E402
 from config import config  # noqa: E402
 import hook             # noqa: E402
 
-#: 非会话调模默认：agnes/agnes-2.5-flash（2026-10-29：免费池不稳定，改稳质模型）
-#    仍可通过 --model openrouter/free 或 MEMORY_LLM_MODEL 环境变量覆盖。
-DEFAULT_MODEL = "agnes/agnes-2.5-flash"
+#: 非会话调模默认（2026-11-02 改判：`agnes/*` 已不在 CCR 清单）。
+#    仍可通过 --model 或 MEMORY_LLM_MODEL 环境变量覆盖。
+#: ⚠️ 计费：`.env` 里 `MEMORY_LLM_MODEL`（alibaba/deepseek-v4.1-flash）与本处同一个槽。
+DEFAULT_MODEL = "alibaba/deepseek-v4.1-flash"
 
 #: 轨迹 → 样本的默认声明（可被 spec 覆盖）。
 DEFAULT_SPEC = {
@@ -47,20 +48,26 @@ DEFAULT_SPEC = {
 
 
 def assert_free_model(model) -> None:
-    """非会话调模准入检查（2026-10-29 更新）。
+    """非会话调模准入检查（2026-11-02 再次改判）。
 
     允许：
     · 免费模型：`openrouter/free`、`openrouter/openrouter/free`、`*:free`（兜底用）
-    · 稳质模型：`agnes/agnes-*`（本机 CCR 本地代理，不经过 OpenRouter 免费池）
+    · 本机 CCR 在册的 `alibaba/*`（必须带前缀；清单 = `GET :3456/v1/models`）
 
     **严禁 `openrouter/auto`**（军规第4条）：语义是「自动挑最便宜的」，最便宜可能是付费档。
+
+    🚩 2026-11-02 为何去掉 `agnes/*`：它已被上游从清单整族摘掉，直打 400
+    `model_resolution`，留着这条白名单只会让死 ID 通过准入检查、在运行时才炸。
+    ⚠️ **代价必须写明**：CCR 清单当前 `free_count = 0`，即**没有任何免费成员**,
+    所以 `alibaba/*` 是唯一可选集 —— 它走 token-plan 网关，**按军规按扣费处理**。
+    函数名保留 `assert_free_model`（调用方 2 处 + 测试），语义已在本文档修正。
     """
     m = str(model or "")
     if m in ("openrouter/free", "openrouter/openrouter/free") or m.endswith(":free"):
         return
-    if m.startswith("agnes/"):
-        return  # agnes 是本机 CCR 本地代理，不扣费
-    raise ValueError("非会话调模只允许 openrouter/free / *:free / agnes/*，得到 %r（严禁 openrouter/auto）" % model)
+    if m.startswith("alibaba/"):
+        return  # 本机 CCR 在册模型（2026-11-02 起 CCR 无免费成员）
+    raise ValueError("非会话调模只允许 openrouter/free / *:free / alibaba/*，得到 %r（严禁 openrouter/auto）" % model)
 
 
 def _sha(s: str) -> str:

@@ -27,8 +27,10 @@ sys.path.insert(0, str(_REPO))
 
 import llm  # noqa: E402
 
-#: 2026-10-29 起的唯一默认档（经 CCR 需 provider 前缀）。
-_AGNES = "agnes/agnes-2.5-flash"
+#: 2026-11-02 起的两个通用默认值（经 CCR 需 provider 前缀）。
+#: 三者必须**不同源**：同源就是「上游一摘全死」，10-29 那次就是这么死的。
+_MEM = "alibaba/deepseek-v4.1-flash"
+_FB = "alibaba/qwen3.8-flash"   # 2026-11-02 23:05：0731 已被摘，兜底换到不同厂的 qwen
 
 
 def _func_body(path: pathlib.Path, name: str) -> str:
@@ -41,11 +43,17 @@ def _func_body(path: pathlib.Path, name: str) -> str:
 
 
 class TestMemoryModelDefault(unittest.TestCase):
-    def test_default_is_agnes(self):
-        """默认值必须是 agnes-2.5-flash（经 CCR 的带前缀形态）。"""
+    def test_default_is_alive_model(self):
+        """默认值必须是在役模型（2026-11-02 改判：agnes 已摘除）。
+
+        只断言「不是 agnes」不够 —— 下次死的是别的 ID 仍会通过。
+        真正闸门是 test_defaults_not_same_model + 网关清单交叉校验（见 docs 第 12 点）。
+        """
         old = os.environ.pop("MEMORY_LLM_MODEL", None)
         try:
-            self.assertEqual(llm.memory_model(), _AGNES)
+            got = llm.memory_model()
+            self.assertEqual(got, _MEM)
+            self.assertTrue(got.startswith("alibaba/"), f"必须带网关 provider 前缀: {got}")
         finally:
             if old is not None:
                 os.environ["MEMORY_LLM_MODEL"] = old
@@ -68,8 +76,8 @@ class TestMemoryModelDefault(unittest.TestCase):
         old_mgr = os.environ.get("MANAGER_LLM_MODEL")
         try:
             os.environ["MANAGER_LLM_MODEL"] = "alibaba/qwen3.8-flash"
-            self.assertNotIn("qwen", llm.memory_model())
-            self.assertEqual(llm.memory_model(), _AGNES)
+            self.assertNotEqual(llm.memory_model(), os.environ["MANAGER_LLM_MODEL"])
+            self.assertEqual(llm.memory_model(), _MEM)
         finally:
             if old_mem is not None:
                 os.environ["MEMORY_LLM_MODEL"] = old_mem
@@ -78,14 +86,19 @@ class TestMemoryModelDefault(unittest.TestCase):
             else:
                 os.environ["MANAGER_LLM_MODEL"] = old_mgr
 
-    def test_fallback_default_is_agnes(self):
-        """兜底位同样不得落回免费池：实测免费路由器会返审核标签。"""
+    def test_fallback_default_differs_from_primary(self):
+        """兜底位必须与主槽不同源 —— 同源 = 无法兜底。"""
         old = os.environ.pop("MEMORY_LLM_FALLBACK_MODEL", None)
+        old_p = os.environ.pop("MEMORY_LLM_MODEL", None)
         try:
-            self.assertEqual(llm.free_fallback_model(), _AGNES)
+            self.assertEqual(llm.free_fallback_model(), _FB)
+            self.assertNotEqual(llm.free_fallback_model(), llm.memory_model(),
+                                "主槽与兜底同值 ⇒ complete_free 只试一次无兜底")
         finally:
             if old is not None:
                 os.environ["MEMORY_LLM_FALLBACK_MODEL"] = old
+            if old_p is not None:
+                os.environ["MEMORY_LLM_MODEL"] = old_p
 
 
 class TestCallSitesWiring(unittest.TestCase):
@@ -109,8 +122,8 @@ class TestCallSitesWiring(unittest.TestCase):
 class TestCompleteFree(unittest.TestCase):
     """「200 但没货」必须换兜底，全失败返回空串（由调用方降级）。
 
-    用 env 显式造出 primary≠fallback：默认值两者同为 agnes，走的是**去重后只调一次**，
-    那是另一条测试（`test_same_primary_and_fallback_calls_once`）。
+    用 env 显式造出 primary≠fallback：默认值本来就不同源，但这里另造一对以保证
+    测的是「换兜底」这条路径而不是默认值本身。
     """
 
     def setUp(self):
@@ -168,15 +181,28 @@ class TestCompleteFree(unittest.TestCase):
         self.assertEqual(calls, ["vendor/primary", "vendor/backup"])   # 不得再试第三个模型
 
     def test_same_primary_and_fallback_calls_once(self):
-        """默认值时 primary == fallback：去重后只发一次，不重复烧一次长尾。"""
+        """显式把两槽弄成同值时：去重后只发一次，不重复烧一次长尾。
+
+        （默认值自 2026-11-02 起已不同源，所以这里必须用 env 造出同值才测得到这条路径。）
+        """
         import asyncio
-        os.environ.pop("MEMORY_LLM_MODEL", None)
-        os.environ.pop("MEMORY_LLM_FALLBACK_MODEL", None)
-        fake, calls = self._call({_AGNES: "正常的中文压缩结果" * 3})
-        text, used = asyncio.run(llm.complete_free("sys", "user", call=fake))
-        self.assertEqual(used, _AGNES)
-        self.assertTrue(text)
-        self.assertEqual(calls, [_AGNES])
+        same = _MEM
+        old_p = os.environ.get("MEMORY_LLM_MODEL")
+        old_f = os.environ.get("MEMORY_LLM_FALLBACK_MODEL")
+        try:
+            os.environ["MEMORY_LLM_MODEL"] = same
+            os.environ["MEMORY_LLM_FALLBACK_MODEL"] = same
+            fake, calls = self._call({same: "正常的中文压缩结果" * 3})
+            text, used = asyncio.run(llm.complete_free("sys", "user", call=fake))
+            self.assertEqual(used, same)
+            self.assertTrue(text)
+            self.assertEqual(calls, [same])
+        finally:
+            for k, v in (("MEMORY_LLM_MODEL", old_p), ("MEMORY_LLM_FALLBACK_MODEL", old_f)):
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 class TestNoAutoRouter(unittest.TestCase):

@@ -69,7 +69,15 @@ RT_PROMPT = os.getenv("VITALS_RT_PROMPT", "只回复一个字：好")
 RT_NEG_STREAK = int(os.getenv("VITALS_NEG_STREAK", "2"))
 # 真请求用的测试模型（2026-09-22 用户指定 Agnes；2026-10-29 统一升到 2.5-flash）。
 # CCR 认斜杠形态，实测可用；写成下划线形态会被 CCR 拒（军规：CCR 用 /，FCC 用 _，两者不通用）。
-RT_MODEL = os.getenv("VITALS_RT_MODEL", "agnes/agnes-2.5-flash")
+#
+# 🚩 2026-11-02 再改判：`agnes/*` 已被上游从 CCR 清单整族摘掉（`GET :3456/v1/models`
+# 实测 9 个全 `alibaba/*`，`grep agnes` 零命中；直打 400 `model_resolution`）。
+# 这个常量是幂等键，不是随便一个名字：`main.py` 把 `RT_MODEL` 直接送进
+# `gwprobe.configure(watch=[config.manager_llm_model, vitals_mod.RT_MODEL])`，
+# 所以它一死，`/health` 的 `ccr_gateway.watch` 就永久报 `agnes/agnes-2.5-flash: false`
+# —— 而 `state` 仍是 `ok`，没人看得见（F3）。L4 的用途是「证明这个 agent 真能应答」，
+# 对模型能力无要求，只要在册且快 ⇒ 取 3.2–7.2s 的 flash 档。
+RT_MODEL = os.getenv("VITALS_RT_MODEL", "alibaba/qwen3.8-flash")
 # 实测一轮真请求耗时：claude 14s / jcode 9s / grok 19s / hermes 21s，40s 够宽容抖。
 RT_TIMEOUT = float(os.getenv("VITALS_RT_TIMEOUT", "90"))
 # 2026-09-24：40s → 90s。实测 claude 走 CCR 在 40s 窗口下跑出一例

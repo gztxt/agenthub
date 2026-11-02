@@ -30,8 +30,13 @@ URL，还得改写在 JS bundle 字符串里拼出来的 /api 与 WebSocket 路�
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import logging
+import os
 import re
+import urllib.parse
 
 log = logging.getLogger("agent-hub.embed-proxy")
 
@@ -83,6 +88,64 @@ _HDR_SPLIT = re.compile(rb"\r?\n")
 _HTML_PATH = re.compile(rb"\.html?$", re.I)
 _ENC = re.compile(rb"^content-encoding:\s*(?P<v>[^\r\n]+)\r?$", re.I | re.M)
 _STATUS = re.compile(rb"^HTTP/\d(?:\.\d)? (?P<code>\d{3})")
+
+# ── Basic 鉴权面板的「桥内登录」（2026-11-02，PT-20261102 报障）──────────
+# 问题：proxy-panel(:8083) 回 `401 + WWW-Authenticate: Basic`，而浏览器**不在跨源 iframe
+# 里弹**认证框（只有顶层导航才弹）⇒ 用户点「嵌入会话」只看到上游那句 `auth required`，
+# 而浏览器直开 :8083 正常。这就是「3208 面板没有登录框、直接报错」的全部成因。
+# 两种错解：① 删掉嵌入入口（用户侧=功能没了）；② 桥里直接补 Authorization（等于把
+# 带鉴权的面板经桥变成 LAN 上免密可读，凭空扩攻击面）。所以桥自己做一层**等价的门**：
+# 未登录先给本页表单 → POST 校验 → 种 HttpOnly cookie → 此后每个上游请求由服务端补
+# Authorization。口令仍只有一份（画像里的 `bridge_secret` 指向的面板口令文件）。
+LOGIN_HTML = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>__TITLE__</title>
+<style>
+html,body{height:100%;margin:0;font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;
+background:#12141a;color:#e6e8ee;display:flex;align-items:center;justify-content:center}
+form{background:#1b1e26;border:1px solid #2c313d;border-radius:10px;padding:22px 24px;
+width:min(320px,86vw);box-shadow:0 8px 28px rgba(0,0,0,.45)}
+h1{font-size:15px;margin:0 0 14px;font-weight:600}
+input{width:100%;box-sizing:border-box;padding:9px 10px;border-radius:7px;border:1px solid #333a48;
+background:#0e1015;color:inherit;font-size:14px}
+button{margin-top:12px;width:100%;padding:9px;border:0;border-radius:7px;background:#3b6df6;
+color:#fff;font-size:14px;cursor:pointer}
+button:hover{background:#4b7bff}
+.e{color:#ff6b6b;margin:0 0 10px;font-size:13px}
+.h{color:#8a91a3;font-size:12px;margin:10px 0 0}
+</style></head><body><form method="post" action="/__hub_login">
+<h1>__TITLE__</h1>__ERR__
+<input type="password" name="p" placeholder="口令" autofocus autocomplete="current-password">
+<button type="submit">登录</button>
+<p class="h">口令取自该面板的本地口令文件；登录状态只记在本桥端口上。</p>
+</form></body></html>"""
+
+
+def _login_page(title: str, err: str = "") -> bytes:
+    import html as _html
+    msg = '<p class="e">%s</p>' % _html.escape(err) if err else ""
+    return (LOGIN_HTML.replace("__TITLE__", _html.escape(title))
+            .replace("__ERR__", msg)).encode()
+
+
+def _req_line(header: bytes) -> tuple[bytes, bytes]:
+    """(method, path) —— 只取请求行，路径去掉 query。"""
+    parts = header.split(b"\r\n", 1)[0].split(b" ")
+    if len(parts) < 2:
+        return b"", b"/"
+    return parts[0].upper(), parts[1].split(b"?", 1)[0]
+
+
+def _cookie_has(header: bytes, name: str, token: str) -> bool:
+    for ln in header.split(b"\r\n"):
+        if not ln.lower().startswith(b"cookie:"):
+            continue
+        for part in ln[7:].split(b";"):
+            k, _, v = part.strip().partition(b"=")
+            if k.decode(errors="replace") == name and hmac.compare_digest(
+                    v.decode(errors="replace"), token):
+                return True
+    return False
+
 
 
 def _is_upgrade(header: bytes) -> bool:
@@ -287,15 +350,24 @@ def _authority(host: str, port: int) -> bytes:
 
 
 async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                  upstream: tuple[str, int], extra: bytes = b"") -> None:
-    try:
-        header = await reader.readuntil(_END)
-    except (asyncio.IncompleteReadError, ConnectionError, asyncio.LimitOverrunError):
-        writer.close()
-        return
+                  upstream: tuple[str, int], extra: bytes = b"",
+                  pre_header: bytes | None = None, auth: bytes = b"") -> None:
+    if pre_header is None:
+        try:
+            header = await reader.readuntil(_END)
+        except (asyncio.IncompleteReadError, ConnectionError, asyncio.LimitOverrunError):
+            writer.close()
+            return
+    else:
+        header = pre_header
     parts = header.split(_END, 1)
     head_line = parts[0].split(b"\r\n", 1)[0]
     rest = parts[0][len(head_line) + 2:]
+    # 桥内登录成功后由服务端补 Basic（客户端自带的 Authorization 不覆盖）：
+    # 浏览器在跨源 iframe 里拿不到表单，也弹不出上游的认证框，只能由桥代持。
+    if auth and not re.search(rb"^authorization:", rest, re.I | re.M):
+        rest = rest + b"\r\nAuthorization: Basic " + auth
+        header = head_line + b"\r\n" + rest + _END
     # 若客户端在同一连接上已带正文（PUT/POST 的 body 紧跟头），已读到的部分要一起转发
     pre_body = parts[1] if len(parts) > 1 else b""
     host, port = upstream
@@ -349,13 +421,20 @@ _BIND_FLAGS = ("--host", "--hostname", "--host-ip", "--addr", "--address",
 
 
 def _start_binds_wide(start) -> bool:
-    """起法参数里是否把监听地址写成通配或具体网卡。
+    """起法里是否声明了「上游对局域网开放」。
 
-    只读 `start["cmd"]`（unit 式起法读不到绑定地址，走运行时探测）。判据窄到只认
-    上面 `_BIND_FLAGS` 后面跟的一个值：`--host 0.0.0.0` / `--addr 0.0.0.0:8787` /
-    `--host=192.168.5.102` 都算「上游自己就要对局域网开放」。
+    两条来源，按可信度排：
+    ① `start["bind"]` —— 给 unit 式起法的显式声明。unit 的 ExecStart 在画像里读不到
+       （pi-web 实际就是 `--hostname 0.0.0.0 --port 30141`），不声明就只能退回运行时
+       探测；而按需拉起的 agent 在 hub 启动那一刻通常停着 ⇒ 探测必假死 ⇒ 桥永久锁
+       回环（2026-11-02 pi 报障的同因，dsh 已于 v0.13.18x 改判）。
+    ② `start["cmd"]` 里的监听旗标：`--host 0.0.0.0` / `--addr 0.0.0.0:8787` /
+       `--host=192.168.5.102` 都算「上游自己就要对局域网开放」。
     """
-    cmd = (start or {}).get("cmd") or []
+    start = start or {}
+    if _host_is_wide(str(start.get("bind") or "")):
+        return True
+    cmd = start.get("cmd") or []
     for i, a in enumerate(cmd):
         s = a if isinstance(a, str) else ""
         val = ""
@@ -364,14 +443,21 @@ def _start_binds_wide(start) -> bool:
                 val = str(cmd[i + 1])
             elif s.startswith(flag + "="):
                 val = s.split("=", 1)[1]
-        if not val:
-            continue
-        host = val.split(":")[0].strip("[]").lower()
-        if host in {"0.0.0.0", "::", "*"}:
-            return True
-        if host and host not in _LOOPBACK_HOSTS:
+        if val and _host_is_wide(val):
             return True
     return False
+
+
+def _host_is_wide(val: str) -> bool:
+    """`0.0.0.0` / `::` / `*` / 具体网卡（`192.168.x.x`、`host:port`）⇒ True。"""
+    raw = (val or "").strip().lower()
+    if raw.startswith("["):               # [::] / [::]:8080 / [::1]:8080
+        raw = raw[1:].split("]", 1)[0]
+    elif raw not in {"::"}:
+        raw = raw.split(":", 1)[0]        # host:port 只取主机段
+    if raw in {"0.0.0.0", "::", "*"}:
+        return True
+    return bool(raw) and raw not in _LOOPBACK_HOSTS
 
 
 def listen_host_for(port: int, default: str = "0.0.0.0", *,
@@ -428,19 +514,118 @@ class EmbedProxy:
 
     def __init__(self, name: str, upstream_host: str, upstream_port: int,
                  listen_host: str = "0.0.0.0", listen_port: int = 3103,
-                 css: str = "", keys: bool = True):
+                 css: str = "", keys: bool = True,
+                 auth_secret: str = "", title: str = ""):
         self.name = name
         self.upstream = (upstream_host, int(upstream_port))
         self.listen = (listen_host, int(listen_port))
         self.server: asyncio.base_events.Server | None = None
         self.extra = (css.encode() if css else b"") + (KEYS_JS.encode() if keys else b"")
+        # 非空 ⇒ 这个桥是「带门的桥」：未登录先给表单，登录后服务端代补 Basic。
+        self.auth_secret = (auth_secret or "").strip()
+        self.title = title or name
+        self._secret_cache: tuple[float | None, str] = (None, "")
+
+    # ── 口令读取（按 mtime 缓存：面板轮换口令后无需重启 hub）──
+    def _secret(self) -> str:
+        if not self.auth_secret:
+            return ""
+        try:
+            mtime = os.stat(self.auth_secret).st_mtime
+        except OSError:
+            return ""
+        if self._secret_cache[0] != mtime:
+            try:
+                with open(self.auth_secret, encoding="utf-8") as fh:
+                    self._secret_cache = (mtime, fh.read().strip())
+            except OSError:
+                return ""
+        return self._secret_cache[1]
+
+    def _cookie_token(self) -> str:
+        s = self._secret()
+        return hashlib.sha256(s.encode()).hexdigest()[:32] if s else ""
+
+    def _cookie_name(self) -> str:
+        return "hub_bridge_%d" % self.listen[1]
+
+    def _auth_header(self) -> bytes:
+        s = self._secret()
+        return base64.b64encode(("hub:" + s).encode()) if s else b""
+
+    async def _serve(self, reader: asyncio.StreamReader,
+                     writer: asyncio.StreamWriter) -> None:
+        """无口令桥：行为与改前完全一致；有口令桥：先过门，再带 Auth 透传。"""
+        if not self.auth_secret:
+            await _handle(reader, writer, self.upstream, self.extra)
+            return
+        try:
+            header = await reader.readuntil(_END)
+        except (asyncio.IncompleteReadError, ConnectionError, asyncio.LimitOverrunError):
+            writer.close()
+            return
+        method, path = _req_line(header)
+        token = self._cookie_token()
+        if method == b"POST" and path == b"/__hub_login":
+            await self._login(reader, writer, header, token)
+            return
+        if token and _cookie_has(header, self._cookie_name(), token):
+            await _handle(reader, writer, self.upstream, self.extra,
+                          pre_header=header, auth=self._auth_header())
+            return
+        # 未登录：文档请求给表单；其余（XHR/静态资源）一律 401，别把半截页面喂给前端。
+        # 文档判据与 _is_document 同向（GET + .html 或 Accept 含 text/html），另加「无扩展名
+        # 路径」——iframe 顶层导航不保证带 Accept，别让用户看到裸的 login required。
+        doc_like = (method == b"GET" and (b"text/html" in header.lower()
+                                          or path == b"/" or bool(_HTML_PATH.search(path))))
+        if doc_like:
+            await self._send(writer, 200, _login_page(self.title + " 需要登录"))
+        else:
+            await self._send(writer, 401, b"login required")
+
+    async def _login(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                     header: bytes, token: str) -> None:
+        m = re.search(rb"^content-length:\s*(\d+)", header, re.I | re.M)
+        n = min(int(m.group(1)), 8192) if m else 0
+        body = b""
+        if n:
+            try:
+                body = await reader.readexactly(n)
+            except (asyncio.IncompleteReadError, ConnectionError):
+                body = b""
+        got = (urllib.parse.parse_qs(body.decode("utf-8", "replace")).get("p") or [""])[0]
+        want = self._secret()
+        if want and got and hmac.compare_digest(got.encode(), want.encode()):
+            head = ("HTTP/1.1 303 See Other\r\nLocation: /\r\n"
+                    "Set-Cookie: %s=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800\r\n"
+                    "Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    % (self._cookie_name(), token)).encode()
+            await self._write(writer, head)
+            return
+        await self._send(writer, 401, _login_page(self.title + " 需要登录", "口令不正确"))
+
+    async def _send(self, writer: asyncio.StreamWriter, code: int, body: bytes) -> None:
+        head = ("HTTP/1.1 %d %s\r\nContent-Type: text/html; charset=utf-8\r\n"
+                "Content-Length: %d\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+                % (code, "OK" if code == 200 else "Unauthorized", len(body))).encode()
+        await self._write(writer, head + body)
+
+    async def _write(self, writer: asyncio.StreamWriter, data: bytes) -> None:
+        try:
+            writer.write(data)
+            await writer.drain()
+        except (ConnectionError, OSError):
+            pass
+        try:
+            writer.close()
+        except Exception:
+            pass
 
     async def start(self) -> bool:
         if self.server is not None:
             return True
         try:
-            self.server = await asyncio.start_server(
-                lambda r, w: _handle(r, w, self.upstream, self.extra), *self.listen)
+            self.server = await asyncio.start_server(self._serve, *self.listen)
         except OSError as e:
             log.warning("[%s] 注入代理监听 %s:%s 失败：%s —— 嵌入视图将回落直连", self.name, *self.listen, e)
             return False

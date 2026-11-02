@@ -348,7 +348,7 @@ def _json_block(text: str) -> Optional[dict]:
     return None
 
 def _ref_model() -> str:
-    """重排用的付费档模型（`REF_LLM_MODEL`，默认 `agnes/agnes-2.5-flash`）。
+    """重排用的付费档模型（`REF_LLM_MODEL`，默认 `alibaba/deepseek-v4.1-flash`）。
 
     为什么不复用 `llm.MODEL`：`MANAGER_LLM_MODEL` 同时服务交互式
     `/api/tasks/decompose`，换它会连带改那条链路；重排只需要「稳定回 JSON、
@@ -357,8 +357,12 @@ def _ref_model() -> str:
     2026-10-21 实测：`alibaba/qwen3.8-flash` 在重排 prompt 上 60s 必超时
     （短请求也 only-thinking）；`agnes/agnes-2.5-flash` 短请求 2.0s 正常返回，
     全量两轮 hit@5 均为 0.467（基线 0.300）。
+
+    🚩 2026-11-02：agnes 已被上游摘掉，改用 `alibaba/deepseek-v4.1-flash`
+    （全量探针 844ms，本机最快；**不是** qwen3.8-flash —— 上面那条 60s 超时
+    只针对 qwen 族，别拿它填这个槽）。重排命中率需重测，旧值 0.467 不再可比。
     """
-    return os.getenv('REF_LLM_MODEL', 'agnes/agnes-2.5-flash')
+    return os.getenv('REF_LLM_MODEL', 'alibaba/deepseek-v4.1-flash')
 
 def _sample_count() -> int:
     """付费档采样次数（`REF_RERANK_SAMPLES`，默认 3，夹在 1~5）。

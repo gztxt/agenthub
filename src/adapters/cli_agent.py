@@ -35,7 +35,11 @@ DSH_ENV_FILE = "/fs/1000/ftp/技术文档/dsh-src/.env"
 
 #: pi 的默认模型（`ccr-free` → `deepseek/deepseek-flash`）实测**返回空响应**，
 #: 必须显式给一个可用模型才出话。默认值与 dsh/claude 当前生产口径一致。
-PI_DEFAULT_MODEL = os.getenv("TASK_CLI_MODEL", "agnes/agnes-2.5-flash")
+#:
+#: 🚩 2026-11-02：原值 `agnes/agnes-2.5-flash` 已被上游从 CCR 清单摘掉（400
+#: `model_resolution`）⇒ 任何**未指定 model** 的任务派发都会静默返回空输出
+#: （`empty-output` 分支，`cli_agent.py` 会判失败但报的是「空输出」不是「模型不存在」）。
+PI_DEFAULT_MODEL = os.getenv("TASK_CLI_MODEL", "alibaba/qwen3.8-flash")
 
 
 # ── argv 构造（每个 CLI 一行，便于逐条核对）────────────────────────────

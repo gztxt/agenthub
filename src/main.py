@@ -82,6 +82,7 @@ import selfattest
 import staticguard
 import tdai_client
 import gwprobe                      # 上游网关（CCR）连通性 + 模型注册清单的缓存式体检
+import modelgate                    # 配置模型 ⊂ 网关清单（2026-11-02 第 11 点：死 ID 闸门）
 import healthx                      # /health 派生量的纯函数层（L0 不 import src.main，故抽出来）
 import memview                     # 内存三口径可观测（本体/托管子进程/cgroup 记账）
 import retention                    # 保留期定时清理（term_recordings + profile_events）
@@ -850,6 +851,14 @@ async def health():
     # 纯读缓存（gwprobe 自己 stale-while-revalidate，TTL 300s），**不改 status**：
     # 上游网关不可达不等于 hub 坏了，与 code_stale / memory_backend 同一设计意图。
     out["ccr_gateway"] = gwprobe.status()
+    # 配置模型 ⊂ 网关清单（2026-11-02 第 11 点）。为什么加：11-02 实测又一个死模型
+    # （`agnes/agnes-2.5-flash` 整族被上游扁掉）—— 拆解 100% 400、后台压缩静默返空，
+    # 而 /health 全绿 —— 这是 09-06 / 09-19 / 09-23 之后的**第四次同源事故**。
+    # 前三次都只改那一行，所以第四次照发；这一层不改 ID，只让「配置里的 ID 不在清单里」自己报出来。
+    # 口径：纯读（清单来自 gwprobe 缓存，不额外发网络），**不改 status**（网关不可达 ≠ hub 坏了），
+    # 取不到清单时报 unknown（`checked:false`），不判死 —— 与 intake 的 count=0 口径同源。
+    # 覆盖 9 类 16 处写死模型，明细见 src/modelgate.py 模块头。
+    out["model_gate"] = modelgate.status(catalog=out["ccr_gateway"].get("models") or [])
     # 出站熔断器状态（PT-20260927-12 A 档）：只列**开着的**闸 + 冷却剩余秒。
     # 为什么必须有：熔断一开，那些调用点会在**毫秒内**返回（不发网络）。
     # 没有这个字段，用户看到的是「GitHub 项目页空了」而没有任何原因字段——
@@ -1202,6 +1211,13 @@ async def startup():
     # 不必等探活烧一轮 token 才发现（09-23 的 M1 阻塞「拿不到在线清单」就此长期解除）。
     gwprobe.configure(config.manager_llm_base, config.manager_llm_key,
                       watch=[config.manager_llm_model, vitals_mod.RT_MODEL])
+    # 预热网关清单缓存（2026-11-02）：`/health` 的 `model_gate` 需要清单才能比对，
+    # 而 gwprobe.status() 是「只读缓存 + 缺缓存时**后台**发探」⇒ 启动时调一次只是把探针排上，
+    # 不阻塞启动；不排的话第一次 /health 的 model_gate 恒是 unknown（读的人会当成没配置）。
+    try:
+        gwprobe.status()
+    except Exception as e:  # noqa: BLE001 —— 预热失败不许影响启动
+        log.warning(f"[gwprobe] 预热失败（不影响启动）：{type(e).__name__}: {e}")
     tasks_mod.ensure_schema()
     # P0-1：数据集/评估/经验库四表（幂等建表，切片 A）
     dataset_mod.ensure_schema()
@@ -1277,7 +1293,9 @@ async def startup():
                         int(t["port"]), os.getenv("EMBED_PROXY_HOST", config.host),
                         upstream_host=str(t.get("host") or ""),
                         start=t.get("start")),
-                    listen_port=port, keys=True)
+                    listen_port=port, keys=True,
+                    auth_secret=str(t.get("secret") or ""),
+                    title=str(t.get("name") or t["id"]))
                 if await px.start():
                     _embed_bridges.append(px)
                     profiles_mod.EMBED_PROXY_MAP[str(t["id"])] = "http://127.0.0.1:%d" % port
@@ -1297,6 +1315,14 @@ async def startup():
              f"jcode: {config.jcode_url} | TDAI: {config.tdaI_url}")
     log.info(f"[Agent Hub] LLM（记忆 L2 重建 / DAG 拆解）: {config.manager_llm_base} "
              f"model={config.manager_llm_model}")
+    # 启动时就把「配置模型是否还在网关清单里」说一遍（2026-11-02 第 11 点）。
+    # 为什么必须在启动时就打：死 ID 的形态是「服务全绿、功能静默死」，
+    # 只写进 /health 的话照样没人看（11-02 实测：watch 里早就写了 false，没人用）。
+    # 这里只兑情报、不拦启动：网关没起来时本次报 unknown，不阻断 hub。
+    try:
+        modelgate.log_summary(modelgate.check(), log)
+    except Exception as e:  # noqa: BLE001 —— 闸门自身出错不得阻断启动
+        log.warning(f"[modelgate] 启动自检异常（不阻断启动）：{type(e).__name__}: {e}")
 
 
 @app.on_event("shutdown")

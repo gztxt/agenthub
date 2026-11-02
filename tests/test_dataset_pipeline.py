@@ -44,17 +44,38 @@ SPEC = {"sources": ["pi", "claude"], "require_events": True,
 
 
 class TestModelDiscipline(unittest.TestCase):
-    def test_default_model_is_agnes(self):
-        """2026-10-29 用户裁定「取消免费模型」⇒ 默认走本机 CCR 的 agnes。"""
-        self.assertEqual(dp.DEFAULT_MODEL, "agnes/agnes-2.5-flash")
+    def test_default_model_is_alive(self):
+        """2026-11-02 改判：agnes 已从 CCR 清单摘除，默认改成在册的 alibaba 档。
+
+        只断言「不是 agnes」不够 —— 下次别的 ID 死了仍会通过。
+        真闸门是将配置模型与 `GET :3456/v1/models` 交叉校验（见 docs 第 12 点）。
+        """
+        self.assertEqual(dp.DEFAULT_MODEL, "alibaba/deepseek-v4.1-flash")
+        self.assertTrue(dp.DEFAULT_MODEL.startswith("alibaba/"))
 
     def test_auto_router_is_rejected(self):
         with self.assertRaises(ValueError):
             dp.assert_free_model("openrouter/auto")
 
-    def test_paid_model_is_rejected(self):
+    def test_ccr_prefixed_model_is_accepted(self):
+        """2026-11-02：CCR 清单 `free_count = 0` ⇒ alibaba/* 是唯一可选集。
+
+        **代价必须写明**：它是 token-plan 网关，按军规按扣费处理。
+        """
+        dp.assert_free_model("alibaba/deepseek-v4.1-flash")
+        dp.assert_free_model("alibaba/qwen3.8-flash")
+
+    def test_dead_agnes_is_rejected(self):
+        """回归钉子：agnes 已被上游摘掉，留着它通过准入就会在运行时才炸。"""
         with self.assertRaises(ValueError):
-            dp.assert_free_model("alibaba/deepseek-v4.1-flash")
+            dp.assert_free_model("agnes/agnes-2.5-flash")
+
+    def test_wrong_dialect_vendor_is_rejected(self):
+        """不带 `alibaba/` 的写法和不在 CCR 清单里的 provider 一律拒。"""
+        with self.assertRaises(ValueError):
+            dp.assert_free_model("deepseek/deepseek-flash")
+        with self.assertRaises(ValueError):
+            dp.assert_free_model("qwen3.8-flash")
 
     def test_free_models_are_accepted(self):
         dp.assert_free_model("openrouter/free")
@@ -64,9 +85,10 @@ class TestModelDiscipline(unittest.TestCase):
         """工作区军规：**经 CCR 时写 `openrouter/openrouter/free`** —— 这种写法也得认。"""
         dp.assert_free_model("openrouter/openrouter/free")
 
-    def test_agnes_is_accepted(self):
-        """`agnes/*` 是 CCR 本地代理，不经 OpenRouter 免费池，同样不扣费。"""
-        dp.assert_free_model("agnes/agnes-2.5-flash")
+    def test_agnes_is_no_longer_accepted(self):
+        """2026-11-02：`agnes/*` 已从 CCR 清单摘除 ⇒ 不再准入（旧测试反向）。"""
+        with self.assertRaises(ValueError):
+            dp.assert_free_model("agnes/agnes-2.5-flash")
 
 
 class TestBuildItemsDeterministic(unittest.TestCase):

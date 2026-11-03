@@ -123,7 +123,22 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.189"
+VERSION = "0.13.190"
+
+# v0.13.190（2026-11-03）：协同看板从「有容器」到「有内容」—— 静态测试全绿，页面却是一块空白。
+#   ① 病：`#statsAgents` 与整套 `.stat-pill` CSS 早已写进模板，JS 里却**从未渲染过它**
+#      ⇒ 「执行结果汇总」卡主体就是空白，只剩折叠区里的原始表。pytest 查的是「选择器在
+#      不在 DOM」，判不了「渲染了没有」：容器在、渲染没写，闸门全绿。
+#   ② 药：按 agent 分组的可展开列表真正落地（成功率徽章必须带 `n=` 样本量；失败+阻塞
+#      多的排最前）；协同历史行头补状态徽章与「失败 N / 阻塞 N」显式计数（原来只有
+#      0/5 这种比值，得自己算才知道挂了几项）；状态筛选从下拉换成带计数的芯片，计数
+#      用**同一个列表接口** +limit=1 取 total，不另开口径（两套 SQL 各算一次必然漂移）。
+#   ③ 展开态分桶：`statsOpen` 与 `runOpenSet` 各自成套，点开一个 agent 不会把协同历史里
+#      已展开的 run 收起 —— 那个症状看起来像"随机失灵"。
+#   ④ 判据：`tests/probe_collab_board.py` 真渲染五条（有行/带样本/单开/计数/行头徽章），
+#      实测读数 claude-code 成功率 56%·n=45；三条静态闸门（hubjs_split / sys_pages_layout /
+#      html_js_escape_depth）照旧全绿。
+#   ⑤ 未闭合：这只是「看得见」。配色与信息密度属端侧判据，本机只证到 DOM 层。
 
 # v0.13.189（2026-11-03）：协同页四框改版 —— 参数可干预，但**统计口径比功能更容易骗人**。
 #   ① 用户裁定「轮次是预算不是契约」：`ROUNDS_CEILING=5`，`MAX_ROUNDS` 降级为「调用方没给

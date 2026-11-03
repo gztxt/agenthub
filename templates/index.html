@@ -681,6 +681,85 @@
         .sp-sub { font-size: var(--fs-sm); font-weight: 600; color: var(--text-2); margin-bottom: 8px; }
         .sp-list { display: flex; flex-direction: column; }
         .sp-list > .mem-item:last-child { border-bottom: 0; }
+        /* ── 协同历史手风琴（主标题 = run.goal，副标题 = tasks[].prompt）──
+           为什么不用 display:none 收起：它让高度瞬间归零，下面的卡片会跟着上下跳；
+           这里用 max-height 过渡，展开后放开纵向滚动，任务多也不撑破卡片。
+           箭头用 transform 旋转 ▸（不换字形），旋转后就是 ▾，且能跟着过渡走。
+
+           2026-11-03 两处改版：
+           ① 主标题**不许被截断**。原写法 `flex:1 1 240px` + `nowrap + ellipsis` 在窄屏
+              会把 goal 切成半截，用户看不出这是哪次协同。现在换成 grid 两行：第 1 行
+              只有箭头 + goal（goal 横跨剩余全部宽度，放不下就整句折行
+              overflow-wrap:anywhere），第 2 行是元信息 + 操作按钮。标题与按钮/元信息
+              **不在同一行争宽**，所以不存在「被挤成 3 个字 + 省略号」。
+              不用 flex-wrap 是因为换行位置随内容漂移，同一 run 在不同屏宽下行高不同。
+           ② 手风琴语义是**同时只开一个**（toggleRun 里关掉其它项），不是多选折叠。 */
+        .runs-acc { display: flex; flex-direction: column; }
+        .run-item { border-bottom: 1px solid var(--divider); }
+        .run-item:last-child { border-bottom: 0; }
+        .run-hd { display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+                  column-gap: 10px; row-gap: 4px; padding: 9px 12px;
+                  cursor: pointer; user-select: none; }
+        .run-hd:hover { background: var(--row-hover); }
+        .run-hd:focus-visible { outline: 2px solid var(--accent-2); outline-offset: -2px; }
+        .run-caret { grid-column: 1; grid-row: 1; width: 1em; color: var(--muted);
+                     transition: transform .18s ease; }
+        .run-item.open .run-caret { transform: rotate(90deg); }
+        /* 标题横跨第 1 行剩余的全部宽度（不被右侧按钮挤），放不下就整句折行 */
+        .run-title { grid-column: 2 / -1; grid-row: 1; min-width: 0; font-size: var(--fs-base);
+                     color: var(--text-1); white-space: normal; overflow-wrap: anywhere;
+                     line-height: var(--lh-base); }
+        .run-meta { grid-column: 2; grid-row: 2;
+                    display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+                    font-size: var(--fs-sm); color: var(--muted); }
+        .run-meta .run-id { font-family: var(--font-mono); }
+        .run-acts { grid-column: 3; grid-row: 2; display: flex; gap: 4px;
+                    align-items: center; justify-self: end; }
+        .run-subs { max-height: 0; overflow: hidden; transition: max-height .2s ease;
+                    background: var(--surface-2); }
+        .run-item.open .run-subs { max-height: 420px; overflow-y: auto; }
+        .run-sub { display: flex; gap: 8px; padding: 7px 12px 7px 34px;
+                   font-size: var(--fs-sm); color: var(--text-2);
+                   border-top: 1px solid var(--divider); }
+        .run-sub-id { flex: none; font-family: var(--font-mono); color: var(--muted); }
+        /* 副标题是展开后才看的正文：原来单行 ellipsis 把 prompt 切成半句，
+           展开等于没展开。改为整句折行，超高由 .run-subs 的 max-height 兜底滚动。 */
+        .run-sub-txt { flex: 1; min-width: 0; white-space: normal; overflow-wrap: anywhere;
+                       line-height: var(--lh-base); }
+        .run-sub-hint { padding-left: 34px; color: var(--muted); font-style: normal; }
+        .runs-empty { padding: 14px 12px; color: var(--muted); font-size: var(--fs-sm); }
+        /* ── t4：执行结果汇总「按 agent 分组」手风琴的徽章与展开内容 ──
+           结构复用上面 .run-item/.run-hd/.run-caret/.run-subs（箭头与展开态视觉一致），
+           这里只补：成功率徽章（成败用颜色区分）、展开区小标题、各模型组合小表。
+           颜色全部走既有 token（--ok/--warn/--danger 的 soft/border 变体），不新增断点。 */
+        .stat-pill { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 99px;
+                     font-size: var(--fs-xs); font-weight: 600; border: 1px solid transparent; }
+        .stat-pill.ok   { background: var(--ok-soft);     color: var(--ok);     border-color: var(--ok-border); }
+        .stat-pill.warn { background: var(--warn-soft);   color: var(--warn);   border-color: var(--warn-border); }
+        .stat-pill.bad  { background: var(--danger-soft); color: var(--danger); border-color: var(--danger-border); }
+        .stat-fail  { color: var(--danger); font-weight: 600; }
+        .stat-block { color: var(--warn);   font-weight: 600; }
+        .stat-sub { padding: 8px 12px 10px 34px; }
+        .stat-sub-h { font-size: var(--fs-sm); font-weight: 600; color: var(--text-2); margin: 8px 0 3px; }
+        .stat-fail-row { padding: 2px 0; font-size: var(--fs-sm); color: var(--text-2); }
+        .stat-models { width: 100%; font-size: var(--fs-sm); }
+        .stat-models th, .stat-models td { padding: 2px 6px; text-align: left; }
+        /* 状态徽章补两档：muted（待跑/取消）与 info（执行中）。上面只有 ok/warn/bad，
+           而 run 的状态有 8 种，缺两档就只能回落成无色的裸文本。 */
+        .stat-pill.muted { background: var(--surface-2); color: var(--muted); border-color: var(--border); }
+        .stat-pill.info  { background: var(--sel-bg); color: var(--accent-2); border-color: var(--sel-border); }
+        /* 协同历史的状态筛选芯片：**.fchip 不复用 .chip** —— .chip 是首页/资源页的
+           详情块（flex:1 1 260px + baseline 布局），拿来做筛选按钮会互相改坏样式。
+           计数徽标贴在 chip 内部，点击走 #runChips 上的事件委托，不写 inline onclick。 */
+        .fchips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+        .fchip { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+                 border: 1px solid var(--border); background: var(--surface-2);
+                 color: var(--text-2); border-radius: 99px; padding: 3px 11px;
+                 font-size: var(--fs-sm); line-height: 1.5; }
+        .fchip:hover { border-color: var(--accent-2); color: var(--text-1); }
+        .fchip.on { background: var(--sel-bg); border-color: var(--sel-border); color: var(--text-1); font-weight: 600; }
+        .fchip-n { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--muted); }
+        .fchip.on .fchip-n { color: var(--text-1); }
         /* 表头钉在页滚动容器顶部 */
         .sp-card thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; }
         /* auto-fit + minmax：列数由可用宽度自己决定，**不新增断点**，也就不会有
@@ -2060,8 +2139,9 @@
 
         <!-- 协同（2026-11-03 四框改版）：目标 / Agent / 模型 / 未完成轮次 四框一组，
              「仅预览」走 dry_run（不落库不派活），「拆解并启动」才真跑。
-             下方依次三张卡：执行结果汇总（需求④）/ 协同历史（需求②）/ 运行详情
+             下方依次三张卡：协同历史（需求②）/ 执行结果汇总（需求④）/ 运行详情
              （需求③：DAG + 逐任务 组合/状态 + 轮次链 + 时间线）。
+             2026-11-03：协同历史提到汇总之前——先看「跑过什么」，再看「统计成什么样」。
              #runPanel 显隐只切 inline 值（.sp-card 是 flex 列，写 display:block 会错位，
              tests/test_sys_pages_layout.py 钉着这一条）。 -->
         <section class="page sys" id="page-tasks">
@@ -2081,9 +2161,42 @@
                             <select id="taskRounds" style="max-width:220px" title="未完成时最多自动重拆几轮"></select>
                             <button class="btn" id="btnDecompose" onclick="decomposeRun()">拆解并启动</button>
                             <button class="btn ghost" id="btnPreview" onclick="previewRun()">仅预览</button>
-                            <button class="btn ghost" onclick="loadRuns();loadTaskStats()"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
+                            <button class="btn ghost" onclick="refreshTasks()"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
                         </div>
                         <div class="hint" id="taskPreview" style="padding-bottom:4px">未指定 Agent = 自动混排：模型由难度→档位决定。要钉死模型请先选一个 Agent。</div>
+                    </div>
+                </div>
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>协同历史</h3>
+                        <div class="sp-r"><span class="hint" id="runsCount"></span></div>
+                    </div>
+                    <div class="sp-tools">
+                        <div class="toolbar">
+                            <input id="runQ" placeholder="搜 run / 目标关键字（回车）" style="max-width:300px" onkeydown="if(event.key==='Enter'){refreshTasks();}">
+                            <!-- 状态筛选：下拉换成一排带计数的芯片（2026-11-03）。
+                                 下拉的毛病是「得点开才知道有几个失败」——先把数量摆在脸上，
+                                 点一下即筛。计数由 loadRunCounts() 用**同一个列表接口**
+                                 +limit=1 取 total（沿用当前搜索词），不另开口径。
+                                 选中态只有一个：runStateFilter（JS 变量），DOM 的 .on 只是投影。 -->
+                            <div class="fchips" id="runChips">
+                                <button class="fchip on" data-run-chip="">全部 <span class="fchip-n" data-chip-n="all">–</span></button>
+                                <button class="fchip" data-run-chip="running">执行中 <span class="fchip-n" data-chip-n="running">–</span></button>
+                                <button class="fchip" data-run-chip="failed">失败 <span class="fchip-n" data-chip-n="failed">–</span></button>
+                                <button class="fchip" data-run-chip="partial">部分 <span class="fchip-n" data-chip-n="partial">–</span></button>
+                                <button class="fchip" data-run-chip="success">成功 <span class="fchip-n" data-chip-n="success">–</span></button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="sp-bd box flush tscroll">
+                        <!-- 协同历史：主副标题手风琴（v0.13.183）。一行一个 run，goal 作主标题，
+                             点行展开该 run 的 tasks[].prompt 作副标题。容器仍是 #runsBody（JS 与
+                             事件委托都按这个 id 找），只是从 <tbody> 换成 <div>。
+                             展开态只活在内存（runOpenSet），库表无此字段，不加后端字段。 -->
+                        <div id="runsBody" class="runs-acc"></div>
+                    </div>
+                    <div class="sp-tools" style="padding-top:8px">
+                        <div class="toolbar" style="margin-bottom:0"><span class="hint" id="runsMore"></span></div>
                     </div>
                 </div>
                 <div class="sp-card">
@@ -2098,49 +2211,30 @@
                         </div>
                     </div>
                     <div class="sp-bd" id="taskStatsVerdict"><span class="hint">加载中…</span></div>
-                    <div class="sp-grid" style="padding:0 16px 12px">
-                        <div class="sp-bd box flush tscroll" style="max-height:300px">
-                            <table><thead><tr><th>Agent</th><th>模型（实测优先）</th><th>n</th><th>成功</th><th>失败</th><th>阻塞</th><th>成功率</th><th>均耗时</th></tr></thead>
+                    <!-- t4（2026-11-03）：主线视图改成「按 agent 分组的可展开列表」。
+                         为什么不再直接上表：原来一张融合表里 Agent 列与模型列并排，
+                         同一个 agent 换了模型就裂成多行，失败原因还折在行尾 <details> 里 ——
+                         「谁出了问题」要横着扫一整列才拼得出来。现在一个 agent 一行头部
+                         （总次数/成功率/失败/阻塞/重试/均耗时 + 成功率徽章配色），点开看
+                         该 agent 的失败原因明细与各模型组合。失败多的 agent 排在最前。
+                         容器 #statsAgents 复用 .runs-acc/.run-item 那套（与协同历史
+                         同一手风琴语义：同容器内单开、点头部切换、箭头旋转一致），
+                         展开态各自分桶 ⇒ 点开 agent 不会把协同历史里已展开的 run 收起。
+                         数据仍只来自 GET /api/tasks/stats 一次响应，前端上卷，无新接口。 -->
+                    <div class="sp-bd box flush tscroll">
+                        <div id="statsAgents" class="runs-acc"></div>
+                    </div>
+                    <!-- ⑤ 原始数据不丢：2026-11-03 那次「三表融合」的产物（单 tbody，
+                         combo × 失败原因折叠列 + 表尾轮次分布）整体收进折叠区，默认收起。
+                         tbody 仍是 #statsCombos —— loadTaskStats 里那段渲染照旧写它，
+                         废弃这个 id 会静默打断渲染（轮次分布是 run 级全局量，只能待在这里）。 -->
+                    <details class="sp-bd flush" id="statsRaw">
+                        <summary class="sp-sub" style="margin:0;padding:10px 14px;cursor:pointer">原始数据（Agent × 模型 融合表 + 轮次分布）</summary>
+                        <div class="sp-bd box flush tscroll" style="max-height:420px">
+                            <table><thead><tr><th>Agent</th><th>模型（实测优先）</th><th>n</th><th>成功</th><th>失败</th><th>阻塞</th><th>成功率</th><th>均耗时</th><th>失败原因</th></tr></thead>
                             <tbody id="statsCombos"></tbody></table>
                         </div>
-                        <div class="sp-bd box flush tscroll" style="max-height:300px">
-                            <table><thead><tr><th>失败原因</th><th>n</th><th>主要 Agent</th><th>样例</th></tr></thead>
-                            <tbody id="statsFailures"></tbody></table>
-                        </div>
-                    </div>
-                    <div class="sp-bd box flush tscroll" style="max-height:200px">
-                        <table><thead><tr><th>轮次</th><th>run 数</th><th>任务数</th><th>成功</th><th>成功率</th></tr></thead>
-                        <tbody id="statsRounds"></tbody></table>
-                    </div>
-                </div>
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>协同历史</h3>
-                        <div class="sp-r"><span class="hint" id="runsCount"></span></div>
-                    </div>
-                    <div class="sp-tools">
-                        <div class="toolbar">
-                            <input id="runQ" placeholder="搜 run / 目标关键字（回车）" style="max-width:300px" onkeydown="if(event.key==='Enter'){loadRuns();}">
-                            <select id="runState" style="max-width:170px" onchange="loadRuns()">
-                                <option value="">全部状态</option>
-                                <option value="running">执行中</option>
-                                <option value="success">成功</option>
-                                <option value="failed">失败</option>
-                                <option value="partial">部分</option>
-                                <option value="pending">待跑</option>
-                                <option value="waiting">等待输入</option>
-                                <option value="awaiting_accept">待接受</option>
-                            </select>
-                            <button class="btn ghost" onclick="loadRuns()">筛选</button>
-                        </div>
-                    </div>
-                    <div class="sp-bd box flush tscroll">
-                        <table><thead><tr><th>Run</th><th>目标</th><th>Agent 组合</th><th>模型</th><th>轮次</th><th>状态</th><th>进度</th><th>耗时</th><th>创建</th><th>操作</th></tr></thead>
-                        <tbody id="runsBody"></tbody></table>
-                    </div>
-                    <div class="sp-tools" style="padding-top:8px">
-                        <div class="toolbar" style="margin-bottom:0"><span class="hint" id="runsMore"></span></div>
-                    </div>
+                    </details>
                 </div>
                 <div class="sp-card" id="runPanel" style="display:none">
                     <div class="sp-hd"><h3 id="runTitle"></h3><div class="sp-r"><span class="hint" id="runSummary"></span></div></div>
@@ -3245,6 +3339,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=ae0a1ef9"></script>
+    <script src="/static/hub.js?v=4813b977"></script>
 </body>
 </html>

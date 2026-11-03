@@ -136,7 +136,18 @@ class TestTaskTableEscaped(unittest.TestCase):
                          "deps.join(',') 之前必须先转义整个串，不能只转义分隔符")
 
     def test_status_escaped(self):
-        self.assertIn("escapeHtml(t.status)", self.body)
+        """status 现在走 `taskStatePill()`（状态→徽章），设防一点没少。
+
+        2026-11-03 改判据的理由：原来断言裸字面 `escapeHtml(t.status)`，改成徽章后
+        这行不存在了 —— 但**未知取值仍是不可信字符串**（映射表没有就原样回落），
+        所以回落分支必须自己转义。断言改到 pill 的回落分支，而不是把测试删成绿的。
+        """
+        self.assertIn("taskStatePill(t.status)", self.body)
+        pill = _body(TERM, "taskStatePill")
+        # 未知取值走 `TASK_ST_TEXT[s] || s` 回落 —— 关键在于 `s` 是被 escapeHtml
+        # **整个包住**的，不是单独出现。所以断言这一整段表达式，不断言 `escapeHtml(s)`。
+        self.assertIn("escapeHtml(TASK_ST_TEXT[s] || s", pill,
+                      "taskStatePill 的未知状态回落分支必须转义（status 来自 LLM）")
 
     def test_no_bare_llm_field_concat(self):
         """形状判据（主判据）：拼接 LLM 字段的表达式里不得出现裸的 `+ t.<field>`。

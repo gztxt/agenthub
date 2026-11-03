@@ -790,6 +790,15 @@
         .fchip.on .fchip-n { color: var(--text-1); }
         /* 表头钉在页滚动容器顶部 */
         .sp-card thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; }
+        /* 协同历史工具条（搜索框 + 状态筛选芯片）钉在卡内滚动容器 #taskAccHist 顶部
+           （2026-11-03 用户令「搜索框和状态保持在顶部，不要随滚动条滚动」）：
+           改成卡内滚动后，工具条作为滚动容器第一个子块会跟着滚走，历史一长
+           就找不着搜索框。sticky 锚在 #taskAccHist（滚动容器 = sticky 参照系），
+           背景取卡面同色 —— 滚过去列表贴到工具条下面不会透字。
+           只钉协同历史这一张卡：汇总卡没有工具条、运行详情工具条是内联的
+           「更多指标」区，各自语义不同，不搭便车。 */
+        #taskAccHist > .sp-tools:first-child { position: sticky; top: 0; z-index: 2;
+                                                background: var(--surface); }
         /* auto-fit + minmax：列数由可用宽度自己决定，**不新增断点**，也就不会有
            「媒体查询写在定义之前被覆盖」那类静默失效（本次第一版就踩了：.three 定死在
            1100 断点之前定义，窄屏没塌成单列）。空轨道会被 auto-fit 收掉 ⇒ 2 个子项

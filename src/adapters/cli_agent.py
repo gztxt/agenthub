@@ -16,6 +16,11 @@ verifier 判不出来（实测 `/etc/hostname` 真值 `zzst`，claude 回 `AGNES
   ⑤ `model_path` 分两档：`ccr` 的 CLI 直接吃 CCR 模型 ID（实测 claude/pi 生效）；
      `native` 的（codebuddy/cursor）模型域是自己的厂商清单，塞 CCR ID 必报
      `unknown model` ⇒ **不透传**，只记 `model="native"`。
+     ⚠ codebuddy 的这条**依然成立**（2026-11-03 复核）：它只认**本地清单里有的**
+     CCR ID —— 实测 `alibaba/qwen3.8-flash`（已写进 ~/.workbuddy/models.json）
+     真回包，而 `alibaba/qwen3.8-max`（不在本地清单）报
+     "Please use --model <model_id>"。故派发侧按档位透传 CCR ID 仍是必失败，
+     `model_path="native"` 保持不变（判例 321）。
 """
 from __future__ import annotations
 

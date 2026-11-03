@@ -27,6 +27,13 @@ MODEL_ARGV: Dict[str, str] = {
     # ── 2026-10-25 新增（omp 入册，实测 omp --help：`--model=<value>  Model to use
     #    (fuzzy match: "opus", "gpt-5.2", or "openai/gpt-5.2")`）──
     "omp": "--model",
+    # ── 2026-11-03 新增（codebuddy 入册，实测 `codebuddy --help`：
+    #    `--model <model>  Model for the current session`）──
+    # ⚠ 它认的值是**本地清单里的 id**：provider 把 ~/.workbuddy/models.json 的条目并进
+    # 清单时加 `custom-local:` 前缀，但**原 id 同时进 aliases** ⇒ 实测
+    # `--model alibaba/deepseek-v4.1-flash` 与 `--model custom-local:alibaba/…` 都真回包。
+    # 这里注入**裸 id**（与设置页存的形状一致，也与其它 agent 同口径）。
+    "codebuddy": "--model",
 }
 
 #: 写入模式（2026-10-07，用户裁定「原生 + 插入」）。三类语义不同，设置页必须分开说：
@@ -43,6 +50,10 @@ WRITE_MODE: Dict[str, str] = {
     "qoder": "native",
     # argv-only：无默认模型配置文件可落（见 _omp_read），hub 侧设置只经终端注入。
     "omp": "argv",
+    # 2026-11-03：codebuddy 的清单条目**直写 CCR 的 provider/model ID**（落
+    # ~/.workbuddy/models.json）⇒ 与 "ccr" 同口径，清单闸门（catalog_ids）对它生效：
+    # 存了不在 CCR 清单里的 ID ⇒ 注入后上游报 unknown model。
+    "codebuddy": "ccr",
 }
 
 #: 该 agent 的模型字段要求的**值前缀**（v0.13.86，2026-10-07；2026-10-25 补 omp）。

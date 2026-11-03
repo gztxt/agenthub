@@ -176,7 +176,10 @@ class AReadCurrent(_HomeFixture):
             self.assertEqual(st["current"], want, aid)
 
     def test_unsupported_agents_are_marked_not_writable(self):
-        for aid in ("codebuddy", "qwenpaw", "cloudcli"):
+        # ⚠ codebuddy 已于 2026-11-03 移出本表（判例 321）：旧理由「--model 只认自有
+        # 清单」已被实测推翻 —— provider 会把 ~/.workbuddy/models.json 里的条目并进
+        # /model 清单，且 `codebuddy --model alibaba/…` 真回包。它的用例见 MCodebuddy。
+        for aid in ("qwenpaw", "cloudcli"):
             st = modelcfg.agent_state(aid)
             self.assertFalse(st["supported"], aid)
             self.assertFalse(st["writable"], aid)
@@ -358,8 +361,11 @@ class CApplyWritesWithBackup(_HomeFixture):
 class DTerminalArgvWhitelist(unittest.TestCase):
     def test_only_whitelisted_agents_get_flags(self):
         self.assertEqual(modelcfg.terminal_argv("hermes", "m"), ["-m", "m"])
-        self.assertEqual(modelcfg.terminal_argv("codebuddy", "m"), [],
-                         "codebuddy 的 --model 只认自有清单，不许注入 CCR 模型")
+        # ⚠ codebuddy 已于 2026-11-03 入白名单（判例 321）：它只认**本地清单里有的**
+        # CCR ID，而设置页写手正是往 ~/.workbuddy/models.json 写该条目 ⇒ 注入的值
+        # 必然在它清单里。不在清单的 CCR ID（如 alibaba/qwen3.8-max）实测被它拒，
+        # 那种情况由「清单闸门」（catalog_ids）+ 写手落盘保证不发生。
+        self.assertEqual(modelcfg.terminal_argv("codebuddy", "m"), ["--model", "m"])
         self.assertEqual(modelcfg.terminal_argv("claude", ""), [], "没设模型就不插 flag")
 
 
@@ -811,8 +817,10 @@ class KClearHubModel(_HomeFixture):
         self.assertEqual(self._read(".cursor/cli-config.json"), before)
 
     def test_clear_on_unknown_agent_is_rejected(self):
+        # ⚠ 样本从 codebuddy 换成真正不在册的 id：codebuddy 已于 2026-11-03 入册
+        # （判例 321），拿它当「未知 agent」会误判成"清空被接受"。
         with self.assertRaises(modelcfg.ModelCfgError):
-            modelcfg.apply_model("codebuddy", "")
+            modelcfg.apply_model("no-such-agent-xyz", "")
 
 
 class LQoderDriftExempt(_HomeFixture):
@@ -1289,3 +1297,166 @@ class RUndo(_HomeFixture):
             modelcfg.undo_model("claude")
         self.assertEqual(cm.exception.status, 409)
         self.assertIn("HOME", cm.exception.args[0])
+
+
+# ── codebuddy（WorkBuddy 包内 CLI）─────────────────────────────────────
+# 判据（2026-11-03 实测，判例 321）：codebuddy 的 `/model` 清单数据源是 CLI dist 的
+# CustomModelsProductProvider，它读 **~/.workbuddy/models.json**（productName=WorkBuddy
+# ⇒ isWorkBuddy ⇒ 落点 .workbuddy），**不是** ~/.codebuddy/models.json（那个只喂 Web UI
+# 的 /custom/list 接口）。且必须**数组格式** —— 桌面端 local-model storage 把同一文件当
+# 数组处理（Array.isArray(current) ? [...] : []），对象格式会被降级成 []。
+class MCodebuddy(_HomeFixture):
+    """codebuddy 落 ~/.workbuddy/models.json：数组格式 + 幂等 upsert + 不碰别人条目。"""
+
+    def setUp(self):
+        super().setUp()
+        self._old_key = os.environ.get("CCR_OPENAI_KEY")
+        os.environ["CCR_OPENAI_KEY"] = "key-fixture-ccr"
+
+    def tearDown(self):
+        if self._old_key is None:
+            os.environ.pop("CCR_OPENAI_KEY", None)
+        else:
+            os.environ["CCR_OPENAI_KEY"] = self._old_key
+        super().tearDown()
+
+    def _models(self):
+        return json.loads(self._read(".workbuddy/models.json"))
+
+    def test_read_reports_ccr_entry_and_files(self):
+        self._write(".workbuddy/models.json", json.dumps([
+            {"id": "alibaba/qwen3.8-flash", "name": "x", "url": "http://127.0.0.1:3456/v1/chat/completions"},
+            {"id": "local-llama", "name": "y", "local": True,
+             "url": "http://127.0.0.1:52741/v1/chat/completions"},
+        ]))
+        st = modelcfg.agent_state("codebuddy")
+        self.assertTrue(st["supported"], "codebuddy 已在册为可设置")
+        self.assertTrue(st["writable"])
+        self.assertEqual(st["current"], "alibaba/qwen3.8-flash",
+                         "current 只认指向本机 CCR 的条目；local:true 的桌面端模型不算")
+        self.assertTrue(st["files"][0].endswith(".workbuddy/models.json"))
+
+    def test_read_handles_missing_file(self):
+        st = modelcfg.agent_state("codebuddy")
+        self.assertTrue(st["supported"], "文件不在也要在册（否则设置页看不到它）")
+        self.assertEqual(st["current"], "")
+
+    def test_write_produces_array_format(self):
+        """数组格式是硬约束：对象格式会被桌面端启动时降级成 []（内容丢失）。"""
+        self._write(".workbuddy/models.json", "[]")
+        modelcfg.apply_model("codebuddy", "alibaba/deepseek-v4.1-flash")
+        raw = self._read(".workbuddy/models.json")
+        d = json.loads(raw)
+        self.assertIsInstance(d, list, "必须是数组（桌面端按数组语义写回）")
+        self.assertEqual(len(d), 1)
+        self.assertEqual(d[0]["id"], "alibaba/deepseek-v4.1-flash")
+        self.assertIn("127.0.0.1:3456", d[0]["url"], "url 必须指向本机 CCR")
+
+    def test_write_is_idempotent_upsert_not_append(self):
+        self._write(".workbuddy/models.json", "[]")
+        modelcfg.apply_model("codebuddy", "alibaba/deepseek-v4.1-flash")
+        modelcfg.apply_model("codebuddy", "alibaba/deepseek-v4.1-flash")
+        d = self._models()
+        self.assertEqual(len(d), 1, "同 id 重复保存不许追加出第二条")
+
+    def test_write_preserves_other_entries(self):
+        """不许动别人的条目：桌面端下载的 local:true 模型、其它 id 的条目原样保留。"""
+        keep_local = {"id": "local-llama", "name": "y", "local": True,
+                      "url": "http://127.0.0.1:52741/v1/chat/completions"}
+        keep_other = {"id": "alibaba/other", "name": "o",
+                      "url": "http://127.0.0.1:3456/v1/chat/completions"}
+        self._write(".workbuddy/models.json",
+                    json.dumps([keep_local, keep_other]))
+        modelcfg.apply_model("codebuddy", "alibaba/deepseek-v4.1-flash")
+        d = self._models()
+        ids = [m.get("id") for m in d]
+        self.assertIn("local-llama", ids, "桌面端的 local:true 条目不许丢")
+        self.assertIn("alibaba/other", ids, "其它 id 的条目不许丢")
+        self.assertIn("alibaba/deepseek-v4.1-flash", ids)
+        self.assertEqual(len(d), 3)
+
+    def test_write_converts_legacy_object_format_to_array(self):
+        """历史形态（对象 {models:[...]}）必须被转成数组，否则桌面端一启动就降级成 []。"""
+        self._write(".workbuddy/models.json", json.dumps(
+            {"models": [{"id": "alibaba/old", "name": "o",
+                         "url": "http://127.0.0.1:3456/v1/chat/completions"}]}))
+        modelcfg.apply_model("codebuddy", "alibaba/deepseek-v4.1-flash")
+        d = self._models()
+        self.assertIsInstance(d, list, "对象格式必须转成数组")
+        self.assertEqual([m["id"] for m in d], ["alibaba/old", "alibaba/deepseek-v4.1-flash"])
+
+    def test_write_refuses_when_file_missing(self):
+        """不新建：文件由 CLI/桌面端创建，hub 凭空造一个会被下一次启动覆盖。"""
+        with self.assertRaises(modelcfg.ModelCfgError) as cm:
+            modelcfg.apply_model("codebuddy", "alibaba/deepseek-v4.1-flash")
+        self.assertEqual(cm.exception.status, 404)
+        self.assertFalse((self.home / ".workbuddy" / "models.json").exists(),
+                         "拒绝时不许留下新建文件")
+
+    def test_preview_does_not_write(self):
+        self._write(".workbuddy/models.json", "[]")
+        before = self._read(".workbuddy/models.json")
+        modelcfg.preview("codebuddy", "alibaba/deepseek-v4.1-flash")
+        self.assertEqual(self._read(".workbuddy/models.json"), before,
+                         "预览只算 diff，不许落盘")
+
+    def test_backup_is_taken_and_isolated(self):
+        self._write(".workbuddy/models.json", "[]")
+        modelcfg.apply_model("codebuddy", "alibaba/deepseek-v4.1-flash")
+        baks = self._backups(".workbuddy/models.json")
+        self.assertTrue(baks, "落笔前必须留时间戳备份")
+
+    def test_terminal_injects_model_flag(self):
+        """拉起终端时注入 --model（codebuddy --help 实测有该 flag）。"""
+        self.assertEqual(modelcfg.terminal_argv("codebuddy", "alibaba/x"), ["--model", "alibaba/x"])
+        self.assertEqual(modelcfg.terminal_argv("codebuddy", ""), [], "没设值不注入")
+
+    def test_write_mode_is_ccr_so_catalog_guard_applies(self):
+        from modelcfg_shape import WRITE_MODE
+        self.assertEqual(WRITE_MODE.get("codebuddy"), "ccr",
+                         "条目直写 CCR ID ⇒ 清单闸门对 codebuddy 生效")
+
+    def test_entry_name_is_readable_not_bare_id(self):
+        """name 用可读形式：/model 选择器显示 name，裸 id 会露出网关内部写法。"""
+        self._write(".workbuddy/models.json", "[]")
+        modelcfg.apply_model("codebuddy", "alibaba/qwen3.8-flash")
+        d = self._models()
+        self.assertEqual(d[0]["name"], "qwen3.8-flash (CCR alibaba)")
+        self.assertEqual(d[0]["id"], "alibaba/qwen3.8-flash")
+
+    def test_no_longer_in_unsupported_table(self):
+        from modelcfg_writers import UNSUPPORTED
+        self.assertNotIn("codebuddy", UNSUPPORTED,
+                         "旧理由「--model 只认自有清单」已被实测推翻（判例 321）")
+
+
+class MCodebuddyEffective(_HomeFixture):
+    """设置页的「设好了到底有没有效」：codebuddy 的四通道判定。"""
+
+    def setUp(self):
+        super().setUp()
+        self._old_key = os.environ.get("CCR_OPENAI_KEY")
+        os.environ["CCR_OPENAI_KEY"] = "key-fixture-ccr"
+        self._write(".workbuddy/models.json", "[]")
+
+    def tearDown(self):
+        if self._old_key is None:
+            os.environ.pop("CCR_OPENAI_KEY", None)
+        else:
+            os.environ["CCR_OPENAI_KEY"] = self._old_key
+        super().tearDown()
+
+    def test_effective_state_reports_terminal_channel(self):
+        modelcfg.apply_model("codebuddy", "alibaba/deepseek-v4.1-flash")
+        st = modelcfg.effective_state("codebuddy")
+        self.assertEqual(st["model"], "alibaba/deepseek-v4.1-flash")
+        self.assertEqual(st["write_mode"], "ccr")
+        self.assertTrue(st["channels"]["term_new"]["applies"],
+                        "codebuddy 有终端入口 + 有 --model 白名单 ⇒ 新会话通道生效")
+        self.assertEqual(st["channels"]["term_new"]["argv"],
+                         ["--model", "alibaba/deepseek-v4.1-flash"])
+
+    def test_effective_state_no_drift_after_write(self):
+        modelcfg.apply_model("codebuddy", "alibaba/deepseek-v4.1-flash")
+        st = modelcfg.effective_state("codebuddy")
+        self.assertIsNone(st["drift"], "写完配置现值应等于 hub 值，不该报漂移")

@@ -25,6 +25,8 @@
     「返回默认模型」等于把"不知道"伪装成"知道"；
   · 模型域不是 CCR 的 agent（codebuddy / cursor）不注入 —— 塞 CCR ID 必报 unknown model，
     那是把"选型"做成"必失败"。
+    ⚠ codebuddy 这条 2026-11-03 复核仍成立：它只认**本地清单里有的** CCR ID
+    （实测 alibaba/qwen3.8-flash 真回包、alibaba/qwen3.8-max 被拒），故按档位透传仍是必失败。
 
 ## 档位顺序是**声明**，不是测量
 

@@ -20,8 +20,10 @@ yaml，pi 还要顺带补模型清单、grok 要建命名 profile），逐一白
   pi      ~/.pi/agent/settings.json   defaultModel / defaultProvider（模型不在清单时补进 models.json）
   grok    ~/.grok/config.toml         [model.ccr-hub] 块 + [models].default
   hermes  ~/.hermes/config.yaml       model.default / model.provider
-  codebuddy（WorkBuddy 包内 CLI）    **不支持**：--model 只认自有清单
-          （hy4-preview / hy3 …，实测 help 输出），与 CCR 的 provider/model ID 不通用。
+  codebuddy（WorkBuddy 包内 CLI）    ~/.workbuddy/models.json（**数组格式**！见 _codebuddy_write）
+          条目直写 CCR 的 provider/model ID（alibaba/xxx）；provider 把它们并进 /model 清单
+          （带 custom-local: 前缀，原 id 同时进 aliases）。2026-11-03 实测入册（判例 321）——
+          此前标「不支持」的理由「--model 只认自有清单」已被推翻。
 
 agent 清单怎么来（2026-10-25 用户令「应该是自动发现并添加」）：
   ① SPECS/UNSUPPORTED 两张硬编码表（逐家实测的读写器与理由）；

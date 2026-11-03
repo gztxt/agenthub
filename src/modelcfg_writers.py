@@ -25,6 +25,16 @@ def _api_key() -> str:
     import modelcfg as _mc
     return _mc._ccr_api_key()
 
+
+def _ccr_base() -> str:
+    """惰性取 CCR 网关口（定义在 modelcfg.py）。
+
+    为什么不在本模块直接读 env：网关口有多个来源（CLAUDE_CCR_URL / 默认 3456），
+    真源在 modelcfg.py；复制一份必然漂移。惰性 import 防循环依赖。
+    """
+    import modelcfg as _mc
+    return _mc._ccr_base()
+
 def _home() -> Path:
     """每次调用现取：L0 用例靠改 HOME 造假盘，模块级常量会让夹具失效。"""
     return Path(os.path.expanduser("~"))
@@ -787,6 +797,128 @@ def _cursor_write(model: str):
     except (KeyError, jsonspan.JsonSpanError):
         return [(p, json.dumps(d, ensure_ascii=False, indent=2) + "\n", changes)]
 
+# ── codebuddy（WorkBuddy 包内 CLI）：落 ~/.workbuddy/models.json（数组格式）────
+# 判据（2026-11-03 实测，判例 321）：CLI dist 的 CustomModelsProductProvider 才是
+# `/model` 清单的数据源，它读的文件是 **~/.workbuddy/models.json**（productName=WorkBuddy
+# ⇒ isWorkBuddyProduct=true ⇒ 落点 .workbuddy），**不是** ~/.codebuddy/models.json
+# （后者只服务 Web UI 的 /custom/list 接口，provider 不读）。
+#
+# ⚠ **必须写数组格式** `[ {...}, {...} ]`：桌面端 asar 的 local-model storage 把同一文件
+# **当数组**处理（`Array.isArray(current) ? [...current] : []`），写对象格式 ⇒ 被当非数组
+# ⇒ 桌面端下次启动写回 []，内容丢失。provider 的 extractConfig() 两种格式都吃，
+# 而数组格式下桌面端写回只剔 `local:true` 条目 ⇒ 我们的条目存活（实测模拟验证）。
+#
+# ⚠ **id 必须带 provider 前缀**（`alibaba/xxx`）：本地条目 id 若与云账号内置清单同名，
+# 云条目优先 ⇒ 本地 url/apiKey 被完全忽略（云在答）。带前缀即避开。
+#
+# ⚠ **项目级 `<cwd>/.codebuddy/models.json` 不是可用落点**：provider 取
+# `workspaceFolders[0].uri`，CLI 独立运行时 = cwd 本身，**不回溯上级目录**；而 hub
+# 拉起的会话 cwd = 用户选的项目目录 ⇒ 只有用户级才是 cwd 无关的落点。
+
+
+def _codebuddy_models_path() -> Path:
+    """provider 真正读的用户级清单路径（productName=WorkBuddy ⇒ .workbuddy）。
+
+    每次现取（不模块级缓存）：L0 用例靠改 HOME 造假盘，模块级常量会让夹具失效。
+    """
+    return _home() / ".workbuddy" / "models.json"
+
+
+def _codebuddy_load_entries(p: Path) -> List[dict]:
+    """读出条目列表（数组格式）。
+
+    兼容三种历史形态，返回**统一的数组**：
+      ① `[ {...} ]`            —— 本写手与桌面端 local-model store 共同使用；
+      ② `{ "models": [...] }`  —— 旧手写格式（provider 也吃，但会被桌面端降级成 []）；
+      ③ `[]` / 缺文件 / 坏 JSON —— 空列表（写侧会补齐）。
+    """
+    if not p.exists():
+        return []
+    try:
+        d = json.loads(_read_text(p))
+    except (json.JSONDecodeError, ModelCfgError):
+        return []
+    if isinstance(d, list):
+        return [m for m in d if isinstance(m, dict)]
+    if isinstance(d, dict) and isinstance(d.get("models"), list):
+        return [m for m in d["models"] if isinstance(m, dict)]
+    return []
+
+
+def _codebuddy_read() -> dict:
+    """读 ~/.workbuddy/models.json：现值 = 指向本机 CCR 的第一个条目。
+
+    「current」取**指向 CCR 的条目**（url 含本机 CCR 口）的 id —— 该文件里的条目
+    可能混着桌面端下载的本地模型（`local:true`，url 是 llama-server 口）与别的来源，
+    只有指向 CCR 的那些才是 hub 该管的。
+    """
+    p = _codebuddy_models_path()
+    if not p.exists():
+        return {"current": "", "files": [], "note": "未找到 ~/.workbuddy/models.json"}
+    entries = _codebuddy_load_entries(p)
+    ccr = _ccr_base()
+    ccr_ids = [str(m.get("id") or "") for m in entries
+                if str(m.get("id") or "") and ccr in str(m.get("url") or "")]
+    return {"current": ccr_ids[0] if ccr_ids else "",
+            "provider": "ccr" if ccr_ids else "",
+            "extra": {"entries": len(entries), "ccr_entries": len(ccr_ids)},
+            "files": [str(p)],
+            "note": ("codebuddy 的模型清单是 ~/.workbuddy/models.json（数组格式）："
+                     "provider 只认指向本机 CCR 的条目；桌面端下载的本地模型"
+                     "（local:true）不在其列")}
+
+
+def _codebuddy_write(model: str) -> List[Tuple[Path, str, List[dict]]]:
+    """把 model 作为一条 CCR 条目 upsert 进 ~/.workbuddy/models.json。
+
+    写手是纯函数（不落盘），返回 [(路径, 新文本, changes)] 交由 apply_model 落。
+
+    硬约束（三条都来自实测，见判例 321）：
+      ① **输出必为数组格式** —— 对象格式会被桌面端启动时降级成 []；
+      ② **按 id 幂等 upsert** —— 同 id 只更新该条，不追加重复项；
+      ③ **不碰别人的条目** —— 桌面端的 local:true 条目、其它 id 的条目原样保留。
+    """
+    p = _codebuddy_models_path()
+    if not p.exists():
+        raise ModelCfgError(
+            f"配置文件不存在，拒绝新建：{p}（codebuddy 的模型清单由 CLI/桌面端创建；"
+            f"请先在 WorkBuddy 里启动一次 codebuddy，或手动建该文件）", 404)
+    entries = _codebuddy_load_entries(p)
+    url = _ccr_base() + "/v1/chat/completions"
+    api_key = _api_key()
+    entry = {
+        "id": model,
+        # name 用可读形式：CLI 的 /model 选择器显示的是 name（id 只作别名）。
+        # 裸 id 会让用户在列表里看到 "alibaba/qwen3.8-flash" 这种网关内部写法。
+        "name": "%s (CCR %s)" % (model.split("/", 1)[-1], model.split("/", 1)[0])
+        if "/" in model else "%s (CCR)" % model,
+        "vendor": model.split("/", 1)[0] if "/" in model else "Custom",
+        "apiKey": api_key,
+        "url": url,
+        "maxInputTokens": 1000000,
+        "maxOutputTokens": 65536,
+        "supportsToolCall": True,
+        "supportsReasoning": True,
+    }
+    changes: List[dict] = []
+    hit = -1
+    for i, m in enumerate(entries):
+        if str(m.get("id") or "") == model:
+            hit = i
+            break
+    if hit >= 0:
+        old = dict(entries[hit])
+        entries[hit] = entry
+        changes.append({"where": f"models[{model}]", "from": str(old.get("url") or ""),
+                        "to": url, "op": "set"})
+    else:
+        entries.append(entry)
+        changes.append({"where": f"models[{model}]", "from": "", "to": url, "op": "add"})
+    # 永远写数组（见硬约束①）。ensure_ascii=False + indent=2：与桌面端写的形态一致。
+    new = json.dumps(entries, ensure_ascii=False, indent=2) + "\n"
+    return [(p, new, changes)]
+
+
 # ── argv-only 型 agent（2026-10-25：omp 入册）────────────────────────
 # 判据（实测，不是推断）：omp 的配置根 ~/.omp/agent 里是 sqlite（agent.db /
 # models.db）+ models.yml 的 provider 清单，**没有** pi 那样的 settings.json
@@ -833,11 +965,18 @@ SPECS: Dict[str, dict] = {
     #    agent，应该是自动发现并添加」）──
     "omp": {"name": "oh-my-pi (omp)", "read": _omp_read, "write": _omp_write,
             "argv_only": True},
+    # ── 2026-11-03 新增（用户报障「嵌入式终端 /model 里看不到 CCR 模型」）──
+    # 落点 ~/.workbuddy/models.json（provider 真正读的文件），数组格式。
+    "codebuddy": {"name": "CodeBuddy Code", "read": _codebuddy_read,
+                  "write": _codebuddy_write},
 }
 
 #: 在册但**不可统一设置**的 agent（理由必须写清，前端据此置灰）
 UNSUPPORTED: Dict[str, str] = {
-    "codebuddy": "WorkBuddy 包内 CLI：--model 只认自有清单（hy4-preview/hy3/…），与 CCR 的 provider/model ID 不通用",
+    # ⚠ codebuddy 已于 2026-11-03 移出本表并入 SPECS（见 _codebuddy_write 注释）：
+    # 旧理由「--model 只认自有清单」已被实测推翻 —— provider 的 CustomModelsProductProvider
+    # 会把 ~/.workbuddy/models.json 里的条目并入 /model 清单（带 custom-local: 前缀），
+    # 且 `codebuddy --model alibaba/deepseek-v4.1-flash` 实测真回包（判例 321）。
     "qwenpaw": "纯 Web 型，无 CLI 与本机模型配置文件",
     # 2026-10-07 实测取证（不是想当然）：cloudcli --help 的全部命令是
     # start / sandbox / browser-use-mcp / status / update / help / version，

@@ -127,6 +127,32 @@ class TestSerializeFileOverlaps(unittest.TestCase):
         self.assertTrue(_acyclic(out))
 
 
+class TestFileDrivenDeps(unittest.TestCase):
+    """区分「刻意串行」与「退化单链」：判据是「这条依赖为什么存在」。"""
+
+    def test_leader_serialized_by_files_is_recognized(self):
+        # 实测 dry_run 原样：三者同为 templates/index.html，Leader 自己写成链
+        items = [_t("t1", ["templates/index.html"]),
+                 _t("t2", ["templates/index.html"], deps=["t1"]),
+                 _t("t3", ["templates/index.html"], deps=["t2"])]
+        driven = tasks_dag.file_driven_deps(items)
+        self.assertEqual(len(driven), 2)
+        self.assertEqual(driven[0][:2], ("t2", "t1"))
+
+    def test_dep_without_file_overlap_is_not_driven(self):
+        items = [_t("t1", ["a.py"]), _t("t2", ["b.py"], deps=["t1"])]
+        self.assertEqual(tasks_dag.file_driven_deps(items), [])
+
+    def test_task_without_files_never_driven(self):
+        items = [_t("t1", ["a.py"]), _t("t2", [], deps=["t1"])]
+        self.assertEqual(tasks_dag.file_driven_deps(items), [])
+
+    def test_partial_chain_reports_only_real_part(self):
+        items = [_t("t1", ["a.py"]), _t("t2", ["a.py"], deps=["t1"]),
+                 _t("t3", ["b.py"], deps=["t2"])]
+        self.assertEqual(len(tasks_dag.file_driven_deps(items)), 1)
+
+
 class TestNormFiles(unittest.TestCase):
     def test_string_becomes_single_item(self):
         self.assertEqual(norm("src/a.py"), ["src/a.py"])

@@ -191,6 +191,29 @@ def _ancestors(items: List[dict]) -> Dict[str, set]:
     return memo
 
 
+def file_driven_deps(items: List[dict]) -> list:
+    """找出「因为有文件交集才该有的依赖」：`(task, dep, 交集文件)`。
+
+    用途：区分**刻意串行**与**退化单链**。Leader 自己就按 `files` 写了 deps 时
+    （实测一次 dry_run：t2 依赖 t1、t3 依赖 t2，三者同为 `templates/index.html`），
+    `serialize_file_overlaps` 无事可做 ⇒ note 为 None，于是并行度告警会把它读成
+    「拆解退化、可能串成单链」。**同一份 DAG，一次是对的，一次被报警** ——
+    判据必须落在「这条依赖为什么存在」，而不是「有几个任务无依赖」。
+    """
+    by_id = {it["id"]: it for it in items}
+    out = []
+    for it in items:
+        cur = set(it.get("files") or [])
+        if not cur:
+            continue
+        for d in it.get("deps") or []:
+            dep = by_id.get(d) or {}
+            hit = cur & set(dep.get("files") or [])
+            if hit:
+                out.append((it["id"], d, sorted(hit)[:3]))
+    return out
+
+
 def serialize_file_overlaps(items: List[dict]) -> tuple:
     """同文件集的并行子任务 ⇒ **强制串行**。返回 `(items, note|None)`。
 
@@ -501,6 +524,19 @@ async def decompose(body: DecomposeIn):
     items, pin_note = _apply_pinned_model(items, body.model, allowed)
     # 并行度体检：只告警不拒绝（串行 DAG 在真有依赖时合法，这里让「退化」可见）。
     par_note = parallelism_note(items)
+    if par_note and not file_note:
+        # Leader 自己按 files 串的：不是退化。全部非空依赖都有文件交集 ⇒ 直接不报警；
+        # 只有部分有交集才补一句说明（剩余部分仍可能是真退化，不能一并静音）。
+        driven = file_driven_deps(items)
+        total_deps = sum(len(it.get("deps") or []) for it in items)
+        if driven and total_deps and len(driven) >= total_deps:
+            par_note = None
+        elif driven:
+            par_note = dict(par_note, reason="partly_file_overlap",
+                            file_driven_deps=len(driven),
+                            warning=par_note["warning"] + (
+                                "（其中 %d 条依赖由同文件声明决定，属刻意串行，不算退化）"
+                                % len(driven)))
     if par_note and file_note:
         # 刻意串行不是退化：不加这句，「为防同文件覆盖而串行」会被读成「Leader 又拆成单链」。
         par_note = dict(par_note, reason="file_overlap",

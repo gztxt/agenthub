@@ -15,8 +15,13 @@
   **只读建议，不改派发**（直接接管需先 A/B）。
 - **孤儿回收**：`adapters/cli_agent` 增进程登记表与 `reap_orphans()`，
   启动 / run 收敛 / 关停三处调用。判据三重：`PPID==自己` + `pgid==pid` + 存活 >120s。
-- **测试**：新增 `test_dag_file_overlap_l0.py`(18)、`test_dispatch_weights_l0.py`(28)、
-  `test_orphan_reap_l0.py`(7)，合计 53 例；相关集 150 例全绿。
+- **修**：Leader **自己**按 `files` 串好时（实测 dry_run：三者同为 `templates/index.html`，
+  它写成 t1→t2→t3），闸门无事可做 ⇒ `file_serialization=null`，于是并行度告警把它读成
+  「拆解退化、可能串成单链」。新增 `file_driven_deps()`：全部非空依赖都有文件交集 ⇒ 不报警；
+  部分有 ⇒ 补一句「其中 N 条属刻意串行」。同一份 DAG 一次被静音、一次被报警，是因为判据
+  落错位置（「几个任务无依赖」≠「这条依赖为什么存在」）。
+- **测试**：新增 `test_dag_file_overlap_l0.py`(22)、`test_dispatch_weights_l0.py`(28)、
+  `test_orphan_reap_l0.py`(7)，合计 57 例；相关集 154 例全绿。
 
 ## v0.13.190 — 协同看板从「有容器」到「有内容」：静态全绿，页面空白
 

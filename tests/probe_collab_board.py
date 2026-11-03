@@ -57,7 +57,9 @@ def main():
                 break
             time.sleep(0.25)
         n_items = ev(cdp, "document.querySelectorAll('#statsAgents .run-item').length")
-        head_txt = ev(cdp, "(document.querySelector('#statsAgents .run-title')||{}).textContent||''")
+        # 行头（标题 + 元信息 + 徽章）整体取文本：实现把徽章放在 .run-acts 里，
+        # 只读 .run-title 会把「成功率 n=45」漏掉 —— 判据不该依赖具体格子。
+        head_txt = ev(cdp, "(document.querySelector('#statsAgents .run-hd')||{}).textContent||''")
         meta_txt = ev(cdp, "(document.querySelector('#statsAgents .run-meta')||{}).textContent||''")
         chip_failed = ev(cdp, "(document.querySelector('[data-chip-n=\"failed\"]')||{}).textContent||''")
         run_pills = ev(cdp, "document.querySelectorAll('#runsBody .run-hd .stat-pill').length")
@@ -68,8 +70,8 @@ def main():
             fails.append("A 汇总卡主体仍为空（#statsAgents 没有渲染出任何 agent 行）")
         print("[B] 首行标题 =", head_txt.strip()[:60])
         print("    首行元信息 =", " ".join(meta_txt.split())[:120])
-        if "成功率" not in head_txt or "n=" not in head_txt:
-            fails.append("B agent 行头缺「成功率 + n=样本量」")
+        if "% 成功" not in head_txt or "n=" not in head_txt:
+            fails.append("B agent 行头缺「成功率百分比 + n=样本量」（比率必须带分母）")
         print("[C] 协同历史行数 =", run_rows, "带徽章行头 =", run_pills)
         if run_rows and run_pills < run_rows:
             fails.append("C 协同历史行头有 %d/%d 行没有状态徽章" % (run_rows - run_pills, run_rows))

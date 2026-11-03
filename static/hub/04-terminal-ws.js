@@ -3504,172 +3504,6 @@ async function loadRunEvents(runId) {
   } catch (e) { el.textContent = '时间线拉取失败：' + e.message; }
 }
 
-/* ── #statsAgents 手风琴：状态桶与渲染（2026-11-03 补完）──────────────
-   上一轮只把容器与 CSS 写进模板，JS 从未渲染它 ⇒ 「执行结果汇总」卡主体是空白。
-   这里把「按 agent 分组」真正落地：一行一个 agent（成败徽章 + 均耗时 + 失败原因类数），
-   点开看该 agent 的失败原因与各模型组合；失败+阻塞多的自动排最前。
-   展开态单独一个桶（statsOpen），与协同历史的 runOpenSet 互不影响 —— 否则点开
-   一个 agent 会把已展开的 run 收起，看着像“随机失灵”。数据只来自 stats 一次响应。 */
-var statsOpen = Object.create(null);
-var statsGroups = Object.create(null);
-var statsActBound = false;
-
-function buildStatsGroups(d) {
-  var map = Object.create(null);
-  function slot(a) {
-    return map[a] || (map[a] = { agent: a, n: 0, ok: 0, failed: 0, blocked: 0, retried: 0,
-                                 escalated: 0, ms: 0, tokens: 0, combos: [], fails: [] });
-  }
-  (d.combos || []).forEach(function (c) {
-    var g = slot(c.agent_id || '-');
-    g.n += c.n || 0; g.ok += c.ok || 0; g.failed += c.failed || 0; g.blocked += c.blocked || 0;
-    g.retried += c.retried || 0; g.escalated += c.escalated || 0;
-    g.ms += c.ms || 0; g.tokens += c.tokens || 0;
-    g.combos.push(c);
-  });
-  (d.failures || []).forEach(function (f) {
-    (f.agents || []).forEach(function (kv) { slot(kv[0]).fails.push({ bucket: f.bucket, n: kv[1], sample: f.sample }); });
-  });
-  var list = Object.keys(map).map(function (k) {
-    var g = map[k];
-    g.rate = g.n ? g.ok / g.n : 0;
-    g.avg_ms = g.n ? g.ms / g.n : 0;
-    g.fail_n = g.fails.reduce(function (a, f) { return a + f.n; }, 0);
-    return g;
-  });
-  /* 排序：失败+阻塞多的在前（这就是“谁的问题”），其次样本多的在前，同分按名字。 */
-  list.sort(function (a, b) {
-    var ba = a.failed + a.blocked, bb = b.failed + b.blocked;
-    if (bb !== ba) return bb - ba;
-    if (b.n !== a.n) return b.n - a.n;
-    return a.agent < b.agent ? -1 : (a.agent > b.agent ? 1 : 0);
-  });
-  list.forEach(function (g) { statsGroups[g.agent] = g; });
-  return list;
-}
-
-function ratePill(g) {
-  var pct = Math.round((g.rate || 0) * 100);
-  var cls = g.rate >= 0.8 ? 'ok' : (g.rate >= 0.5 ? 'warn' : 'bad');
-  /* 样本量永远跟着比率上屏：n=1 的 100% 与 n=20 的 100% 不是同一件事 */
-  return '<span class="stat-pill ' + cls + '">成功率 ' + pct + '% · n=' + g.n + '</span>';
-}
-
-function statsSubsHtml(agent) {
-  var g = statsGroups[agent];
-  if (!g) return '<div class="run-sub run-sub-hint">无数据</div>';
-  var h = '<div class="stat-sub">';
-  h += '<div class="stat-sub-h">失败原因（' + (g.fail_n || 0) + ' 次 · ' + g.fails.length + ' 类）</div>';
-  h += g.fails.length
-    ? g.fails.map(function (f) {
-        return '<div class="stat-fail-row"><b>' + escapeHtml(f.bucket) + '</b> ×' + f.n +
-          (f.sample ? '<div class="hint" style="max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' +
-            escapeHtml(String(f.sample)) + '">' + escapeHtml(String(f.sample).slice(0, 120)) + '</div>' : '') +
-          '</div>';
-      }).join('')
-    : '<div class="stat-fail-row hint">该时间窗内这个 agent 没有失败记录</div>';
-  h += '<div class="stat-sub-h">模型组合（' + g.combos.length + ' 组）</div>';
-  h += '<table class="stat-models"><thead><tr><th>模型</th><th>n</th><th>成功</th><th>失败</th>' +
-       '<th>阻塞</th><th>重试</th><th>升档</th><th>成功率</th><th>均耗时</th></tr></thead><tbody>' +
-    g.combos.map(function (c) {
-      var pct = Math.round((c.rate || 0) * 100);
-      var cls = c.rate >= 0.8 ? 'ok' : (c.rate >= 0.5 ? 'warn' : 'bad');
-      return '<tr><td style="font-family:var(--font-mono)">' + escapeHtml(c.model_eff || '') + '</td>' +
-        '<td>' + c.n + '</td><td>' + c.ok + '</td>' +
-        '<td>' + (c.failed ? '<span class="stat-fail">' + c.failed + '</span>' : '0') + '</td>' +
-        '<td>' + (c.blocked ? '<span class="stat-block">' + c.blocked + '</span>' : '0') + '</td>' +
-        '<td>' + (c.retried || 0) + '</td><td>' + (c.escalated || 0) + '</td>' +
-        '<td><span class="stat-pill ' + cls + '">' + pct + '%</span></td>' +
-        '<td>' + taskFmtDur(c.avg_ms) + '</td></tr>';
-    }).join('') + '</tbody></table>';
-  h += '</div>';
-  return h;
-}
-
-function statsItemEl(agent) {
-  var host = $('statsAgents');
-  if (!host) return null;
-  for (var i = 0; i < host.children.length; i++) {
-    if (host.children[i].getAttribute('data-stats-item') === agent) return host.children[i];
-  }
-  return null;
-}
-
-function setStatsOpen(agent, open) {
-  var item = statsItemEl(agent);
-  if (!item) return;
-  if (open) item.classList.add('open');
-  else item.classList.remove('open');
-  var hd = item.querySelector('.run-hd');
-  if (hd) hd.setAttribute('aria-expanded', open ? 'true' : 'false');
-  /* 展开区内容懒铺：收起时清空，避免 20 个 agent 各带一张表占内存也占 DOM */
-  var subs = item.querySelector('.run-subs');
-  if (subs) subs.innerHTML = open ? statsSubsHtml(agent) : '';
-}
-
-function toggleStats(agent) {
-  if (!agent) return;
-  var willOpen = !statsOpen[agent];
-  /* 与协同历史同一套手风琴语义：同容器内只开一个。区别只在桶（statsOpen vs runOpenSet）。 */
-  Object.keys(statsOpen).forEach(function (other) {
-    if (other === agent) return;
-    delete statsOpen[other];
-    setStatsOpen(other, false);
-  });
-  if (!willOpen) { delete statsOpen[agent]; setStatsOpen(agent, false); return; }
-  statsOpen[agent] = true;
-  setStatsOpen(agent, true);
-}
-
-function bindStatsActions() {
-  var host = $('statsAgents');
-  if (!host || statsActBound) return;
-  statsActBound = true;
-  host.addEventListener('click', function (ev) {
-    var el = ev.target.closest('[data-stats-toggle]');
-    if (!el || !host.contains(el)) return;
-    ev.preventDefault();
-    toggleStats(el.getAttribute('data-stats-toggle'));
-  });
-  /* role=button + tabindex=0 只是承诺，Enter/Space 得自己接（与 run 行头同口径） */
-  host.addEventListener('keydown', function (ev) {
-    if (ev.key !== 'Enter' && ev.key !== ' ') return;
-    var el = ev.target.closest('[data-stats-toggle]');
-    if (!el || !host.contains(el)) return;
-    ev.preventDefault();
-    toggleStats(el.getAttribute('data-stats-toggle'));
-  });
-}
-
-function renderStatsAgents(d) {
-  var host = $('statsAgents');
-  if (!host) return;
-  bindStatsActions();
-  var list = buildStatsGroups(d);
-  if (!list.length) { host.innerHTML = '<div class="runs-empty hint">该时间窗内没有任务记录</div>'; return; }
-  host.innerHTML = list.map(function (g) {
-    var open = !!statsOpen[g.agent];
-    var meta = '<span>' + g.n + ' 次</span>' +
-      '<span>成功 ' + g.ok + '</span>' +
-      '<span' + (g.failed ? ' class="stat-fail"' : '') + '>失败 ' + g.failed + '</span>' +
-      (g.blocked ? '<span class="stat-block">阻塞 ' + g.blocked + '</span>' : '') +
-      (g.retried ? '<span>重试 ' + g.retried + '</span>' : '') +
-      (g.escalated ? '<span>升档 ' + g.escalated + '</span>' : '') +
-      '<span>均 ' + taskFmtDur(g.avg_ms) + '</span>' +
-      (g.fails.length ? '<span>' + g.fails.length + ' 类失败原因</span>' : '');
-    return '<div class="run-item' + (open ? ' open' : '') + '" data-stats-item="' + escapeHtml(g.agent) + '">' +
-      '<div class="run-hd" role="button" tabindex="0" aria-expanded="' + (open ? 'true' : 'false') + '"' +
-      ' data-stats-toggle="' + escapeHtml(g.agent) + '" title="点击展开该 agent 的失败原因与模型组合">' +
-      '<span class="run-caret" aria-hidden="true">▸</span>' +
-      '<span class="run-title">' + escapeHtml(g.agent) + ' ' + ratePill(g) + '</span>' +
-      '<span class="run-meta">' + meta + '</span>' +
-      '<span class="run-acts"></span>' +
-      '</div>' +
-      '<div class="run-subs">' + (open ? statsSubsHtml(g.agent) : '') + '</div>' +
-      '</div>';
-  }).join('');
-}
-
 /* 需求③④⑤（t4，2026-11-03）：执行结果汇总。
    主线 = 按 agent 分组的可展开列表（#statsAgents，复用协同历史那套手风琴）；
    原始数据 = 单表融合视图（#statsCombos，收进「原始数据」折叠区，功能不减）；
@@ -3756,7 +3590,7 @@ async function loadTaskStats() {
             (a.retried ? '<span>重试 ' + a.retried + '</span>' : '') +
             '<span>均耗时 ' + taskFmtDur(a.n ? Math.round(a.ms / a.n) : 0) + '</span>' +
             '</span>' +
-            '<span class="run-acts"><span class="stat-pill ' + cls + '">' + pct + '% 成功</span></span>' +
+            '<span class="run-acts"><span class="stat-pill ' + cls + '">' + pct + '% 成功 · n=' + a.n + '</span></span>' +
             '</div>' +
             '<div class="run-subs" data-run-subs="' + escapeHtml(a.id) + '">' +
             '<div class="stat-sub">' +
@@ -3821,9 +3655,6 @@ async function loadTaskStats() {
       }
       cb.innerHTML = comboRows.join('');
     }
-    /* 主线视图：按 agent 分组（#statsAgents）。原始融合表（#statsCombos）保留在折叠区。
-       两者同一份响应、同一步渲染 —— 只渲染原始表就是“卡里一大片空白”（上一轮的实际症状）。 */
-    renderStatsAgents(d);
   } catch (e) {
     var v2 = $('taskStatsVerdict');
     if (v2) v2.textContent = '汇总拉取失败：' + e.message;

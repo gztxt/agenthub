@@ -13,6 +13,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
+import adapters.cli_agent as _cli_agent
 import chain_judge
 import db
 import verifier
@@ -34,7 +35,36 @@ _TASK_COLUMNS_EXTRA = (
     ("model_sent", "TEXT"),
     ("tokens_estimated", "INTEGER DEFAULT 0"),
     ("last_fail_kind", "TEXT"),
+    # —— 心跳判据（2026-11-03 混排取证后新增）——
+    # 病根：claude-code 挂住不返回时，旧逻辑要等满 TASK_TIMEOUT_S(600s) 才升级，
+    # 且这次隐藏重试既不进 attempts 也不进 duration_ms ⇒ 统计口径系统性低估
+    # （实测 e91b24b879 的 t3 表面 35.5s，实际先吃满 600s 才升级 codex）。
+    # 心跳信号源＝子进程 CPU ticks（utime+stime，/proc/<pid>/stat 字段 11-12）。
+    # ticks 增长 ⇒ 真在干活；N 秒无增长 ⇒ 挂住，提前升级，不必等满总时长。
+    # 这避免误杀 120-590s 的合法长任务（本轮实测有 15 个成功任务跑在这个区间）。
+    ("last_progress_at", "TEXT"),
+    ("last_cpu_ticks", "INTEGER"),
 )
+
+
+# 心跳判据：连续这么多秒 CPU ticks 无增长即判挂住（区别于总时长 TASK_TIMEOUT_S）。
+HEARTBEAT_STALL_S = int(os.getenv("TASK_HEARTBEAT_STALL_S", "120"))
+
+
+def _proc_cpu_ticks(pid: int):
+    """读子进程累计 CPU ticks（utime+stime）。进程已消失/字段异常 ⇒ None。
+
+    判据是**增量**不是绝对值：本轮 ticks − 上轮 ticks > 0 才算有心跳。这把
+    「CPU 低但真在跑」（等网络 I/O）与「CPU 零增长且已停」（挂住）区分开。
+    """
+    try:
+        with open("/proc/%d/stat" % int(pid), "r") as fh:
+            # comm 字段可能含空格/括号 ⇒ 从最后一个 ')' 后切，后面依次是
+            # state(0) ppid(1) pgrp(2) … utime(11) stime(12)。
+            fields = fh.read().rsplit(")", 1)[1].split()
+        return int(fields[11]) + int(fields[12])
+    except Exception:  # noqa: BLE001 — 进程消失是常态，不是错误
+        return None
 
 #: 已确认补过列的目标库（`db.current_path()`），避免每个任务都跑一遍 PRAGMA。
 _columns_ready = set()
@@ -606,6 +636,16 @@ async def _run_task(run_id: str, row: dict):
             return
         await _verify_and_settle(run_id, row, result, attempts_done, exec_agent,
                                  exec_model, dur, spent_tokens, used_model)
+    except asyncio.CancelledError:
+        # 心跳停滞路径：`_execute_run` 检测到 CPU ticks 无增长后 `atask.cancel()` 到这里。
+        # 不再排重试（_execute_run 已调 _schedule_exec_retry 升级换人），但必须把
+        # 本次耗时**累加**进 spent_ms（不是覆盖）——否则隐藏重试的耗时仍不进账，
+        # 统计口径继续低估（本轮实测：表面 35.5s 的任务实际先吃满 600s）。
+        dur_c = int((asyncio.get_event_loop().time() - t0) * 1000)
+        db.execute("UPDATE tasks SET spent_ms=COALESCE(spent_ms,0)+?,updated_at=?"
+                   " WHERE run_id=? AND task_id=?",
+                   (dur_c, _tiers._now(), run_id, row["task_id"]))
+        raise
     except asyncio.TimeoutError:
         # 2026-10-15 P0-a 取证时发现既存缺陷（非本次引入）：原句把 `'超时熔断 %ds'`
         # 写成字面量却按 5 个参数传（SQL 只有 4 个占位符）⇒ sqlite3.ProgrammingError
@@ -649,6 +689,7 @@ async def _execute_run(run_id: str):
         pass
     sem = asyncio.Semaphore(_tiers.MAX_CONCURRENCY)
     live: Dict[str, asyncio.Task] = {}
+    _hb_prev: Dict[str, tuple] = {}   # task_id -> (上轮 cpu_ticks, 采样时刻)，心跳判据用
     try:
         while True:
             rows = db.query("SELECT * FROM tasks WHERE run_id=? ORDER BY created_at", (run_id,))
@@ -697,14 +738,78 @@ async def _execute_run(run_id: str):
                                              detail={"task": r["task_id"],
                                                      "run_budget": r_over})
                         continue
-                    db.execute("UPDATE tasks SET status='running',started_at=?,updated_at=?"
+                    db.execute("UPDATE tasks SET status='running',started_at=?,"
+                               "last_progress_at=?,last_cpu_ticks=NULL,updated_at=?"
                                " WHERE run_id=? AND task_id=?",
-                               (_tiers._now(), _tiers._now(), run_id, r["task_id"]))
+                               (_tiers._now(), _tiers._now(), _tiers._now(),
+                                run_id, r["task_id"]))
 
                     async def guarded(row=r):
                         async with sem:
                             await _run_task(run_id, row)
                     live[r["task_id"]] = asyncio.create_task(guarded())
+
+            # —— 心跳判据（缺陷1：600s 满超时才升级，且这次隐藏重试不进统计）——
+            # 每轮对在跑任务采一次子进程 CPU ticks：增长 ⇒ 把 last_progress_at 推到现在；
+            # 距 last_progress_at 已超 HEARTBEAT_STALL_S 且 ticks 无增长 ⇒ 判挂住，
+            # **不等满 TASK_TIMEOUT_S**，直接取消并走 _schedule_exec_retry 升级换人。
+            # 误杀防护：ticks 增长就永不判死，所以 120-590s 的合法长任务（本轮实测 15 个）
+            # 只要还在干活就不会被中断；只有真挂住（CLI 无输出且 CPU 不动）才提前止损。
+            if live:
+                try:
+                    pid_by_task = {t.get("tag"): p for p, t in
+                                   ((x["pid"], x) for x in _cli_agent.live_processes())
+                                   if t.get("tag")}
+                    now_ts = datetime.now(timezone.utc).timestamp()
+                    for tid, atask in list(live.items()):
+                        if atask.done():
+                            continue
+                        pid = pid_by_task.get("task-%s-%s" % (run_id, tid))
+                        ticks = _proc_cpu_ticks(pid) if pid else None
+                        if ticks is None:
+                            # 采不到子进程（未 spawn / 在等 sem / 已退出）⇒ 不判 stall。
+                            # 要不然 semaphore 排队 >120s 的任务会被误杀（它根本没跑）。
+                            continue
+                        db.execute("UPDATE tasks SET last_progress_at=COALESCE(last_progress_at,?),"
+                                   "last_cpu_ticks=?,updated_at=? WHERE run_id=? AND task_id=?",
+                                   (_tiers._now(), ticks, _tiers._now(), run_id, tid))
+                        prev = _hb_prev.get(tid)
+                        if prev is not None and ticks > prev[0]:
+                            db.execute("UPDATE tasks SET last_progress_at=?,last_cpu_ticks=?,"
+                                       "updated_at=? WHERE run_id=? AND task_id=?",
+                                       (_tiers._now(), ticks, _tiers._now(), run_id, tid))
+                        _hb_prev[tid] = (ticks, now_ts)
+                        row_hb = next((x for x in rows if x["task_id"] == tid), None)
+                        if not row_hb:
+                            continue
+                        try:
+                            lpa = datetime.fromisoformat(row_hb["last_progress_at"] or
+                                                         row_hb["started_at"]).timestamp()
+                        except (TypeError, ValueError):
+                            continue
+                        silent_s = now_ts - lpa
+                        if silent_s < HEARTBEAT_STALL_S:
+                            continue
+                        # 挂住：取消并升级换人。_schedule_exec_retry 会 attempts+1、
+                        # 记 retry 事件（attempt/escalate_to 入账），下轮重新派发。
+                        atask.cancel()
+                        live.pop(tid, None)
+                        _hb_prev.pop(tid, None)
+                        row_hb = db.query("SELECT * FROM tasks WHERE run_id=? AND task_id=?",
+                                          (run_id, tid))
+                        row_hb = row_hb[0] if row_hb else None
+                        if not row_hb:
+                            continue
+                        _tiers._schedule_exec_retry(
+                            run_id, row_hb,
+                            "心跳停滞 %.0fs（CPU ticks 无增长），提前升级" % silent_s,
+                            "heartbeat_stall", int(row_hb.get("attempts") or 0),
+                            row_hb.get("agent_id") or "", row_hb.get("model_sent"),
+                            dur=int(silent_s * 1000), used_model=row_hb.get("model_sent"),
+                            kind="heartbeat_stall",
+                            detail={"silent_s": int(silent_s), "cpu_ticks": ticks})
+                except Exception:  # noqa: BLE001 — 心跳采样失败不得带倒调度主循环
+                    pass
             if not live:
                 parked = [t for t, s in status.items() if s in _tiers.PARKED_STATUSES]
                 awaiting = [t for t, s in status.items() if s in _tiers.SUBMITTED_STATUSES]

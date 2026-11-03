@@ -221,8 +221,7 @@ class TestColumnDdl(unittest.TestCase):
         # 已存在该列 ⇒ 不 ALTER；返回新增列表
         with mock.patch.object(r, "db") as m:
             m.current_path.return_value = "/tmp/never.db"
-            m.query.return_value = [{"name": "model_sent"}, {"name": "tokens_estimated"},
-                                    {"name": "last_fail_kind"}]
+            m.query.return_value = [{"name": c} for c, _ in r._TASK_COLUMNS_EXTRA]
             added = r.ensure_task_columns()
         self.assertEqual(added, [])
 
@@ -232,13 +231,14 @@ class TestEnsureTaskColumnsRealDB(_TmpDB):
 
     _auto_cols = False   # 这一组要验「补列」本身，setUp 不能替它先补
 
-    def test_adds_three_columns(self):
+    def test_adds_all_declared_columns(self):
         r._columns_ready.clear()
-        # tasks.ensure_schema 不管这三列 ⇒ 第一次必须真的补出来
+        # tasks.ensure_schema 不管这些观测列 ⇒ 第一次必须真的补出来
         added = r.ensure_task_columns()
-        self.assertEqual(sorted(added), ["last_fail_kind", "model_sent", "tokens_estimated"])
+        declared = [c for c, _ in r._TASK_COLUMNS_EXTRA]
+        self.assertEqual(sorted(added), sorted(declared))
         cols = {x["name"] for x in db.query("PRAGMA table_info(tasks)")}
-        for c in ("model_sent", "tokens_estimated", "last_fail_kind"):
+        for c in declared:
             self.assertIn(c, cols, "缺列 %s" % c)
 
     def test_second_run_no_error_no_duplicate(self):

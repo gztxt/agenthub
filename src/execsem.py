@@ -48,6 +48,9 @@ SOURCES: Tuple[str, ...] = (
     # 为什么不并进 task_exec：那是**单个子任务**的执行结果，而重拆是**run 级**决策，
     # 把它塞进 task_exec 会让「子任务成功率」被决策事件污染。
     "task_replan",
+    # 2026-11-03 混排五缺陷 · 缺陷5：拆解完成的**并行度体检**（拆出 N 个任务里几个无依赖）。
+    # 为什么不并进 task_exec：那是「子任务执行结果」，这是**拆解质量**，发生在花钱之前。
+    "task_plan",
 )
 
 #: 跨 source 的执行结果语义闭集（**结果怎样**）。
@@ -65,6 +68,8 @@ STATUS_MAP: Dict[str, Dict[str, str]] = {
     # 闸门拒绝（complete/max_rounds/same_failure/budget）**不落事件**：那是正常结论，
     # 落成 failed 会让「重拆失败率」恒高且不可解释。
     "task_replan": {"replan": "ok", "fail": "failed"},
+    # task_plan：`low_parallelism` 是**告警**不是失败（拆解仍usable，只是混排可能退化）⇒ degraded。
+    "task_plan": {"low_parallelism": "degraded"},
     "cron_run": {"success": "ok", "fail": "failed", "skipped": "skipped"},
     "mcp_call": {"success": "ok", "fail": "failed"},
     # P2 C2：影子规则只观测不拦 ⇒ 命中即「有异常但未阻断」= degraded（不是 failed）。

@@ -21,6 +21,139 @@ import tasks_tiers as _tiers
 
 _runners: Dict[str, asyncio.Task] = {}
 
+#: 无 `usage` 时的 token 估算粒度（字符/token）。见 `_estimate_tokens`。
+TOKENS_PER_CHAR = 4
+
+#: 本文件自建的三列。`tasks.py` 的 `_TASK_COLUMNS` 不属于本任务归属范围（并行改动会打架），
+#: 所以 ALTER 放在这里，由 `ensure_task_columns()` 幂等执行。
+#:   model_sent        —— 我们**实际下发**的 model（决议面）；`model` 保持既有契约=回包观测值
+#:   tokens_estimated  —— 1 = spent_tokens 是估算值；0 = 真值
+#:   last_fail_kind    —— 'timeout' 等失败种类；供降档决议读
+_TASK_COLUMNS_EXTRA = (
+    ("model_sent", "TEXT"),
+    ("tokens_estimated", "INTEGER DEFAULT 0"),
+    ("last_fail_kind", "TEXT"),
+)
+
+#: 已确认补过列的目标库（`db.current_path()`），避免每个任务都跑一遍 PRAGMA。
+_columns_ready = set()
+
+
+def ensure_task_columns() -> list:
+    """幂等补三列：先查 `PRAGMA table_info(tasks)`，缺哪列补哪列。
+
+    返回本次**实际新增**的列名。已存在 ⇒ 不重复 ALTER、不报错；并发下另一进程刚加完
+    （SQLite 的 duplicate column name）也一律吞掉 —— 判据是「跑两遍不炸」，不是「跑一遍成功」。
+    """
+    try:
+        path = db.current_path()
+    except Exception:  # noqa: BLE001 — 旧版 db 无 current_path
+        path = None
+    if path in _columns_ready and path is not None:
+        return []
+    try:
+        have = {r["name"] for r in db.query("PRAGMA table_info(tasks)")}
+    except Exception:  # noqa: BLE001 — 库未就绪 / 无 tasks 表：交给 ensure_schema
+        return []
+    added = []
+    for col, decl in _TASK_COLUMNS_EXTRA:
+        if col in have:
+            continue
+        try:
+            db.execute("ALTER TABLE tasks ADD COLUMN %s %s" % (col, decl))
+            added.append(col)
+        except Exception:  # noqa: BLE001 — 并发重复列：视为已完成
+            pass
+    if path is not None:
+        _columns_ready.add(path)
+    return added
+
+
+def _tiercfg_mod():
+    """取 `tiercfg` 模块；取不到（并行开发未落地 / import 失败）⇒ None，调用方回落老行为。"""
+    try:
+        import tiercfg
+    except Exception:  # noqa: BLE001
+        return None
+    return tiercfg
+
+
+def _timeout_s_for(tier) -> int:
+    """该档位的超时秒数。优先 `tiercfg.timeout_for_tier`，取不到 ⇒ 全局 `TASK_TIMEOUT_S`。
+
+    **绝不因函数缺失/抛异常而阻塞**：A 的改动没落地时，行为与改动前完全一致。
+    """
+    mod = _tiercfg_mod()
+    fn = getattr(mod, "timeout_for_tier", None) if mod is not None else None
+    if callable(fn):
+        try:
+            val = int(fn(tier))
+        except Exception:  # noqa: BLE001
+            return _tiers.TASK_TIMEOUT_S
+        if val > 0:
+            return val
+    return _tiers.TASK_TIMEOUT_S
+
+
+def _prev_tier_of(tier) -> Optional[str]:
+    """降一档。`tiercfg.prev_tier` 缺失/抛异常/已触底 ⇒ None（调用方保持原档）。"""
+    mod = _tiercfg_mod()
+    fn = getattr(mod, "prev_tier", None) if mod is not None else None
+    if not callable(fn):
+        return None
+    try:
+        return fn(tier) or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _first_usable_of(tier, catalog, checked) -> Optional[str]:
+    """该档位下第一个在清单里的模型；清单取不到 ⇒ None（调用方保留原模型，只降档号）。"""
+    mod = _tiercfg_mod()
+    fn = getattr(mod, "first_usable", None) if mod is not None else None
+    if not callable(fn):
+        return None
+    try:
+        tiers_cfg = mod.parse_tiers()
+        model, _why = fn(tier, tiers_cfg, catalog, checked)
+    except Exception:  # noqa: BLE001
+        return None
+    return model or None
+
+
+def _estimate_tokens(prompt, response) -> int:
+    """无 `usage` 时的 token 估算（可解释规则，不调用分词器）。
+
+    规则：`(len(prompt) + len(response)) // TOKENS_PER_CHAR`，最小 1。
+    依据：英文本约 4 字符/token，中文约 1~1.5 字/token；取 4 是**下界**，
+    宁可低估也不虚增成本口径。调用发生过就至少花 1 token，故下限为 1。
+    """
+    text = "%s%s" % (prompt or "", response or "")
+    return max(1, len(text) // TOKENS_PER_CHAR)
+
+
+def _fix_retry_columns(run_id: str, task_id: str, exec_model, used_model,
+                       tokens_estimated: int = 0, last_fail_kind=None) -> None:
+    """补两条**新增**观测列：`model_sent`=本次实际下发值、`tokens_estimated`（+可选 `last_fail_kind`）。
+
+    ⚠ **不写 `model` 列**：那是既有契约（adapter 回包观测值）。2026-11-03 集成裁决：
+    「实发值」与「回包值」分成两列，才能同时答出「我们让谁跑」与「实际谁跑了」；
+    把 `model` 改成实发值会吃掉 P0-a 的观测面（`test_task_attribution` 会红）。
+
+    保留 `used_model` 形参只为调用点兼容（回包值仍由既有的 `model=?` UPDATE 写入）。
+    """
+    sets = ["model_sent=?", "tokens_estimated=?"]
+    params: list = [exec_model, int(tokens_estimated)]
+    if last_fail_kind is not None:
+        sets.append("last_fail_kind=?")
+        params.append(last_fail_kind)
+    params += [run_id, task_id]
+    try:
+        db.execute("UPDATE tasks SET " + ",".join(sets) + " WHERE run_id=? AND task_id=?",
+                   tuple(params))
+    except Exception:  # noqa: BLE001 — 观测列写不进去不影响任务本身
+        pass
+
 
 def resume_expired_waits(now: Optional[str] = None) -> int:
     """§7-② **自愈**：把过期的等待态推到下一步。返回被处理的行数。
@@ -96,7 +229,7 @@ def _accepts_kwarg(fn, name: str) -> bool:
 
 
 async def _call_chat(chat_fn, agent_id: str, prompt: str, tag: str,
-                     model: Optional[str]):
+                     model: Optional[str], tier=None):
     """按 chat_fn 的实际签名决定要不要把选型模型传下去。
 
     传不下去时**不报错**（拆解意图不等于执行契约），但这条事实是可查的：
@@ -108,7 +241,8 @@ async def _call_chat(chat_fn, agent_id: str, prompt: str, tag: str,
     """
     kw: Dict[str, Any] = {}
     if _accepts_kwarg(chat_fn, "timeout_s"):
-        kw["timeout_s"] = _tiers.TASK_TIMEOUT_S + 30
+        # 2026-11-03 缺陷1：adapter 侧超时按档位走（tier 未知 ⇒ 回落 TASK_TIMEOUT_S）。
+        kw["timeout_s"] = _timeout_s_for(tier) + 30
     if model and _chat_arity(chat_fn) >= 4:
         return await chat_fn(agent_id, prompt, tag, model, **kw)
     return await chat_fn(agent_id, prompt, tag, **kw)
@@ -155,6 +289,26 @@ def _resolve_exec_target(run_id: str, row: dict, attempts_done: int) -> Tuple[st
     # None（用该 agent 自己的默认）。执行前一律以"决议值"为准。
     exec_model = row.get("model_planned") or row.get("model_choice")
     cat, cat_ok = _tiers._catalog_snapshot()
+    # ── 2026-11-03 缺陷2：超时后**降一档**（不是升档）──────────────────
+    # 超时的语义是「任务太重 / 预算不够」，升档只会更慢更难在预算内跑完
+    # （实测 run 159ae98077 t2：codex+t3 超时 600s → 升档 claude-code + t3 再超 600s，
+    #  两轮共 20 分钟零产出）。此处只对 `last_fail_kind='timeout'` 生效；其它失败仍走
+    # `escalate_target` 的升档逻辑，逐字不变。
+    if str(row.get("last_fail_kind") or "") == "timeout":
+        nxt = _prev_tier_of(row.get("tier"))
+        if nxt:
+            new_model = _first_usable_of(nxt, cat, cat_ok) or exec_model
+            db.execute("UPDATE tasks SET tier=?,tier_reason=?,model_planned=?,"
+                       "escalated_from_model=?,updated_at=? WHERE run_id=? AND task_id=?",
+                       (nxt, "downgrade:timeout", new_model, exec_model, _tiers._now(),
+                        run_id, row["task_id"]))
+            db.log_profile_event("task_exec", exec_agent, "downgrade", 0,
+                                 trace_id=row["trace_id"],
+                                 detail={"task": row["task_id"], "reason": "timeout",
+                                         "from_tier": row.get("tier"), "to_tier": nxt,
+                                         "from_model": exec_model, "to_model": new_model,
+                                         "attempt": attempts_done})
+            return exec_agent, new_model
     esc = _tiers.escalate_target(exec_agent, exec_model, attempts_done, _tiers._known_agent_ids(),
                           tier=row.get("tier"), catalog=cat, catalog_checked=cat_ok)
     if esc["changed"]:
@@ -372,6 +526,12 @@ async def _verify_and_settle(run_id: str, row: dict, result: dict, attempts_done
                                      "verify_status": verdict["status"],
                                      "model": used_model})
 async def _run_task(run_id: str, row: dict):
+    # 观测三列在 `_execute_run` 入口补过一次；直调 `_run_task` 的路径（L0 用例、恢复）
+    # 没有那一步，这里再幂等补一次（已补过 ⇒ 只读一次 PRAGMA，代价可忽略）。
+    try:
+        ensure_task_columns()
+    except Exception:  # noqa: BLE001
+        pass
     chat_fn = _tiers._ctx.get("chat_fn")
     if not chat_fn:
         db.execute("UPDATE tasks SET status='failed',error='chat 引擎未就绪',updated_at=? "
@@ -388,19 +548,32 @@ async def _run_task(run_id: str, row: dict):
     attempts_done = int(row.get("attempts") or 0)
     exec_agent, exec_model = _resolve_exec_target(run_id, row, attempts_done)
     prompt = await _attach_retrieval(run_id, row, prompt, exec_agent)
+    # 缺陷1：本任务的超时按**它自己的档位**取（A 未落地时回落 TASK_TIMEOUT_S）。
+    _tout = _timeout_s_for(row.get("tier"))
     t0 = asyncio.get_event_loop().time()
     try:
         result = await asyncio.wait_for(
             _call_chat(chat_fn, exec_agent, prompt,
                        f"task-{row['trace_id']}-{row['task_id']}",
-                       exec_model),
-            timeout=_tiers.TASK_TIMEOUT_S)
+                       exec_model, row.get("tier")),
+            timeout=_tout)
         dur = int((asyncio.get_event_loop().time() - t0) * 1000)
         spent_tokens = int(((result.get("usage") or {}).get("total_tokens")) or 0)
-        # P0-a：实发模型。取 **adapter 回包** 的 model 而非请求值 —— 上游可能改写，
-        # 记请求值会把「我们以为用了谁」当成「实际用了谁」，正好毁掉归因的意义。
-        # 回包缺 model 时留 NULL，不拿请求值兜底（那是猜测，不是观测）。
+        # 缺陷3：回包不带 usage（claude-code 就是这样）⇒ 按字数估算，并与真值分开记账。
+        # 记 0 会把「未知」与「真的没花」写成同一个值，成本统计单边失真（实测 570s 的任务记 0）。
+        tokens_estimated = 0
+        if spent_tokens <= 0:
+            spent_tokens = _estimate_tokens(prompt, result.get("response") or "")
+            tokens_estimated = 1
+        # 缺陷4（集成裁决 2026-11-03）：`model` 保持**既有契约** = adapter 回包观测值
+        # （P0-a 的理由：记请求值会把「我们以为用了谁」当成「实际用了谁」；
+        #  tests/test_task_attribution.py 三个用例钉着它）。
+        # 新增 `model_sent` 记**实际下发值**（决议面）—— 两列并存才答得出
+        # 「哪个组合失败、失败时我们让谁跑」。实测 t3 钉 `alibaba/qwen3.8-max`、
+        # 回包却是 `openrouter/nvidia/nemotron-3.5-super-vl:free`。
         used_model = result.get("model") or None
+        _fix_retry_columns(run_id, row["task_id"], exec_model, used_model,
+                           tokens_estimated, None)
         # ① 等待态：执行者说「卡在等人/等批」⇒ 让出执行资源，不占槽、不算终态。
         waiting = result.get("waiting")
         if waiting in _tiers.PARKED_STATUSES:
@@ -437,17 +610,24 @@ async def _run_task(run_id: str, row: dict):
         # 写成字面量却按 5 个参数传（SQL 只有 4 个占位符）⇒ sqlite3.ProgrammingError
         # 在**超时这个异常处理器内部**抛出，任务永远停在 running，且异常冒泡进
         # `_execute_run`。改成正常绑定，顺带把 model 一起记上。
-        _err = "超时熔断 %ds" % _tiers.TASK_TIMEOUT_S
+        _err = "超时熔断 %ds" % _tout
+        # 缺陷2：标上失败种类，下一次 `_resolve_exec_target` 据此**降档**而非继续升档。
+        # ⚠ 顺序：`_schedule_exec_retry` 自己会写 `model=?`（传的是它收到的 exec_model），
+        # 所以口径纠正必须在它**之后**做，否则会被它覆盖回来。
         if _tiers._schedule_exec_retry(run_id, row, _err, _err, int(row.get("attempts") or 0),
-                                row.get("agent_id") or "",
-                                row.get("model_planned") or row.get("model_choice"),
-                                dur=_tiers.TASK_TIMEOUT_S * 1000):
+                                row.get("agent_id") or "", exec_model,
+                                dur=_tout * 1000, used_model=exec_model):
+            _fix_retry_columns(run_id, row["task_id"], exec_model, None, 0, "timeout")
             return
-        db.execute("UPDATE tasks SET status='failed',error=?,finished_at=?,updated_at=?"
-                   " WHERE run_id=? AND task_id=?",
-                   (_err, _tiers._now(), _tiers._now(), run_id, row["task_id"]))
-        db.log_profile_event("task_exec", row["agent_id"], "fail", _tiers.TASK_TIMEOUT_S * 1000,
-                             trace_id=row["trace_id"], detail={"task": row["task_id"], "timeout": True})
+        db.execute("UPDATE tasks SET status='failed',error=?,spent_ms=?,model=NULL,"
+                   "model_sent=?,tokens_estimated=0,last_fail_kind='timeout',"
+                   "finished_at=?,updated_at=? WHERE run_id=? AND task_id=?",
+                   (_err, _tout * 1000, exec_model, _tiers._now(), _tiers._now(),
+                    run_id, row["task_id"]))
+        db.log_profile_event("task_exec", row["agent_id"], "fail", _tout * 1000,
+                             trace_id=row["trace_id"],
+                             detail={"task": row["task_id"], "timeout": True,
+                                     "tier": row.get("tier"), "exec_model": exec_model})
     except Exception as e:  # noqa: BLE001
         _err = repr(e)[:500]
         if _tiers._schedule_exec_retry(run_id, row, _err, _err, int(row.get("attempts") or 0),
@@ -460,6 +640,12 @@ async def _run_task(run_id: str, row: dict):
 
 
 async def _execute_run(run_id: str):
+    # 缺陷3/4/2 的三个观测列由本模块自建（不动 tasks.py 的列清单，避免并行改动打架）。
+    # 必须在本轮任何 UPDATE 之前补上，否则第一次 ``_fix_retry_columns`` 会静默失败。
+    try:
+        ensure_task_columns()
+    except Exception:  # noqa: BLE001 — 补列失败不得让整条 run 起不来
+        pass
     sem = asyncio.Semaphore(_tiers.MAX_CONCURRENCY)
     live: Dict[str, asyncio.Task] = {}
     try:

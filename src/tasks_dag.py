@@ -57,8 +57,42 @@ LEADER_PROMPT = """你是任务编排器。把用户目标拆解为子任务 DAG
 - model **一般省略**：省略后由 difficulty 决定起始档位（t1 便宜 / t2 中 / t3 强，失败会自动升档）。
   只有你确实要用某个特定模型时才填，且必须从 {models} 里选
 - 子任务数 ≤ {maxn}；无依赖的兄弟任务会被并行执行，有依赖写 deps
+- **互不依赖的子任务必须写 `deps: []`**：拆成单链会让一个任务超时把下游全部阻塞（实测 10 个任务串成链、名册 4 家 agent 只调到 1 家）。能并行的就不要串
 - 聚合/汇总类任务必须 deps 列出全部上游
 """
+
+#: 并行度闸门（2026-11-03 混排五缺陷 · 缺陷5）
+# 判据：任务数 >= 3 且「无 deps 任务数 / 总数」< 该阈值 ⇒ 拆解可能被串成单链。
+# 只告警不拒绝：串行 DAG 在真有依赖时是合法的，闸门的作用是让「退化」可见。
+PARALLEL_RATIO_MIN = 0.5
+PARALLEL_MIN_TASKS = 3
+
+
+def parallelism_note(items: Optional[List[dict]]) -> Optional[dict]:
+    """拆解后的并行度体检（纯函数，可单测；不读库、不读 env）。
+
+    返回 `None`（合格 / 任务太少不判）或 `{"warning","ratio","free","total"}`。
+
+    为什么值得单列：实证 run `e0f7de9912` 把 10 个子任务排成单链
+    （t1→t2→{t3,t4,t6}→…→t9→t10），t2 一次 600s 超时就让剩下 8 个全部 `blocked/
+    上游失败`，名册里 4 家 agent 实际只调度到 1 家 —— **混排的「多」在失败时归零**。
+    这个退化从返回体里看不出来（每项都合法），所以要显式算一次。
+    """
+    total = len(items or [])
+    if total < PARALLEL_MIN_TASKS:
+        return None
+    free = sum(1 for it in (items or []) if not (it.get("deps") or []))
+    ratio = free / total
+    if ratio >= PARALLEL_RATIO_MIN:
+        return None
+    return {
+        "warning": ("并行度偏低：%d/%d 个任务无依赖（%.0f%% < %.0f%%）⇒ 拆解可能被串成单链，"
+                    "任一任务超时会把下游全部阻塞（实测会读成「N 个上游失败」）"
+                    % (free, total, ratio * 100, PARALLEL_RATIO_MIN * 100)),
+        "ratio": round(ratio, 3),
+        "free": free,
+        "total": total,
+    }
 
 
 def _agent_model_block(models: Optional[List[str]]) -> str:
@@ -361,6 +395,8 @@ async def decompose(body: DecomposeIn):
     # 钉死模型必须在档位层**之后**（见 `_apply_pinned_model` 文档串）：档位层会提升执行者，
     # 先钉再抬可能把 CCR 模型 ID 抬到一个不吃它的 agent 上。
     items, pin_note = _apply_pinned_model(items, body.model, allowed)
+    # 并行度体检：只告警不拒绝（串行 DAG 在真有依赖时合法，这里让「退化」可见）。
+    par_note = parallelism_note(items)
     # 轮次：显式 `rounds` 优先，其次老开关 `auto_rounds`（true→2/false→1），最后默认 1。
     rounds = _tiers.clamp_rounds(
         body.rounds if body.rounds is not None else (2 if body.auto_rounds else 1))
@@ -369,6 +405,7 @@ async def decompose(body: DecomposeIn):
         return {"run_id": None, "goal": body.goal, "tasks": items, "running": False,
                 "dry_run": True, "round": 1, "synthesis": synth, "tiers": tier_note,
                 "model_policy": pin_note,
+                "parallelism_warning": (par_note or {}).get("warning"),
                 "auto_rounds": auto_rounds, "rounds": rounds, "max_rounds": rounds,
                 "round_choices": list(_tiers.ROUND_CHOICES),
                 "note": "dry_run：只拆解未落库，确认后传 dry_run=false 再调一次"}
@@ -377,8 +414,16 @@ async def decompose(body: DecomposeIn):
                          auto_rounds=auto_rounds, max_rounds=rounds)
     if body.auto_run:
         _runner._start_runner(run_id)
+    if par_note:
+        # 只有真落库的 run 才留痕（dry_run 不写库是既有约定，见 DecomposeIn.dry_run 注释）
+        try:
+            db.log_profile_event("task_plan", body.default_agent or "leader", "low_parallelism",
+                                 0, trace_id=run_id, detail=dict(par_note, run=run_id))
+        except Exception:  # noqa: BLE001 —— 留痕失败不得让拆解整体失败
+            pass
     return {"run_id": run_id, "goal": body.goal, "tasks": items,
             "running": body.auto_run, "round": 1, "synthesis": synth, "tiers": tier_note,
             "model_policy": pin_note,
+            "parallelism_warning": (par_note or {}).get("warning"),
             "auto_rounds": auto_rounds, "rounds": rounds, "max_rounds": rounds,
             "round_choices": list(_tiers.ROUND_CHOICES)}

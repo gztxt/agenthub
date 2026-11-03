@@ -6935,6 +6935,8 @@ let currentRunGoal = '';        // v0.13.171：口令桥要用 run 的总目标
 let currentRunTasks = {};       // task_id → task（含 prompt），供复制时取正文
 let runsOffset = 0;             // 历史分页游标（0 = 首屏/重新筛选）
 let runsTotal = 0;
+let runsSigLast = '';           // 首屏签名：数据没变就不重建 #runsBody（防焦点被轮询冲掉）
+let runSigLast = '';            // 运行详情签名：数据没变就不重建详情（防焦点被 6s 轮询冲掉）
 let taskRoundChoices = [1, 2, 3, 5];   // 后端 /api/tasks/pool 下发前的兜底（仅首屏一次）
 
 function taskFmtDur(ms) {
@@ -7150,6 +7152,38 @@ function setTaskAcc(key) {
 }
 function toggleTaskAcc(key) { setTaskAcc(taskAccKey === key ? '' : key); }
 var taskAccBound = false;
+/* ── 运行详情卡的收起口径（2026-11-03 用户令）───────────────────────────
+   病：点「查看」会把详情卡设为单开那张 ⇒ 协同历史被压成卡头、页面重排；而
+       6s 轮询（06-manager-tasks.js）又**无条件** openRun(currentRun) 顺势
+       setTaskAcc('run') —— 用户正在看历史/汇总时每 6s 被切回详情，主观就是
+       「焦点被抢 / 点哪儿都跳到详细信息」。
+   药（两条同时做）：
+   ① 轮询侧：详情卡只有**已展开**时才刷数据，收起后只留 currentRun，不再抢卡；
+   ② 交互侧：点击**卡外任意位置**即收起详情并回落到展开它之前的那张卡（默认历史）。
+   「卡外」判据：既不在 #runPanel 里，也不是一条 [data-run-act="open"] 入口 ——
+   后者会先走 openRun 把卡打开，先收后开会把刚点「查看」顶掉。
+   收起后 #runPanel 只 display:none（卡片仍在四卡序列里），点它的卡头可再展开。 */
+var runPanelOutsideBound = false;
+var runPanelPrevAcc = '';
+function closeRunPanel() {
+  var p = $('runPanel');
+  if (p) p.style.display = 'none';
+  /* 详情卡仍是当前展开的那张 ⇒ 回落到「展开它之前」的那张（默认协同历史）；
+     用户已经先点了别的卡头（单开把详情压成卡头）⇒ 尊重他当前的选择，别再替他跳。 */
+  if (taskAccKey === 'run') setTaskAcc(runPanelPrevAcc === 'run' ? '' : (runPanelPrevAcc || 'hist'));
+  runPanelPrevAcc = '';
+}
+function bindRunPanelOutside() {
+  var pg = $('page-tasks');
+  if (!pg || runPanelOutsideBound) return;
+  runPanelOutsideBound = true;
+  document.addEventListener('click', function (ev) {
+    if (taskAccKey !== 'run') return;
+    var t = ev.target;
+    if (t && t.closest && (t.closest('#runPanel') || t.closest('[data-run-act="open"]'))) return;
+    closeRunPanel();
+  });
+}
 function bindTaskAcc() {
   var pg = $('page-tasks');
   if (!pg || taskAccBound) return;
@@ -7397,6 +7431,15 @@ async function loadRuns(append) {
     var d = await api('/api/tasks/runs?' + p.toString());
     runsTotal = d.total || 0;
     var rows = d.runs || [];
+    /* 6s 轮询每轮都重建 #runsBody 的 innerHTML：内容没变也照样重排 ⇒
+       展开的行被换成新节点、键盘/鼠标焦点掉到 body（「鼠标焦点被抢」的另一半）。
+       数据指纹没变就整段跳过 —— 跑着的 run 的 state/success/... 任一变了仍会重刷。 */
+    var runsSig = (runStateFilter || '') + '|' + (rows.map(function (r) {
+      return [r.run_id, r.state, r.success, r.total, r.failed, r.blocked,
+              r.round, r.stop_reason, r.duration_ms].join('~');
+    }).join('|'));
+    if (!append && runsSig === runsSigLast) return;
+    if (!append) runsSigLast = runsSig;
     var html = rows.map(function (r) {
       var rid = r.run_id || '';
       var agents = (r.agents || '').split(',').filter(Boolean).slice(0, 3).join('+') || '-';
@@ -7450,14 +7493,28 @@ async function loadRuns(append) {
 }
 
 async function openRun(runId) {
+  var prevRun = currentRun;
   currentRun = runId;
   try {
     var d = await api('/api/tasks/' + runId);
     var panel = $('runPanel');
     if (panel) panel.style.display = '';   // v0.13.40：卡是 flex 列，显隐只切 inline 值
     /* 2026-11-03：详情是手风琴里的一项 —— 点「查看」自动展开它（并收起历史），
-       页面高度不变，鼠标不需要再滚整页去找刚打开的内容。 */
+       页面高度不变，鼠标不需要再滚整页去找刚打开的内容。
+       展开前先记住「原来开着哪张」（点击外部收起时回落它，见 bindRunPanelOutside）。 */
+    if (taskAccKey !== 'run') runPanelPrevAcc = taskAccKey;
     setTaskAcc('run');
+    /* 6s 轮询在卡已展开时会重打这里：数据没变就别重建表格/DAG/时间线 ——
+       否则用户在详情里滚动/展开时内容被整个换掉，焦点和滚动位置又被抢一次。
+       run_id 换了（用户点了另一行「查看」）必重建；数据指纹没变只把面板亮出来。 */
+    var runSig = runId + '|' + (d.tasks || []).map(function (t) {
+      return [t.task_id, t.status, t.agent, t.model, t.duration_ms].join('~');
+    }).join('|') + '|' + ((d.run || {}).stop_reason || '');
+    if (prevRun === runId && runSig === runSigLast && $('taskBody').children.length) {
+      $('runTitle').textContent = 'Run ' + runId + ' · ' + (d.goal || '').slice(0, 60);
+      return;
+    }
+    runSigLast = runSig;
     $('runTitle').textContent = 'Run ' + runId + ' · ' + (d.goal || '').slice(0, 60);
     currentRunGoal = d.goal || '';
     currentRunTasks = {};
@@ -7797,7 +7854,7 @@ function renderDag(tasks) {
   $('dagSvg').innerHTML = svg;
 }
 
-async function startRun(id) { if (!id) return; try { await api('/api/tasks/' + id + '/start', { method: 'POST' }); toast('已调度', 'ok'); setTimeout(() => { openRun(id); loadRuns(); }, 1200); } catch (e) { toast(e.message, 'err'); } }
+async function startRun(id) { if (!id) return; try { await api('/api/tasks/' + id + '/start', { method: 'POST' }); toast('已调度', 'ok'); runSigLast = ''; setTimeout(() => { openRun(id); loadRuns(); }, 1200); } catch (e) { toast(e.message, 'err'); } }
 
 /* 重拆下一轮（需求②「继续执行」的另一半）：已失败/部分完成时人工推一轮。
    闸门在后端同一套 `replan_gate` —— 这里不做前置判断，只把结论如实转述，
@@ -7825,10 +7882,11 @@ async function enterTasksPage() {
   } catch (e) { fillRoundSelect(null); }
   fillTaskModelSelect();
   bindTaskAcc();
+  bindRunPanelOutside();   // 点外部收起运行详情（焦点不被轮询抢走）
   bindRunActions();
   refreshTasks();
 }
-async function retryRun(id) { if (!id) return; try { await api('/api/tasks/' + id + '/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); toast('失败项已重置', 'ok'); setTimeout(() => openRun(id), 1200); } catch (e) { toast(e.message, 'err'); } }
+async function retryRun(id) { if (!id) return; try { await api('/api/tasks/' + id + '/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); toast('失败项已重置', 'ok'); runSigLast = ''; setTimeout(() => openRun(id), 1200); } catch (e) { toast(e.message, 'err'); } }
 async function delRun(id) { if (!id || !confirm('删除 run ' + id + '？')) return; try { await api('/api/tasks/' + id, { method: 'DELETE' }); currentRun = null; $('runPanel').style.display = 'none'; if (taskAccKey === 'run') setTaskAcc('hist'); refreshTasks(); } catch (e) { toast(e.message, 'err'); } }
 
 /* ── S4 定时任务 ──────────────────────────────────── */
@@ -8972,7 +9030,14 @@ document.addEventListener('visibilitychange', () => {
   loadAgents(); updateBadges(); pollHealth();
 });
 setInterval(() => {
-  if (document.getElementById('page-tasks').classList.contains('on')) { loadRuns(); loadRunCounts(); if (currentRun) openRun(currentRun); }
+  if (document.getElementById('page-tasks').classList.contains('on')) {
+    loadRuns(); loadRunCounts();
+    /* 2026-11-03 用户报「鼠标焦点被抢 / 点哪儿都跳到详细信息」：
+       轮询里 openRun(currentRun) 会顺手 setTaskAcc('run') 把详情卡设为单开 ⇒
+       用户正在看协同历史/汇总时每 6s 被切到详情。现在**只有详情卡已展开**才刷数据；
+       收起后只留 currentRun，点「查看」或详情卡头即可再展开。 */
+    if (currentRun && typeof taskAccKey !== 'undefined' && taskAccKey === 'run') openRun(currentRun);
+  }
   if (document.getElementById('page-jobs').classList.contains('on')) loadJobs();
   // 终端面板可见时轮询会话记录：进程退出/超时/TTL 回收都会让死条目自动消失，无需手动点「会话」
   // 只看 termPane 的 on 不够：整块 page-chat 被 display:none 藏起来时它仍是 on，白轮询

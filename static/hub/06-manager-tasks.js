@@ -412,7 +412,14 @@ document.addEventListener('visibilitychange', () => {
   loadAgents(); updateBadges(); pollHealth();
 });
 setInterval(() => {
-  if (document.getElementById('page-tasks').classList.contains('on')) { loadRuns(); loadRunCounts(); if (currentRun) openRun(currentRun); }
+  if (document.getElementById('page-tasks').classList.contains('on')) {
+    loadRuns(); loadRunCounts();
+    /* 2026-11-03 用户报「鼠标焦点被抢 / 点哪儿都跳到详细信息」：
+       轮询里 openRun(currentRun) 会顺手 setTaskAcc('run') 把详情卡设为单开 ⇒
+       用户正在看协同历史/汇总时每 6s 被切到详情。现在**只有详情卡已展开**才刷数据；
+       收起后只留 currentRun，点「查看」或详情卡头即可再展开。 */
+    if (currentRun && typeof taskAccKey !== 'undefined' && taskAccKey === 'run') openRun(currentRun);
+  }
   if (document.getElementById('page-jobs').classList.contains('on')) loadJobs();
   // 终端面板可见时轮询会话记录：进程退出/超时/TTL 回收都会让死条目自动消失，无需手动点「会话」
   // 只看 termPane 的 on 不够：整块 page-chat 被 display:none 藏起来时它仍是 on，白轮询

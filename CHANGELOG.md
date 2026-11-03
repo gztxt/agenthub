@@ -1,3 +1,29 @@
+## 未发版 — 协同页运行详情不再抢焦点，点外部自动收起（2026-11-03）
+
+> 用户报：「点击查看 弹出详细信息 但是页面的鼠标焦点就会总是被抢或者说自动跳到详细信息
+> 点击其他地方 也会突然跳到详细信息。操作逻辑应该是点击查看 弹出详细信息 鼠标点击其他地方
+> 详细信息应该也是要自动收起或者隐藏」。
+> 同样不做版本号 bump：模板与 `static/hub.js` 即时下发，直接在生产 3102 复验（有活会话不重启）。
+
+- **病（两个根因都在前端）**：
+  1. `06-manager-tasks.js` 的 **6s 轮询**无条件 `if (currentRun) openRun(currentRun)`，
+     而 `openRun` 会 `setTaskAcc('run')` ⇒ 用户正在看协同历史 / 汇总时每 6s 被切到详情卡；
+  2. 详情卡只能靠点卡头 / 删 run 收起，**点外部没有任何收起路径**。
+- **药（前端 only）**：
+  1. 轮询侧：详情卡**只有已展开**时才刷数据；收起后只留 `currentRun`，点「查看」或卡头再展开；
+  2. 交互侧：`bindRunPanelOutside()` 挂文档级 click 委托 —— 点到 `#runPanel` 之外、
+     且不是一条 `[data-run-act="open"]`（否则刚点「查看」就被顶掉）即收起，
+     回落到「展开详情之前」那张卡（`runPanelPrevAcc`，默认协同历史），不再替用户跳卡；
+  3. 防焦点被冲掉：`loadRuns` 与 `openRun` 各自比**数据指纹**（`runsSigLast` / `runSigLast`），
+     6s 轮询数据没变就整段跳过重建 —— `#runsBody` / `#taskBody` 不换节点，键盘/滚动焦点不掉；
+     `startRun` / `retryRun` 主动清指纹，保证动作后的真重建。
+- **判据（`tests/probe_collab_focus.py`，CDP 真渲染，全过）**：A 点「查看」后四卡里只开详情；
+  E 连点第二行「查看」不会被收起；F 详情数据没变时 7.5s 内 `#taskBody` 重建 **0** 次；
+  B1 点别的卡头 → 详情卡体 `display:none`；B2 点页面空白 → `#runPanel` 整卡隐藏 + 回落点查看前
+  那张卡；C 收起后再等 7.5s **不会**被轮询重新弹开（这正是「焦点被抢」的主根因）。
+  回归：`tests/probe_collab_board.py` A–H 七条仍全过；`test_hubjs_split` /
+  `test_sys_pages_layout` / `test_html_js_escape_depth` / `test_xss_untrusted_render` 全绿。
+
 ## 未发版 — 协同页改成「卡内滚动」：整页不再滚（2026-11-03）
 
 > 用户令：「协同页面前端UI界面 参考左侧菜单栏 点击后展开 展开后滚动 不要整页滚动 不然鼠标很难控制」。

@@ -136,6 +136,119 @@ def next_tier(tier: Optional[str], tiers: Optional[Dict[str, List[str]]] = None)
     return order_[i + 1] if i + 1 < len(order_) else None
 
 
+# ── 超时按档位（2026-11-03 混排五缺陷 · 任务A）───────────────────────────
+#
+# 动机：全链路只有一个 `TASK_TIMEOUT_S`（tasks_tiers.py:23）当所有档位的超时，
+# 便宜档和最强档跑同一个 600s。本段让超时能按档位分档（t1 短、t3 长），
+# 并提供 `prev_tier`（降档方向）给「超时后降一档重试」的决议用。
+#
+# 纪律（对齐本模块既有 parse_tiers/next_tier 的语义）：
+#   · 空/坏配置 ⇒ 回落 `TASK_TIMEOUT_S`（老行为），绝不因为分档没配就崩；
+#   · `prev_tier` 与 `next_tier` 严格相反，且**永不向上**；触底/未知档 ⇒ None
+#     （None 是 B 的降档决议「已触底、别再降」的信号，不能拿首档本身冒充）。
+
+#: 默认分档超时（秒）。env `TASK_TIMEOUT_TIERS` 可全量覆盖；空/坏 ⇒ 回落 `TASK_TIMEOUT_S`。
+#: ⚠ 数值是**声明**（t1 快给短、t3 强给长），无本机测量支撑，与 DEFAULT_TIERS 同口径。
+DEFAULT_TIMEOUT_TIERS: Dict[str, int] = {"t1": 300, "t2": 600, "t3": 900}
+
+
+def _fallback_timeout() -> int:
+    """回落超时 = `TASK_TIMEOUT_S`（tasks_tiers.py:23，唯一定义处，不留第二份真值）。
+
+    延迟 import：① 避开顶层 import 顺序耦合；② import 失败（tasks_tiers 依赖变动）
+    也要给出可用值，绝不让「取超时」这一步抛异常 —— 回落到硬编码 600（= TASK_TIMEOUT_S 默认）。
+    """
+    try:
+        import tasks_tiers
+        val = getattr(tasks_tiers, "TASK_TIMEOUT_S", None)
+    except Exception:
+        return 600
+    # 2026-11-03 集成修正：不能 `int()` 截断 —— 既有用例用 `TASK_TIMEOUT_S = 0.05`
+    # 模拟超时（tests/test_task_attribution.py::test_verdict_null_on_timeout），
+    # int(0.05) == 0 会被下面的 `>0` 判成无效而回落 600 ⇒ 那个用例永远不超时。
+    # 数值型（含 float）且 >0 一律原样返回；`wait_for` 本来就收 float。
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        return 600
+    return val if val > 0 else 600
+
+
+def parse_timeout_tiers(raw: Optional[str] = None) -> Dict[str, int]:
+    """`'t1=300;t2=600;t3=900'` → `{'t1':300,'t2':600,'t3':900}`。
+
+    env 名 `TASK_TIMEOUT_TIERS`。语义对齐 `parse_tiers`：
+      · 空（None/'') ⇒ `{}`（调用方据此回落 `TASK_TIMEOUT_S`，不是整表用默认）；
+      · 单项格式错（无 `=`、档位名空、秒数非正整数如 `'abc'`/`'0'`/`'-5'`）
+        ⇒ **整项忽略，其余保留**（一个手抖的档位不该让其余档位一起失效）；
+      · 重复档位名 ⇒ 后者覆盖前者（最后一次赋值胜出）；
+      · 返回值按档位 rank 升序（复用 `_rank_of`，与 `order()` 同一把尺）⇒ 确定性排序。
+    """
+    raw = _env("TASK_TIMEOUT_TIERS", "") if raw is None else raw
+    if not raw or not str(raw).strip():
+        return {}
+    vals: Dict[str, int] = {}
+    for part in str(raw).split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, sec = part.split("=", 1)
+        name = name.strip()
+        sec = sec.strip()
+        if not name or not sec:
+            continue
+        try:
+            n = int(sec)
+        except ValueError:
+            continue
+        if n <= 0:
+            continue
+        vals[name] = n          # 重复档位名：后者覆盖前者
+    # 按档位 rank 升序（确定性）；非 t<数字> 的档位名排在其后、按名字典序。
+    return {k: vals[k] for k in sorted(vals, key=_rank_of)}
+
+
+def timeout_for_tier(tier: Optional[str], raw: Optional[str] = None) -> int:
+    """该档位的超时秒数。
+
+    回落 `TASK_TIMEOUT_S`（tasks_tiers.py:23）的情形，**一律不抛未捕获异常**：
+      · `tier` 为空 / None；
+      · `raw` 与 env 均空（分档未配置）；
+      · `tier` 不在分档表里（含 `'explicit'` 这类非档位名、未知档位）；
+      · 档位对应的值非法（parse 阶段已滤掉非正整数，双保险再挡一次）。
+    命中且为正整数 ⇒ 返回该档秒数。
+
+    默认表（2026-11-03 集成修正）：`raw is None` 且 env `TASK_TIMEOUT_TIERS` 为空时，
+    用 `DEFAULT_TIMEOUT_TIERS`（t1=300/t2=600/t3=900）—— 否则「改了代码但没人配 env」
+    会让缺陷1 永远不生效（默认值仍全 600，与改动前逐字相同）。显式传 `raw`（含空串）
+    则**不**用默认表，保持一致纯函数语义（测试就是这么隔离的）。
+    """
+    fb = _fallback_timeout()
+    t = (tier or "").strip() if isinstance(tier, str) else ""
+    if not t:
+        return fb
+    table = parse_timeout_tiers(raw)
+    if not table and raw is None:
+        table = dict(DEFAULT_TIMEOUT_TIERS)
+    val = table.get(t)
+    if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+        return val
+    return fb
+
+
+def prev_tier(tier: Optional[str], tiers: Optional[Dict[str, List[str]]] = None) -> Optional[str]:
+    """下一档（**降档**方向）；已在最低档或档位未知 ⇒ None。与 `next_tier` 严格相反。
+
+    镜像 `next_tier`：同一张 `parse_tiers()` 表、同一个 `order()` 序。
+    `None` 是「已触底/不认识这个档位」的明确信号（供降档决议终止），**绝不返回首档本身冒充**。
+    """
+    tiers = parse_tiers() if tiers is None else tiers
+    order_ = order(tiers)
+    t = (tier or "").strip()
+    if t not in order_:
+        return None
+    i = order_.index(t)
+    return order_[i - 1] if i - 1 >= 0 else None
+
+
 def tier_for(difficulty: int, mapping: Optional[Dict[int, str]] = None,
              floors: Optional[Dict[int, str]] = None,
              tiers: Optional[Dict[str, List[str]]] = None) -> str:

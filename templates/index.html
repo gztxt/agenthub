@@ -681,6 +681,34 @@
         .sp-sub { font-size: var(--fs-sm); font-weight: 600; color: var(--text-2); margin-bottom: 8px; }
         .sp-list { display: flex; flex-direction: column; }
         .sp-list > .mem-item:last-child { border-bottom: 0; }
+        /* ── 协同页（2026-11-03）：整页不滚，卡头手风琴 ────────────────────
+           用户报「协同页要整页滚动，鼠标很难控制」。照左侧菜单 7150fef 的做法改：
+           卡头常驻、点开的那一张吃满剩余高度、内容只在卡体里滚 —— 页级滚动彻底关掉。
+           四张卡 = 四个手风琴项（data-task-acc），单开；展开态由 JS 写 .open。
+           ① #page-tasks 的高度是 section.page.on 的 flex:1 给的 ⇒ 这里 overflow:hidden
+             即可，不需要算 calc(100vh - 常数) 这种拍脑袋值；
+           ② 展开卡里的 .sp-bd.box 必须退化成普通块：否则「卡体滚 + 盒内滚」两层竖向
+             滚动条，滚轮到底滚谁又变成新的「难控制」（.run-subs 同理）；
+           ③ 窄屏不另开断点：手风琴本身与宽度无关，390 宽实测同样只滚一张卡。 */
+        #page-tasks { overflow: hidden; }
+        #page-tasks .sp { flex: 1 1 auto; min-height: 0; }
+        #page-tasks .sp-card { flex: 0 0 auto; min-height: 0; }
+        #page-tasks .sp-card > .sp-scroll { display: none; }
+        #page-tasks .sp-card.open { flex: 1 1 auto; }
+        #page-tasks .sp-card.open > .sp-scroll { display: flex; flex-direction: column;
+                                                flex: 1 1 auto; min-height: 0; overflow: auto;
+                                                overscroll-behavior: contain; }
+        /* 卡体是滚动容器，子块不许被压扁（flex-shrink 默认 1 会把表格/列表挤成一条缝） */
+        #page-tasks .sp-card.open > .sp-scroll > * { flex: 0 0 auto; }
+        #page-tasks .sp-card.open .sp-bd.box { max-height: none; overflow: visible; }
+        #page-tasks .sp-card.open .run-item.open .run-subs { max-height: none; overflow: visible; }
+        /* 卡头整行可点（与 .nav-acc-head 同语义）：hover 高亮 + 键盘焦点框 + 箭头旋转 */
+        #page-tasks .sp-hd[data-task-acc-head] { cursor: pointer; user-select: none; }
+        #page-tasks .sp-hd[data-task-acc-head]:hover { background: var(--row-hover); }
+        #page-tasks .sp-hd[data-task-acc-head]:focus-visible { outline: 2px solid var(--accent-2);
+                                                              outline-offset: -2px; }
+        .acc-caret { flex: none; align-self: center; color: var(--muted); transition: transform .18s ease; }
+        #page-tasks .sp-card.open > .sp-hd .acc-caret { transform: rotate(90deg); }
         /* ── 协同历史手风琴（主标题 = run.goal，副标题 = tasks[].prompt）──
            为什么不用 display:none 收起：它让高度瞬间归零，下面的卡片会跟着上下跳；
            这里用 max-height 过渡，展开后放开纵向滚动，任务多也不撑破卡片。
@@ -2146,31 +2174,38 @@
              tests/test_sys_pages_layout.py 钉着这一条）。 -->
         <section class="page sys" id="page-tasks">
             <div class="sp">
-                <div class="sp-card">
-                    <div class="sp-hd">
+                <div class="sp-card" data-task-acc="new">
+                    <div class="sp-hd" data-task-acc-head="new" role="button" tabindex="0"
+                         aria-expanded="false" aria-controls="taskAccNew">
+                        <svg class="i xs acc-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg>
                         <h3>新建协同</h3>
                         <div class="sp-r"><span class="hint">Leader 拆解 · 多 agent 混排 · 未完成自动重拆（SQLite 状态机，重启可恢复）</span></div>
                     </div>
-                    <div class="sp-tools">
-                        <div class="toolbar">
-                            <textarea id="taskGoal" class="doc" style="min-height:64px" placeholder="复杂任务目标，例如：分别介绍 A 与 B（并行），再汇总对比"></textarea>
+                    <div class="sp-scroll" id="taskAccNew">
+                        <div class="sp-tools">
+                            <div class="toolbar">
+                                <textarea id="taskGoal" class="doc" style="min-height:64px" placeholder="复杂任务目标，例如：分别介绍 A 与 B（并行），再汇总对比"></textarea>
+                            </div>
+                            <div class="toolbar">
+                                <select id="taskAgent" style="max-width:200px" onchange="onTaskAgentChange()"><option value="">自动选择执行 Agent</option></select>
+                                <select id="taskModel" style="max-width:280px" title="钉死模型只对模型域是 CCR 的 Agent 生效"><option value="">模型：自动（按难度 t1/t2/t3）</option></select>
+                                <select id="taskRounds" style="max-width:220px" title="未完成时最多自动重拆几轮"></select>
+                                <button class="btn" id="btnDecompose" onclick="decomposeRun()">拆解并启动</button>
+                                <button class="btn ghost" id="btnPreview" onclick="previewRun()">仅预览</button>
+                                <button class="btn ghost" onclick="refreshTasks()"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
+                            </div>
+                            <div class="hint" id="taskPreview" style="padding-bottom:4px">未指定 Agent = 自动混排：模型由难度→档位决定。要钉死模型请先选一个 Agent。</div>
                         </div>
-                        <div class="toolbar">
-                            <select id="taskAgent" style="max-width:200px" onchange="onTaskAgentChange()"><option value="">自动选择执行 Agent</option></select>
-                            <select id="taskModel" style="max-width:280px" title="钉死模型只对模型域是 CCR 的 Agent 生效"><option value="">模型：自动（按难度 t1/t2/t3）</option></select>
-                            <select id="taskRounds" style="max-width:220px" title="未完成时最多自动重拆几轮"></select>
-                            <button class="btn" id="btnDecompose" onclick="decomposeRun()">拆解并启动</button>
-                            <button class="btn ghost" id="btnPreview" onclick="previewRun()">仅预览</button>
-                            <button class="btn ghost" onclick="refreshTasks()"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
-                        </div>
-                        <div class="hint" id="taskPreview" style="padding-bottom:4px">未指定 Agent = 自动混排：模型由难度→档位决定。要钉死模型请先选一个 Agent。</div>
                     </div>
                 </div>
-                <div class="sp-card">
-                    <div class="sp-hd">
+                <div class="sp-card open" data-task-acc="hist">
+                    <div class="sp-hd" data-task-acc-head="hist" role="button" tabindex="0"
+                         aria-expanded="true" aria-controls="taskAccHist">
+                        <svg class="i xs acc-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg>
                         <h3>协同历史</h3>
                         <div class="sp-r"><span class="hint" id="runsCount"></span></div>
                     </div>
+                    <div class="sp-scroll" id="taskAccHist">
                     <div class="sp-tools">
                         <div class="toolbar">
                             <input id="runQ" placeholder="搜 run / 目标关键字（回车）" style="max-width:300px" onkeydown="if(event.key==='Enter'){refreshTasks();}">
@@ -2198,9 +2233,12 @@
                     <div class="sp-tools" style="padding-top:8px">
                         <div class="toolbar" style="margin-bottom:0"><span class="hint" id="runsMore"></span></div>
                     </div>
+                    </div>
                 </div>
-                <div class="sp-card">
-                    <div class="sp-hd">
+                <div class="sp-card" data-task-acc="stats">
+                    <div class="sp-hd" data-task-acc-head="stats" role="button" tabindex="0"
+                         aria-expanded="false" aria-controls="taskAccStats">
+                        <svg class="i xs acc-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg>
                         <h3>执行结果汇总</h3>
                         <div class="sp-r">
                             <select id="statsDays" style="max-width:130px" onchange="loadTaskStats()">
@@ -2210,6 +2248,7 @@
                             </select>
                         </div>
                     </div>
+                    <div class="sp-scroll" id="taskAccStats">
                     <div class="sp-bd" id="taskStatsVerdict"><span class="hint">加载中…</span></div>
                     <!-- t4（2026-11-03）：主线视图改成「按 agent 分组的可展开列表」。
                          为什么不再直接上表：原来一张融合表里 Agent 列与模型列并排，
@@ -2235,9 +2274,18 @@
                             <tbody id="statsCombos"></tbody></table>
                         </div>
                     </details>
+                    </div>
                 </div>
-                <div class="sp-card" id="runPanel" style="display:none">
-                    <div class="sp-hd"><h3 id="runTitle"></h3><div class="sp-r"><span class="hint" id="runSummary"></span></div></div>
+                <div class="sp-card" id="runPanel" data-task-acc="run" style="display:none">
+                    <!-- 精简渲染（2026-11-03 子任务③）：#runSummary 只留 1 行结论
+                         （轮次 · 成功/失败 · 停因），耗时/tokens/阻塞/总数收进默认收起的
+                         #runSummaryMore ——数据一个不删，只挪进折叠区。 -->
+                    <div class="sp-hd" data-task-acc-head="run" role="button" tabindex="0"
+                         aria-expanded="false" aria-controls="taskAccRun">
+                        <svg class="i xs acc-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg>
+                        <h3 id="runTitle"></h3><div class="sp-r"><span class="hint" id="runSummary"></span><details class="sum-more" id="runSummaryMore" style="display:none"><summary>更多指标</summary><div class="hint" id="runSummaryDetail"></div></details></div>
+                    </div>
+                    <div class="sp-scroll" id="taskAccRun">
                     <div class="sp-bd"><div id="runChain" class="hint"></div></div>
                     <div class="sp-bd">
                         <div id="dagSvg" class="tscroll"></div>
@@ -2250,6 +2298,7 @@
                         <details><summary class="hint">执行时间线（派发 / 升档 / 验证 / 重拆）</summary>
                             <div id="runEvents" class="tscroll" style="max-height:240px;padding-top:8px"></div>
                         </details>
+                    </div>
                     </div>
                     <div class="sp-tools" style="padding-top:12px">
                         <div class="toolbar" style="margin-bottom:0">
@@ -3339,6 +3388,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=4813b977"></script>
+    <script src="/static/hub.js?v=32b2693b"></script>
 </body>
 </html>

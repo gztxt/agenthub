@@ -7128,6 +7128,50 @@ function accOpenSet(hostId) { return hostId === 'statsAgents' ? statsOpenSet : r
 var runSubsCache = Object.create(null);
 var runSubsInFlight = Object.create(null);
 
+/* ── 协同页卡头手风琴（2026-11-03）────────────────────────────────────
+   用户报「协同页点开后要整页滚动，鼠标很难控制」。照左侧菜单（提交 7150fef）的做法：
+   卡头常驻、同容器**单开**、展开的那张吃满剩余高度，内容只在卡体 .sp-scroll 里滚。
+   于是点开/收起都不会把上下卡片推来推去，鼠标不用重新找位置。
+   状态只活在 taskAccKey 一个字符串里（**不写 localStorage**）：这是视图开关，
+   不是跨会话偏好（分档偏好五条之②：加载不写盘）。
+   四个 key：new（新建）/ hist（协同历史）/ stats（执行结果汇总）/ run（运行详情）。 */
+var taskAccKey = 'hist';
+function taskAccCards() {
+  return [].slice.call(document.querySelectorAll('#page-tasks .sp-card[data-task-acc]'));
+}
+function setTaskAcc(key) {
+  taskAccKey = key || '';
+  taskAccCards().forEach(function (card) {
+    var on = !!taskAccKey && card.getAttribute('data-task-acc') === taskAccKey;
+    card.classList.toggle('open', on);
+    var hd = card.querySelector('[data-task-acc-head]');
+    if (hd) hd.setAttribute('aria-expanded', on ? 'true' : 'false');
+  });
+}
+function toggleTaskAcc(key) { setTaskAcc(taskAccKey === key ? '' : key); }
+var taskAccBound = false;
+function bindTaskAcc() {
+  var pg = $('page-tasks');
+  if (!pg || taskAccBound) return;
+  taskAccBound = true;
+  setTaskAcc(taskAccKey);          // 首屏把 HTML 里的静态 open 与内存状态对齐
+  pg.addEventListener('click', function (ev) {
+    var hd = ev.target.closest('[data-task-acc-head]');
+    if (!hd) return;
+    /* 卡头右侧的下拉（汇总的时间窗）与 <details>（详情里的「更多指标」）是独立控件，
+       点它们不该顺手把整张卡收起来 */
+    if (ev.target.closest('select, input, button, a, summary, details, label')) return;
+    toggleTaskAcc(hd.getAttribute('data-task-acc-head'));
+  });
+  pg.addEventListener('keydown', function (ev) {
+    var hd = ev.target.closest('[data-task-acc-head]');
+    if (!hd) return;
+    if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') return;
+    ev.preventDefault();           // 空格否则会滚卡体
+    toggleTaskAcc(hd.getAttribute('data-task-acc-head'));
+  });
+}
+
 function runSubsHtml(runId) {
   var tasks = runSubsCache[runId];
   if (!tasks) return '<div class="run-sub run-sub-hint">展开后加载该 run 的拆解任务…</div>';
@@ -7136,6 +7180,10 @@ function runSubsHtml(runId) {
     var p = t.prompt || '(无 prompt)';
     return '<div class="run-sub">' +
       '<span class="run-sub-id">' + escapeHtml(t.task_id || '-') + '</span>' +
+      /* 状态徽章（2026-11-03 需求①）：展开的每个子任务都要能看出跑到哪一步。
+         status 来自 GET /api/tasks/{runId} 的 d.tasks[]，已在 runSubsCache 里；
+         字段缺失时 taskStatePill 回退「未知」，不会渲染成空白也不会抛错。 */
+      taskStatePill(t.status) +
       '<span class="run-sub-txt" title="' + escapeHtml(p) + '">' + escapeHtml(p) + '</span>' +
       '</div>';
   }).join('');
@@ -7224,14 +7272,17 @@ function bindRunActions() {
       /* 主标题行整行可点：先看是不是展开了某一行，再落到行内按钮。
          按钮（查看/续跑/重拆）自己也住在 .run-hd 里，所以必须先判 data-run-act
          并把这次点击整个吞掉，否则点「查看」会顺带把副标题也翻一下。 */
+      var actEl = ev.target.closest('[data-run-act]');
       var tgl = ev.target.closest('[data-run-toggle]');
-      if (tgl && host.contains(tgl)) {
-        if (ev.target.closest('[data-run-act]')) return;
+      /* 按钮住在 .run-hd 里，所以按钮点击也会命中 data-run-toggle。
+         必须先判按钮并让开路（不是 `return`——那会把「查看」整个吞掉，
+         2026-11-03 实测：点按钮无任何反应，currentRun 仍是 None）。 */
+      if (tgl && host.contains(tgl) && !actEl) {
         ev.preventDefault();
         toggleRun(tgl.getAttribute('data-run-toggle'), host.id);
         return;
       }
-      var el = ev.target.closest('[data-run-act]');
+      var el = actEl;
       if (!el || !host.contains(el)) return;
       var id = el.getAttribute('data-run-id') || '';
       if (!id) return;
@@ -7262,7 +7313,7 @@ var runChipsBound = false;
 
 var RUN_ST_PILL = { running: 'info', pending: 'muted', waiting: 'muted', awaiting_accept: 'muted',
                     success: 'ok', failed: 'bad', partial: 'warn' };
-var RUN_ST_TEXT = { running: '执行中', pending: '待跑', waiting: '等待输入', awaiting_accept: '待接受',
+var RUN_ST_TEXT = { running: '执行中', pending: '待执行', waiting: '等待输入', awaiting_accept: '待接受',
                     success: '成功', failed: '失败', partial: '部分' };
 
 /* run / task 状态一律用徽章而不是裸文本：裸文本里 success 与 failed 只差几个字母，
@@ -7274,14 +7325,24 @@ function runStatePill(s) {
 
 var TASK_ST_PILL = { success: 'ok', failed: 'bad', blocked: 'warn', cancelled: 'muted',
                      pending: 'muted', waiting_input: 'warn', waiting_approval: 'warn',
-                     submitted: 'info', verifying: 'info', running: 'info' };
-var TASK_ST_TEXT = { blocked: '阻塞', cancelled: '取消', waiting_input: '等待输入',
+                     submitted: 'info', verifying: 'info', running: 'info', paused: 'muted' };
+var TASK_ST_TEXT = { blocked: '阻塞', cancelled: '跳过', waiting_input: '等待输入',
                      waiting_approval: '等待审批', submitted: '已提交', verifying: '验证中',
-                     pending: '待跑', running: '执行中', success: '成功', failed: '失败' };
+                     pending: '待执行', running: '执行中', success: '成功', failed: '失败',
+                     paused: '已暂停' };
+
+/* 状态文案唯一出口（2026-11-03 需求①）：徽章、表格、DAG 三处都从这里取词，
+   不再各存一份映射（判例 316「两套口径必漂移」）。词表没覆盖到的新状态回显
+   原始码（可排查），字段缺失才写「未知」——缺状态 ≠ 没状态，不能崩也不能空着。 */
+function taskStText(s) {
+  return TASK_ST_TEXT[s] || s || '未知';
+}
+function taskStTone(s) {
+  return TASK_ST_PILL[s] || 'muted';
+}
 
 function taskStatePill(s) {
-  return '<span class="stat-pill ' + (TASK_ST_PILL[s] || 'muted') + '">' +
-    escapeHtml(TASK_ST_TEXT[s] || s || '-') + '</span>';
+  return '<span class="stat-pill ' + taskStTone(s) + '">' + escapeHtml(taskStText(s)) + '</span>';
 }
 
 function bindRunChips() {
@@ -7394,6 +7455,9 @@ async function openRun(runId) {
     var d = await api('/api/tasks/' + runId);
     var panel = $('runPanel');
     if (panel) panel.style.display = '';   // v0.13.40：卡是 flex 列，显隐只切 inline 值
+    /* 2026-11-03：详情是手风琴里的一项 —— 点「查看」自动展开它（并收起历史），
+       页面高度不变，鼠标不需要再滚整页去找刚打开的内容。 */
+    setTaskAcc('run');
     $('runTitle').textContent = 'Run ' + runId + ' · ' + (d.goal || '').slice(0, 60);
     currentRunGoal = d.goal || '';
     currentRunTasks = {};
@@ -7438,11 +7502,20 @@ function renderRunSummary(d) {
   if (meta.stop_reason) stop = RUN_STOP_TEXT[meta.stop_reason] || meta.stop_reason;
   else if (open) stop = '进行中';
   else stop = (cnt.failed || cnt.blocked) ? '已停（有失败项，可重试/重拆）' : '已完工（全部达标）';
+  /* 精简渲染（2026-11-03 子任务③）：原来一行塞满 7 段指标，人工读不动。
+     现在结论行只留「轮次 · 成功/失败 · 停因」；阻塞/总数/耗时/tokens
+     收进标题栏的「更多指标」折叠区（#runSummaryMore，默认收起）。
+     数据全部仍在前端手里，一个不删，只改渲染位置。 */
   var el = $('runSummary');
   if (!el) return;
   el.textContent = '第 ' + (meta.round || 1) + '/' + (d.max_rounds || '?') + ' 轮 · '
-    + (cnt.success || 0) + ' 成功 / ' + (cnt.failed || 0) + ' 失败 / ' + (cnt.blocked || 0) + ' 阻塞 / '
-    + ts.length + ' 总 · 耗时 ' + taskFmtDur(ms) + ' · ' + taskFmtTokens(tok) + ' tokens · ' + stop;
+    + (cnt.success || 0) + ' 成功 / ' + (cnt.failed || 0) + ' 失败 · ' + stop;
+  var more = $('runSummaryMore'), det = $('runSummaryDetail');
+  if (more && det) {
+    det.textContent = ts.length + ' 总任务 · 阻塞 ' + (cnt.blocked || 0)
+      + ' · 耗时 ' + taskFmtDur(ms) + ' · ' + taskFmtTokens(tok) + ' tokens';
+    more.style.display = '';
+  }
 }
 
 async function loadRunChain(runId) {
@@ -7465,16 +7538,27 @@ async function loadRunEvents(runId) {
   var el = $('runEvents');
   if (!el) return;
   try {
-    var d = await api('/api/tasks/' + encodeURIComponent(runId) + '/events?limit=200');
+    /* 精简渲染（2026-11-03 子任务③）：明细列以前整段铺出来，一行日志能撑几屏。
+       现在收进「展开明细」<details>（默认收起，摘要截 80 字加省略号）；命中 limit
+       时如实说明截断口径——完整日志留在 profile_events，agent 走
+       GET /api/tasks/{run_id}/events?limit=1000 取，前端不替它裁数据。 */
+    var LIMIT = 200;
+    var d = await api('/api/tasks/' + encodeURIComponent(runId) + '/events?limit=' + LIMIT);
     var evs = d.events || [];
     if (!evs.length) { el.innerHTML = '<span class="hint">无事件记录（存量 run 或尚未派发）</span>'; return; }
     el.innerHTML = '<table><thead><tr><th>时间</th><th>类型</th><th>主体</th><th>状态</th><th>明细</th></tr></thead><tbody>' +
       evs.map(function (e) {
+        var dt = String(e.detail || '');
+        var cell = dt
+          ? '<details><summary class="hint">' + escapeHtml(dt.slice(0, 80)) + (dt.length > 80 ? '…' : '') + '</summary>' +
+            '<pre style="white-space:pre-wrap;font-size:var(--fs-sm);max-height:180px;overflow:auto">' + escapeHtml(dt) + '</pre></details>'
+          : '<span class="hint">—</span>';
         return '<tr><td class="hint">' + escapeHtml((e.created_at || '').slice(5, 19).replace('T', ' ')) + '</td>' +
           '<td>' + escapeHtml(e.source || '') + '</td><td>' + escapeHtml(e.subject || '') + '</td>' +
           '<td>' + escapeHtml(e.status || '') + '</td>' +
-          '<td class="hint" style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(e.detail || '') + '">' + escapeHtml(e.detail || '') + '</td></tr>';
-      }).join('') + '</tbody></table>';
+          '<td style="max-width:420px">' + cell + '</td></tr>';
+      }).join('') + '</tbody></table>' +
+      (evs.length >= LIMIT ? '<div class="hint" style="padding-top:6px">仅显示最近 ' + LIMIT + ' 条；更早的事件在数据层完整保留（profile_events），可供 agent 按需读取。</div>' : '');
   } catch (e) { el.textContent = '时间线拉取失败：' + e.message; }
 }
 
@@ -7489,14 +7573,20 @@ async function loadTaskStats() {
     var d = await api('/api/tasks/stats?days=' + encodeURIComponent(days) + '&top=6');
     var s = d.summary || {};
     var v = $('taskStatsVerdict');
+    /* 精简渲染（2026-11-03 子任务③）：verdict 一句话 + 一行成功/失败计数留在
+       页面上；重试/耗时/中位/tokens 收进默认收起的 <details>「更多指标」。
+       五项变两行，底层字段一个不删（都在同一次 /api/tasks/stats 响应里）。 */
     if (v) {
       v.innerHTML = '<div class="hint" style="padding:0 0 8px">' + escapeHtml(d.verdict || '') + '</div>' +
         '<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:var(--fs-sm)">' +
         '<span>run ' + (s.runs || 0) + ' · 全绿 ' + (s.runs_success || 0) + '</span>' +
         '<span>任务 ' + (s.tasks || 0) + ' · 成功 ' + (s.success || 0) + ' / 失败 ' + (s.failed || 0) + ' / 阻塞 ' + (s.blocked || 0) + '</span>' +
+        '</div>' +
+        '<details style="margin-top:6px"><summary class="hint">更多指标（重试 / 耗时 / tokens）</summary>' +
+        '<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:var(--fs-sm);padding-top:6px">' +
         '<span>重试 ' + (s.retried || 0) + '</span>' +
         '<span>总耗时 ' + taskFmtDur(s.duration_ms) + ' · 中位 ' + (s.p50_ms == null ? '?' : taskFmtDur(s.p50_ms)) + '</span>' +
-        '<span>' + taskFmtTokens(s.tokens) + ' tokens</span></div>';
+        '<span>' + taskFmtTokens(s.tokens) + ' tokens</span></div></details>';
     }
     /* ── 主线视图：按 agent 分组（t4）────────────────────────────────────
        combos 的粒度是 agent × 模型，同一 agent 换过模型就裂成多行；这里在**前端**
@@ -7556,23 +7646,23 @@ async function loadTaskStats() {
             ' data-run-toggle="' + escapeHtml(a.id) + '" title="点击展开该 agent 的失败原因与模型组合">' +
             '<span class="run-caret" aria-hidden="true">▸</span>' +
             '<span class="run-title">' + escapeHtml(a.id) + '</span>' +
+            /* 精简渲染（2026-11-03 子任务③）：行头只留结论三件（成功/失败/阻塞）
+               + 右侧徽章；重试/均耗时/升档是过程量，挪进展开区首行。n= 仍在徽章里
+               （probe B：比率必须带样本）。 */
             '<span class="run-meta">' +
-            '<span>任务 ' + a.n + '</span>' +
             '<span>成功 ' + a.ok + '</span>' +
             '<span' + (a.failed ? ' class="stat-fail"' : '') + '>失败 ' + a.failed + '</span>' +
             '<span' + (a.blocked ? ' class="stat-block"' : '') + '>阻塞 ' + a.blocked + '</span>' +
-            (a.retried ? '<span>重试 ' + a.retried + '</span>' : '') +
-            '<span>均耗时 ' + taskFmtDur(a.n ? Math.round(a.ms / a.n) : 0) + '</span>' +
             '</span>' +
             '<span class="run-acts"><span class="stat-pill ' + cls + '">' + pct + '% 成功 · n=' + a.n + '</span></span>' +
             '</div>' +
             '<div class="run-subs" data-run-subs="' + escapeHtml(a.id) + '">' +
             '<div class="stat-sub">' +
+            '<div class="hint" style="margin-bottom:6px">重试 ' + a.retried + ' · 均耗时 ' + taskFmtDur(a.n ? Math.round(a.ms / a.n) : 0) + (a.escalated ? ' · 其中 ' + a.escalated + ' 条发生过升档/换人' : '') + '</div>' +
             '<div class="stat-sub-h">失败原因（top 桶归因，抽样口径）</div>' + failHtml +
             '<div class="stat-sub-h">模型组合（' + a.models.length + '）</div>' +
             '<table class="stat-models"><thead><tr><th>模型（实测优先）</th><th>n</th><th>成功</th><th>失败</th><th>阻塞</th><th>成功率</th><th>均耗时</th></tr></thead>' +
             '<tbody>' + modelRows + '</tbody></table>' +
-            (a.escalated ? '<div class="hint" style="margin-top:4px">其中 ' + a.escalated + ' 条发生过升档/换人</div>' : '') +
             '</div></div>' +
             '</div>';
         }).join('');
@@ -7636,13 +7726,20 @@ async function loadTaskStats() {
 }
 
 // 色值必须是具体十六进制：下面 fill = 描边色 + '22' 透明度派生，拿到 "var(--x)" 会变成非法色值
-const TASK_COLORS = {
-  pending:  cssToken('--muted', '#6b6b6b'),
-  running:  cssToken('--busy', '#2c5f8a'),
-  success:  cssToken('--ok', '#2f7a4f'),
-  failed:   cssToken('--danger', '#a3342c'),
-  blocked:  cssToken('--warn', '#8a5a00')
+/* DAG 配色不再按状态各存一份（判例 316：表格徽章与 DAG 两套映射各存一份、无对账 ⇒
+   submitted/verifying/waiting_* 5 个合法态落到 --border 兜底，节点灰成一片）。
+   现在只剩一条链：status → 色档（TASK_ST_PILL，唯一词表）→ 十六进制。
+   新增状态只在 TASK_ST_PILL 加一行，DAG 自动跟着变。 */
+const TASK_TONE_HEX = {
+  ok:    cssToken('--ok', '#2f7a4f'),
+  bad:   cssToken('--danger', '#a3342c'),
+  warn:  cssToken('--warn', '#8a5a00'),
+  info:  cssToken('--busy', '#2c5f8a'),
+  muted: cssToken('--muted', '#6b6b6b')
 };
+function taskStColor(s) {
+  return TASK_TONE_HEX[taskStTone(s)] || cssToken('--border', '#8a8a8a');
+}
 
 function renderTaskTable(tasks) {
   currentRunTasks = {};
@@ -7652,7 +7749,8 @@ function renderTaskTable(tasks) {
     '<td style="font-family:var(--font-mono);font-size:var(--fs-xs)">' + escapeHtml(t.model || t.model_planned || t.model_choice || '默认') + '</td>' +
     '<td>' + escapeHtml((t.deps || []).join(',')) + '</td><td>' + taskStatePill(t.status) + '</td>' +
     '<td>' + taskFmtDur(t.duration_ms) + '</td>' +
-    '<td><details><summary class="hint">' + escapeHtml((t.output || t.error || '').slice(0, 50)) + '</summary><pre style="white-space:pre-wrap;font-size:var(--fs-sm);max-height:220px;overflow:auto">' + escapeHtml(t.output || t.error || '') + '</pre></details></td>' +
+    /* 摘要截 50 字并补省略号（子任务③：截断要看得见），展开仍是全文 <pre>。 */
+    '<td><details><summary class="hint">' + escapeHtml((t.output || t.error || '').slice(0, 50)) + ((t.output || t.error || '').length > 50 ? '…' : '') + '</summary><pre style="white-space:pre-wrap;font-size:var(--fs-sm);max-height:220px;overflow:auto">' + escapeHtml(t.output || t.error || '') + '</pre></details></td>' +
     '<td><button class="btn ghost sm" data-bb-copy="' + escapeHtml(t.task_id) + '" title="生成可粘贴到 DS Bot 的派活文本">复制派活</button></td></tr>').join('');
   bindHandoff();
 }
@@ -7689,10 +7787,11 @@ function renderDag(tasks) {
   }));
   tasks.forEach(t => {
     const p = pos[t.task_id];
-    svg += '<g><rect x="' + p.x + '" y="' + p.y + '" width="' + NW + '" height="' + NH + '" rx="10" fill="' + (TASK_COLORS[t.status] || cssToken('--border')) + '22" stroke="' + (TASK_COLORS[t.status] || cssToken('--border')) + '" stroke-width="1.5"/>' +
+    const c = taskStColor(t.status);
+    svg += '<g><rect x="' + p.x + '" y="' + p.y + '" width="' + NW + '" height="' + NH + '" rx="10" fill="' + c + '22" stroke="' + c + '" stroke-width="1.5"/>' +
       '<text x="' + (p.x + 8) + '" y="' + (p.y + 18) + '" fill="' + cssToken('--text-1') + '" font-size="' + DAG_ST('--fs-xs') + '" font-weight="bold">' + escapeHtml(t.task_id) + ' · ' + escapeHtml(t.agent_id || '') + '</text>' +
       '<text x="' + (p.x + 8) + '" y="' + (p.y + 34) + '" fill="' + cssToken('--text-2') + '" font-size="' + DAG_ST('--fs-xs') + '">' + escapeHtml((t.prompt || '').slice(0, 18)) + '</text>' +
-      '<text x="' + (p.x + 8) + '" y="' + (p.y + 48) + '" fill="' + cssToken('--info') + '" font-size="' + DAG_ST('--fs-xs') + '">' + escapeHtml(t.status) + (t.duration_ms != null ? ' · ' + Math.round(t.duration_ms / 100) / 10 + 's' : '') + '</text></g>';
+      '<text x="' + (p.x + 8) + '" y="' + (p.y + 48) + '" fill="' + c + '" font-size="' + DAG_ST('--fs-xs') + '">' + escapeHtml(taskStText(t.status)) + (t.duration_ms != null ? ' · ' + Math.round(t.duration_ms / 100) / 10 + 's' : '') + '</text></g>';
   });
   svg += '</svg>';
   $('dagSvg').innerHTML = svg;
@@ -7725,11 +7824,12 @@ async function enterTasksPage() {
     if (pool && pool.rounds) fillRoundSelect(pool.rounds);
   } catch (e) { fillRoundSelect(null); }
   fillTaskModelSelect();
+  bindTaskAcc();
   bindRunActions();
   refreshTasks();
 }
 async function retryRun(id) { if (!id) return; try { await api('/api/tasks/' + id + '/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); toast('失败项已重置', 'ok'); setTimeout(() => openRun(id), 1200); } catch (e) { toast(e.message, 'err'); } }
-async function delRun(id) { if (!id || !confirm('删除 run ' + id + '？')) return; try { await api('/api/tasks/' + id, { method: 'DELETE' }); currentRun = null; $('runPanel').style.display = 'none'; refreshTasks(); } catch (e) { toast(e.message, 'err'); } }
+async function delRun(id) { if (!id || !confirm('删除 run ' + id + '？')) return; try { await api('/api/tasks/' + id, { method: 'DELETE' }); currentRun = null; $('runPanel').style.display = 'none'; if (taskAccKey === 'run') setTaskAcc('hist'); refreshTasks(); } catch (e) { toast(e.message, 'err'); } }
 
 /* ── S4 定时任务 ──────────────────────────────────── */
 

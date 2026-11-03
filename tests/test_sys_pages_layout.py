@@ -155,6 +155,35 @@ class TestSysPagesLayout(unittest.TestCase):
             self.assertIn("sp-bd box flush tscroll", self.sections[p],
                           "#page-%s 的表格缺少 .sp-bd.box.flush.tscroll（表头将不再钉住）" % p)
 
+    def test_collab_page_scrolls_inside_cards_not_page(self):
+        """协同页（2026-11-03 用户报「整页滚动，鼠标很难控制」）。
+
+        判据分三层，任一被改回去都要判红：
+          ① 页级不再滚：#page-tasks 关掉纵向滚动（高度由 section.page.on 的 flex:1 给，
+             不许写 calc(100vh - 常数) 这种拍脑袋值）；
+          ② 四张卡都是手风琴项（data-task-acc + data-task-acc-head），卡体是 .sp-scroll
+             且展开卡里 .sp-bd.box 的限高被解除 —— 否则「卡体 + 盒内」两层竖向滚动条；
+          ③ 点「查看」把详情卡设为展开态：不这样，详情会以第 4 张卡的身份把页高再撑 1000px。
+        """
+        self.assertIn("#page-tasks { overflow: hidden; }", self.css,
+                      "#page-tasks 又整页滚了（用户明确要求只滚卡内）")
+        seg = self.sections["tasks"]
+        for key in ("new", "hist", "stats", "run"):
+            self.assertIn('data-task-acc-head="%s"' % key, seg,
+                          "协同页 %s 卡没有手风琴卡头" % key)
+            self.assertIn('data-task-acc="%s"' % key, seg,
+                          "协同页 %s 卡没有手风琴标记" % key)
+        self.assertEqual(seg.count('class="sp-scroll"'), 4,
+                         "四张卡的卡体必须都是 .sp-scroll（多/少一个都会让某张卡退回整页滚动）")
+        self.assertIn("#page-tasks .sp-card.open .sp-bd.box { max-height: none; overflow: visible; }",
+                      self.css, "展开卡里的限高盒必须退化，否则一张卡两条竖向滚动条")
+        self.assertIn("function setTaskAcc(", strip_comments(self.s04),
+                      "协同页手风琴的 setTaskAcc 没了")
+        m = re.search(r"async function openRun\(.*?\n\}", strip_comments(self.s04), re.S)
+        self.assertTrue(m, "openRun 缺失")
+        self.assertIn("setTaskAcc('run')", m.group(0),
+                      "openRun 没把详情卡设为展开态 ⇒ 详情又变成整页往下长")
+
     def test_shared_kit_css_present(self):
         for rule in (".sp-card", ".sp-hd h3", ".sp-tools", ".sp-bd.box", ".sp-note",
                      ".sp-list", ".sp-grid", ".sp-cell"):

@@ -379,6 +379,90 @@ _RUN_STATE_SQL = """CASE WHEN a.running > 0 THEN 'running'
       WHEN a.pending = a.total THEN 'pending'
       ELSE 'partial' END"""
 
+#: **会话（chain）归并**：把「重拆/自动续轮」产生的一串 run 收成 1 条主标题记录。
+#:
+#: 2026-11-03 实盘缺陷：`_replan_once` 每重拆一轮就新建一个 run_id（parent_run_id 指回上一轮），
+#: 目标是同一个，历史列表却按 `GROUP BY t.run_id` 一行一条 ⇒ 用户看到「同一条需求重复出现」，
+#: 误以为成功和失败被拆成了两条记录。真实数据里 `e04a438732→5666103ba6`、
+#: `810a64086f→c8e00ac6bc` 都是同一条会话的两轮。
+#:
+#: 为什么去重键必须是**链根 run_id**而不是 goal：
+#: 实盘有 3 条互不相干的 run 共用 goal「读取 /etc/hostname 并只返回其内容」，
+#: 按 goal 合并会把 3 个独立会话吞成 1 条（那是删数据，不是去重）。
+#: 为什么不是「最新 run_id」：链根才稳定 —— 重拆一轮后 key 不变，前端的展开态/缓存不会失配。
+#:
+#: 环/脏数据硬上限 10 跳，同 `/api/tasks/{id}/chain` 的 guard；深度走到哪算哪，不把接口拖死。
+_CHAIN_ROOT_SQL = """
+    up(run_id, root_id, depth) AS (
+        SELECT a.run_id, a.run_id, 0 FROM a
+        UNION ALL
+        SELECT up.run_id, p.parent_run_id, up.depth + 1
+          FROM up JOIN task_runs p ON p.run_id = up.root_id
+         WHERE p.parent_run_id IS NOT NULL
+           AND p.parent_run_id <> up.root_id
+           AND up.depth < 10
+    ),
+    root AS (
+        SELECT run_id, root_id FROM (
+            SELECT run_id, root_id,
+                   ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY depth DESC) rn
+              FROM up)
+         WHERE rn = 1
+    )
+"""
+
+#: 每一轮 run 的归属会话号 `sid`。没有 `task_runs` 行的存量 run 走 `LEFT JOIN` ⇒ `root_id` 为 NULL ⇒
+#: 回落成自己的 run_id（自己就是链根），不会被吞进别人的会话里。
+_CHAIN_ST_SQL = """SELECT a.*, COALESCE(root.root_id, a.run_id) AS sid, %s AS state
+      FROM a LEFT JOIN root ON root.run_id = a.run_id"""
+
+#: 会话级汇总：把同一条链的所有轮次加总，**状态取最后一轮**。
+#:
+#: 为什么状态不按「加总后的成败比」重算：第 1 轮 5 条全败、第 2 轮 5 条全成，加总后
+#: success=5/total=10，套 `_RUN_STATE_SQL` 会判成 `failed` —— 明明最后跑成了。
+#: 会话的「现在怎么样」只能看链尾；成败条数则是全链累计（第 1 轮挂过几次，用户要能看到）。
+_CHAIN_SESS_SQL = """
+    sess AS (
+        SELECT sid, COUNT(*) rounds,
+               SUM(total) total, SUM(success) success, SUM(failed) failed,
+               SUM(blocked) blocked, SUM(running) running, SUM(pending) pending,
+               SUM(waiting) waiting, SUM(submitted) submitted,
+               MAX(created_at) created_at, MAX(updated_at) updated_at,
+               MAX(finished_at) finished_at,
+               SUM(duration_ms) duration_ms, SUM(tokens) tokens,
+               GROUP_CONCAT(DISTINCT agents) agents,
+               GROUP_CONCAT(DISTINCT models) models
+          FROM st GROUP BY sid
+    ),
+    pick AS (
+        SELECT sid, run_id, round, state, goal, max_rounds, auto_rounds,
+               stop_reason, parent_run_id, child_run_id,
+               ROW_NUMBER() OVER (PARTITION BY sid
+                                  ORDER BY COALESCE(round,1) DESC, created_at DESC) rn
+          FROM st
+    )
+"""
+
+#: 会话一行的最终投影（列表 / 计数共用同一份，避免「两套口径必漂移」判例 316）。
+#: `root_run_id` = 稳定的去重键；`run_id` = 链尾（「查看 / 续跑 / 重拆」指向最新一轮）。
+_CHAIN_SEL_SQL = """
+    SELECT s.sid AS root_run_id, p.run_id AS run_id,
+           COALESCE(r0.goal, p.goal) AS goal,
+           s.rounds AS rounds, COALESCE(p.round,1) AS round, p.state AS state,
+           s.total AS total, s.success AS success, s.failed AS failed,
+           s.blocked AS blocked, s.running AS running, s.pending AS pending,
+           s.waiting AS waiting, s.submitted AS submitted,
+           s.created_at AS created_at, s.updated_at AS updated_at,
+           s.finished_at AS finished_at, s.duration_ms AS duration_ms,
+           s.tokens AS tokens, s.agents AS agents, s.models AS models,
+           p.max_rounds AS max_rounds, p.auto_rounds AS auto_rounds,
+           p.stop_reason AS stop_reason, p.parent_run_id AS parent_run_id,
+           p.child_run_id AS child_run_id
+      FROM sess s
+      JOIN pick p ON p.sid = s.sid AND p.rn = 1
+      LEFT JOIN st r0 ON r0.run_id = s.sid
+"""
+
 
 @router.get("/api/tasks/runs")
 async def list_runs(limit: int = Query(default=20, ge=1, le=100),
@@ -393,30 +477,52 @@ async def list_runs(limit: int = Query(default=20, ge=1, le=100),
     为何改成 CTE 两层：`state` 是聚合出来的派生列，SQLite 不允许在 WHERE 里引用 SELECT 别名；
     原实现是在 Python 里逐行补 `state` 后直接返回 20 条——那样「按状态筛」只能筛前 20 条，
     等于给了个只能看到最近 20 条的筛子。现在过滤与分页都在 SQL 里做，`total` 是同口径计数。
+
+    **一条会话 = 一条记录**（2026-11-03 需求②）：重拆/自动续轮每轮都新建 run_id，列表原来
+    按 run_id 出 20 行，用户看到「同一条需求重复出现，成功和失败各占一行」。现在先按
+    `sid`（链根 run_id）归并成会话，主标题取链根的 goal，成败条数为全链累计，
+    状态取**最后一轮**（`pick`）——第 1 轮挂、第 2 轮跑成的会话必须显示成功。
+    `root_run_id` 是稳定去重键（重拆后不变），`run_id` 是链尾，查看/续跑/重拆都指向它。
     """
     where, args = [], []
     if q.strip():
-        where.append("(run_id LIKE ? OR goal LIKE ?)")
+        # 会话级搜索：链上任一轮的 run_id 或 goal 命中都算 —— 用户搜的是「那条需求」，
+        # 不是「第几轮」。只在链尾的 goal 上找，会让「第 1 轮标题」搜不到。
+        where.append("s.sid IN (SELECT sid FROM st WHERE run_id LIKE ? OR goal LIKE ?)")
         like = "%" + q.strip() + "%"
         args += [like, like]
     if state:
-        where.append("state = ?")
+        where.append("p.state = ?")
         args.append(state)
     if agent.strip():
-        where.append("COALESCE(agents,'') LIKE ?")
+        where.append("COALESCE(s.agents,'') LIKE ?")
         args.append("%" + agent.strip() + "%")
     if model.strip():
-        where.append("COALESCE(models,'') LIKE ?")
+        where.append("COALESCE(s.models,'') LIKE ?")
         args.append("%" + model.strip() + "%")
     if days:
-        where.append("created_at >= ?")
+        # 会话的时间锚是**最近一轮的创建时间**：一条 40 天前开的会话昨天重拆过，
+        # 应当出现在「最近 7 天」里（用户的「最近」= 最近动过，不是最早开始过）。
+        where.append("s.created_at >= ?")
         args.append(_days_ago(days))
     w = (" WHERE " + " AND ".join(where)) if where else ""
-    cte = ("WITH a AS (%s), st AS (SELECT a.*, %s AS state FROM a)" % (_RUN_AGG_SQL, _RUN_STATE_SQL))
-    total = db.query(cte + " SELECT COUNT(*) c FROM st" + w, tuple(args))[0]["c"]
-    rows = db.query(cte + " SELECT * FROM st" + w +
-                    " ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    cte = ("WITH RECURSIVE a AS (%s),%s, st AS (%s),%s"
+           % (_RUN_AGG_SQL, _CHAIN_ROOT_SQL, _CHAIN_ST_SQL % _RUN_STATE_SQL, _CHAIN_SESS_SQL))
+    total = db.query(cte + " SELECT COUNT(*) c FROM sess s JOIN pick p"
+                     " ON p.sid = s.sid AND p.rn = 1" + w, tuple(args))[0]["c"]
+    rows = db.query(cte + _CHAIN_SEL_SQL + w +
+                    " ORDER BY s.created_at DESC, s.sid DESC LIMIT ? OFFSET ?",
                     tuple(args) + (limit, offset))
+    for r in rows:
+        # 跨轮拼接会把同一 agent/model 重复列出来（GROUP_CONCAT(DISTINCT) 只去重整串），
+        # 这里按元素再去一次，顺序保持首次出现。
+        for k in ("agents", "models"):
+            seen, out = set(), []
+            for v in str(r.get(k) or "").split(","):
+                if v and v not in seen:
+                    seen.add(v)
+                    out.append(v)
+            r[k] = ",".join(out)
     return {"runs": rows, "total": total, "limit": limit, "offset": offset,
             "has_more": offset + len(rows) < total,
             "filters": {"q": q, "state": state, "agent": agent, "model": model, "days": days}}
@@ -475,10 +581,14 @@ async def task_stats(days: int = Query(default=30, ge=0, le=3650),
 
     # 时间窗必须与任务侧**同一个**：初版漏了这一句，于是 days=7 时「run 15 个」与
     # 「轮次表 14 个 run」同时上屏（同一份数据的两个窗口，2026-11-03 实盘）。
+    # 会话级归并（2026-11-03 需求②）：这里必须与 `list_runs` 的 sid 口径一致，否则
+    # 汇总卡写「run 26 个」而历史列表写「共 12 条」——同一份数据的两个数字自相矛盾（判例 316）。
     run_rows = db.query(
-        "WITH a AS (%s), st AS (SELECT a.*, %s AS state FROM a)"
-        " SELECT state, COUNT(*) n FROM st" % (_RUN_AGG_SQL, _RUN_STATE_SQL)
-        + _win() + " GROUP BY state", targs)
+        "WITH RECURSIVE a AS (%s),%s, st AS (%s),%s"
+        " SELECT p.state state, COUNT(*) n FROM sess s"
+        " JOIN pick p ON p.sid = s.sid AND p.rn = 1" % (
+            _RUN_AGG_SQL, _CHAIN_ROOT_SQL, _CHAIN_ST_SQL % _RUN_STATE_SQL, _CHAIN_SESS_SQL)
+        + _win("s.created_at") + " GROUP BY p.state", targs)
     state_counts = {r["state"]: int(r["n"] or 0) for r in run_rows}
     runs_total = sum(state_counts.values())
     ok = state_counts.get("success", 0)

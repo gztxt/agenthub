@@ -144,10 +144,11 @@ class TestTaskTableEscaped(unittest.TestCase):
         """
         self.assertIn("taskStatePill(t.status)", self.body)
         pill = _body(TERM, "taskStatePill")
-        # 未知取值走 `TASK_ST_TEXT[s] || s` 回落 —— 关键在于 `s` 是被 escapeHtml
-        # **整个包住**的，不是单独出现。所以断言这一整段表达式，不断言 `escapeHtml(s)`。
-        self.assertIn("escapeHtml(TASK_ST_TEXT[s] || s", pill,
-                      "taskStatePill 的未知状态回落分支必须转义（status 来自 LLM）")
+        # 未知取值走 `taskStText(s)` → `TASK_ST_TEXT[s] || s` 回落。设防点是**在
+        # pill 里把词表结果整个 escapeHtml 包住**：文案是中文也好、原样回落的
+        # 任意字符串也好，都在同一出口转义，不依赖 `s` 是否被登记。
+        self.assertIn("escapeHtml(taskStText(s))", pill,
+                      "taskStatePill 必须整体转义（词表命中与未知回落共用同一出口）")
 
     def test_no_bare_llm_field_concat(self):
         """形状判据（主判据）：拼接 LLM 字段的表达式里不得出现裸的 `+ t.<field>`。
@@ -179,7 +180,10 @@ class TestDagEscaped(unittest.TestCase):
         self.assertIn("escapeHtml(t.agent_id", self.body)
 
     def test_status_escaped(self):
-        self.assertIn("escapeHtml(t.status)", self.body)
+        """DAG 节点第三行现在打中文文案（`taskStText`），仍是不可信输入：
+        未登记状态回显原始码 ⇒ 转义点必须还在，只是包的内层换了。"""
+        self.assertIn("escapeHtml(taskStText(t.status))", self.body,
+                      "DAG 状态文案必须转义（未登记状态会原样回显 LLM 给的码）")
 
     def test_numeric_duration_left_alone(self):
         """数字不是不可信输入，不该被转义（转义了也不对，但那是噪音不是缺陷）。

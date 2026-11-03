@@ -49,13 +49,17 @@ class DecomposeIn(BaseModel):
 
 
 LEADER_PROMPT = """你是任务编排器。把用户目标拆解为子任务 DAG，只输出 JSON 数组（不要围栏、不要解释）。
-每项格式: {"id":"t1","task":"中文指令（自包含，可独立执行）","agent_id":"执行Agent","difficulty":2,"deps":[]}
+每项格式: {"id":"t1","task":"中文指令（自包含，可独立执行）","agent_id":"执行Agent","difficulty":2,"deps":[],"files":["src/a.py"]}
 规则：
 - agent_id 只能从这里选：{agents}（选最合适的；不确定用 {default}）
 - **要读文件 / 跑命令 / 改代码**的子任务，必须选带工具环的执行 Agent（claude-code、codex、dsh、pi、codebuddy、grok、hermes、omp、cursor）；claude/jcode 是纯文本端点，做不了这类活，选它必编造
 - difficulty 取 1/2/3：1 = 单点取证或机械核对；2 = 要读多份材料后归纳；3 = 要取舍/设计/跨模块推理
 - model **一般省略**：省略后由 difficulty 决定起始档位（t1 便宜 / t2 中 / t3 强，失败会自动升档）。
   只有你确实要用某个特定模型时才填，且必须从 {models} 里选
+- **`files` 必填**：该子任务会**读或写**的文件路径（相对仓库根，最多 8 个）；纯推理/检索类写 []
+- **文件重叠 ⇒ 必须串行**：两个子任务 `files` 有交集时，**不许都是 `deps: []`**——
+  要么合并成一个任务，要么给后一个写上前一个的 id。并行改同一文件会互相覆盖，
+  实测后果是「同一份代码里并存两套实现，改一处另一处照旧生效」
 - 子任务数 ≤ {maxn}；无依赖的兄弟任务会被并行执行，有依赖写 deps
 - **互不依赖的子任务必须写 `deps: []`**：拆成单链会让一个任务超时把下游全部阻塞（实测 10 个任务串成链、名册 4 家 agent 只调到 1 家）。能并行的就不要串
 - 聚合/汇总类任务必须 deps 列出全部上游
@@ -138,6 +142,100 @@ def _clamp_difficulty(v: Any) -> int:
     return max(1, min(3, n))
 
 
+#: 单任务最多记几个文件（护栏，不是业务上限）。多于此数说明子任务边界本身没划清。
+FILE_LIST_MAX = 8
+
+#: 文件重叠闸门（2026-11-03 混排第五缺陷）
+# 判据：无依赖的两个子任务 `files` 相交 ⇒ 自动给后者补 dep（串行），并留 note。
+FILE_OVERLAP_ENFORCE = True
+
+
+def _norm_files(v: Any) -> List[str]:
+    """把 LLM 给的 files 归一成去重路径列表。非列表/坏项一律丢弃（自评字段不倒灌主流程）。"""
+    out: List[str] = []
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, (list, tuple)):
+        return out
+    for f in v:
+        t = str(f or "").strip().replace("\\", "/")
+        while t.startswith("./"):
+            t = t[2:]
+        if not t or len(t) > 200 or t in out:
+            continue
+        out.append(t)
+        if len(out) >= FILE_LIST_MAX:
+            break
+    return out
+
+
+def _ancestors(items: List[dict]) -> Dict[str, set]:
+    """每个任务的全部祖先集（含传递）。前置：DAG 已无环（`_validate_dag` 已查过）。"""
+    by_id = {it["id"]: it for it in items}
+    memo: Dict[str, set] = {}
+
+    def walk(tid: str, stack: set) -> set:
+        if tid in memo:
+            return memo[tid]
+        if tid in stack:  # 环：交给上层 Kahn 报错，这里不制造二次异常
+            return set()
+        acc: set = set()
+        for d in (by_id.get(tid, {}).get("deps") or []):
+            acc.add(d)
+            acc |= walk(d, stack | {tid})
+        memo[tid] = acc
+        return acc
+
+    for it in items:
+        walk(it["id"], set())
+    return memo
+
+
+def serialize_file_overlaps(items: List[dict]) -> tuple:
+    """同文件集的并行子任务 ⇒ **强制串行**。返回 `(items, note|None)`。
+
+    为什么这不是"锦上添花"：2026-11-03 实测同一条 UI 需求被拆成 4 个子任务并行派给
+    4 家 agent，全都落在 `templates/index.html` 与 `static/hub/04-terminal-ws.js` 上，
+    后写覆盖先写 ⇒ 落盘的是「两套并存的实现」，改一处另一处照旧生效。拆解层当时
+    没有任何字段能表达「这两个任务会碰同一份文件」，所以**连告警都给不出来**。
+
+    规则只有一条，且只在无环方向加边（后者依赖前者）：
+      按声明顺序扫描，若 B 的 files 与某个更早的 A 相交，且 A 不在 B 的祖先集里，
+      就给 B 补 `deps += [A]`。因为边只从后指向前，加边不可能造出环。
+    """
+    if not FILE_OVERLAP_ENFORCE:
+        return items, None
+    anc = _ancestors(items)
+    added: List[dict] = []
+    for i, cur in enumerate(items):
+        cur_files = set(cur.get("files") or [])
+        if not cur_files:
+            continue
+        # 先做**传递归约**再连边：若 prev 本身是另一个 prev 的祖先，只等后者即可。
+        # 少了这一步，3 个任务碰同一文件会连出 t2←{t1}、t3←{t1,t2} 三条边 ——
+        # 图是对的，但「等 t1 又等 t2（t2 本来就在等 t1）」是白等，且 note 计数虚高。
+        cands = [p for p in items[:i] if cur_files & set(p.get("files") or [])]
+        cands = [p for p in cands
+                 if not any(p["id"] in anc.get(q["id"], set()) for q in cands if q is not p)]
+        for prev in cands:
+            if prev["id"] in anc.get(cur["id"], set()):
+                continue
+            cur.setdefault("deps", [])
+            cur["deps"] = list(cur["deps"]) + [prev["id"]]
+            anc[cur["id"]] = anc.get(cur["id"], set()) | {prev["id"]} | anc.get(prev["id"], set())
+            added.append({"task": cur["id"], "after": prev["id"],
+                          "files": sorted(cur_files & set(prev.get("files") or []))[:4]})
+    if not added:
+        return items, None
+    return items, {
+        "kind": "file_overlap_serialized",
+        "count": len(added),
+        "pairs": added[:6],
+        "warning": ("%d 个子任务的文件集相交，已自动改为串行（后写覆盖先写会让产物互相抹掉）：%s"
+                    % (len(added), "；".join("%s 等 %s" % (a["task"], a["after"]) for a in added[:4]))),
+    }
+
+
 def _validate_dag(items: list, known_agents: set, default_agent: str,
                   allowed_models: Optional[Dict[str, set]] = None) -> List[dict]:
     """校验并归一 DAG。
@@ -171,7 +269,7 @@ def _validate_dag(items: list, known_agents: set, default_agent: str,
         normalized.append({"id": tid, "task": str(it.get("task") or it.get("prompt") or "").strip(),
                            "agent_id": agent, "deps": [str(d) for d in (it.get("deps") or [])],
                            "difficulty": _clamp_difficulty(it.get("difficulty")),
-                           "model": model})
+                           "model": model, "files": _norm_files(it.get("files"))})
     for n in normalized:
         for d in n["deps"]:
             if d not in ids:
@@ -263,13 +361,14 @@ def _create_run(goal: str, items: List[dict], *, verify_kind: str,
         db.execute(
             "INSERT INTO tasks(run_id,task_id,trace_id,goal,prompt,agent_id,deps,status,"
             "verify_kind,budget_ms,budget_tokens,difficulty,model_choice,"
-            "tier,model_planned,tier_reason,agent_promoted_from,created_at,updated_at)"
-            " VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?,?,?,?,?,?,?)",
+            "tier,model_planned,tier_reason,agent_promoted_from,created_at,updated_at,files)"
+            " VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?,?,?,?,?,?,?,?)",
             (run_id, it["id"], run_id, goal, it["task"], it["agent_id"],
              json.dumps(it["deps"]), verify_kind, budget_ms, budget_tokens,
              it.get("difficulty"), it.get("model"),
              it.get("tier"), it.get("model_planned"), it.get("tier_reason"),
-             it.get("agent_promoted_from") or "", now, now))
+             it.get("agent_promoted_from") or "", now, now,
+             json.dumps(it.get("files") or [])))
     # `max_rounds`：界面轮次框的**落库值**（2026-11-03）。存 NULL = 存量/老调用方，
     # 重拆层回落到 `MAX_ROUNDS`，行为与改版前逐字一致（不因新列出现就多跑几轮）。
     db.execute("INSERT INTO task_runs(run_id,parent_run_id,round,goal,origin,auto_rounds,"
@@ -389,6 +488,11 @@ async def decompose(body: DecomposeIn):
         raise
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"Leader 拆解失败: {e}")
+    # 文件重叠闸门必须在 ensure_synthesis **之前**、档位层**之前**：
+    #   · 之前（相对汇总节点）：串行化会改 deps，汇总节点的 deps 要按**串行化后的叶子**算，
+    #     否则会 dep 到一个已经不是叶子的节点（冗余等待，且掩盖真正缺口）；
+    #   · 之前（相对档位层）：叶子才钉最高档，档位层必须看到最终形态。
+    items, file_note = serialize_file_overlaps(items)
     # 汇总节点在 try 之外补：它抛错是**我们的** bug，不该被报成「Leader 拆解失败」。
     items, synth = ensure_synthesis(items, default)
     items, tier_note = _tiers._plan_tiers(items, known)
@@ -397,6 +501,13 @@ async def decompose(body: DecomposeIn):
     items, pin_note = _apply_pinned_model(items, body.model, allowed)
     # 并行度体检：只告警不拒绝（串行 DAG 在真有依赖时合法，这里让「退化」可见）。
     par_note = parallelism_note(items)
+    if par_note and file_note:
+        # 刻意串行不是退化：不加这句，「为防同文件覆盖而串行」会被读成「Leader 又拆成单链」。
+        par_note = dict(par_note, reason="file_overlap",
+                        file_serialization=file_note["count"],
+                        warning=par_note["warning"] + (
+                            "（其中 %d 处是为避免同文件覆盖而**刻意**串行，见 file_serialization）"
+                            % file_note["count"]))
     # 轮次：显式 `rounds` 优先，其次老开关 `auto_rounds`（true→2/false→1），最后默认 1。
     rounds = _tiers.clamp_rounds(
         body.rounds if body.rounds is not None else (2 if body.auto_rounds else 1))
@@ -406,6 +517,7 @@ async def decompose(body: DecomposeIn):
                 "dry_run": True, "round": 1, "synthesis": synth, "tiers": tier_note,
                 "model_policy": pin_note,
                 "parallelism_warning": (par_note or {}).get("warning"),
+                "file_serialization": file_note,
                 "auto_rounds": auto_rounds, "rounds": rounds, "max_rounds": rounds,
                 "round_choices": list(_tiers.ROUND_CHOICES),
                 "note": "dry_run：只拆解未落库，确认后传 dry_run=false 再调一次"}
@@ -414,6 +526,12 @@ async def decompose(body: DecomposeIn):
                          auto_rounds=auto_rounds, max_rounds=rounds)
     if body.auto_run:
         _runner._start_runner(run_id)
+    if file_note:
+        try:
+            db.log_profile_event("task_plan", body.default_agent or "leader", "file_overlap",
+                                 0, trace_id=run_id, detail=dict(file_note, run=run_id))
+        except Exception:  # noqa: BLE001 —— 留痕失败不得让拆解整体失败
+            pass
     if par_note:
         # 只有真落库的 run 才留痕（dry_run 不写库是既有约定，见 DecomposeIn.dry_run 注释）
         try:
@@ -425,5 +543,6 @@ async def decompose(body: DecomposeIn):
             "running": body.auto_run, "round": 1, "synthesis": synth, "tiers": tier_note,
             "model_policy": pin_note,
             "parallelism_warning": (par_note or {}).get("warning"),
+            "file_serialization": file_note,
             "auto_rounds": auto_rounds, "rounds": rounds, "max_rounds": rounds,
             "round_choices": list(_tiers.ROUND_CHOICES)}

@@ -123,7 +123,25 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.190"
+VERSION = "0.13.191"
+
+# v0.13.191（2026-11-03）：混排没有优势不是「模型不够强」，是拆解层缺一整个字段。
+#   ① 病：同一条 UI 需求被拆给 4 家 agent 并行，`files` 全是同一两个文件，后写覆盖先写
+#      ⇒ 落盘两套并存实现。拆解层**没有任何字段能表达「这两个任务会碰同一份文件」**，
+#      所以连告警都给不出来；而上一版刚加的并行度闸门反过来在**鼓励**并行（"能并行就别串"）。
+#      同批取证：30 天 90 任务里 blocked 17 条全是「上游失败」；codex 吃 80.8% 的 token
+#      却在改文件类任务上 6 次秒挂（平均 2.5s）。选型层一处都没读过历史成绩。
+#   ② 药：LEADER_PROMPT 加**必填** `files`；`serialize_file_overlaps()` 在拆解后自动把
+#      「文件相交且无依赖」的兄弟任务改成串行（只从后往前加边 ⇒ 不可能造环），先做传递
+#      归约再连边（否则 3 个任务同文件会白等 t1）。刻意串行与「退化单链」在告警里分开写，
+#      否则修好覆盖问题又被读成拆解退化。
+#   ③ 分桶：`files` 落库（`tasks.files`）—— 复盘要能回答「这次为什么串行」而不必重跑拆解；
+#      新增 `dispatch_weights` 三维尺子（质量=Wilson 下界 / 效率=p50 / 成本=每成功一次 token）
+#      与 `/api/tasks/weights`，**只读建议不改派发**（直接接管需先 A/B，已登记待办）。
+#   ④ 判据：`tests/test_dag_file_overlap_l0.py` 18 例（含"部分重叠只串那一对"、
+#      "已声明依赖不重复加边"、"跨 agent 同文件照样串行"）；`tests/test_dispatch_weights_l0.py`
+#      25 例（含"2/2 不许排第一"、"600s 超时不许拉爆 p50"、"干得多但失败多不显得便宜"）。
+#   ⑤ 未闭合：权重尚未接管选型；孤儿子进程仍未回收；本轮联网搜索接口返垃圾（fetch 可用）。
 
 # v0.13.190（2026-11-03）：协同看板从「有容器」到「有内容」—— 静态测试全绿，页面却是一块空白。
 #   ① 病：`#statsAgents` 与整套 `.stat-pill` CSS 早已写进模板，JS 里却**从未渲染过它**
@@ -1227,6 +1245,16 @@ async def startup():
         term_record.ensure_counted()
     except Exception as e:  # noqa: BLE001
         log.warning(f"[term_record] 计数表播种跳过：{type(e).__name__}: {str(e)[:160]}")
+    # v0.13.191：启动先收孤儿子进程。顺序不能与下面的恢复颠倒 —— 恢复会把 `running`
+    # 拉回 `pending` 并重派，旧进程没清掉就会与新进程同时写同一批文件。
+    # 只杀「自有子进程 + 独立进程组 + 存活超 120s」，不碰任何别人家的进程。
+    try:
+        import adapters.cli_agent as _cli
+        _killed = _cli.reap_orphans(os.getpid())
+        if _killed:
+            log.warning(f"[reap] 启动回收孤儿子进程 {len(_killed)} 个：{_killed[:8]}")
+    except Exception as e:  # noqa: BLE001 —— 回收失败不得拖垮启动
+        log.warning(f"[reap] 启动孤儿回收跳过：{type(e).__name__}: {str(e)[:120]}")
     appstate.discovery = AgentDiscovery(config, db=db)
     build_adapters(config)
     # v0.13.50 起的漂移体检 + v0.13.51 的授权写回：启动先修一轮（CCR 可能还没改写，
@@ -1366,6 +1394,15 @@ async def shutdown():
     for _px in _embed_bridges:
         await _px.stop()
     term_mod.kill_all()
+    # 关停也必须收：`start_new_session` 的子进程不属于 systemd 的 cgroup 收尸范围之外
+    # 那部分行为不可依赖，显式杀一次最省事（2026-11-03 实测有 43 分钟孤儿）。
+    try:
+        import adapters.cli_agent as _cli
+        _left = _cli.kill_all_live()
+        if _left:
+            log.warning(f"[reap] 关停回收子进程 {len(_left)} 个：{_left[:8]}")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 if __name__ == "__main__":

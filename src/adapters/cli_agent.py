@@ -236,6 +236,103 @@ def _kill_group(proc) -> None:
             pass
 
 
+# ── 孤儿回收（2026-11-03）────────────────────────────────────────────────────
+#: 活着的子进程：`pgid -> {"pid","tag","t0"}`。`tag` 写成 `<run_id>/<task_id>`，
+#: 这样回收日志能直接对上 run 表。
+_LIVE: dict = {}
+
+#: 启动清扫只杀「比这个时间更老」的自有子进程，避免误杀刚拉起的活任务。
+REAP_MIN_AGE_S = 120.0
+
+
+def register_process(proc, tag: str = "") -> None:
+    """登记刚 spawn 的进程组。closest 失败也不抛（回收是增强，不许带倒主流程）。"""
+    try:
+        _LIVE[proc.pid] = {"pid": proc.pid, "tag": tag, "t0": time.monotonic()}
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def unregister_process(proc) -> None:
+    try:
+        _LIVE.pop(proc.pid, None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def live_processes() -> list:
+    """当前登记在案的子进程（供探针与 /health 观测，不改状态）。"""
+    return [dict(v) for v in list(_LIVE.values())]
+
+
+def _pgid_of(pid: int) -> int:
+    try:
+        return os.getpgid(pid)
+    except Exception:  # noqa: BLE001
+        return pid
+
+
+def reap_orphans(parent_pid: int, min_age_s: float = REAP_MIN_AGE_S,
+                 proc_root: str = "/proc") -> list:
+    """杀掉 `parent_pid` 名下的**孤儿**子进程组，返回被杀的 pid 列表。
+
+    判据（三者同时成立才动手，缺一不可）：
+      ① `PPID == parent_pid` —— 只碰自己的子进程，绝不动别人的；
+      ② `pgid == pid` —— 是 `start_new_session` 建的独立进程组（CLI 派生的 node/bun
+         会共享这个 pgid，所以杀组才杀得干净）；
+      ③ 存活时长 > `min_age_s` —— 刚拉起的活任务不动（回收器与派发器并发跑）。
+
+    为什么必须有这一层：2026-11-03 实测一条 run 在 01:53 已判 `failed/max_rounds` 并闭合，
+    它派出去的 `claude -p`（PPID=hub）**43 分钟后仍在运行**并持续读写仓库文件——
+    产物无人收集，token 照烧（20 秒采样 rchar +1261B/wchar +1168B，连接挂在网关）。
+    `_kill_group` 只覆盖超时分支；run 被整体关闭/服务重启时没有任何一处去收子进程。
+    """
+    killed: list = []
+    try:
+        now = time.time()
+        for name in os.listdir(proc_root):
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            try:
+                with open(os.path.join(proc_root, name, "stat"), "r") as fh:
+                    fields = fh.read().rsplit(")", 1)[1].split()
+                ppid, pgrp = int(fields[1]), int(fields[2])
+                ticks = int(fields[19])
+                with open("/proc/uptime", "r") as fh:
+                    uptime = float(fh.read().split()[0])
+                age = uptime - ticks / os.sysconf("SC_CLK_TCK")
+            except Exception:  # noqa: BLE001 — 进程在枚举期间消失是常态
+                continue
+            if ppid != parent_pid or pgrp != pid or (now and age < min_age_s):
+                continue
+            try:
+                os.killpg(pgrp, signal.SIGTERM)
+                killed.append(pid)
+            except (ProcessLookupError, PermissionError):
+                continue
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001 — 回收失败不得带倒启动
+        pass
+    for pid in killed:
+        _LIVE.pop(pid, None)
+    return killed
+
+
+def kill_all_live() -> list:
+    """服务关停时把登记在案的进程组全收掉（优雅停机不放任子进程逃生）。"""
+    killed = []
+    for pid in list(_LIVE):
+        try:
+            os.killpg(_pgid_of(pid), signal.SIGTERM)
+            killed.append(pid)
+        except Exception:  # noqa: BLE001
+            pass
+    _LIVE.clear()
+    return killed
+
+
 class CliAgentAdapter(BaseAdapter):
     """按 SPECS 把一个 agent id 变成一次无头 CLI 调用。"""
 
@@ -338,10 +435,12 @@ class CliAgentAdapter(BaseAdapter):
             return {"success": False, "agent": self.agent_id,
                     "error": "spawn_failed: %s: %s" % (type(e).__name__, str(e)[:200])}
 
+        register_process(proc, str(kwargs.get("tag") or ""))
         try:
             out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         except asyncio.TimeoutError:
             _kill_group(proc)
+            unregister_process(proc)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=10)
             except Exception:  # noqa: BLE001
@@ -351,9 +450,11 @@ class CliAgentAdapter(BaseAdapter):
                     "ms": int((time.monotonic() - t0) * 1000)}
         except Exception as e:  # noqa: BLE001
             _kill_group(proc)
+            unregister_process(proc)
             return {"success": False, "agent": self.agent_id,
                     "error": "run_failed: %s: %s" % (type(e).__name__, str(e)[:200])}
 
+        unregister_process(proc)
         dur = int((time.monotonic() - t0) * 1000)
         stdout = out_b.decode("utf-8", "ignore")
         stderr = err_b.decode("utf-8", "ignore")

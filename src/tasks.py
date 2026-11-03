@@ -86,6 +86,10 @@ _TASK_COLUMNS = (
     ("verify_reason", "TEXT"),
     # 2026-11-01：重启恢复注记（派发时拼进 prompt 最前，拼完即清空）
     ("recovery_note", "TEXT"),
+    # 2026-11-03：拆解声明「会碰哪些文件」。文件重叠闸门（tasks_dag.serialize_file_overlaps）
+    # 靠它把并行的同文件子任务强制串行；空数组 = 纯推理/检索类（不含文件读写）。
+    # 之所以落库而不是只存在内存里：复盘要能回答「这次为什么串行」而不必重跑拆解。
+    ("files", "TEXT"),
     # §7-①：让「正在验」可被外部读到并**可度量**（旧实现是同一协程内的瞬时态）
     ("verify_started_at", "TEXT"),
     ("verify_ms", "INTEGER"),
@@ -430,6 +434,21 @@ def _days_ago(days: int) -> str:
     from datetime import datetime, timedelta, timezone
     return (datetime.now(timezone.utc) - timedelta(days=int(days))).replace(
         microsecond=0).isoformat()
+
+
+@router.get("/api/tasks/weights")
+async def task_weights(days: int = Query(default=30, ge=1, le=3650)):
+    """派发权重排名（2026-11-03）：agent × 模型 的质量 / 效率 / 成本三维。
+
+    为什么单独一个端点、而不是塞进 `/api/tasks/stats`：stats 是**看过去**（发生了什么），
+    这里是**定未来**（下次派谁）。两者口径不同 —— stats 的取消/阻塞要计入「发生过」，
+    权重只该按「值不值得再派」算（成本按每成功一次 token，失败任务不进效率分母）。
+
+    ⚠ 本端点**只读建议，不改派发**：选型仍走 `tasks_tiers` 的档位层。
+    权重直接接管选型需要先跑 A/B，已登记 PENDING-TASKS，别在这里偷偷改行为。
+    """
+    import dispatch_weights
+    return dispatch_weights.compute(days=days)
 
 
 @router.get("/api/tasks/stats")

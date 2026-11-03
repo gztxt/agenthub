@@ -51,6 +51,10 @@ SOURCES: Tuple[str, ...] = (
     # 2026-11-03 混排五缺陷 · 缺陷5：拆解完成的**并行度体检**（拆出 N 个任务里几个无依赖）。
     # 为什么不并进 task_exec：那是「子任务执行结果」，这是**拆解质量**，发生在花钱之前。
     "task_plan",
+    # v0.13.191：run **收尾**时的运维动作（孤儿回收）。为什么不并进 task_replan：
+    # 那是「决策要不要再拆一轮」，这是「收尸」。也不并进 task_exec：那里记的是子任务
+    # 自己的执行结果，收尸是 run 级的清理，混进去会让「子任务成功率」被清理事件污染。
+    "task_run",
 )
 
 #: 跨 source 的执行结果语义闭集（**结果怎样**）。
@@ -69,7 +73,11 @@ STATUS_MAP: Dict[str, Dict[str, str]] = {
     # 落成 failed 会让「重拆失败率」恒高且不可解释。
     "task_replan": {"replan": "ok", "fail": "failed"},
     # task_plan：`low_parallelism` 是**告警**不是失败（拆解仍usable，只是混排可能退化）⇒ degraded。
-    "task_plan": {"low_parallelism": "degraded"},
+    # file_overlap：拆解声明了会碰同一份文件却排成并行，已由 `serialize_file_overlaps`
+    # 自动串行补救 ⇒ 记 degraded（退化确实发生了，只是被兜住），不能记 ok。
+    "task_plan": {"low_parallelism": "degraded", "file_overlap": "degraded"},
+    # v0.13.191：回收成功 = 正常动作完成（`ok`）；没有孤儿时不落事件，故无需空态映射。
+    "task_run": {"reap_orphans": "ok"},
     "cron_run": {"success": "ok", "fail": "failed", "skipped": "skipped"},
     "mcp_call": {"success": "ok", "fail": "failed"},
     # P2 C2：影子规则只观测不拦 ⇒ 命中即「有异常但未阻断」= degraded（不是 failed）。

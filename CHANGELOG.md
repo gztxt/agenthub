@@ -1,3 +1,23 @@
+## v0.13.191 — 混排三缺口：文件集闸门 / 派发权重 / 孤儿回收（2026-11-03）
+
+**起因**：同一批任务，混排结果比单会话更差、token 几倍，质量和效率没有优势。
+30 天库内取证：blocked 17/90 全是「上游失败」；top5 任务吃掉 80.8% token，五条全是 codex；
+`claude-code（默认模型）` n=22 成功率 **9%**。
+
+- **拆解（最重要）**：`LEADER_PROMPT` 新增**必填** `files`；`serialize_file_overlaps()`
+  在拆解后把「文件相交且无依赖」的兄弟任务自动改为串行（只从后往前加边 ⇒ 不可能造环；
+  先做传递归约再连边）。`files` 落库（`tasks.files`）供复盘。
+  刻意串行与「退化单链」在 `parallelism_warning` 里分开写。
+- **派发权重**：新增 `src/dispatch_weights.py` 与 `GET /api/tasks/weights`。
+  质量=成功率 **Wilson 下界**（小样本不许靠运气排第一）；效率=p50（不被 600s 熔断拉爆）；
+  成本=**每成功一次 token**（干得多但失败多不显得便宜）；效率与成本归一**取 log1p**
+  （跨 3 个数量级，线性归一会把「贵 450 倍」读成「差一点」）。分 `code/research/synth` 三族。
+  **只读建议，不改派发**（直接接管需先 A/B）。
+- **孤儿回收**：`adapters/cli_agent` 增进程登记表与 `reap_orphans()`，
+  启动 / run 收敛 / 关停三处调用。判据三重：`PPID==自己` + `pgid==pid` + 存活 >120s。
+- **测试**：新增 `test_dag_file_overlap_l0.py`(18)、`test_dispatch_weights_l0.py`(28)、
+  `test_orphan_reap_l0.py`(7)，合计 53 例；相关集 150 例全绿。
+
 ## v0.13.190 — 协同看板从「有容器」到「有内容」：静态全绿，页面空白
 
 > 用户 2026-11-03 报「协同前端 UI 非常混乱，不能直观了解任务状态 / 历史任务 / 失败项」。

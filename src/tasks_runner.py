@@ -9,6 +9,7 @@
 import asyncio
 import inspect
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -659,6 +660,18 @@ async def _execute_run(run_id: str):
                 # 监听会变成第二份「什么叫跑完」的定义。
                 import tasks_replan as _replan  # 延迟导入：runner 在依赖链底端，重拆层在它上面
                 await _replan._maybe_replan(run_id)
+                # run 收尾必扫孤儿：2026-11-03 实测一条 run 在 01:53 已闭合，它派出的
+                # `claude -p`（PPID=hub）43 分钟后仍在跑并持续读写仓库 —— 产物无人收集，
+                # token 照烧。`_kill_group` 只覆盖超时分支，run 整体收敛时没有任何一处收子进程。
+                try:
+                    import adapters.cli_agent as _cli
+                    killed = _cli.reap_orphans(os.getpid())
+                    if killed:
+                        db.log_profile_event("task_run", "runner", "reap_orphans", 0,
+                                             trace_id=run_id,
+                                             detail={"killed": killed, "run": run_id})
+                except Exception:  # noqa: BLE001 — 回收失败不得带倒 run 收尾
+                    pass
                 return
             for r in rows:
                 if r["task_id"] in live or r["status"] != "pending":

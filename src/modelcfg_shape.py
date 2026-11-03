@@ -9,7 +9,15 @@ from __future__ import annotations
 import re
 from typing import Dict, List
 
-MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+\-]{0,119}$")
+# CCR /v1/models 实测形状：alibaba/qwen3.8-max、openrouter/poolside/laguna-xs-2.1:free、
+# **商汤/sensenova-6.8-flash**（CCR 给商汤 provider 用了中文 slug，2026-11-03 实测 7 条）。
+# 收紧到这个字符集：模型 ID 会被写进 JSON/TOML 的**双引号字符串**与终端 argv，
+# 放宽字符集等于给引号逃逸与 argv 注入开门。
+# 2026-11-03：补 CJK Unified Ideographs（\u4e00-\u9fff）—— CCR 自身就用中文 provider slug，
+# 不放宽会把合法的 CCR 模型 ID 挡在形状闸门外（用户报障：商汤/sensenova-6.8-flash 报 400）。
+# 安全性：CJK 字符不是 shell 元字符、不是引号、不是反斜杠、不是控制字符；
+# JSON 字符串允许任意 Unicode；argv 在 UTF-8 locale 下无注入风险。
+MODEL_ID_RE = re.compile(r"^[A-Za-z0-9\u4e00-\u9fff][A-Za-z0-9\u4e00-\u9fff._:/+\-]{0,119}$")
 
 #: 终端注入白名单（实测 `<cli> --help` 输出）：值 = 传给该 CLI 的 flag。
 #: 只有这里在册的 agent 才会被 hub 拉起时追加 --model；其余仅写配置文件。
@@ -112,7 +120,7 @@ def validate_model(model: str) -> str:
     if not m:
         raise ModelCfgError("模型 ID 为空")
     if not MODEL_ID_RE.match(m):
-        raise ModelCfgError("模型 ID 形状不合法（只允许字母数字与 . _ : / + -，≤120 字符）")
+        raise ModelCfgError("模型 ID 形状不合法（只允许字母数字、中文与 . _ : / + -，≤120 字符）")
     return m
 
 #: 漂移比对豁免表（形状不可比的 agent，见 modelcfg_verify.drift_report）

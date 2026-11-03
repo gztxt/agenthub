@@ -226,6 +226,12 @@ class BPreviewNoWrite(_HomeFixture):
             with self.assertRaises(modelcfg.ModelCfgError, msg=f"{bad!r} 本该被拒"):
                 modelcfg.validate_model(bad)
 
+    def test_cjk_model_id_accepted(self):
+        """CCR 给商汤 provider 用了中文 slug「商汤」（2026-11-03 实测 7 条），
+        形状闸门必须放行。挡住的是空格/引号/换行/超长，不是中文。"""
+        for ok in ("商汤/sensenova-6.8-flash", "商汤/kimi-k3", "商汤/deepseek-v4.1-flash"):
+            self.assertEqual(modelcfg.validate_model(ok), ok, f"{ok!r} 本该被接受")
+
     def test_unsupported_agent_rejected(self):
         with self.assertRaises(modelcfg.ModelCfgError):
             modelcfg.preview("codebuddy", "new/model-z")

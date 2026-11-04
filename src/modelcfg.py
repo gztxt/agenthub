@@ -107,7 +107,8 @@ def _ccr_api_key() -> str:
 # （人工增删模型、免费池轮换）。设置页只证明"写进去了"，证明不了"这个 ID 现在还在"。
 # 存着一个已经不在清单里的 ID ⇒ 新开终端照旧注入它，agent 报 unknown model 或上游
 # 回落，用户看到的就是"设置好了没用"。本节的 catalog_* 就是补这条。
-_CATALOG = {"ts": 0.0, "ids": set(), "checked": False, "size": 0, "error": ""}
+_CATALOG = {"ts": 0.0, "ids": set(), "names": {}, "contexts": {}, "checked": False,
+            "size": 0, "error": ""}
 CATALOG_TTL_S = float(os.getenv("HUB_MODEL_CATALOG_TTL", "60"))
 
 
@@ -166,12 +167,90 @@ def _fetch_catalog_from_sqlite() -> Tuple[set, str]:
     return ids, ""
 
 
-def _fetch_catalog_ids() -> Tuple[set, str]:
-    """真去网关拉一次清单。返回 (ids, error)。
+#: CCR 自带的模型目录缓存（5092 条，`limits.contextTokens`）。
+_CCR_MODELS_CACHE = Path.home() / ".claude-code-router" / "app-data" / "cache" / "models.json"
+_CTX_CACHE = {"key": None, "map": {}}
+
+
+def _catalog_contexts() -> dict:
+    """CCR 侧已知的上下文窗口 `{catalog_id: tokens}`。
+
+    为什么需要它：`/v1/models` **只回 id / display_name，不带任何容量字段**（2026-11-04
+    实测 26 条全无），所以任何"从清单推上下文"的写法都只能靠编。CCR 自己知道的值在
+    两个地方，按权威度取：
+
+      ① `config.sqlite` → `Providers[].modelMetadata[<裸模型 ID>].contextWindow`
+         —— CCR UI 里**显式钉住**的值（带 `contextWindowPinned`），provider 级最准；
+         这里按 `<provider 名>/<裸 ID>` 展开成与 /v1/models 同形的 catalog id。
+      ② `app-data/cache/models.json` → `limits.contextTokens`（CCR 的 5092 条目录缓存），
+         按 catalog id 精确匹配。
+
+    两处都没有的 id **不返回** —— 调用方宁缺不猜：写个假数（131072）会让 agent 在远小于
+    模型真实容量的阈值上压缩，用户侧就是"1M 的模型只用得上 128k"。
+    """
+    out: dict = {}
+    try:
+        conn = sqlite3.connect(f"file:{_CCR_CONFIG_DB}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT value_json FROM app_config WHERE key='default'").fetchall()
+        conn.close()
+        cfg = json.loads(rows[0]["value_json"]) if rows else {}
+        for p in (cfg.get("Providers") or []):
+            if not isinstance(p, dict):
+                continue
+            # catalog id 的前缀是 provider 的**显示名**（`商汤/x`），不是带 hash 的 id
+            prefix = str(p.get("name") or "").strip() or _provider_vendor(p)
+            for mid, meta in (p.get("modelMetadata") or {}).items():
+                cw = (meta or {}).get("contextWindow") if isinstance(meta, dict) else None
+                if isinstance(cw, int) and not isinstance(cw, bool) and cw > 0:
+                    out[f"{prefix}/{mid}"] = cw
+    except Exception:  # noqa: BLE001 —— 读不到就退到目录缓存，不许拖垮设置页
+        pass
+    # ② 目录缓存（15MB）：按 (mtime, size) 缓存，避免每轮同步都重新解析
+    try:
+        st = _CCR_MODELS_CACHE.stat()
+        key = (str(_CCR_MODELS_CACHE), st.st_mtime_ns, st.st_size)
+        if _CTX_CACHE["key"] != key:
+            data = json.loads(_CCR_MODELS_CACHE.read_text(encoding="utf-8", errors="replace"))
+            cmap = {}
+            for m in (data.get("models") or []):
+                lim = (m or {}).get("limits") or {}
+                cw = lim.get("contextTokens")
+                if m.get("id") and isinstance(cw, int) and not isinstance(cw, bool) and cw > 0:
+                    cmap[str(m["id"])] = cw
+            _CTX_CACHE.update({"key": key, "map": cmap})
+        for k, v in _CTX_CACHE["map"].items():
+            out.setdefault(k, v)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _provider_vendor(p: dict) -> str:
+    """provider id → /v1/models 的前缀（剥 `provider-` 与末尾 8+ 位 hex hash）。"""
+    raw = str(p.get("id") or "").replace("provider-", "")
+    m = re.match(r"^(.*)-[0-9a-f]{8,}$", raw)
+    return m.group(1) if m else raw
+
+
+def _clean_display_name(v) -> str:
+    """`display_name` 归一：去空白、压多空格、剥控制字符。空值返回 ''（调用方回退 id）。"""
+    s = re.sub(r"[\x00-\x1f\x7f]+", " ", str(v or "")).strip()
+    return re.sub(r"\s{2,}", " ", s)
+
+
+def _fetch_catalog_ids() -> Tuple[set, dict, dict, str]:
+    """真去网关拉一次清单。返回 (ids, names, contexts, error)。
+
+    `names` 是 `{id: display_name}`，只含**非空** display_name；CCR 里 9/26 条没有
+    display_name（如 `alibaba/qwen-image-3.0-pro`），这类不进 names，调用方回退用 id。
 
     v0.13.190：加 SQLite 兜底。当 /v1/models 返回 0 条或明显少于配置时（CCR CDN
     刷新失败的那类间歇性故障），自动从 config.sqlite 读 enabled providers 的完整
     模型清单补全，保证设置页至少能展示可用的候选。
+    v0.13.192：多带一份 display_name（dsh 目录的 `name:` 字段以 CCR 为准）。
+    v0.13.193：多带一份 contexts（`{id: 上下文窗口}`，来自 CCR 自己的元数据 ——
+    /v1/models 不带容量字段）。缺的 id 不出现，调用方宁缺不猜。
     """
     try:
         req = urllib.request.Request(
@@ -179,50 +258,67 @@ def _fetch_catalog_ids() -> Tuple[set, str]:
             headers={"Authorization": "Bearer " + _ccr_api_key()})
         with urllib.request.urlopen(req, timeout=4) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))
-        api_ids = {str(m.get("id")) for m in (data.get("data") or []) if m.get("id")}
-        # 兜底：/v1/models 返回 0 条或明显少于配置时，用 SQLite 补全
+        if not isinstance(data, dict):
+            raise ValueError(f"unexpected payload type: {type(data).__name__}")
+        rows = [m for m in (data.get("data") or []) if isinstance(m, dict) and m.get("id")]
+        api_ids = {str(m["id"]).strip() for m in rows if str(m["id"]).strip()}
+        names = {}
+        for m in rows:
+            mid = str(m["id"]).strip()
+            nm = _clean_display_name(m.get("display_name"))
+            if mid and nm:
+                names[mid] = nm
+        # 兜底：/v1/models 返回 0 条或明显少于配置时，用 SQLite 补全（SQLite 无名字）
         sqlite_ids, sqlite_err = _fetch_catalog_from_sqlite()
+        contexts = _catalog_contexts()
         if not api_ids:
             # 网关 0 条：SQLite 有就整份用它，没有才如实报"取不到"
             if sqlite_ids:
-                return sqlite_ids, (f"gateway returned empty; sqlite fallback "
-                                    f"({len(sqlite_ids)})")
-            return set(), "gateway returned empty" + (f"; {sqlite_err}" if sqlite_err else "")
+                return sqlite_ids, {}, contexts, (f"gateway returned empty; sqlite fallback "
+                                                 f"({len(sqlite_ids)})")
+            return set(), {}, contexts, ("gateway returned empty"
+                                         + (f"; {sqlite_err}" if sqlite_err else ""))
         if not sqlite_ids:
-            return api_ids, ""
+            return api_ids, names, contexts, ""
         # 命中 80%+ 算正常；否则视为不完整，与 SQLite **取并集**补全。
         # ⚠ 必须并集而不是替换：网关清单里有 SQLite 配置里没有的条目（实测 2026-11-04
         # `商汤/*` 7 条来自网关动态配置），替换会让这些模型从设置页下拉里消失。
         hit_ratio = len(api_ids & sqlite_ids) / len(sqlite_ids) if sqlite_ids else 0
         if hit_ratio < 0.8:
             merged = api_ids | sqlite_ids
-            return merged, (f"gateway incomplete ({len(api_ids)}/{len(sqlite_ids)}, "
-                            f"ratio={hit_ratio:.2f}, merged sqlite fallback → {len(merged)})")
-        return api_ids, ""
+            return merged, names, contexts, (
+                f"gateway incomplete ({len(api_ids)}/{len(sqlite_ids)}, "
+                f"ratio={hit_ratio:.2f}, merged sqlite fallback → {len(merged)})")
+        return api_ids, names, contexts, ""
     except Exception as e:  # noqa: BLE001 —— 取不到只影响判断，不许打断设置页
-        # 异常时退到 SQLite
-        return _fetch_catalog_from_sqlite()
+        # 异常时退到 SQLite（兜底没有 display_name，dsh 侧回退写 id）
+        ids, err = _fetch_catalog_from_sqlite()
+        return ids, {}, _catalog_contexts(), (err or f"{type(e).__name__}: {e}")
 
 
 def catalog_ids(force: bool = False) -> dict:
     """CCR 当前模型清单（同步、带 TTL 缓存）。
 
-    返回 `{"checked": bool, "ids": set, "size": int, "error": str}`。
+    返回 `{"checked": bool, "ids": set, "names": {id: display_name},
+    "contexts": {id: 上下文窗口}, "size": int, "error": str}`。
     `checked=False` 表示**取不到**（网关挂着/无凭据），调用方必须把"取不到"与
     "清单里没有"分开：前者不能判死，后者才是真问题（与 intake 的 count=0 口径同源）。
     `HUB_MODEL_CATALOG=off` 可整条关掉（L0 单测用，生产不要关）。
 
     v0.13.190：命中 SQLite 兜底时 error 会带上 'sqlite fallback' 字样，前端可据此
-    显示提示（如'清单来自配置缓存，网关实时数据暂不可用'）。"""
+    显示提示（如'清单来自配置缓存，网关实时数据暂不可用'）。
+    v0.13.192：`names` 只含网关给了非空 display_name 的 id；缺名字的由调用方回退 id。
+    v0.13.193：`contexts` 只含 CCR 元数据里确有值的 id；缺的由调用方保持原值/省略。
+    """
     if os.getenv("HUB_MODEL_CATALOG", "").lower() in ("0", "off", "false", "no"):
-        return {"ts": 0.0, "ids": set(), "checked": False, "size": 0,
-                "error": "disabled by HUB_MODEL_CATALOG"}
+        return {"ts": 0.0, "ids": set(), "names": {}, "contexts": {}, "checked": False,
+                "size": 0, "error": "disabled by HUB_MODEL_CATALOG"}
     now = time.monotonic()
     if not force and _CATALOG["checked"] and (now - _CATALOG["ts"]) < CATALOG_TTL_S:
         return _CATALOG
-    ids, err = _fetch_catalog_ids()
-    _CATALOG.update({"ts": now, "ids": ids, "checked": bool(ids), "size": len(ids),
-                     "error": err})
+    ids, names, contexts, err = _fetch_catalog_ids()
+    _CATALOG.update({"ts": now, "ids": ids, "names": names, "contexts": contexts,
+                     "checked": bool(ids), "size": len(ids), "error": err})
     return _CATALOG
 
 
@@ -245,7 +341,8 @@ def sync_dsh_catalog() -> dict:
     if not cat["checked"]:
         return {"ok": False, "skipped": True,
                 "error": cat["error"] or "CCR 清单不可用，本轮跳过"}
-    out = _dsh_sync_models(cat["ids"])
+    out = _dsh_sync_models(cat["ids"], names=cat.get("names") or {},
+                           contexts=cat.get("contexts") or {})
     out["catalog_size"] = cat["size"]
     return out
 

@@ -53,7 +53,7 @@ class FetchCatalogUnion(unittest.TestCase):
         with mock.patch.object(modelcfg, "_fetch_catalog_from_sqlite",
                                return_value=(sqlite, "")), \
              mock.patch("urllib.request.urlopen", return_value=_resp(["商汤/x"])):
-            ids, err = modelcfg._fetch_catalog_ids()
+            ids, names, contexts, err = modelcfg._fetch_catalog_ids()
         self.assertIn("商汤/x", ids, "网关独有的 ID 不许被兜底挤掉")
         self.assertTrue(sqlite.issubset(ids), "SQLite 条目必须补齐")
         self.assertIn("merged sqlite fallback", err)
@@ -62,7 +62,7 @@ class FetchCatalogUnion(unittest.TestCase):
         with mock.patch.object(modelcfg, "_fetch_catalog_from_sqlite",
                                return_value=({"alibaba/a"}, "")), \
              mock.patch("urllib.request.urlopen", return_value=_resp([])):
-            ids, err = modelcfg._fetch_catalog_ids()
+            ids, names, contexts, err = modelcfg._fetch_catalog_ids()
         self.assertEqual(ids, {"alibaba/a"})
         self.assertIn("sqlite fallback", err)
 
@@ -72,9 +72,68 @@ class FetchCatalogUnion(unittest.TestCase):
                                return_value=(sqlite, "")), \
              mock.patch("urllib.request.urlopen",
                         return_value=_resp(["alibaba/a", "alibaba/b", "商汤/x"])):
-            ids, err = modelcfg._fetch_catalog_ids()
+            ids, names, contexts, err = modelcfg._fetch_catalog_ids()
         self.assertEqual(err, "")
         self.assertIn("商汤/x", ids)
+
+
+class CatalogContexts(unittest.TestCase):
+    """`_catalog_contexts`：容量真值只从 CCR 自己的元数据取，取不到就不给。
+
+    背景（2026-11-04 用户报障）：dsh 里 deepseek-v4.1-flash 只有 128k，官方 1M。
+    根因不是 dsh（它默认就是 1M），也不是 CCR（元数据写着 1000000），而是 hub 的
+    sync 给每条目录写死了 131072。这里钉死取值优先级与"宁缺不猜"。
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self._tmp.name)
+        self.db = root / "config.sqlite"
+        self.cache = root / "models.json"
+        import sqlite3
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE app_config (key TEXT PRIMARY KEY, value_json TEXT)")
+        cfg = {"Providers": [{
+            "id": "provider-alibaba-b600d5a733", "name": "alibaba",
+            "modelMetadata": {"deepseek-v4.1-flash": {"contextWindow": 1000000},
+                              "qwen3.8-max": {"contextWindow": 983616}},
+        }, {
+            # provider id 没有可解析的 vendor 名 ⇒ 必须用 name 当前缀（`商汤/x`）
+            "id": "provider", "name": "商汤", "modelMetadata": None,
+        }]}
+        conn.execute("INSERT INTO app_config VALUES ('default', ?)", (json.dumps(cfg),))
+        conn.commit()
+        conn.close()
+        self.cache.write_text(json.dumps({"models": [
+            {"id": "alibaba/deepseek-v4.1-flash", "limits": {"contextTokens": 111}},
+            {"id": "alibaba/deepseek-v4-pro-0813", "limits": {"contextTokens": 1000000}},
+            {"id": "商汤/none", "limits": {}},
+        ]}), encoding="utf-8")
+        self._old = (modelcfg._CCR_CONFIG_DB, modelcfg._CCR_MODELS_CACHE,
+                     dict(modelcfg._CTX_CACHE))
+        modelcfg._CCR_CONFIG_DB = self.db
+        modelcfg._CCR_MODELS_CACHE = self.cache
+        modelcfg._CTX_CACHE.update({"key": None, "map": {}})
+
+    def tearDown(self):
+        (modelcfg._CCR_CONFIG_DB, modelcfg._CCR_MODELS_CACHE, _old) = self._old
+        modelcfg._CTX_CACHE.update(_old)
+        self._tmp.cleanup()
+
+    def test_pinned_metadata_wins_over_catalog_cache(self):
+        ctx = modelcfg._catalog_contexts()
+        self.assertEqual(ctx["alibaba/deepseek-v4.1-flash"], 1000000,
+                         "显式钉住的元数据优先于目录缓存")
+        self.assertEqual(ctx["alibaba/qwen3.8-max"], 983616)
+
+    def test_catalog_cache_fills_the_gap(self):
+        ctx = modelcfg._catalog_contexts()
+        self.assertEqual(ctx["alibaba/deepseek-v4-pro-0813"], 1000000)
+
+    def test_unknown_id_is_absent_not_invented(self):
+        ctx = modelcfg._catalog_contexts()
+        self.assertNotIn("商汤/none", ctx, "两处都没有 ⇒ 不返回，调用方不要猜")
 
 
 if __name__ == "__main__":

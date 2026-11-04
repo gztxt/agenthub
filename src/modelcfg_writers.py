@@ -1009,12 +1009,38 @@ def _kimi_write(model: str):
     alias = model if model.startswith(KIMI_PREFIX) else f"{KIMI_PREFIX}{model}"
     bare = alias[len(KIMI_PREFIX):]
     sec = f'models."{alias}"'
+    # 上下文窗口：能拿到 CCR 的真值就用真值，拿不到才用保守的 131072。
+    # 2026-11-04 同类缺陷：qwen3.8-max 的真实窗口是 983616，却按 128k 压缩。
+    import modelcfg as _mc
+    _cat = _mc._CATALOG if _mc._CATALOG.get("checked") else {}
+    _ctxs = _cat.get("contexts") or {}
+    ctx = _ctxs.get(model) or _ctxs.get(bare)
+    if not ctx:
+        # 老式别名 `ccr/qwen3.8-max` 的短名对不上 catalog id；块内 `model =` 才是
+        _lo, _hi = _section_range(text.splitlines(), sec)
+        for ln in (text.splitlines()[_lo:_hi] if _lo >= 0 else []):
+            m = re.match(r'^\s*model\s*=\s*"([^"]+)"\s*$', ln)
+            if m:
+                ctx = _ctxs.get(m.group(1))
+                break
     # 已存在的块不覆盖 provider/model，只在缺块时补 —— 用户手调过的值不该被清掉
     if f'[models."{alias}"]' not in text:
         for k, v in (("provider", "ccr"), ("model", bare),
-                     ("max_context_size", str(KIMI_DEFAULT_CTX)),
+                     ("max_context_size", str(ctx or KIMI_DEFAULT_CTX)),
                      ("display_name", f"CCR {bare}")):
             text, c = _set_kv(text, k, v, section=sec)
+            changes.append(c)
+    elif ctx:
+        # 已有块：只有在写死的假值（KIMI_DEFAULT_CTX）上才校正，用户手改过的值不动
+        lo, hi = _section_range(text.splitlines(), sec)
+        cur = ""
+        for ln in text.splitlines()[lo:hi] if lo >= 0 else []:
+            m = re.match(r'^\s*max_context_size\s*=\s*"?(\d+)"?\s*$', ln)
+            if m:
+                cur = m.group(1)
+                break
+        if cur == str(KIMI_DEFAULT_CTX) and int(cur) != ctx:
+            text, c = _set_kv(text, "max_context_size", str(ctx), section=sec)
             changes.append(c)
     text, c = _set_kv(text, "default_model", alias)
     changes.append(c)
@@ -1034,7 +1060,9 @@ def _kimi_write(model: str):
 DSH_PROFILES = ("web", "tui", "headless")
 DSH_ENTRY_LLM = "llm-deepseek"
 DSH_ENTRY_DEFAULT = "agent-default-model"
-DSH_DEFAULT_CONTEXT = 131072
+# 2026-11-04：删掉 `DSH_DEFAULT_CONTEXT = 131072`。它是**编出来的数**，被写进每一条
+# 目录（把 1M 的 deepseek-v4.1-flash 压成 128k）。现在容量只取 CCR 元数据
+# （modelcfg._catalog_contexts），取不到就不写这行，让 dsh 用 defaultContextWindow(1M)。
 
 
 def _dsh_paths() -> List[Path]:
@@ -1049,6 +1077,20 @@ def _yaml_unquote(v: str) -> str:
     if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
         return v[1:-1]
     return v
+
+
+def _yaml_scalar(v: str) -> str:
+    """写 YAML 标量的最小安全形式：普通名字原样输出，含 `: ` / ` #` 或首字符危险才加引号。
+
+    CCR 的 display_name 可能带括号、`+`、`(`（如 `DeepSeek V4.1 Flash (Alibaba)`），
+    这些在 YAML plain scalar 里合法；但含冒号或 `#` 就必须引起来，否则整份 patch 解析失败。
+    """
+    s = " ".join(str(v or "").split())
+    if not s:
+        return "''"
+    if re.search(r":\s| #|^[!&*\[\]{},#|>@`\"'%-]", s):
+        return "'" + s.replace("'", "''") + "'"
+    return s
 
 
 def _yaml_entry_span(lines: List[str], entry_id: str) -> Optional[Tuple[int, int]]:
@@ -1126,11 +1168,14 @@ def _dsh_item_id(lines: List[str], a: int, b: int) -> str:
 
 
 def _dsh_edit(text: str, *, default: Optional[str] = None, ids: Optional[set] = None,
-              allow_remove: bool = True, keep: str = "") -> Tuple[str, List[dict]]:
-    """在 patch 文本上做两件事：改默认模型、同步模型目录。
+              allow_remove: bool = True, keep: str = "",
+              names: Optional[dict] = None,
+              contexts: Optional[dict] = None) -> Tuple[str, List[dict]]:
+    """在 patch 文本上做三件事：改默认模型、同步模型目录、校正目录条目的容量/名字。
 
     `allow_remove=False` 只增不删（网关清单疑似不完整时的保护）。
-    `keep` 是不许删的条目（当前默认模型：即便不在清单里也留着，否则 dsh 起不来）。"""
+    `keep` 是不许删的条目（当前默认模型：即便不在清单里也留着，否则 dsh 起不来）。
+    `contexts`/`names` 是 CCR 侧的权威值（`{catalog_id: 值}`），只覆盖**确有值**的条目。"""
     lines = text.splitlines(keepends=True)
     changes: List[dict] = []
     span = _yaml_entry_span(lines, DSH_ENTRY_LLM)
@@ -1162,13 +1207,70 @@ def _dsh_edit(text: str, *, default: Optional[str] = None, ids: Optional[set] = 
         items2 = _dsh_model_items(lines, lo2, hi2, item_indent)
         insert_at = items2[-1][1] if items2 else lo2
         for mid in [x for x in sorted(ids) if x not in present_ids]:
+            ctx = (contexts or {}).get(mid)
+            # 上下文只写**CCR 有据**的值；没据就不写这一行，让 dsh 用自己的
+            # defaultContextWindow(1M)。为什么不再兜 131072：2026-11-04 的报障就是
+            # 所有条目被写成 131072，1M 的 deepseek-v4.1-flash 在 dsh 里只按 128k 压缩。
             block = (f"{' ' * item_indent}- id: {mid}\n"
-                     f"{' ' * (item_indent + 2)}name: {mid}\n"
-                     f"{' ' * (item_indent + 2)}contextWindow: {DSH_DEFAULT_CONTEXT}\n")
+                     f"{' ' * (item_indent + 2)}name: "
+                     f"{_yaml_scalar((names or {}).get(mid) or mid)}\n")
+            if isinstance(ctx, int) and ctx > 0:
+                block += f"{' ' * (item_indent + 2)}contextWindow: {ctx}\n"
             lines.insert(insert_at, block)
             insert_at += 1
             changes.append({"where": "llm-deepseek.models", "op": "add",
                             "from": "", "to": mid})
+
+        # 校正**已有**条目：网关给了真值才动，没给就保持原样（不猜）。
+        # 名称只在原来是占位（name == id）或缺失时替换，手写名不覆盖。
+        if names or contexts:
+            span4 = _yaml_entry_span(lines, DSH_ENTRY_LLM)
+            ms4 = _dsh_models_span(lines, span4) if span4 else None
+            items4 = _dsh_model_items(lines, ms4[2], ms4[3], ms4[1] + 2) if ms4 else []
+            for a, b in reversed(items4):
+                mid = _dsh_item_id(lines, a, b)
+                if not mid:
+                    continue
+                want_name = (names or {}).get(mid)
+                if want_name:
+                    ni = next((i for i in range(a, b)
+                               if re.match(r"^\s*name:\s*", lines[i])), None)
+                    if ni is None:
+                        indent = " " * (len(lines[a]) - len(lines[a].lstrip()) + 2)
+                        lines.insert(a + 1, f"{indent}name: {_yaml_scalar(want_name)}\n")
+                        b += 1
+                        changes.append({"where": "llm-deepseek.models", "op": "add-key",
+                                        "from": f"{mid}: (none)",
+                                        "to": f"name: {want_name}"})
+                    else:
+                        m = re.match(r"^(\s*name:\s*)(\S.*?)(\s*#.*)?(\r?\n)?$", lines[ni])
+                        if m and _yaml_unquote(m.group(2)) == mid:
+                            lines[ni] = (f"{m.group(1)}{_yaml_scalar(want_name)}"
+                                         f"{m.group(3) or ''}{m.group(4) or ''}")
+                            changes.append({"where": "llm-deepseek.models", "op": "set",
+                                            "from": f"{mid}: name={mid}",
+                                            "to": f"name={want_name}"})
+                want_ctx = (contexts or {}).get(mid)
+                if not (isinstance(want_ctx, int) and want_ctx > 0):
+                    continue
+                ci = next((i for i in range(a, b)
+                           if re.match(r"^\s*contextWindow:\s*", lines[i])), None)
+                if ci is None:
+                    anchor = next((i for i in range(a, b)
+                                   if re.match(r"^\s*name:\s*", lines[i])), a)
+                    indent = " " * (len(lines[a]) - len(lines[a].lstrip()) + 2)
+                    lines.insert(anchor + 1, f"{indent}contextWindow: {want_ctx}\n")
+                    changes.append({"where": "llm-deepseek.models", "op": "add-key",
+                                    "from": f"{mid}: (none)",
+                                    "to": f"contextWindow: {want_ctx}"})
+                else:
+                    m = re.match(r"^(\s*contextWindow:\s*)(\d+)(\s*#.*)?(\r?\n)?$", lines[ci])
+                    if m and int(m.group(2)) != want_ctx:
+                        lines[ci] = (f"{m.group(1)}{want_ctx}"
+                                     f"{m.group(3) or ''}{m.group(4) or ''}")
+                        changes.append({"where": "llm-deepseek.models", "op": "set",
+                                        "from": f"{mid}: contextWindow={m.group(2)}",
+                                        "to": f"contextWindow={want_ctx}"})
 
     if default is not None:
         span3 = _yaml_entry_span(lines, DSH_ENTRY_DEFAULT)
@@ -1220,19 +1322,30 @@ def _dsh_write(model: str):
     paths = _dsh_paths()
     if not paths:
         raise ModelCfgError("未找到 ~/.dsh/profiles/*/cordis.patch.yml", 404)
+    # 目录里已有该模型时顺手校正它的 contextWindow/name（CCR 有据才改）。
+    # 只读**已缓存**的清单：设置页落笔不许为了元数据再发一次网络请求（缓存冷时
+    # 留空，10 分钟一轮的目录同步会补上）。
+    import modelcfg as _mc
+    cat = _mc._CATALOG if _mc._CATALOG.get("checked") else {}
+    names = {model: cat["names"][model]} if model in (cat.get("names") or {}) else {}
+    contexts = {model: cat["contexts"][model]} if model in (cat.get("contexts") or {}) else {}
     out = []
     for p in paths:
         new, changes = _dsh_edit(_read_text(p), default=model, ids={model},
-                                 allow_remove=False, keep=model)
+                                 allow_remove=False, keep=model,
+                                 names=names, contexts=contexts)
         out.append((p, new, changes))
     return out
 
 
-def _dsh_sync_models(ids) -> dict:
+def _dsh_sync_models(ids, names=None, contexts=None) -> dict:
     """把 CCR 当前清单写进三份 profile 的 llm-deepseek.models（不动默认值）。
 
-    只增删目录，不碰 `agent-default-model`：默认模型是用户的选择，
-    清单变化不该悄悄换掉它。由 modelcfg.sync_dsh_catalog 定时调用。"""
+    只增删/校正目录，不碰 `agent-default-model`：默认模型是用户的选择，
+    清单变化不该悄悄换掉它。由 modelcfg.sync_dsh_catalog 定时调用。
+
+    `names`/`contexts` 来自 CCR 元数据（`modelcfg.catalog_ids()`）；只有里面**确有**
+    的条目才会被改写 —— 缺的直接保持原值，宁缺不猜。"""
     want = {str(x) for x in (ids or []) if str(x)}
     res = {"ok": True, "changed": 0, "files": [], "added": [], "removed": [],
            "errors": []}
@@ -1262,7 +1375,8 @@ def _dsh_sync_models(ids) -> dict:
             floor = max(1, (len(existing) * 3 + 4) // 5)   # ceil(0.6 * n)
             allow_remove = len(want) >= floor
             new, changes = _dsh_edit(text, ids=ids_for_file,
-                                     allow_remove=allow_remove, keep=keep)
+                                     allow_remove=allow_remove, keep=keep,
+                                     names=names or {}, contexts=contexts or {})
             if new != text:
                 _backup(p, "dsh-sync")
                 _atomic_write(p, new)

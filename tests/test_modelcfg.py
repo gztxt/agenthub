@@ -1102,20 +1102,20 @@ class _CatalogFixture(_HomeFixture):
         super().setUp()
         self._old_env = os.environ.pop("HUB_MODEL_CATALOG", None)
         self._old_fetch = modelcfg._fetch_catalog_ids
-        modelcfg._CATALOG.update({"ts": 0.0, "ids": set(), "checked": False, "size": 0,
-                                  "error": ""})
+        modelcfg._CATALOG.update({"ts": 0.0, "ids": set(), "names": {}, "checked": False,
+                                  "size": 0, "error": ""})
 
     def tearDown(self):
         modelcfg._fetch_catalog_ids = self._old_fetch
-        modelcfg._CATALOG.update({"ts": 0.0, "ids": set(), "checked": False, "size": 0,
-                                  "error": ""})
+        modelcfg._CATALOG.update({"ts": 0.0, "ids": set(), "names": {}, "checked": False,
+                                  "size": 0, "error": ""})
         if self._old_env is not None:
             os.environ["HUB_MODEL_CATALOG"] = self._old_env
         super().tearDown()
 
-    def _serve(self, ids=None, err=""):
+    def _serve(self, ids=None, err="", names=None):
         got = set(self.IDS if ids is None else ids)
-        modelcfg._fetch_catalog_ids = lambda: (got, err)
+        modelcfg._fetch_catalog_ids = lambda: (got, dict(names or {}), {}, err)
 
 
 class MCatalogGuard(_CatalogFixture):
@@ -1603,3 +1603,37 @@ class SDshProfile(_HomeFixture):
         text = self._dsh("web")
         self.assertIn("- id: old/model-b", text, "骤降时不许把旧目录删成一条")
         self.assertIn("- id: new/only-one", text)
+
+    def test_sync_uses_ccr_context_and_display_name(self):
+        """新增条目必须带 CCR 的真值：contextWindow 与 name 都来自元数据/display_name。"""
+        r = modelcfg._dsh_sync_models(
+            {"old/model-a", "old/model-b", "new/model-c"},
+            names={"new/model-c": "Model C (CCR)"},
+            contexts={"new/model-c": 1000000})
+        self.assertTrue(r["ok"], r)
+        text = self._dsh("web")
+        self.assertIn("- id: new/model-c", text)
+        self.assertIn("name: Model C (CCR)", text)
+        self.assertIn("contextWindow: 1000000", text)
+
+    def test_sync_corrects_fabricated_context_on_existing_entry(self):
+        """已有条目被写成假值（131072）时，CCR 有真值必须改写 —— 2026-11-04 报障点。"""
+        r = modelcfg._dsh_sync_models(
+            {"old/model-a", "old/model-b"},
+            contexts={"old/model-b": 1000000})
+        self.assertTrue(r["ok"], r)
+        for name in ("web", "tui", "headless"):
+            text = self._dsh(name)
+            block = text.split("- id: old/model-b", 1)[1].split("- id:", 1)[0]
+            self.assertIn("contextWindow: 1000000", block, name)
+        # 没有元数据的条目保持原值，不许凭空改
+        block_a = self._dsh("web").split("- id: old/model-a", 1)[1].split("- id:", 1)[0]
+        self.assertIn("contextWindow: 131072", block_a)
+
+    def test_sync_does_not_invent_context_when_unknown(self):
+        """CCR 没给值的模型：宁缺不猜，不写 contextWindow（dsh 用默认 1M）。"""
+        r = modelcfg._dsh_sync_models({"old/model-a", "old/model-b", "new/model-x"})
+        self.assertTrue(r["ok"], r)
+        block = self._dsh("web").split("- id: new/model-x", 1)[1].split("- id:", 1)[0]
+        self.assertNotIn("contextWindow", block, "未知容量不许编造 131072")
+

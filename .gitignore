@@ -16,6 +16,13 @@ data/
 *.bak[0-9]-*
 *.log
 
+# 仓根误产生的空 sqlite（2026-11-04 实测两个 0 字节 `agents.db`/`hub.db`）：
+# 任何 `sqlite3.connect("agents.db")` 之类在 cwd=仓根 执行都会留下同名空壳，
+# 而生产库在 data/（`.env:21` 的 DATA_DIR 固定为绝对路径，`src/config.py:94` 默认也指向 data/）。
+# 必须带前导 `/` 只锚定仓根：`data/agents.db`(912MB 生产库) 与 tests 里的临时库都靠相对路径区分。
+/agents.db
+/hub.db
+
 # 修复工具时间戳备份（data/backups/）
 data/backups/
 

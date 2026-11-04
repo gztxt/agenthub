@@ -1,41 +1,74 @@
-"""logs 适配器 —— hub 运行日志扫描（PT-20261025-12 P1）。
+"""logs 适配器 —— hub 运行日志扫描（PT-20261025-12 P1 / 2026-11-04 重写）。
 
-扫描 `data/logs/` 下的日志文件，提取时间戳 + 级别 + 消息，分块索引。
-仅索引近期日志（30 天内），避免索引过大的历史文件。
+扫描 `data/logs/` 下的日志文件，**以文件为对象**（一个文件一条记录），
+索引尾部窗口（默认 200 行）作为正文。仅看 30 天内修改过的文件。
+
+⚠ 2026-11-04 修：旧实现只认 `2026-10-25 12:00:00 | INFO | msg` 与
+`2026-10-25T12:00:00 | INFO | msg` 两种格式，而生产实际是 uvicorn 的
+`INFO:     Started server process [85512]`、`[Agent Hub] 启动完成 …`
+以及 JSONL（`{"ts": …}`）⇒ 全部行解析失败被过滤 ⇒ **该源上线 10 天产出 0 条**，
+`status` 里却一直显示 ok（`probe` 只查目录存在）。现在改成「格式无关」：
+级别用宽松正则提取，正文直接取尾部窗口，不再要求任何时间戳格式。
 """
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from ..adapter import BaseAdapter, register
 from ..schema import chunk_text, oid_of
 
+LOGS_DIR = Path("/fs/1000/ftp/技术文档/agenthub/data/logs")
 
-# 日志正则：匹配 common log format
-LOG_PATTERNS = [
-    # agent-hub.log 格式: 2026-10-25 12:00:00 | INFO | message
-    re.compile(r'^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s*\|\s*(\w+)\s*\|\s*(.+)$'),
-    # restart.log 格式: 2026-10-25T12:00:00 | INFO | message
-    re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s*\|\s*(\w+)\s*\|\s*(.+)$'),
-]
+#: 只收这几种后缀；`.heartbeat` / `.gz` / 无后缀一律跳过。
+SUFFIXES = (".log", ".txt", ".jsonl")
+
+#: 宽松级别提取：uvicorn `INFO: …`、管道格式 `| ERROR |`、JSONL `"level": "warn"`。
+LEVEL_RE = re.compile(
+    r'\b(DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL|FATAL)\b', re.IGNORECASE)
+
+#: 尾部窗口：一个日志文件只索引最近这么多行（控制库体，历史靠文件自身留存）。
+TAIL_LINES = 200
+#: 尾部读取上限：先读最后 256KB，再取行 —— 避免把 1GB 日志整篇读进内存。
+TAIL_BYTES = 256 * 1024
+#: 摘要上限（进 chunk 的字符数）。
+SUMMARY_CHARS = 6000
 
 
-def _parse_log_line(line: str) -> Tuple[int, str, str]:
-    """解析日志行，返回 (timestamp_int, level, message)。"""
-    for pattern in LOG_PATTERNS:
-        match = pattern.match(line)
-        if match:
-            ts_str, level, msg = match.groups()
-            try:
-                ts_str = ts_str.replace("T", " ")
-                ts = int(datetime.fromisoformat(ts_str).timestamp())
-                return ts, level.upper(), msg.strip()
-            except (ValueError, OSError):
-                continue
-    return 0, "UNKNOWN", line.strip()
+def _tail_text(path: Path) -> str:
+    """读文件尾部窗口；小于阈值就整篇读。"""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > TAIL_BYTES:
+                fh.seek(-TAIL_BYTES, 2)
+                raw = fh.read()
+                # 丢掉被截断的首行
+                nl = raw.find(b"\n")
+                raw = raw[nl + 1:] if nl >= 0 else raw
+            else:
+                raw = fh.read()
+    except OSError:
+        return ""
+    return raw.decode("utf-8", errors="replace")
+
+
+def _summarize(text: str) -> Tuple[str, Dict[str, int], int]:
+    """返回 (尾部摘要, 级别计数, 总行数)。"""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    levels: Dict[str, int] = {}
+    for ln in lines:
+        m = LEVEL_RE.search(ln)
+        if m:
+            lv = m.group(1).upper().replace("WARN", "WARNING")
+            levels[lv] = levels.get(lv, 0) + 1
+    tail = lines[-TAIL_LINES:]
+    summary = "\n".join(tail)
+    if len(summary) > SUMMARY_CHARS:
+        summary = summary[-SUMMARY_CHARS:]
+    return summary, levels, len(lines)
 
 
 @register
@@ -49,67 +82,47 @@ class LogsAdapter(BaseAdapter):
     uri = "file://data/logs/**"
 
     def probe(self) -> Dict[str, Any]:
-        logs_dir = Path("/fs/1000/ftp/技术文档/agenthub/data/logs")
-        if not logs_dir.exists():
-            return {"ok": False, "reason": "no_dir",
-                    "error": "logs 目录不存在"}
-        total_size = sum(
-            p.stat().st_size for p in logs_dir.iterdir() if p.is_file()
-        )
+        if not LOGS_DIR.exists():
+            return {"ok": False, "reason": "no_dir", "error": "logs 目录不存在"}
+        files = [p for p in LOGS_DIR.iterdir()
+                 if p.is_file() and p.suffix in SUFFIXES]
         return {"ok": True, "reason": None, "error": None,
-                "total_size": total_size}
+                "files": len(files)}
 
     def collect(self, states: Dict[str, Tuple[Any, Any, Any]]
                 ) -> Dict[str, Any]:
-        logs_dir = Path("/fs/1000/ftp/技术文档/agenthub/data/logs")
         cutoff = int((datetime.now() - timedelta(days=30)).timestamp())
-
         records: List[Dict[str, Any]] = []
         live: List[str] = []
         notes: List[str] = []
+        skipped_old = 0
 
-        for filepath in sorted(logs_dir.iterdir()):
-            if not filepath.is_file():
+        for filepath in sorted(LOGS_DIR.iterdir()):
+            if not filepath.is_file() or filepath.suffix not in SUFFIXES:
                 continue
-            # 跳过 .heartbeat、.jsonl 等格式
-            if filepath.suffix not in (".log", ".txt"):
-                continue
-
             nkey = str(filepath)
             try:
-                mtime = int(filepath.stat().st_mtime)
-                size = filepath.stat().st_size
-                content = filepath.read_text(encoding="utf-8", errors="replace")
+                st = filepath.stat()
             except OSError as e:
-                notes.append(f"{filepath}: {e}")
+                notes.append(f"{filepath.name}: {e}")
                 continue
+            mtime, size = int(st.st_mtime), st.st_size
 
-            # 解析日志行
-            lines = content.split('\n')
-            parsed_lines = []
-            for line in lines:
-                if not line.strip():
-                    continue
-                ts, level, msg = _parse_log_line(line)
-                if ts >= cutoff and msg:
-                    parsed_lines.append((ts, level, msg))
-
-            if not parsed_lines:
+            # 30 天没动过的日志不再收录（历史仍在盘上，不属于「近期可检索面」）
+            if mtime < cutoff:
+                skipped_old += 1
                 live.append(_oid(nkey))
                 continue
 
-            # 按时间排序并分组
-            parsed_lines.sort(key=lambda x: x[0])
+            digest = self._hash(nkey, mtime, size)
+            if self.skip(states, nkey, mtime, size, digest):
+                live.append(_oid(nkey))
+                continue
 
-            # 生成摘要
-            summary_parts = []
-            for ts, level, msg in parsed_lines[-50:]:  # 只取最近 50 条
-                ts_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
-                summary_parts.append(f"[{ts_str}] {level}: {msg[:200]}")
-            summary = "\n".join(summary_parts[-20:])  # 最多 20 行摘要
-
-            # 分块
-            chunks = chunk_text(summary)
+            summary, levels, nlines = _summarize(_tail_text(filepath))
+            if not summary:
+                # 空文件：登记但正文为空（harness 自愈时会补 chunk 头）
+                summary = f"{filepath.name}（空/不可读）"
 
             records.append({
                 "domain": "log",
@@ -120,15 +133,17 @@ class LogsAdapter(BaseAdapter):
                 "summary": summary,
                 "mtime": mtime,
                 "size": size,
-                "hash": self._hash(nkey, mtime, size, summary),
+                "hash": digest,
                 "ext": {
                     "unit": filepath.stem,
-                    "level": "all",  # 包含所有级别
-                    "lines_count": len(parsed_lines),
+                    "level": max(levels, key=levels.get) if levels else "all",
+                    "levels": levels,
+                    "lines_count": nlines,
+                    "tail_lines": min(nlines, TAIL_LINES),
                     "cutoff_days": 30,
                 },
                 "meta": {"source": "hub_logs"},
-                "chunks": chunks,
+                "chunks": chunk_text(summary),
             })
             live.append(_oid(nkey))
 
@@ -136,15 +151,15 @@ class LogsAdapter(BaseAdapter):
             "records": records,
             "live": live,
             "complete": True,
-            "note": f"日志 {len(records)} 个文件" +
-                    (f"；错误：{','.join(notes)}" if notes else ""),
+            "note": f"日志 {len(records)} 个文件（超 30 天跳过 {skipped_old}）"
+                    + (f"；错误：{','.join(notes)}" if notes else ""),
         }
 
     @staticmethod
-    def _hash(nkey: str, mtime: int, size: int, preview: str) -> str:
+    def _hash(nkey: str, mtime: int, size: int) -> str:
         import hashlib
         h = hashlib.sha256()
-        h.update(f"{nkey}|{mtime}|{size}|{preview}".encode())
+        h.update(f"{nkey}|{mtime}|{size}".encode())
         return h.hexdigest()[:16]
 
 

@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from catalog import query as catalog_query
 from catalog import schema, store
+from catalog import verify as catalog_verify
 
 router = APIRouter(prefix="/api/catalog", tags=["catalog"])
 
@@ -117,5 +118,15 @@ def get(oid: str = Query(default="", max_length=128),
         if not out.get("ok"):
             raise HTTPException(404, out.get("error") or "对象不存在")
         return out
+    finally:
+        con.close()
+
+
+@router.get("/verify")
+def verify() -> dict:
+    """质量闸门（P2）：FTS 自洽 / 孤儿块 / 重复率 / missing / 滞后 / 库体。"""
+    con = _connect()
+    try:
+        return catalog_verify.verify(con)
     finally:
         con.close()

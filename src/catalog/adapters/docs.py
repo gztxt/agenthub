@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -33,6 +34,54 @@ def _is_agg_page(filepath: str) -> bool:
             "/_index.md", "/_index.MD",
         ]
     )
+
+
+#: 工作区根：接口只收这个根的「权威原文」，不收备份盘/派生物/依赖树。
+WORKSPACE = "/fs/1000/ftp/技术文档"
+
+#: 目录名命中即整棵子树跳过。
+#: `.mnt-jishu` 是另一台系统的备份盘（AGENTS.md 明令不读）；其余是依赖与中间产物。
+SKIP_DIR_NAMES = {
+    ".mnt-jishu", ".git", "venv", "node_modules", "__pycache__",
+    "_stale", ".skill_backup", "worktrees", "会话备份",
+}
+
+#: 相对工作区的路径前缀命中即跳过。
+#: `会话备份/` 归 `sessions.archived`（同一批 md 若两处都收，查询里一条会话出现两次）。
+SKIP_REL_PREFIXES = ("会话备份/", "agenthub/work/")
+
+
+def _iter_markdown(root: str):
+    """遍历 markdown，**就地剪枝**（不进 .mnt-jishu / node_modules / venv）。
+
+    旧实现用 `rglob`，会真的走进备份盘与依赖树再逐个丢弃：2026-11-04 实测
+    一次 docs 扫描走了 15 分钟（.mnt-jishu 是另一台机器的挂载，node_modules
+    有 1.5 万个 md）。剪枝后同一个根只走内容目录。
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIR_NAMES)
+        for name in sorted(filenames):
+            if name.endswith(".md"):
+                yield Path(dirpath) / name
+
+
+def _skip_path(filepath: str) -> str:
+    """返回跳过原因（空串 = 收录）。
+
+    `docs.filesystem` 是**权威原文**源；把备份副本、`.bak-*`、venv 一起收进来，
+    同一条查询会返回同一篇文档的 2~3 个副本（2026-11-04 实测 `统一编目` 前两条
+    就是 `.mnt-jishu` 与源端各一份），既虚增库体又污染排序。
+    """
+    p = Path(filepath)
+    rel = p.relative_to(WORKSPACE).as_posix() if filepath.startswith(
+        WORKSPACE + "/") else p.as_posix()
+    if any(part in SKIP_DIR_NAMES for part in p.parts):
+        return "skip_dir"
+    if rel.startswith(SKIP_REL_PREFIXES):
+        return "derived_owner"
+    if ".bak-" in p.name:
+        return "backup_copy"
+    return ""
 
 
 def _extract_title(content: str) -> str:
@@ -66,16 +115,18 @@ class DocsAdapter(BaseAdapter):
     uri = "file://wiki/** + 技术文档/*.md"
 
     def probe(self) -> Dict[str, Any]:
-        paths = []
-        for base in ["/fs/1000/ftp/技术文档/wiki", "/fs/1000/ftp/技术文档"]:
-            p = Path(base)
-            if p.exists():
-                paths.extend(list(p.rglob("*.md")) + list(p.glob("*.md")))
-        total = len(paths)
-        excluded = sum(1 for p in paths if _is_agg_page(str(p)))
+        root = Path(WORKSPACE)
+        if not root.exists():
+            return {"ok": False, "reason": "no_dir", "error": "工作区不存在"}
+        # 只走一个根：`wiki/` 是它的子目录，两个根会把每篇 wiki 收两遍
+        uniq = list(_iter_markdown(str(root)))
+        agg = sum(1 for p in uniq if _is_agg_page(str(p)))
+        skipped = sum(1 for p in uniq
+                      if not _is_agg_page(str(p)) and _skip_path(str(p)))
+        total = len(uniq)
         return {"ok": True, "reason": None, "error": None,
-                "total": total, "excluded": excluded,
-                "indexable": total - excluded}
+                "total": total, "excluded": agg, "skipped": skipped,
+                "indexable": total - agg - skipped}
 
     def collect(self, states: Dict[str, Tuple[Any, Any, Any]]
                 ) -> Dict[str, Any]:
@@ -83,18 +134,25 @@ class DocsAdapter(BaseAdapter):
         live: List[str] = []
         notes: List[str] = []
         excluded_count = 0
+        skipped: Dict[str, int] = {}
 
-        for base in ["/fs/1000/ftp/技术文档/wiki", "/fs/1000/ftp/技术文档"]:
+        for base in [WORKSPACE]:
             try:
                 root = Path(base)
                 if not root.exists():
                     continue
-                for filepath in sorted(root.rglob("*.md")):
+                for filepath in _iter_markdown(str(root)):
                     fp_str = str(filepath)
 
                     # 跳过聚合页
                     if _is_agg_page(fp_str):
                         excluded_count += 1
+                        continue
+
+                    # 跳过备份副本 / 派生物 / 依赖树（见 _skip_path）
+                    skip_reason = _skip_path(fp_str)
+                    if skip_reason:
+                        skipped[skip_reason] = skipped.get(skip_reason, 0) + 1
                         continue
 
                     try:
@@ -146,7 +204,9 @@ class DocsAdapter(BaseAdapter):
             "records": records,
             "live": live,
             "complete": True,
-            "note": f"文档 {len(records)} 条（聚合页排除 {excluded_count}）" +
+            "note": f"文档 {len(records)} 条（聚合页排除 {excluded_count}；"
+                    f"非权威/派生物跳过 {sum(skipped.values())}"
+                    + (f"={skipped}" if skipped else "") + "）" +
                     (f"；错误：{','.join(notes)}" if notes else ""),
         }
 

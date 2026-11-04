@@ -331,6 +331,104 @@ class CatalogWriter:
                         (_now(), oid))
         return len(gone)
 
+    # ── 清理（P2 质量闸门配套）────────────────────────────────────
+    def _delete_object(self, oid: str) -> int:
+        """物理删除一个对象及其分块/扩展行/FTS 条目。
+
+        external-content FTS 必须逐条 `VALUES('delete',…)` 带上索引时原文，
+        否则只删 chunk 行会在索引里留下指向空 cid 的幽灵条目
+        （`_fts_rank` 那条 `AND c.oid = o.oid` 就是在兜这个）。
+        """
+        con = self._require()
+        for r in con.execute(
+                "SELECT cid, text FROM chunk WHERE oid=?", (oid,)).fetchall():
+            con.execute(
+                "INSERT INTO chunk_fts(chunk_fts,rowid,text) VALUES('delete',?,?)",
+                (r["cid"], r["text"]))
+        for r in con.execute(
+                "SELECT cid, text_uni FROM chunk_uni WHERE oid=?", (oid,)).fetchall():
+            con.execute(
+                "INSERT INTO chunk_ftsu(chunk_ftsu,rowid,text_uni) "
+                "VALUES('delete',?,?)", (r["cid"], r["text_uni"]))
+        con.execute("DELETE FROM chunk WHERE oid=?", (oid,))
+        con.execute("DELETE FROM chunk_uni WHERE oid=?", (oid,))
+        for tbl in _schema.DOMAIN_TABLE.values():
+            con.execute("DELETE FROM %s WHERE oid=?" % tbl, (oid,))
+        con.execute("DELETE FROM edge WHERE src_oid=? OR dst_oid=?", (oid, oid))
+        con.execute("DELETE FROM alias WHERE oid=?", (oid,))
+        con.execute("DELETE FROM obj WHERE oid=?", (oid,))
+        return 1
+
+    def _delete_many(self, oids: List[str]) -> None:
+        """批量删对象：先删正文/扩展行，最后一次 `rebuild` 重建双 FTS。
+
+        **为什么不用逐条 `VALUES('delete',…)`**：2026-11-04 实测，删 2.5 万对象
+        （约 12.5 万块）用逐条 FTS delete 跑了 38 分钟仍未结束 —— FTS5 的
+        segment merge 是增量代价，逐条删的复杂度远高于一次性重建。改成
+        「批量 DELETE + `INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')`」，
+        顺带把历史上 delete 未带原文造成的索引漂移一起修掉。
+        """
+        if not oids:
+            return
+        con = self._require()
+        con.execute("BEGIN")
+        try:
+            for start in range(0, len(oids), 500):
+                batch = oids[start:start + 500]
+                marks = ",".join("?" * len(batch))
+                con.execute("DELETE FROM chunk WHERE oid IN (%s)" % marks, batch)
+                con.execute("DELETE FROM chunk_uni WHERE oid IN (%s)" % marks, batch)
+                for tbl in _schema.DOMAIN_TABLE.values():
+                    con.execute("DELETE FROM %s WHERE oid IN (%s)" % (tbl, marks),
+                                batch)
+                con.execute("DELETE FROM edge WHERE src_oid IN (%s)" % marks, batch)
+                con.execute("DELETE FROM edge WHERE dst_oid IN (%s)" % marks, batch)
+                con.execute("DELETE FROM alias WHERE oid IN (%s)" % marks, batch)
+                con.execute("DELETE FROM obj WHERE oid IN (%s)" % marks, batch)
+            con.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')")
+            con.execute("INSERT INTO chunk_ftsu(chunk_ftsu) VALUES('rebuild')")
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+
+    def purge_missing(self, src_id: str = "") -> int:
+        """删除已判定 missing 的对象（扫描后调用，落实「跳过即出库」）。"""
+        con = self._require()
+        sql = "SELECT oid FROM obj WHERE status='missing'"
+        args: List[Any] = []
+        if src_id:
+            sql += " AND src_id=?"
+            args.append(src_id)
+        oids = [r["oid"] for r in con.execute(sql, args).fetchall()]
+        self._delete_many(oids)
+        return len(oids)
+
+    def purge_matching(self, src_id: str, suffixes: Sequence[str] = (),
+                       contains: Sequence[str] = ()) -> int:
+        """删除某源里命中「非权威产物」特征的对象（一次性清库用）。
+
+        例：memindex 迁移把 `.md.hash` 旁路文件、`venv/`、`.mnt-jishu/` 备份盘
+        也搬了进来 —— 这些不是内容，检索时只会占位。
+        """
+        con = self._require()
+        where = ["src_id=?"]
+        args: List[Any] = [src_id]
+        for suf in suffixes:
+            where.append("native_key LIKE ?")
+            args.append("%" + suf)
+        for frag in contains:
+            where.append("native_key LIKE ?")
+            args.append("%" + frag + "%")
+        if len(where) == 1:
+            return 0
+        # ⚠ 条件组必须加括号：`src_id=? OR …` 会跨源删
+        oids = [r["oid"] for r in con.execute(
+            "SELECT oid FROM obj WHERE " + where[0] + " AND ("
+            + " OR ".join(where[1:]) + ")", args).fetchall()]
+        self._delete_many(oids)
+        return len(oids)
+
     # ── 扫描账本 ────────────────────────────────────────────────────
     @contextmanager
     def scan_run(self, src_id: str, mode: str):

@@ -471,7 +471,7 @@ agenthub service install          # 按平台生成 systemd/launchd/计划任务
 
 **回滚**：删 `catalog.db` + 关开关，无副作用（业务库未动）。
 
-### P1 · 全量接入 + memindex 收编
+### P1 · 全量接入 + memindex 收编 — ✅ 已实施（2026-10-25 `1afb0f4`；2026-11-04 补 logs/jsonl/调度）
 
 **交付**
 1. 适配器：`sessions` / `docs` / `memory` / `logs` / `biz` / `term`。
@@ -486,11 +486,18 @@ agenthub service install          # 按平台生成 systemd/launchd/计划任务
 
 **回滚**：`HUB_CATALOG=0` 回旧链路，`memindex.db` 未删。
 
-### P2 · 质量 + 归档
+### P2 · 质量 + 归档 — ◐ 质量面已实施（2026-11-04），归档待裁
 
-**交付**：去重/别名/权威合并；tombstone；`verify` 每日任务接进 `retention.py` 心跳；归档器（会话 >180 天 → zst）；质量面板进 `/health`。
+**已交付（2026-11-04）**：非权威副本剪枝（`.mnt-jishu`/`node_modules`/`.bak-*`/`venv`）；
+`verify.py` 六项闸门（`/api/catalog/verify` + `scripts/hub-catalog-verify.sh`）；
+`purge_missing/purge_matching` + 扫描 `--purge`（跳过即出库，批量 DELETE + FTS rebuild）；
+扫描调度（`src/catalog/schedule.py`，按 `verify.LAG_SLO` 到期，子进程逐源）。
+**实测**：对象 73,707→38,571；chunks 697,990→455,483；重复率 702 组→70 组（0.18%）；滞后全绿。
 
-**验收**：重复率 <2%、孤儿 0、抽样漂移 <0.5%、滞后 SLO 达标。
+**未做**：跨源影子对象合并（memindex 与 docs/sessions 重叠）、别名表落地、
+归档器（会话 >180 天 → zst，涉及搬动原文，需用户裁定）、质量面板进 `/health`、`VACUUM`（需独占锁）。
+
+**验收**：重复率 <2% ✅（0.18%）、孤儿 0 ✅、滞后 SLO ✅；抽样漂移与归档未做。
 
 ### P3 · 可移植
 

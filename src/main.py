@@ -1336,6 +1336,12 @@ async def startup():
     #   表一天长 44 万行」）；`profile_events` 3,250 行/天且**全仓无 DELETE**。
     # ⇒ 不寄生在任何会话生命周期上，自带 1 小时心跳。
     _spawn(retention.retention_loop())
+    # PT-20261025-12 P1 遗留：编目扫描必须有周期心跳，否则库停在旧快照
+    # （实测 10 天没人跑）。到期判据复用 verify.LAG_SLO，改动只此一处。
+    if os.getenv("HUB_CATALOG", "0") == "1" and os.getenv(
+            "HUB_CATALOG_SCAN", "1") != "0":
+        from catalog import schedule as catalog_schedule
+        _spawn(catalog_schedule.scan_loop())
     mcpgw_mod.ensure_schema()
     cronjobs_mod.ensure_schema()
     cronjobs_mod.set_context(

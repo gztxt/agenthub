@@ -16,7 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import api_catalog
 from catalog import adapter, adapters, query, schema, store
 from catalog.adapters import agents as agents_adapter
+from catalog.adapters import docs as docs_adapter
+from catalog.adapters import logs as logs_adapter
 from catalog.adapters import projects as projects_adapter
+from catalog.adapters import sessions as sessions_adapter
+from catalog import verify as catalog_verify
 
 
 class CatalogCase(unittest.TestCase):
@@ -498,6 +502,89 @@ class TestIndexCompleteness(CatalogCase):
             self.assertEqual("agent", result["items"][0]["domain"])
         finally:
             con.close()
+
+
+class TestCatalogQuality(CatalogCase):
+    """P2 质量：非权威副本排除 / 格式无关日志 / 原始会话 / 清理 / 闸门。"""
+
+    def test_docs_skip_path_excludes_derived_copies(self):
+        cases = {
+            "/fs/1000/ftp/技术文档/.mnt-jishu/全量备份/wiki/a.md": "skip_dir",
+            "/fs/1000/ftp/技术文档/agenthub/venv/lib/a.md": "skip_dir",
+            "/fs/1000/ftp/技术文档/会话备份/2026/a.md": "skip_dir",
+            "/fs/1000/ftp/技术文档/wiki/a.md.bak-20261025_164751-p0-done": "backup_copy",
+        }
+        for path, reason in cases.items():
+            self.assertEqual(reason, docs_adapter._skip_path(path), path)
+        self.assertEqual("", docs_adapter._skip_path("/fs/1000/ftp/技术文档/wiki/a.md"))
+
+    def test_logs_summary_is_format_agnostic(self):
+        """生产实际是 uvicorn / 中括号行，旧实现两种都认不出 ⇒ 0 条。"""
+        text = ("INFO:     Started server process [85512]\n"
+                "[Agent Hub] 启动完成 v0.2.0，监听 0.0.0.0:3102\n"
+                "ERROR:    端口占用\n"
+                '{"ts": "2026-10-25T07:50:25+0800", "decision": "allow"}\n')
+        summary, levels, n = logs_adapter._summarize(text)
+        self.assertEqual(4, n)
+        self.assertIn("Started server process", summary)
+        self.assertEqual(1, levels.get("INFO"))
+        self.assertEqual(1, levels.get("ERROR"))
+
+    def test_sessions_jsonl_uses_head_and_tail(self):
+        tmp = Path(self.tmp.name) / "s1.jsonl"
+        tmp.write_text(
+            '{"type":"session","id":"abc"}\n'
+            '{"type":"message","message":{"role":"user","content":'
+            '[{"type":"text","text":"帮我统一数据存储"}]}}\n'
+            '{"type":"message","message":{"role":"assistant",'
+            '"content":[{"type":"text","text":"已落地 catalog.db"}]}}\n',
+            encoding="utf-8")
+        st = tmp.stat()
+        rec = sessions_adapter._jsonl_record(
+            tmp, int(st.st_mtime), st.st_size, "pi", "h1")
+        self.assertEqual("jsonl", rec["ext"]["format"])
+        self.assertIn("帮我统一数据存储", rec["summary"])
+        self.assertIn("已落地 catalog.db", rec["summary"])
+        self.assertTrue(rec["chunks"])
+
+    def test_purge_missing_removes_chunks_and_fts(self):
+        self.add(native_key="a", title="统一数据存储", chunks=["统一数据存储方案"])
+        self.writer.mark_missing("s1", [], complete=True)
+        self.assertEqual(1, self.writer.purge_missing("s1"))
+        con = self.readonly()
+        try:
+            self.assertEqual(0, con.execute("SELECT COUNT(*) FROM obj").fetchone()[0])
+            self.assertEqual(0, con.execute("SELECT COUNT(*) FROM chunk").fetchone()[0])
+            # 索引里也不许留幽灵行
+            self.assertEqual(0, query.query(con, "统一数据存储")["count"])
+        finally:
+            con.close()
+
+    def test_purge_matching_targets_non_content_sidecars(self):
+        self.add(native_key="/w/a.md", hash_="h1")
+        self.add(native_key="/w/a.md.hash", hash_="h2")
+        self.add(native_key="/w/venv/lib/x.md", hash_="h3")
+        n = self.writer.purge_matching("s1", suffixes=(".hash",),
+                                       contains=("/venv/",))
+        self.assertEqual(2, n)
+        con = self.readonly()
+        try:
+            self.assertEqual(1, con.execute("SELECT COUNT(*) FROM obj").fetchone()[0])
+        finally:
+            con.close()
+
+    def test_verify_reports_failures(self):
+        self.add(native_key="a", hash_="h1")
+        self.add(native_key="b", hash_="h1")   # 同 hash ⇒ 重复
+        con = self.readonly()
+        try:
+            out = catalog_verify.verify(con)
+        finally:
+            con.close()
+        self.assertFalse(out["ok"])
+        names = out["failed"]
+        self.assertTrue(any(x.startswith("duplicate_hash_ratio") for x in names))
+        self.assertTrue(any(x.startswith("lag:") for x in names))
 
 
 if __name__ == "__main__":

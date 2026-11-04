@@ -1352,7 +1352,8 @@ async def startup():
                         start=t.get("start")),
                     listen_port=port, keys=True,
                     auth_secret=str(t.get("secret") or ""),
-                    title=str(t.get("name") or t["id"]))
+                    title=str(t.get("name") or t["id"]),
+                    rewrite_authority=bool(t.get("rewrite_host")))
                 if await px.start():
                     _embed_bridges.append(px)
                     profiles_mod.EMBED_PROXY_MAP[str(t["id"])] = "http://127.0.0.1:%d" % port

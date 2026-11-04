@@ -1,3 +1,20 @@
+## 未发版 — 嵌页桥：Host 改写为上游 authority（dsh「一直连接中」）（2026-11-04）
+
+> 状态：**代码已落盘 + L0 3852 全绿（0 skip）+ 影子实例实测 403→101，待重启生效**。
+> 当前 `term_sessions=1`（用户本人这条），按「有活会话严禁 restart」停手。
+
+- **报障**：dsh 原生界面一直「连接中」、会话记录加载不出、登录失败。
+- **根因（不是 Linux 编译问题）**：dsh 的 `/api` 围栏（`api-request-trust.ts`）只放行
+  ① 回环 ② 自己 `--host` 绑的地址 ③ `--trusted-host`。用户经 Oray VPN 访问 hub 时
+  authority 是 `172.16.3.227:3202`，桥按客户端 Host 原样透传 ⇒ **HTML 照常下发**
+  （文档不走围栏）、`/api/remote.mux` 与一切 `/api` **403** ⇒ 前端无限重连。
+  11-01 那次「统一用客户端 Host」只解决了 document/tunnel 自洽（401），没解决可信（403）。
+- **药**：`_rewrite_authority()` 把 Host 换成上游 authority、摘掉 `Origin`/`Sec-Fetch-Site`，
+  document 与 tunnel 同一条路径改；按 `profiles.embed_proxy_targets()` 的 `rewrite_host`
+  **只对 dsh 开**（别家按 Host 拼绝对跳转地址）。
+- **判据**：`tests/test_embed_authority_rewrite.py`（6 条）+ `work/probe_authority_rewrite.py`
+  旧行为 403 / 新行为 303→设 cookie→WS **101** 对照实测。
+
 ## 未发版 — 设置→模型：假漂移死循环、清单兜底丢模型、计费档分叉（2026-11-04）
 
 > 状态：**代码已落盘 + 全量 3926 passed，待重启生效**。当前唯一活会话就是用户本人

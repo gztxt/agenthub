@@ -265,14 +265,16 @@ async def _document(writer: asyncio.StreamWriter, head_line: bytes, header: byte
                     pre_body: bytes, authority: bytes, extra: bytes = b"") -> None:
     """HTML：整份读回 → 插 <style> → 重算 Content-Length。上游强制 identity + close。
 
-    Host 必须用**客户端原值**，不能改写成上游 authority（2026-11-01 实测定案）：
-    _strip_hop_headers 会把客户端 Host 摘掉，但 HTTP/1.1 不带 Host 有些服务端直接 400，
-    所以要补回来——补的是原值。原因：dsh 用 Host 签发 auth cookie 的 `authority` 字段
-    并在每次校验时比对当前 Host；HTML 走本函数（曾改写成 192.168.5.102:3080），
-    而 WebSocket/SSE/静态资源走 `_tunnel`（原样透传，Host 仍是 127.0.0.1:3202）⇒
-    两侧 authority 不一致 ⇒ `/api/remote.mux` 每次 401，前端无限重连，页面永远"加载中"。
-    （netlog 实测同一页面 27 次 ws 重连，而 JS 总体积只有 pi 的 5.7 倍、传输仅 238ms，
-    慢的不是下载。）两侧统一用客户端 Host 后与浏览器 origin 一致，cookie 才自洽。
+    Host 用**请求里现有的值**：默认是客户端原值；`rewrite_authority` 打开时上面
+    已把它换成上游 authority，这里只管原样带过去。
+
+    ⚠️ 历史口径（2026-11-01 → 11-04 已改判）：当时定的是「两侧统一用客户端 Host」，
+    理由是 dsh 用 Host 签发 cookie 的 `authority` 并在每次校验时比对当前 Host，而
+    HTML 改写上游 Host、隧道却透传客户端 Host ⇒ 两侧不等 ⇒ `/api/remote.mux` 每次
+    401、前端无限重连。**统一到客户端 Host 只解决了「自洽」，没解决「可信」**：
+    客户端 Host（Oray VPN 的 `172.16.3.227:3202`）不在 dsh 的 trusted-host 名单里，
+    `/api` 围栏直接 403 ⇒ 同样的无限重连，只是错误码从 401 变成 403。
+    现在统一到**上游 authority**（见 `_rewrite_authority`）：既自洽又落在围栏白名单内。
     """
     mh = re.search(rb"^host:\s*(?P<v>[^\r\n]+)", header, re.I | re.M)
     host_hdr = mh.group("v").strip() if mh else authority
@@ -349,9 +351,44 @@ def _authority(host: str, port: int) -> bytes:
     return ("[%s]:%d" % (host, port) if ":" in host else "%s:%d" % (host, port)).encode()
 
 
+def _rewrite_authority(header: bytes, authority: bytes) -> bytes:
+    """把客户端 Host 改写成上游 authority，并摘掉 Origin / Sec-Fetch-Site。
+
+    为什么需要（2026-11-04 报障「dsh 原生界面一直连接中」）：
+    dsh 的 `/api` 围栏（`packages/client/connection/src/api-request-trust.ts`）只放行
+    ① 回环地址 ② 它自己 `--host` 绑的地址 ③ `--trusted-host` 显式声明的 authority。
+    hub 的嵌页桥原先按客户端 Host 原样透传，用户经 Oray VPN 打开 hub 时 Host 是
+    `172.16.3.227:3202` —— 不在名单里：HTML 文档照常下发（文档不走 `/api` 围栏），
+    但 `/api/remote.mux`（WebSocket）与其余 `/api` **一律 403**，前端于是无限重连，
+    用户看到的就是「一直连接中 + 会话列表空 + 登录失败」三连。
+    改写成上游 authority 后 Host 恒为绑定地址（围栏白名单内），且 document 与
+    tunnel 两条路径同一份值 ⇒ dsh 签发 cookie 时记的 `authority` 与之后校验时的
+    Host 自洽（11-01 的 401 死循环正是「只改文档不改隧道」的不对称造成的）。
+
+    Origin 一并摘除：围栏在无 Origin 时改以 Host 为准；留着它等于拿客户端的
+    authority 去比对改写后的 Host，必 403（`sec-fetch-site: cross-site` 同理）。
+
+    只给**按 Host 判来源**的上游开（profiles 的 `rewrite_host`）：别家（qwenpaw /
+    pi-web / cloudcli）会用 Host 拼绝对跳转地址，改写后会把浏览器送到上游地址。
+    """
+    head, sep, body = header.partition(_END)
+    lines = head.split(b"\r\n")
+    out = [lines[0]] if lines else [b""]
+    for ln in lines[1:]:
+        low = ln.lower()
+        if low.startswith(b"host:"):
+            continue
+        if low.startswith(b"origin:") or low.startswith(b"sec-fetch-site:"):
+            continue
+        out.append(ln)
+    out.append(b"Host: " + authority)
+    return b"\r\n".join(out) + sep + body
+
+
 async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                   upstream: tuple[str, int], extra: bytes = b"",
-                  pre_header: bytes | None = None, auth: bytes = b"") -> None:
+                  pre_header: bytes | None = None, auth: bytes = b"",
+                  rewrite_authority: bool = False) -> None:
     if pre_header is None:
         try:
             header = await reader.readuntil(_END)
@@ -390,6 +427,13 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
         log.debug("上游不可达 %s:%s (%s)", upstream[0], port, last_err)
         writer.close()
         return
+    if rewrite_authority:
+        # 上游 authority 要在**连上之后**取：回环上游可能回落到 ::1（见 _upstream_candidates），
+        # 两端（document / tunnel）必须用同一个值，否则 dsh 的 cookie authority 又不自洽。
+        header = _rewrite_authority(header, _authority(host, port))
+        parts = header.split(_END, 1)
+        head_line = parts[0].split(b"\r\n", 1)[0]
+        rest = parts[0][len(head_line) + 2:]
     doc = _is_document(head_line, rest)   # 逐请求埋点已摘（会把 hub 日志刷满）
     if not doc and head_line.upper().startswith(b"GET ") and b"text/html" in rest.lower():
         log.info("[embed] GET+html Accept 但判为非文档，走隧道: %s" % head_line.decode(errors="replace")[:48])
@@ -515,7 +559,8 @@ class EmbedProxy:
     def __init__(self, name: str, upstream_host: str, upstream_port: int,
                  listen_host: str = "0.0.0.0", listen_port: int = 3103,
                  css: str = "", keys: bool = True,
-                 auth_secret: str = "", title: str = ""):
+                 auth_secret: str = "", title: str = "",
+                 rewrite_authority: bool = False):
         self.name = name
         self.upstream = (upstream_host, int(upstream_port))
         self.listen = (listen_host, int(listen_port))
@@ -524,6 +569,9 @@ class EmbedProxy:
         # 非空 ⇒ 这个桥是「带门的桥」：未登录先给表单，登录后服务端代补 Basic。
         self.auth_secret = (auth_secret or "").strip()
         self.title = title or name
+        # 按 Host 判来源的上游（首指 dsh）：请求出桥前把 Host 换成上游 authority，
+        # 并摘 Origin —— 详见 _rewrite_authority 的报障记录。
+        self.rewrite_authority = bool(rewrite_authority)
         self._secret_cache: tuple[float | None, str] = (None, "")
 
     # ── 口令读取（按 mtime 缓存：面板轮换口令后无需重启 hub）──
@@ -557,7 +605,8 @@ class EmbedProxy:
                      writer: asyncio.StreamWriter) -> None:
         """无口令桥：行为与改前完全一致；有口令桥：先过门，再带 Auth 透传。"""
         if not self.auth_secret:
-            await _handle(reader, writer, self.upstream, self.extra)
+            await _handle(reader, writer, self.upstream, self.extra,
+                          rewrite_authority=self.rewrite_authority)
             return
         try:
             header = await reader.readuntil(_END)
@@ -571,7 +620,8 @@ class EmbedProxy:
             return
         if token and _cookie_has(header, self._cookie_name(), token):
             await _handle(reader, writer, self.upstream, self.extra,
-                          pre_header=header, auth=self._auth_header())
+                          pre_header=header, auth=self._auth_header(),
+                          rewrite_authority=self.rewrite_authority)
             return
         # 未登录：文档请求给表单；其余（XHR/静态资源）一律 401，别把半截页面喂给前端。
         # 文档判据与 _is_document 同向（GET + .html 或 Accept 含 text/html），另加「无扩展名

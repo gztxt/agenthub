@@ -72,7 +72,11 @@ def embed_proxy_targets() -> List[Dict[str, object]]:
                     "host": sp.hostname or "127.0.0.1", "port": port,
                     "start": ui_start_for(p["id"]),
                     # Basic 面板：桥拿到口令文件才肯出 embed（桥自己当门，见 embed_proxy）
-                    "secret": p.get("bridge_secret") or ""})
+                    "secret": p.get("bridge_secret") or "",
+                    # 按 Host 判来源的上游（dsh 的 /api 围栏只认 loopback / 绑定地址 /
+                    # --trusted-host）。别的宿主用 Host 拼绝对跳转地址，跟着改写会把
+                    # 浏览器送到上游内网地址 ⇒ 只点名 dsh，不做成默认。
+                    "rewrite_host": p["id"] == "dsh"})
     return out
 
 

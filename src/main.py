@@ -574,6 +574,8 @@ VERSION = "0.13.191"
 #     无明文模型字段；且实测 --model 收 `ccr/<id>` 前缀形状，裸 ID 会被解析成
 #     provider=openrouter 报 No API key ⇒ VALUE_PREFIX 补 omp）；dsh 入
 #     UNSUPPORTED（实测 `dsh --profile tui --help` 仅 --resume/--agent-preset）。
+#     ⚠ 2026-11-04 改判：dsh 移出 UNSUPPORTED 并入 SPECS —— 无 --model 不等于
+#     不可设置，真源是 profile 的 cordis.patch.yml（见 modelcfg_writers._dsh_write）。
 #   红向自证三破坏点各自精确变红：加回 probe_port / 去掉 has('embed') /
 #   去掉注册表合并段。
 #   v0.13.150：**补登 QoderWake 长驻缺口**（用户 2026-10-24 报「不是所有 agent
@@ -1210,6 +1212,28 @@ async def model_drift_loop():
             log.warning(f"[modelcfg] 巡检异常（下轮重试）{type(e).__name__}: {str(e)[:160]}")
 
 
+async def dsh_sync_loop():
+    """CCR 模型清单 → dsh profile 目录（用户令 2026-11-04：自动同步）。
+
+    首轮延后 20s：CCR 与 hub 开机同秒起来，太早拉清单会拿到空/不全的结果。
+    只在 diff 时写盘（modelcfg._dsh_sync_models 内部判），因此每轮成本≈一次
+    本地 /v1/models 请求。异常不打死循环。"""
+    await asyncio.sleep(20)
+    while True:
+        try:
+            r = await asyncio.to_thread(modelcfg.sync_dsh_catalog)
+            if r.get("changed"):
+                log.info("[modelcfg] dsh 模型目录已同步：%d 个文件，新增 %d，移除 %d"
+                         % (r["changed"], len(r.get("added") or []),
+                            len(r.get("removed") or [])))
+            elif r.get("ok") is False and not r.get("skipped"):
+                log.warning("[modelcfg] dsh 模型目录同步失败：%s"
+                            % (r.get("errors") or r.get("error")))
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"[modelcfg] dsh 同步异常（下轮重试）{type(e).__name__}: {str(e)[:160]}")
+        await asyncio.sleep(modelcfg.DSH_SYNC_SEC)
+
+
 async def vitals_loop():
     """可用心跳慢周期：首轮延后 2s（先让 hub 开接请求），之后每 VITALS_SWEEP_SEC 一轮。
     只跑 L1/L2（which / 文件头 / --version / --help / 端点探活），不碰模型；
@@ -1294,6 +1318,7 @@ async def startup():
     _spawn(tasks_mod.sweep_stale_tasks())
     _spawn(vitals_loop())
     _spawn(model_drift_loop())   # 配置漂移巡检（CCR 重启会把模型改回旧值）
+    _spawn(dsh_sync_loop())      # CCR 模型清单 → dsh profile 目录（2026-11-04）
     _spawn(prov_loop())   # 代码溯源（工作区脏度）刷新
     # P0-4：终端会话回收必须有独立心跳，不能寄生在前端轮询上
     _spawn(term_mod.reap_loop())

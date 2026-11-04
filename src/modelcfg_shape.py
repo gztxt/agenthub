@@ -66,6 +66,9 @@ WRITE_MODE: Dict[str, str] = {
     "codebuddy": "ccr",
     # ── 2026-11-04 新增（kimi 写 ~/.kimi-code/config.toml，别名前缀 ccr/ = 与 CCR 同源）──
     "kimi": "ccr",
+    # 2026-11-04：dsh 无 --model，但 profile 的 llm-deepseek 直接吃 CCR 的
+    # provider/model ID（baseURL 指向 :3456）⇒ "ccr" 同口径，清单闸门对它生效。
+    "dsh": "ccr",
 }
 
 #: 该 agent 的模型字段要求的**值前缀**（v0.13.86，2026-10-07；2026-10-25 补 omp）。

@@ -121,6 +121,31 @@ CURSOR_JSON = {
 }
 
 
+DSH_PATCH = """# dsh profile user layer
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek-api-key'
+  config:
+    baseURL: http://127.0.0.1:3456
+    models:
+      - id: old/model-a
+        name: Old A
+        contextWindow: 131072
+      - id: old/model-b
+        name: Old B
+        contextWindow: 131072
+# 注释：默认模型必须单独改，只改目录不会换默认值
+- id: agent-default-model
+  name: '@deepseek-ai/dsh-agent-default-model'
+  config:
+    provider: deepseek-official
+    model: old/model-a
+- id: permission
+  name: '@deepseek-ai/dsh-permission-presets'
+  config:
+    defaultPreset: danger-full-access
+"""
+
+
 class _HomeFixture(unittest.TestCase):
     """造假 HOME：modelcfg 的所有落点都在 ~ 下，换 HOME 即可全隔离。"""
 
@@ -141,6 +166,8 @@ class _HomeFixture(unittest.TestCase):
         self._write(".qoder/settings.json", json.dumps(QODER_JSON))
         self._write(".cursor/cli-config.json", json.dumps(CURSOR_JSON))
         self._write(".claude-code-router/config.json", json.dumps(CCR_CONFIG))
+        for name in ("web", "tui", "headless"):
+            self._write(f".dsh/profiles/{name}/cordis.patch.yml", DSH_PATCH)
 
     def tearDown(self):
         if self.old_home is not None:
@@ -897,7 +924,7 @@ class MAutoDiscovery(_HomeFixture):
     （dsh 10-23、omp 10-24）在设置页零存在感。判据三条：
     ① 注册表在册的 agent 必须出现在 list_agents（可设或带理由置灰）；
     ② omp 是 argv-only（实测 --help 有 --model、无明文配置文件）⇒ hub 侧可设；
-    ③ dsh 实测 TUI 无 --model ⇒ 置灰且理由里带证据关键词。
+    ③ dsh 无 --model，但真源是 profile 的 cordis.patch.yml ⇒ 2026-11-04 起可设置。
     """
 
     def test_registry_agents_appear_in_list(self):
@@ -940,13 +967,19 @@ class MAutoDiscovery(_HomeFixture):
         self.assertEqual(p["write_mode"], "argv")
         self.assertEqual(p["value_prefix"], "ccr/")
 
-    def test_dsh_is_unsupported_with_evidence_reason(self):
+    def test_dsh_is_writable_via_profile(self):
+        """2026-11-04 改判：「TUI 无 --model」不等于不支持。
+
+        dsh 的真源是 profile 的 cordis.patch.yml（llm-deepseek.models +
+        agent-default-model.model），与 argv 无关 ⇒ 必须可设置。
+        """
         st = modelcfg.agent_state("dsh")
-        self.assertFalse(st["supported"], "dsh TUI 实测无 --model，必须置灰")
-        self.assertFalse(st["writable"])
-        self.assertEqual(st["write_mode"], "none")
-        self.assertIn("--profile tui --help", st["reason"],
-                      "置灰理由必须带实测证据（dsh --profile tui --help 的选项清单）")
+        self.assertTrue(st["supported"], "dsh 的模型真源是 profile 配置")
+        self.assertTrue(st["writable"])
+        self.assertEqual(st["write_mode"], "ccr")
+        self.assertNotIn("--model", " ".join(st.get("argv_effective") or []),
+                         "dsh 仍然没有 --model，不许凭空注入")
+        self.assertEqual(len(st["files"]), 3)
 
     def test_omp_not_reported_as_drift(self):
         """argv-only 没有配置文件可比 ⇒ 不许进漂移体检（否则恒假警报）。"""
@@ -1512,3 +1545,61 @@ class MCodebuddyEffective(_HomeFixture):
         modelcfg.apply_model("codebuddy", "alibaba/deepseek-v4.1-flash")
         st = modelcfg.effective_state("codebuddy")
         self.assertIsNone(st["drift"], "写完配置现值应等于 hub 值，不该报漂移")
+
+
+class SDshProfile(_HomeFixture):
+    """dsh 模型设置（2026-11-04 用户报障「模型配置里设不了 dsh」）。
+
+    旧判「dsh 无 --model ⇒ 不支持」只看了 argv；真源是三份 profile 的
+    cordis.patch.yml。判据：① 设置页可见可写；② 写入同时改三份 profile
+    的默认值并补目录条目；③ 同步只动目录、不动默认值，且空清单不删任何东西。
+    """
+
+    def _dsh(self, name):
+        return (self.home / f".dsh/profiles/{name}/cordis.patch.yml").read_text(encoding="utf-8")
+
+    def test_dsh_is_writable_with_three_files(self):
+        st = modelcfg.agent_state("dsh")
+        self.assertTrue(st["supported"], "dsh 的模型真源是 profile 配置，必须可设置")
+        self.assertTrue(st["writable"])
+        self.assertEqual(st["write_mode"], "ccr")
+        self.assertEqual(st["current"], "old/model-a")
+        self.assertEqual(len(st["files"]), 3, "web/tui/headless 三份都要写")
+
+    def test_apply_updates_default_in_all_profiles(self):
+        modelcfg.apply_model("dsh", "alibaba/qwen3.8-max")
+        for name in ("web", "tui", "headless"):
+            text = self._dsh(name)
+            self.assertIn("    model: alibaba/qwen3.8-max", text, name)
+            self.assertIn("- id: alibaba/qwen3.8-max", text, name)
+            self.assertIn("- id: old/model-b", text, "不许删别人的目录条目")
+            self.assertIn("# 注释：默认模型必须单独改", text, "注释与排版必须保留")
+        self.assertEqual(modelcfg.hub_model("dsh"), "alibaba/qwen3.8-max")
+
+    def test_sync_replaces_catalog_but_keeps_default(self):
+        modelcfg.set_hub_model("dsh", "old/model-a")
+        r = modelcfg._dsh_sync_models({"new/model-c", "new/model-d"})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["changed"], 3)
+        for name in ("web", "tui", "headless"):
+            text = self._dsh(name)
+            self.assertIn("- id: new/model-c", text)
+            self.assertIn("- id: new/model-d", text)
+            self.assertNotIn("- id: old/model-b", text, "已下线的目录条目应清掉")
+            self.assertIn("- id: old/model-a", text, "默认模型条目必须保留")
+            self.assertIn("model: old/model-a", text, "同步不许改默认模型")
+
+    def test_sync_refuses_empty_catalog(self):
+        before = self._dsh("web")
+        r = modelcfg._dsh_sync_models(set())
+        self.assertFalse(r["ok"])
+        self.assertEqual(self._dsh("web"), before, "取不到清单 ≠ 全部下线，不许删条目")
+
+    def test_sync_shrink_guard_keeps_entries(self):
+        """清单骤降（网关 CDN 抖动只回几条）⇒ 只增不删。"""
+        before = self._dsh("web")
+        r = modelcfg._dsh_sync_models({"new/only-one"})
+        self.assertTrue(r["ok"])
+        text = self._dsh("web")
+        self.assertIn("- id: old/model-b", text, "骤降时不许把旧目录删成一条")
+        self.assertIn("- id: new/only-one", text)

@@ -24,13 +24,18 @@ yaml，pi 还要顺带补模型清单、grok 要建命名 profile），逐一白
           条目直写 CCR 的 provider/model ID（alibaba/xxx）；provider 把它们并进 /model 清单
           （带 custom-local: 前缀，原 id 同时进 aliases）。2026-11-03 实测入册（判例 321）——
           此前标「不支持」的理由「--model 只认自有清单」已被推翻。
+  dsh     ~/.dsh/profiles/{web,tui,headless}/cordis.patch.yml
+          llm-deepseek.models（可选目录，**由 hub 定期从 CCR 清单同步**）+
+          agent-default-model.model（新会话默认值，三份同批写）
 
 agent 清单怎么来（2026-10-25 用户令「应该是自动发现并添加」）：
   ① SPECS/UNSUPPORTED 两张硬编码表（逐家实测的读写器与理由）；
   ② **注册表自动发现**：profiles.all_profiles() 里在册的 agent 若两张表都没登记
      （如将来新接入的 agent），以「未接入」+ 如实原因出现在设置页，置灰 ——
      宁可显示「设不了 + 为什么」，也不让用户在页面上找不到这个 agent。
-  已按此登记：omp（argv-only，见 _omp_read）、dsh（UNSUPPORTED，TUI 无 --model）。
+  已按此登记：omp（argv-only，见 _omp_read）、dsh（profile 配置文件，见 _dsh_write；
+  2026-11-04 从 UNSUPPORTED 移出 —— 旧判据只看 `dsh --help` 无 --model，漏了
+  ~/.dsh/profiles/*/cordis.patch.yml 这个真源）。
 """
 from __future__ import annotations
 
@@ -61,6 +66,7 @@ from modelcfg_shape import *  # noqa: F401,F403
 from modelcfg_writers import _toml_get  # 兼容旧调用方（测试直接打这个私有名） —— 对外仍从 modelcfg 取这些名字
 from modelcfg_writers import *  # noqa: F401,F403
 from modelcfg_writers import _atomic_write, _backup, _home, _now, _read_text  # 私有名
+from modelcfg_writers import _dsh_sync_models  # 私有名：dsh 目录同步
 from modelcfg_verify import *  # noqa: F401,F403
 
 # 放宽字符集等于给引号逃逸与 argv 注入开门。
@@ -220,6 +226,28 @@ def catalog_ids(force: bool = False) -> dict:
     return _CATALOG
 
 
+
+
+# ── dsh 模型目录自动同步（2026-11-04 用户令：CCR 模型配置更新自动同步到 dsh）──
+# dsh 的模型下拉是静态目录（llm-deepseek.models），CCR 侧增删模型不会自动出现。
+# 这里把 CCR 当前清单定期落到三份 profile：只增删**目录条目**，不动默认模型。
+# 护栏：① 清单取不到 ⇒ 跳过（不把"取不到"当"全部下线"）；② 清单条数 < 现有的
+# 60% ⇒ 只增不删（网关 CDN 抖动时 /v1/models 只回 22 条的已知故障面）；③ 每次写盘带
+# 时间戳备份（_dsh_sync_models 内调 _backup）。
+DSH_SYNC_SEC = max(60, int(os.getenv("HUB_DSH_SYNC_SEC", "600")))
+
+
+def sync_dsh_catalog() -> dict:
+    """供后台循环调用：CCR 清单 → dsh 三份 profile 的 llm-deepseek.models。"""
+    if os.getenv("HUB_DSH_SYNC", "").lower() in ("0", "off", "false", "no"):
+        return {"ok": False, "skipped": True, "error": "disabled by HUB_DSH_SYNC"}
+    cat = catalog_ids()
+    if not cat["checked"]:
+        return {"ok": False, "skipped": True,
+                "error": cat["error"] or "CCR 清单不可用，本轮跳过"}
+    out = _dsh_sync_models(cat["ids"])
+    out["catalog_size"] = cat["size"]
+    return out
 
 
 # ── Hub 侧 per-agent 模型（拉起终端时注入用）────────────────────────

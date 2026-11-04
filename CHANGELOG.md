@@ -1,3 +1,25 @@
+## 未发版 — 设置→模型：dsh 可设置 + CCR 清单自动同步（2026-11-04）
+
+> 状态：**代码已落盘 + `tests/test_modelcfg.py` 123 passed（pytest 与 unittest 两套口径），
+> 生产已按新清单同步三份 profile，待重启后设置页出现 dsh**。`term_sessions=1`（用户本人这条），
+> 按「有活会话严禁 restart」停手。
+
+- **报障**：设置 → 模型 里 dsh 只有置灰理由（「TUI 无 --model」），改不了；
+  且 CCR 增删模型后 dsh 的下拉永远停在写死的那几条。
+- **根因**：2026-10-25 只查了 `dsh --help` 有没有 `--model`，没查它的真源。
+  dsh 的模型真源是 `~/.dsh/profiles/{web,tui,headless}/cordis.patch.yml`：
+  `llm-deepseek.models` 是目录、`agent-default-model.model` 是新会话默认值
+  （源码 `llm-deepseek-api-key/src/index.ts` 的 `discoverModels` 直接返回 `connection.models`）。
+- **药**：① `_dsh_read/_dsh_write` 定点改这两处（YAML 文本级编辑，保留注释与排版；
+  三份同批写，避免「网页对了终端没变」）；② dsh 从 `UNSUPPORTED` 移入 `SPECS`，
+  `WRITE_MODE=ccr`，不注入 argv；③ `sync_dsh_catalog` + 后台 `dsh_sync_loop`（默认 600s）
+  把 CCR 清单同步进三份目录，只动目录不动默认值。
+- **护栏**：清单取不到 ⇒ 本轮跳过；清单条数 < 现有的 60% ⇒ 只增不删（CCR CDN 抖动时
+  `/v1/models` 只回 22 条的实测故障面）；每次写盘带时间戳备份；默认模型永不删除。
+- **判据**：`SDshProfile` 5 条（三份同写、注释保留、同步不动默认值、空清单不删、
+  骤降只增不删）；真机 `dsh --profile headless --dump-config` 组合通过，
+  js-yaml 解析三份均为 26 条目录。
+
 ## 未发版 — 嵌页桥：Host 改写为上游 authority（dsh「一直连接中」）（2026-11-04）
 
 > 状态：**代码已落盘 + L0 3852 全绿（0 skip）+ 影子实例实测 403→101，待重启生效**。

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -1020,7 +1021,263 @@ def _kimi_write(model: str):
     return [(p, text, changes)]
 
 
+# ── dsh（DeepSeek Harness，2026-11-04 用户报障「模型设置里设不了 dsh」）──
+# 2026-10-25 判「不支持」的依据只有一条：`dsh --profile tui --help` 没有 --model。
+# 依据本身没错，结论错了 —— dsh 的取值源不在 argv，而在三份 profile 的
+# `cordis.patch.yml`：
+#   - id: llm-deepseek         → config.models   新会话的模型目录
+#   - id: agent-default-model  → config.model    新会话的默认模型
+# 源码判据：packages/llm/llm-deepseek-api-key/src/index.ts 的 `discoverModels`
+# 直接返回 `connection.models`；`agent-default-model` 决定新会话用哪个。
+# 故写这两处 = 设置真的生效（Web UI / TUI / headless 同源）。
+# 三份 profile 必须同批写：只改 web 会出现「网页上对了、终端里还是旧模型」。
+DSH_PROFILES = ("web", "tui", "headless")
+DSH_ENTRY_LLM = "llm-deepseek"
+DSH_ENTRY_DEFAULT = "agent-default-model"
+DSH_DEFAULT_CONTEXT = 131072
+
+
+def _dsh_paths() -> List[Path]:
+    """三份 profile 的 patch 文件（只返回存在的；缺 profile 不算故障）。"""
+    root = _home() / ".dsh" / "profiles"
+    return [p for p in (root / name / "cordis.patch.yml" for name in DSH_PROFILES)
+            if p.exists()]
+
+
+def _yaml_unquote(v: str) -> str:
+    v = v.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+        return v[1:-1]
+    return v
+
+
+def _yaml_entry_span(lines: List[str], entry_id: str) -> Optional[Tuple[int, int]]:
+    """顶层 YAML 条目 `- id: <entry_id>` 到下一个顶层 `- ` 之前。
+
+    dsh 的 patch 文件是顶层数组，条目只以**顶格** `- ` 开头（`- insert:` 也是），
+    子项一律缩进 ⇒ 用缩进判边界，不做整份 YAML 解析（保住注释与手工排版）。"""
+    start = None
+    pat = re.compile(r"^-\s+id:\s*['\"]?" + re.escape(entry_id) + r"['\"]?\s*(?:#.*)?$")
+    for i, ln in enumerate(lines):
+        if pat.match(ln):
+            start = i
+            break
+    if start is None:
+        return None
+    for j in range(start + 1, len(lines)):
+        if re.match(r"^-(?:\s|$)", lines[j]):
+            return start, j
+    return start, len(lines)
+
+
+def _yaml_key_line(lines: List[str], span: Tuple[int, int], key: str) -> Optional[int]:
+    """条目内某个键所在行号。`model` 不会误匹配 `models`（要求紧跟冒号）。"""
+    pat = re.compile(r"^\s*" + re.escape(key) + r":\s*")
+    for i in range(span[0], span[1]):
+        if pat.match(lines[i]):
+            return i
+    return None
+
+
+def _dsh_models_span(lines: List[str], span: Tuple[int, int]):
+    """`llm-deepseek` 里 `models:` 列表的 (键行, 键缩进, 列表起, 列表止)。
+
+    边界按缩进判：遇到缩进 ≤ models 键的行即结束（注释行也参与判断，
+    否则会把注释之后的 `- insert:` 当成列表内容）。"""
+    idx = _yaml_key_line(lines, span, "models")
+    if idx is None:
+        return None
+    key_indent = len(lines[idx]) - len(lines[idx].lstrip())
+    end = span[1]
+    for j in range(idx + 1, span[1]):
+        s = lines[j]
+        if not s.strip():
+            continue
+        if len(s) - len(s.lstrip()) <= key_indent:
+            end = j
+            break
+    return idx, key_indent, idx + 1, end
+
+
+def _dsh_model_items(lines: List[str], lo: int, hi: int, item_indent: int):
+    """列表项区间 [(起, 止)]；item_indent 是 `- id:` 的缩进。"""
+    spans: List[Tuple[int, int]] = []
+    cur: Optional[int] = None
+    for i in range(lo, hi):
+        s = lines[i]
+        if not s.strip() or s.lstrip().startswith("#"):
+            continue
+        ind = len(s) - len(s.lstrip())
+        if ind == item_indent and s.lstrip().startswith("- "):
+            if cur is not None:
+                spans.append((cur, i))
+            cur = i
+    if cur is not None:
+        spans.append((cur, hi))
+    return spans
+
+
+def _dsh_item_id(lines: List[str], a: int, b: int) -> str:
+    for i in range(a, b):
+        m = re.match(r"^\s*-\s+id:\s*(\S.*?)\s*$", lines[i])
+        if m:
+            return _yaml_unquote(m.group(1))
+    return ""
+
+
+def _dsh_edit(text: str, *, default: Optional[str] = None, ids: Optional[set] = None,
+              allow_remove: bool = True, keep: str = "") -> Tuple[str, List[dict]]:
+    """在 patch 文本上做两件事：改默认模型、同步模型目录。
+
+    `allow_remove=False` 只增不删（网关清单疑似不完整时的保护）。
+    `keep` 是不许删的条目（当前默认模型：即便不在清单里也留着，否则 dsh 起不来）。"""
+    lines = text.splitlines(keepends=True)
+    changes: List[dict] = []
+    span = _yaml_entry_span(lines, DSH_ENTRY_LLM)
+    if span is None:
+        raise ModelCfgError("dsh 配置缺少 llm-deepseek 条目，拒绝落笔", 409)
+
+    if ids is not None:
+        ms = _dsh_models_span(lines, span)
+        if ms is None:
+            raise ModelCfgError("dsh 配置的 llm-deepseek 缺少 models 目录，拒绝落笔", 409)
+        _idx, key_indent, lo, hi = ms
+        items = _dsh_model_items(lines, lo, hi, key_indent + 2)
+        present = [(a, b, _dsh_item_id(lines, a, b)) for a, b in items]
+        present_ids = {mid for _a, _b, mid in present if mid}
+        # 先删（倒序，行号不漂）
+        if allow_remove:
+            for a, b, mid in reversed(present):
+                if mid and mid not in ids and mid != keep:
+                    del lines[a:b]
+                    changes.append({"where": "llm-deepseek.models", "op": "remove",
+                                    "from": mid, "to": ""})
+        # 再增（删除后重新定位）；插在**最后一项之后**，不要插到列表后的注释之后
+        span2 = _yaml_entry_span(lines, DSH_ENTRY_LLM)
+        ms2 = _dsh_models_span(lines, span2)
+        if ms2 is None:
+            raise ModelCfgError("dsh 配置的 llm-deepseek 缺少 models 目录，拒绝落笔", 409)
+        _i2, key_indent2, lo2, hi2 = ms2
+        item_indent = key_indent2 + 2
+        items2 = _dsh_model_items(lines, lo2, hi2, item_indent)
+        insert_at = items2[-1][1] if items2 else lo2
+        for mid in [x for x in sorted(ids) if x not in present_ids]:
+            block = (f"{' ' * item_indent}- id: {mid}\n"
+                     f"{' ' * (item_indent + 2)}name: {mid}\n"
+                     f"{' ' * (item_indent + 2)}contextWindow: {DSH_DEFAULT_CONTEXT}\n")
+            lines.insert(insert_at, block)
+            insert_at += 1
+            changes.append({"where": "llm-deepseek.models", "op": "add",
+                            "from": "", "to": mid})
+
+    if default is not None:
+        span3 = _yaml_entry_span(lines, DSH_ENTRY_DEFAULT)
+        if span3 is None:
+            raise ModelCfgError("dsh 配置缺少 agent-default-model 条目，拒绝落笔", 409)
+        idx3 = _yaml_key_line(lines, span3, "model")
+        if idx3 is None:
+            raise ModelCfgError("dsh 配置的 agent-default-model 缺少 model 字段，拒绝落笔", 409)
+        m = re.match(r"^(\s*model:\s*)(\S.*?)(\s*#.*)?(\r?\n)?$", lines[idx3])
+        if not m:
+            raise ModelCfgError("dsh 的 agent-default-model.model 行格式无法识别，拒绝落笔", 409)
+        old = _yaml_unquote(m.group(2))
+        if old != default:
+            lines[idx3] = f"{m.group(1)}{default}{m.group(3) or ''}{m.group(4) or ''}"
+            changes.append({"where": "agent-default-model.model", "op": "set",
+                            "from": old, "to": default})
+    return "".join(lines), changes
+
+
+def _dsh_current_from_text(text: str) -> str:
+    """某份 profile 的 agent-default-model.model（读不到返回空）。"""
+    lines = text.splitlines()
+    span = _yaml_entry_span(lines, DSH_ENTRY_DEFAULT)
+    idx = _yaml_key_line(lines, span, "model") if span else None
+    if idx is None:
+        return ""
+    m = re.match(r"^\s*model:\s*(\S.*?)\s*(?:#.*)?$", lines[idx])
+    return _yaml_unquote(m.group(1)) if m else ""
+
+
+def _dsh_read() -> dict:
+    paths = _dsh_paths()
+    vals: Dict[str, str] = {}
+    for p in paths:
+        v = _dsh_current_from_text(_read_text(p))
+        if v:
+            vals[p.parent.name] = v
+    current = next((v for v in vals.values() if v), "")
+    return {"current": current, "provider": "deepseek-official",
+            # 三个 profile 各一份值：任一与 hub 值不同就是漂移，巡检会按 hub 值写回。
+            "extra": {k: v for k, v in vals.items() if v != current},
+            "files": [str(p) for p in paths],
+            "note": "dsh 的模型真源是三份 profile 的 cordis.patch.yml："
+                    "llm-deepseek.models 是可选目录、agent-default-model.model 是新会话默认值；"
+                    "CCR 清单由 hub 定期自动同步到 web/tui/headless"}
+
+
+def _dsh_write(model: str):
+    paths = _dsh_paths()
+    if not paths:
+        raise ModelCfgError("未找到 ~/.dsh/profiles/*/cordis.patch.yml", 404)
+    out = []
+    for p in paths:
+        new, changes = _dsh_edit(_read_text(p), default=model, ids={model},
+                                 allow_remove=False, keep=model)
+        out.append((p, new, changes))
+    return out
+
+
+def _dsh_sync_models(ids) -> dict:
+    """把 CCR 当前清单写进三份 profile 的 llm-deepseek.models（不动默认值）。
+
+    只增删目录，不碰 `agent-default-model`：默认模型是用户的选择，
+    清单变化不该悄悄换掉它。由 modelcfg.sync_dsh_catalog 定时调用。"""
+    want = {str(x) for x in (ids or []) if str(x)}
+    res = {"ok": True, "changed": 0, "files": [], "added": [], "removed": [],
+           "errors": []}
+    paths = _dsh_paths()
+    if not paths:
+        res.update(ok=False, error="未找到 ~/.dsh/profiles/*/cordis.patch.yml")
+        return res
+    if not want:
+        res.update(ok=False, error="CCR 清单为空，跳过（不把'取不到'当成'全部下线'）")
+        return res
+    for p in paths:
+        try:
+            text = _read_text(p)
+            keep = _dsh_current_from_text(text)
+            # 默认模型必须留在目录里（否则 dsh 的下拉会选不到当前值）
+            ids_for_file = want | ({keep} if keep else set())
+            lines = text.splitlines()
+            span = _yaml_entry_span(lines, DSH_ENTRY_LLM)
+            ms = _dsh_models_span(lines, span) if span else None
+            existing: List[str] = []
+            if ms:
+                _i, ki, lo, hi = ms
+                existing = [mid for _a, _b in _dsh_model_items(lines, lo, hi, ki + 2)
+                            for mid in [_dsh_item_id(lines, _a, _b)] if mid]
+            # 防网关抖动：清单条数不到现有的 60% ⇒ 只增不删（实测故障面：
+            # CCR 的 CDN 刷新失败时 /v1/models 只回 22 条，而配置里有 90 条）。
+            floor = max(1, (len(existing) * 3 + 4) // 5)   # ceil(0.6 * n)
+            allow_remove = len(want) >= floor
+            new, changes = _dsh_edit(text, ids=ids_for_file,
+                                     allow_remove=allow_remove, keep=keep)
+            if new != text:
+                _backup(p, "dsh-sync")
+                _atomic_write(p, new)
+                res["changed"] += 1
+                res["files"].append(str(p))
+            res["added"] += [c["to"] for c in changes if c["op"] == "add"]
+            res["removed"] += [c["from"] for c in changes if c["op"] == "remove"]
+        except Exception as e:  # noqa: BLE001 —— 单个 profile 失败不拖垮其余两份
+            res["ok"] = False
+            res["errors"].append({"file": str(p), "error": f"{type(e).__name__}: {e}"})
+    return res
+
+
 #: agent_id -> {name, read, write, argv}
+
 #: argv_only=True 的条目：writable 语义 = 「hub 侧可设置」（无配置文件可落）。
 SPECS: Dict[str, dict] = {
     "claude": {"name": "Claude Code", "read": _claude_read, "write": _claude_write},
@@ -1037,6 +1294,9 @@ SPECS: Dict[str, dict] = {
     #    agent，应该是自动发现并添加」）──
     "omp": {"name": "oh-my-pi (omp)", "read": _omp_read, "write": _omp_write,
             "argv_only": True},
+    # ── 2026-11-04 新增（用户报障「模型配置里设不了 dsh」）──
+    # 落点 ~/.dsh/profiles/{web,tui,headless}/cordis.patch.yml；无 --model，纯配置文件。
+    "dsh": {"name": "dsh (DeepSeek Harness)", "read": _dsh_read, "write": _dsh_write},
     # ── 2026-11-04 新增（用户报障「模型设置页没有 kimi」）──
     # 落点 ~/.kimi-code/config.toml：default_model + [models."ccr/<id>"] 块。
     "kimi": {"name": "Kimi CLI", "read": _kimi_read, "write": _kimi_write},
@@ -1058,11 +1318,9 @@ UNSUPPORTED: Dict[str, str] = {
     # 无 --model 选项，其模型由内嵌的 claude / codex / opencode 客户端各自决定。
     "cloudcli": "CloudCLI 是 Web 宿主（cloudcli --help 实测无 --model 选项）："
                 "它的模型由内嵌的 claude/codex/opencode 客户端各自决定，应在对应 agent 上设置",
-    # 2026-10-25 实测取证：dsh 是 profile 启动器，`dsh --profile tui --help` 的全部
-    # 选项只有 --resume / --agent-preset / -h —— **没有 --model**（模型由 agent
-    # preset 与 Web UI 内的选择决定）。故 hub 侧无处可注入，只能如实置灰。
-    "dsh": "dsh TUI 无 --model（实测 dsh --profile tui --help 仅 --resume/--agent-preset）："
-           "模型由 agent preset 与 Web UI 内选择决定，hub 无注入入口",
+    # ⚠ dsh 已于 2026-11-04 移出本表并入 SPECS：旧理由「TUI 无 --model」成立，
+    # 但 dsh 的模型真源是 profile 的 cordis.patch.yml（llm-deepseek.models +
+    # agent-default-model.model），与 argv 无关。见 _dsh_write。
 }
 
 

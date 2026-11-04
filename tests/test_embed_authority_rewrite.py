@@ -14,6 +14,7 @@ L0 口径：这里只起**本地回环**的假上游，不打外网、不 import
    绝对跳转地址，跟着改写会把浏览器送到上游内网地址。
 """
 import asyncio
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -94,9 +95,45 @@ class _Recorder:
         writer.close()
 
 
+class _KeepAliveRecorder:
+    """假上游：同一条 socket 上连续收多个请求，逐个记头并回 keep-alive 响应。
+
+    真浏览器就是这么干活的（连接复用），旧实现只改首个请求 ⇒ 第 2 个起 403。
+    """
+
+    def __init__(self):
+        self.seen = []
+
+    async def __call__(self, reader, writer):
+        while True:
+            try:
+                head = await reader.readuntil(b"\r\n\r\n")
+            except (asyncio.IncompleteReadError, ConnectionError):
+                break
+            self.seen.append(head)
+            if b"transfer-encoding: chunked" in head.lower():
+                while True:                       # 吃掉正文，别让分块被当成下一个请求
+                    line = await reader.readuntil(b"\r\n")
+                    size = int(line.split(b";")[0], 16)
+                    await reader.readexactly(size + 2)
+                    if size == 0:
+                        break
+            else:
+                m = re.search(rb"^content-length:\s*(\d+)", head, re.I | re.M)
+                n = int(m.group(1)) if m else 0
+                if n:
+                    await reader.readexactly(n)
+            try:
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                await writer.drain()
+            except (ConnectionError, OSError):
+                break
+        writer.close()
+
+
 class TestBridgeEndToEnd(unittest.IsolatedAsyncioTestCase):
-    async def _boot(self, rewrite: bool):
-        self.up = _Recorder()
+    async def _boot(self, rewrite: bool, handler=None):
+        self.up = handler or _Recorder()
         self.up_srv = await asyncio.start_server(self.up, "127.0.0.1", 0)
         up_port = self.up_srv.sockets[0].getsockname()[1]
         self.px = embed_proxy.EmbedProxy(
@@ -137,6 +174,33 @@ class TestBridgeEndToEnd(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"Host: " + want.encode(), seen)
         self.assertNotIn(b"Origin:", seen)
         self.assertIn(b"Sec-WebSocket-Key:", seen, "握手头本身必须保留")
+
+    async def test_keepalive_second_request_rewritten(self):
+        """同一条连接上的第 2 个请求也必须改写（2026-11-04 生产实测 req1=200/req2=403）。"""
+        want = await self._boot(True, handler=_KeepAliveRecorder())
+        r, w = await asyncio.open_connection("127.0.0.1", self.port)
+        req = (b"POST /api/settings/describe HTTP/1.1\r\n"
+               b"Host: " + CLIENT_HOST.encode() + b"\r\n"
+               b"Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
+        chunked = (b"POST /api/session/list HTTP/1.1\r\n"
+                   b"Host: " + CLIENT_HOST.encode() + b"\r\n"
+                   b"Transfer-Encoding: chunked\r\n\r\n"
+                   b"4\r\n{\"a\"\r\n0\r\n\r\n")
+        w.write(req + req + chunked)
+        await w.drain()
+        got = b""
+        while got.count(b"ok") < 3:
+            try:
+                got += await asyncio.wait_for(r.read(4096), 3)
+            except asyncio.TimeoutError:
+                break
+        w.close()
+        await self._teardown()
+        self.assertEqual(got.count(b"ok"), 3, "三个请求都要拿到上游响应")
+        self.assertEqual(len(self.up.seen), 3)
+        for i, seen in enumerate(self.up.seen):
+            self.assertIn(b"Host: " + want.encode(), seen, f"第 {i+1} 个请求没被改写")
+            self.assertNotIn(CLIENT_HOST.encode(), seen, f"第 {i+1} 个请求仍带客户端 Host")
 
     async def test_other_hosts_keep_client_host(self):
         await self._boot(False)

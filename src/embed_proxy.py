@@ -247,6 +247,97 @@ async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
         writer.close()
 
 
+_MAX_HEAD_BYTES = 64 * 1024
+
+
+def _body_shape(head: bytes) -> "tuple[int, bool]":
+    """请求头的正文形态：(Content-Length, 是否 chunked)。无正文返回 (0, False)。"""
+    m = re.search(rb"^content-length:\s*(\d+)", head, re.I | re.M)
+    n = int(m.group(1)) if m else 0
+    te = re.search(rb"^transfer-encoding:\s*([^\r\n]+)", head, re.I | re.M)
+    return n, bool(te and b"chunked" in te.group(1).lower())
+
+
+async def _pump_rewritten(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                          first: bytes, up_w: asyncio.StreamWriter,
+                          up_r: asyncio.StreamReader, authority: bytes) -> None:
+    """keep-alive 连接上**逐个请求**改写 Host，然后再双向泵。
+
+    为什么不能只改第一个（2026-11-04 实锤）：浏览器会复用同一条 socket 连发多个
+    请求，旧实现改完首个请求就进 `_tunnel` 原样透传 ⇒ 第 2 个起带着客户端 Host
+    (`172.16.3.227:3202`) 到 dsh，围栏 403。实测同一连接三次 POST（带同 cookie）：
+    `req1=200 / req2=403 / req3=403` —— 用户侧就是「首屏能出、会话列表空、刷新即丢」。
+    请求边界按 Content-Length / chunked 切，不能拿 `\\r\\n\\r\\n` 在字节流里乱找：
+    正文里出现空行会把后续帧当成新请求头改写。
+    """
+    async def client_to_upstream() -> None:
+        buf = first
+        while True:
+            while b"\r\n\r\n" not in buf:
+                if len(buf) > _MAX_HEAD_BYTES:
+                    log.warning("[embed] 请求头超长，放弃改写转原样透传")
+                    up_w.write(buf)
+                    await up_w.drain()
+                    await _pipe(reader, up_w)
+                    return
+                chunk = await reader.read(65536)
+                if not chunk:
+                    if buf:
+                        up_w.write(buf)
+                        await up_w.drain()
+                    return
+                buf += chunk
+            idx = buf.index(b"\r\n\r\n") + 4
+            head, buf = buf[:idx], buf[idx:]
+            up_w.write(_rewrite_authority(head, authority))
+            await up_w.drain()
+            n, chunked = _body_shape(head)
+            if chunked:
+                while True:
+                    while b"\r\n" not in buf:
+                        chunk = await reader.read(65536)
+                        if not chunk:
+                            return
+                        buf += chunk
+                    eol = buf.index(b"\r\n")
+                    try:
+                        size = int(buf[:eol].split(b";")[0], 16)
+                    except ValueError:
+                        # 帧格式不认识就别装懂：剩余字节原样送出，后续交给裸泵
+                        up_w.write(buf)
+                        await up_w.drain()
+                        await _pipe(reader, up_w)
+                        return
+                    need = eol + 2 + size + 2
+                    while len(buf) < need:
+                        chunk = await reader.read(65536)
+                        if not chunk:
+                            return
+                        buf += chunk
+                    up_w.write(buf[:need])
+                    await up_w.drain()
+                    buf = buf[need:]
+                    if size == 0:
+                        break
+            elif n:
+                remain = n
+                while remain:
+                    if buf:
+                        take, buf = buf[:remain], buf[remain:]
+                        up_w.write(take)
+                        remain -= len(take)
+                    else:
+                        chunk = await reader.read(min(65536, remain))
+                        if not chunk:
+                            return
+                        up_w.write(chunk)
+                        remain -= len(chunk)
+                    await up_w.drain()
+
+    await asyncio.gather(client_to_upstream(), _pipe(up_r, writer))
+    up_w.close()
+
+
 async def _tunnel(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                   pre: bytes, up_w: asyncio.StreamWriter, up_r: asyncio.StreamReader) -> None:
     """非 HTML：原样转发 + 双向泵。WS 升级、SSE、静态资源、/api JSON 都走这里。"""
@@ -440,6 +531,10 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     if doc:
         await _document(writer, head_line, rest, up_w, up_r, pre_body,
                         _authority(host, port), extra)
+    elif rewrite_authority and b"upgrade:" not in rest.lower():
+        # 非升级请求走逐请求改写；WS 升级后是全双工裸字节流，不能再按 HTTP 解析
+        await _pump_rewritten(reader, writer, header + pre_body, up_w, up_r,
+                              _authority(host, port))
     else:
         await _tunnel(reader, writer, header + pre_body, up_w, up_r)
 

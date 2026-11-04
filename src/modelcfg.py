@@ -40,6 +40,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import tempfile
 import time
 import urllib.error
@@ -108,18 +109,93 @@ def _ccr_base() -> str:
     return os.getenv("CLAUDE_CCR_URL", "http://127.0.0.1:3456").rstrip("/")
 
 
+#: CCR config.sqlite 路径（readonly，与 memfed 同模式）。
+_CCR_CONFIG_DB = Path.home() / ".claude-code-router" / "config.sqlite"
+
+
+def _fetch_catalog_from_sqlite() -> Tuple[set, str]:
+    """从 CCR config.sqlite 读 enabled providers 的全部模型 ID，作为 /v1/models 不可靠时的兜底。
+
+    触发场景：CCR 启动时 CDN 刷新 openrouter 模型失败（日志 'CDN refresh failed'
+    ⇒ /v1/models 只暴露静态配置的 ~22 条），但配置里实际有 90 条。本函数按
+    provider 前缀展开（provider-xxx → xxx），把所有 enabled provider 的模型拼成
+    'prefix/model' 形状（与 /v1/models 返回格式一致），供 catalog_ids 降级用。
+
+    ⚠ ID 形状对齐：SQLite 里 provider ID 带短 hash 后缀（如 'alibaba-b600d5a733'），
+    而 /v1/models 返回时 CCR 会去掉后缀（变成 'alibaba'）。这里用正则剥掉，确保
+    fallback 返回的 ID 与网关完全一致，不会造成应用侧 ID 与清单闸门对不上。
+
+    返回 (ids, error)。error 非空时 ids 仍可能非空（部分失败也要用）。
+    """
+    import re as _re
+    # provider ID 形如 'alibaba-b600d5a733'，末尾是 -<8+位hex> 短 hash；
+    # /v1/models 返回时会剥掉这段，变成 'alibaba'。这里同步剥掉，确保 fallback ID 与网关一致。
+    _PROVIDER_SUFFIX_RE = _re.compile(r'^(.*)-[0-9a-f]{8,}$')
+    try:
+        conn = sqlite3.connect(f"file:{_CCR_CONFIG_DB}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT value_json FROM app_config WHERE key='default'").fetchall()
+        conn.close()
+    except Exception as e:  # noqa: BLE001
+        return set(), f"sqlite read failed: {e}"
+    if not rows:
+        return set(), "no default config row"
+    try:
+        cfg = json.loads(rows[0]["value_json"])
+    except json.JSONDecodeError as e:
+        return set(), f"json decode: {e}"
+    ids = set()
+    for p in (cfg.get("Providers") or []):
+        if not p.get("account", {}).get("enabled", False):
+            continue
+        raw_prefix = p.get("id", "").replace("provider-", "")
+        # 去掉末尾 -<8位hex> 后缀，与 /v1/models 的简化前缀对齐
+        vendor = _PROVIDER_SUFFIX_RE.match(raw_prefix)
+        vendor = vendor.group(1) if vendor else raw_prefix
+        for m in (p.get("models") or []):
+            if m:
+                ids.add(f"{vendor}/{m}")
+    if not ids:
+        return set(), "no enabled providers in config"
+    return ids, ""
+
+
 def _fetch_catalog_ids() -> Tuple[set, str]:
-    """真去网关拉一次清单。返回 (ids, error)。抽成独立函数是为了让 L0 用例能打桩
-    —— 单测若真打 :3456，既慢又依赖网关活着（本仓最贵的假绿灯形态）。"""
+    """真去网关拉一次清单。返回 (ids, error)。
+
+    v0.13.190：加 SQLite 兜底。当 /v1/models 返回 0 条或明显少于配置时（CCR CDN
+    刷新失败的那类间歇性故障），自动从 config.sqlite 读 enabled providers 的完整
+    模型清单补全，保证设置页至少能展示可用的候选。
+    """
     try:
         req = urllib.request.Request(
             _ccr_base() + "/v1/models",
             headers={"Authorization": "Bearer " + _ccr_api_key()})
         with urllib.request.urlopen(req, timeout=4) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))
-        return {str(m.get("id")) for m in (data.get("data") or []) if m.get("id")}, ""
+        api_ids = {str(m.get("id")) for m in (data.get("data") or []) if m.get("id")}
+        # 兜底：/v1/models 返回 0 条或明显少于配置时，用 SQLite 补全
+        sqlite_ids, sqlite_err = _fetch_catalog_from_sqlite()
+        if not api_ids:
+            # 网关 0 条：SQLite 有就整份用它，没有才如实报"取不到"
+            if sqlite_ids:
+                return sqlite_ids, (f"gateway returned empty; sqlite fallback "
+                                    f"({len(sqlite_ids)})")
+            return set(), "gateway returned empty" + (f"; {sqlite_err}" if sqlite_err else "")
+        if not sqlite_ids:
+            return api_ids, ""
+        # 命中 80%+ 算正常；否则视为不完整，与 SQLite **取并集**补全。
+        # ⚠ 必须并集而不是替换：网关清单里有 SQLite 配置里没有的条目（实测 2026-11-04
+        # `商汤/*` 7 条来自网关动态配置），替换会让这些模型从设置页下拉里消失。
+        hit_ratio = len(api_ids & sqlite_ids) / len(sqlite_ids) if sqlite_ids else 0
+        if hit_ratio < 0.8:
+            merged = api_ids | sqlite_ids
+            return merged, (f"gateway incomplete ({len(api_ids)}/{len(sqlite_ids)}, "
+                            f"ratio={hit_ratio:.2f}, merged sqlite fallback → {len(merged)})")
+        return api_ids, ""
     except Exception as e:  # noqa: BLE001 —— 取不到只影响判断，不许打断设置页
-        return set(), f"{type(e).__name__}: {str(e)[:120]}"
+        # 异常时退到 SQLite
+        return _fetch_catalog_from_sqlite()
 
 
 def catalog_ids(force: bool = False) -> dict:
@@ -128,7 +204,10 @@ def catalog_ids(force: bool = False) -> dict:
     返回 `{"checked": bool, "ids": set, "size": int, "error": str}`。
     `checked=False` 表示**取不到**（网关挂着/无凭据），调用方必须把"取不到"与
     "清单里没有"分开：前者不能判死，后者才是真问题（与 intake 的 count=0 口径同源）。
-    `HUB_MODEL_CATALOG=off` 可整条关掉（L0 单测用，生产不要关）。"""
+    `HUB_MODEL_CATALOG=off` 可整条关掉（L0 单测用，生产不要关）。
+
+    v0.13.190：命中 SQLite 兜底时 error 会带上 'sqlite fallback' 字样，前端可据此
+    显示提示（如'清单来自配置缓存，网关实时数据暂不可用'）。"""
     if os.getenv("HUB_MODEL_CATALOG", "").lower() in ("0", "off", "false", "no"):
         return {"ts": 0.0, "ids": set(), "checked": False, "size": 0,
                 "error": "disabled by HUB_MODEL_CATALOG"}
@@ -272,9 +351,16 @@ def agent_state(agent_id: str) -> dict:
     # 页面此前只显示 flag 名 `--model`，用户以为会注入 `--model <上面那个 ID>`，
     # 与实际差一层。这里给出**实际命令**，避免"设置页说一套、终端跑另一套"。
     want = hub_model(agent_id)
+    # 清单型落点（codebuddy 的 models.json）：hub 值在册即显示为现值。
+    # 否则页面会出现「文件现值 A／hub 侧 B」并存，而两者其实都已生效（该文件是
+    # 多值目录，A 只是排序第一的条目，不代表当前模型）。
+    cur = st.get("current", "")
+    _ids = st.get("catalog_ids")
+    if _ids is not None and want and want in [str(x) for x in _ids]:
+        cur = want
     return {"id": agent_id, "name": spec["name"], "supported": True,
             "writable": argv_only or (bool(files) and all(Path(f).exists() for f in files)),
-            "current": st.get("current", ""), "provider": st.get("provider", ""),
+            "current": cur, "provider": st.get("provider", ""),
             "extra": st.get("extra", {}), "note": st.get("note", ""),
             "files": files, "argv": MODEL_ARGV.get(agent_id, ""),
             "argv_effective": terminal_argv(agent_id, want) if want else [],

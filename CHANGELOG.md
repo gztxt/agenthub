@@ -1,3 +1,29 @@
+## 未发版 — 设置→模型：假漂移死循环、清单兜底丢模型、计费档分叉（2026-11-04）
+
+> 状态：**代码已落盘 + 全量 3926 passed，待重启生效**。当前唯一活会话就是用户本人
+> 这条（`/api/term/sessions` 标题与本轮任务一致），按「有活会话严禁 restart」停手。
+
+- **① codebuddy 假漂移死循环（线上已复现）**：`models.json` 是**多值清单**，写入按 id
+  upsert、不改顺序；而 `_codebuddy_read` 拿「第一条 CCR 条目」当现值做等值比对 ⇒
+  hub 值一旦不是第一条，漂移永远修不好。实测 11:51–12:41 每 300s 一轮「漂移→已写回」，
+  单日积压 149 份 `.bak`，设置页常驻 ⚠ 且与 hub 值自相矛盾。
+  药：read 透出 `catalog_ids`；`drift_report`/`verify_model` 改为**存在性判据**
+  （hub 值还在清单里 = 一致，被桌面端重写掉 = 真漂移）；`agent_state` 在册时把
+  `current` 显示为 hub 值。
+- **② SQLite 兜底会挤掉网关独有模型**：`/v1/models` 不完整时原实现**整份替换**为
+  config.sqlite 清单，而后者没有 `商汤/*` 7 条（实测 api 89 / sqlite 82 / 交集 82）
+  ⇒ 兜底一触发这些模型从下拉消失、已设值反被判「不在清单」。
+  药：改**并集**（`modelcfg._fetch_catalog_ids` 与 `api_models._merge_catalog` 两侧同改）。
+  顺带修：网关返回 0 条时原代码直接 `return set()`，根本没用上兜底。
+- **③ 兜底清单的计费档自造规则**：`_fallback_catalog` 自己拼
+  `m == "free" or endswith(":free")`，把 `openrouter/openrouter/free` 判成 paid
+  （实测 1 条不一致），会在设置页弹假「付费」确认。药：统一调 `model_billing`。
+- **判据**：`tests/test_api_models_catalog.py`（5 条：并集/去重/空网关/完整网关/计费）
+  + `tests/test_modelcfg.py::NCodebuddyCatalogDrift`（3 条：在册不算漂移、缺条目算漂移
+  且写回补齐、页面现值跟 hub）；`pytest tests/ -q --ignore=tests/e2e` = **3926 passed**。
+- **未做**：`modelcfg._fetch_catalog_from_sqlite` 与 `api_models._fallback_catalog`
+  仍各有一份 sqlite 读取逻辑（输出形状不同）。本次只对齐了计费判定，合并留待裁。
+
 ## 未发版 — 协同页运行详情不再抢焦点，点外部自动收起（2026-11-03）
 
 > 用户报：「点击查看 弹出详细信息 但是页面的鼠标焦点就会总是被抢或者说自动跳到详细信息

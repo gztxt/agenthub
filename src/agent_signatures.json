@@ -26,5 +26,12 @@
     "names": ["goose"],
     "verify_re": "(?i)goose.{0,80}(agent|ai|subcommand|session)",
     "desc": "本地编码 Agent（自动发现，未实测应答）"
+  },
+  {
+    "id": "kimi",
+    "display": "Kimi CLI",
+    "names": ["kimi"],
+    "verify_re": "(?i)(kimi|Starting Point for Next-Gen Agents)",
+    "desc": "Moonshot Kimi 编码 Agent（~/.kimi-code/bin/kimi，实测 2.4.1）"
   }
 ]

@@ -42,6 +42,8 @@ MODEL_ARGV: Dict[str, str] = {
     # `--model alibaba/deepseek-v4.1-flash` 与 `--model custom-local:alibaba/…` 都真回包。
     # 这里注入**裸 id**（与设置页存的形状一致，也与其它 agent 同口径）。
     "codebuddy": "--model",
+    # ── 2026-11-04 新增（kimi-code，`kimi -m <alias>` 入册，实测 `kimi --help`）──
+    "kimi": "--model",
 }
 
 #: 写入模式（2026-10-07，用户裁定「原生 + 插入」）。三类语义不同，设置页必须分开说：
@@ -62,6 +64,8 @@ WRITE_MODE: Dict[str, str] = {
     # ~/.workbuddy/models.json）⇒ 与 "ccr" 同口径，清单闸门（catalog_ids）对它生效：
     # 存了不在 CCR 清单里的 ID ⇒ 注入后上游报 unknown model。
     "codebuddy": "ccr",
+    # ── 2026-11-04 新增（kimi 写 ~/.kimi-code/config.toml，别名前缀 ccr/ = 与 CCR 同源）──
+    "kimi": "ccr",
 }
 
 #: 该 agent 的模型字段要求的**值前缀**（v0.13.86，2026-10-07；2026-10-25 补 omp）。
@@ -76,7 +80,9 @@ WRITE_MODE: Dict[str, str] = {
 #: 正确形状是 `ccr/openrouter/openrouter/free`（provider key = ~/.omp/agent/models.yml
 #: 里的 `ccr`，实测该形状一句话正常返回）。⚠ 前缀跟着 provider key 走，用户若把
 #: models.yml 里的 provider 改名，这里要同步改。
-VALUE_PREFIX: Dict[str, str] = {"opencode": "ccr/", "omp": "ccr/"}
+VALUE_PREFIX: Dict[str, str] = {"opencode": "ccr/", "omp": "ccr/",
+                                 # ── 2026-11-04 新增（kimi 别名形如 ccr/alibaba/...，同 opencode/omp）──
+                                 "kimi": "ccr/",}
 
 #: 该 agent 的**原生模型清单**（v0.13.86）。取证：`qodercli --list-models` 实测输出
 #: （2026-10-07）= Qwen3.8-Max / Qwen3.8-Flash；`~/.qoder/.models/default` 的 key

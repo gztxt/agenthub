@@ -104,7 +104,8 @@ def scan_dirs() -> List[Path]:
         if part:
             raw.append(Path(part))
     raw += [Path.home() / ".local/bin", Path.home() / ".npm-global/bin",
-            Path.home() / "bin", Path.home() / ".bun/bin"]
+            Path.home() / "bin", Path.home() / ".bun/bin",
+            Path.home() / ".kimi-code" / "bin"]
     try:
         import profiles
         raw += [Path(d) for d in profiles.extra_path_dirs()]

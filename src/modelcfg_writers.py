@@ -859,7 +859,14 @@ def _codebuddy_read() -> dict:
     ccr = _ccr_base()
     ccr_ids = [str(m.get("id") or "") for m in entries
                 if str(m.get("id") or "") and ccr in str(m.get("url") or "")]
+    # 2026-11-04：models.json 是**多值清单**，不是单值默认模型字段 —— 「第一条 CCR
+    # 条目」只是展示用的启发值，不代表当前生效模型（桌面端另存 settings.json.model，
+    # hub 拉起终端则靠 --model 注入）。写入是按 id upsert、不改顺序 ⇒ 用 current
+    # 与 hub 值做等值比对会**恒假漂移**，巡检每 300s 写回一次却永远修不好
+    # （实测一天 149 份备份、设置页常驻 ⚠）。故额外透出 catalog_ids，
+    # 漂移判据改为「hub 值是否还在清单里」（见 modelcfg_verify.drift_report）。
     return {"current": ccr_ids[0] if ccr_ids else "",
+            "catalog_ids": ccr_ids,
             "provider": "ccr" if ccr_ids else "",
             "extra": {"entries": len(entries), "ccr_entries": len(ccr_ids)},
             "files": [str(p)],
@@ -948,6 +955,71 @@ def _omp_write(model: str):
     return []
 
 
+# ── kimi (kimi-code CLI, 2026-11-04) ─────────────────────────────────
+# 配置形状（`~/.kimi-code/config.toml` 实测）：
+#   default_model = "ccr/qwen3.8-max"            ← 顶层扁平键
+#   [providers.ccr] base_url/type/api_key
+#   [models."ccr/qwen3.8-max"] provider/model/max_context_size/display_name
+# `kimi -m <alias>` 收的是 **models 段的表头键**（别名），不是裸模型 ID。
+# ⇒ VALUE_PREFIX = "ccr/"，设置页选项值 = `ccr/<CCR裸ID>`，写入时
+#   ① 把 default_model 指向该别名；② 该别名的 [models."..."] 块不存在就补一块
+#      （provider=ccr, model=<去掉 ccr/ 前缀的裸 ID>）。缺块时 kimi 会报未知别名。
+KIMI_CFG = ".kimi-code"
+KIMI_PREFIX = "ccr/"
+KIMI_DEFAULT_CTX = 131072
+
+
+def _kimi_path() -> Path:
+    return _home() / KIMI_CFG / "config.toml"
+
+
+def _kimi_read() -> dict:
+    p = _kimi_path()
+    if not p.exists():
+        return {"current": "", "files": [], "note": "未找到 ~/.kimi-code/config.toml"}
+    text = _read_text(p)
+    try:
+        import tomllib
+        data = tomllib.loads(text)
+    except Exception:  # noqa: BLE001 —— 读坏了只影响展示，不许 500 打断设置页
+        return {"current": "", "files": [str(p)], "note": "config.toml 解析失败"}
+    alias = str(data.get("default_model") or "")
+    if not alias:
+        return {"current": "", "files": [str(p)]}
+    blk = (data.get("models") or {}).get(alias)
+    blk = blk if isinstance(blk, dict) else {}
+    return {"current": alias,
+            "provider": str(blk.get("provider") or ""),
+            "extra": {"model": str(blk.get("model") or ""),
+                      "max_context_size": str(blk.get("max_context_size") or "")},
+            "files": [str(p)]}
+
+
+def _kimi_write(model: str):
+    """写 default_model + 补 [models."<别名>"] 块。别名必须是 ccr/<CCR裸ID> 形状。"""
+    from modelcfg_shape import MODEL_ID_RE  # 惰性：常量单一真相源
+    if not MODEL_ID_RE.match(model or ""):
+        raise ModelCfgError(f"模型 ID 形状非法：{model!r}", 400)
+    p = _kimi_path()
+    if not p.exists():
+        raise ModelCfgError("未找到 ~/.kimi-code/config.toml（kimi 未安装？）", 404)
+    text = _read_text(p)
+    changes: List[dict] = []
+    alias = model if model.startswith(KIMI_PREFIX) else f"{KIMI_PREFIX}{model}"
+    bare = alias[len(KIMI_PREFIX):]
+    sec = f'models."{alias}"'
+    # 已存在的块不覆盖 provider/model，只在缺块时补 —— 用户手调过的值不该被清掉
+    if f'[models."{alias}"]' not in text:
+        for k, v in (("provider", "ccr"), ("model", bare),
+                     ("max_context_size", str(KIMI_DEFAULT_CTX)),
+                     ("display_name", f"CCR {bare}")):
+            text, c = _set_kv(text, k, v, section=sec)
+            changes.append(c)
+    text, c = _set_kv(text, "default_model", alias)
+    changes.append(c)
+    return [(p, text, changes)]
+
+
 #: agent_id -> {name, read, write, argv}
 #: argv_only=True 的条目：writable 语义 = 「hub 侧可设置」（无配置文件可落）。
 SPECS: Dict[str, dict] = {
@@ -965,6 +1037,9 @@ SPECS: Dict[str, dict] = {
     #    agent，应该是自动发现并添加」）──
     "omp": {"name": "oh-my-pi (omp)", "read": _omp_read, "write": _omp_write,
             "argv_only": True},
+    # ── 2026-11-04 新增（用户报障「模型设置页没有 kimi」）──
+    # 落点 ~/.kimi-code/config.toml：default_model + [models."ccr/<id>"] 块。
+    "kimi": {"name": "Kimi CLI", "read": _kimi_read, "write": _kimi_write},
     # ── 2026-11-03 新增（用户报障「嵌入式终端 /model 里看不到 CCR 模型」）──
     # 落点 ~/.workbuddy/models.json（provider 真正读的文件），数组格式。
     "codebuddy": {"name": "CodeBuddy Code", "read": _codebuddy_read,

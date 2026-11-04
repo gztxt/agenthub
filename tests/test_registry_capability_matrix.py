@@ -187,7 +187,8 @@ class TestSpawnEnv(unittest.TestCase):
         import profiles
         fake = [Path("/opt/zz-l0-nvm/bin"), Path("/opt/zz-l0-bun/bin")]
         with mock.patch.object(profiles, "_nvm_bins", return_value=[fake[0]]), \
-             mock.patch.object(profiles, "_bun_bin", return_value=fake[1]):
+             mock.patch.object(profiles, "_bun_bin", return_value=fake[1]), \
+             mock.patch.object(profiles, "_kimi_code_bin", return_value=None):
             extra = profiles.extra_path_dirs()
             env = api_agents._ui_spawn_env()
         self.assertEqual(extra, [str(p) for p in fake],

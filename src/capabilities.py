@@ -118,6 +118,8 @@ UI_DECIDED: Dict[str, Tuple[str, str]] = {
 #: 这就是「新增 agent 别忘了做决定」的机械保证。
 UI_TUI_ONLY = {
     "claude", "omp", "jcode", "codex", "hermes", "grok", "cursor",
+    # ── 2026-11-04 新增（kimi-code：无 Web 原生界面，`kimi web` 需额外安装桌面端）──
+    "kimi",
 }
 
 #: `--help` 里出现这些词 ⇒ 疑似自带 Web 界面（足以让「没有按钮」变成显式缺口）。

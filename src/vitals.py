@@ -191,6 +191,7 @@ def launch_env() -> Dict[str, str]:
     否则会把「hub 其实起不来的 CLI」判成可用（服务进程 PATH 不含 ~/.local/bin 等）。"""
     e = dict(os.environ)
     extra = [str(Path.home() / ".local/bin"), str(Path.home() / ".npm-global/bin"),
+             str(Path.home() / ".kimi-code" / "bin"),
              "/usr/local/bin", "/usr/bin", "/bin"]
     e["PATH"] = ":".join(dict.fromkeys((e.get("PATH") or "").split(":") + extra))
     return e

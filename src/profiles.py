@@ -902,6 +902,9 @@ def extra_path_dirs() -> List[str]:
     bun = _bun_bin()
     if bun:
         dirs.append(str(bun))
+    kimi = _kimi_code_bin()
+    if kimi:
+        dirs.append(str(kimi))
     return dirs
 
 
@@ -923,6 +926,16 @@ def cli_env() -> Dict[str, str]:
     return env
 
 
+def _kimi_code_bin() -> Optional[Path]:
+    """`~/.kimi-code/bin` 存在才返回（Moonshot Kimi CLI，默认 ~/.local/bin 外）。
+
+    与 `_nvm_bins()` / `_bun_bin()` 同构成函数：L0 测试要能 patch 掉它才能钉
+    「没有 kimi 的机器上 PATH 原样」这条不变量。只认 `~/.kimi-code/bin`。
+    """
+    d = Path.home() / ".kimi-code" / "bin"
+    return d if d.is_dir() else None
+
+
 def _bun_bin() -> Optional[Path]:
     """`~/.bun/bin` 存在才返回（2026-10-24：omp 等 bun 系 CLI 的解释器目录）。
 
@@ -940,7 +953,8 @@ def which(name: str) -> Optional[str]:
     if p:
         return p
     for d in (Path.home() / ".local/bin", Path.home() / ".npm-global/bin",
-              Path("/usr/local/bin"), Path.home() / "bin") + tuple(_nvm_bins()):
+              Path("/usr/local/bin"), Path.home() / "bin",
+              Path.home() / ".kimi-code" / "bin") + tuple(_nvm_bins()):
         f = d / name
         if f.is_file() and os.access(f, os.X_OK):
             return str(f)

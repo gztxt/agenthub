@@ -40,12 +40,17 @@ class TestChildEnvPrependsNvm(unittest.TestCase):
         self.bun_patcher = mock.patch.object(profiles, "_bun_bin",
                                              return_value=self.fake_bun)
         self.bun_patcher.start()
+        # 2026-11-04：kimi-code 同构补进，L0 hermetic 不依赖真盘
+        self.kimi_patcher = mock.patch.object(profiles, "_kimi_code_bin",
+                                              return_value=None)
+        self.kimi_patcher.start()
         self._saved_path = os.environ["PATH"]
         os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
     def tearDown(self):
         self.patcher.stop()
         self.bun_patcher.stop()
+        self.kimi_patcher.stop()
         os.environ["PATH"] = self._saved_path
 
     def test_nvm_dirs_come_first(self):
@@ -85,7 +90,8 @@ class TestChildEnvPrependsNvm(unittest.TestCase):
         self.bun_patcher.stop()
         try:
             with mock.patch.object(profiles, "_nvm_bins", return_value=[]), \
-                 mock.patch.object(profiles, "_bun_bin", return_value=None):
+                 mock.patch.object(profiles, "_bun_bin", return_value=None), \
+                 mock.patch.object(profiles, "_kimi_code_bin", return_value=None):
                 env = term.child_env()
             self.assertEqual(env["PATH"], os.environ["PATH"])
             self.assertEqual(env["PATH"].split(os.pathsep)[0], "/usr/local/sbin")
@@ -97,7 +103,8 @@ class TestChildEnvPrependsNvm(unittest.TestCase):
         """无 nvm 有 bun：只前置 bun（不造空串段）—— 反过来钉上条的边界"""
         self.patcher.stop()
         try:
-            with mock.patch.object(profiles, "_nvm_bins", return_value=[]):
+            with mock.patch.object(profiles, "_nvm_bins", return_value=[]), \
+                 mock.patch.object(profiles, "_kimi_code_bin", return_value=None):
                 env = term.child_env()
             self.assertEqual(env["PATH"].split(os.pathsep)[0], str(self.fake_bun))
             self.assertIn("/usr/bin", env["PATH"])

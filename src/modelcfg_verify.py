@@ -100,6 +100,12 @@ def effective_state(agent_id: str) -> dict:
     except ModelCfgError:
         st = {}
     cur = str(st.get("current") or "")
+    # 清单型落点（codebuddy 的 models.json）：hub 值在册即视为现值一致。
+    # 该文件是多值目录、写入不改顺序，拿"第一条 CCR 条目"当现值做等值比对
+    # 会恒假漂移（2026-11-04：巡检每 300s 写回 + 备份，却永远修不好）。
+    _ids = st.get("catalog_ids")
+    if _ids is not None and want and want in [str(x) for x in _ids]:
+        cur = want
     drift = None
     if want and cur and agent_id not in DRIFT_EXEMPT and cur != want:
         drift = {"file": cur, "hub": want}
@@ -234,6 +240,18 @@ def drift_report() -> List[dict]:
         except ModelCfgError as e:
             out.append({"id": aid, "hub_model": want, "current": "",
                         "extra": {}, "files": [], "note": e.args[0]})
+            continue
+        # 清单型落点（codebuddy 的 models.json）：文件是**多值目录**，写入 = 按 id
+        # upsert、不改顺序 ⇒ 拿"第一条"当现值做等值比对会恒假漂移。这里的判据改成
+        # 「hub 值还在不在清单里」：在 = 无一失；被桌面端重写掉 = 真漂移，写回即修复。
+        catalog_ids = st.get("catalog_ids")
+        if catalog_ids is not None:
+            ids = [str(x) for x in (catalog_ids or [])]
+            if want not in ids:
+                out.append({"id": aid, "hub_model": want, "current": "",
+                            "extra": st.get("extra") or {},
+                            "owned": {"catalog": f"清单里没有 {want}"},
+                            "files": st.get("files") or []})
             continue
         owned = {"current": str(st.get("current") or "")}
         for k, v in (st.get("extra") or {}).items():

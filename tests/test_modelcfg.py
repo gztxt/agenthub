@@ -844,6 +844,52 @@ class LQoderDriftExempt(_HomeFixture):
                          "repair 不许把 CCR ID 写进 qoder 的原生字段")
 
 
+class NCodebuddyCatalogDrift(_HomeFixture):
+    """codebuddy 的 models.json 是**多值清单**，漂移判据必须是「条目还在不在」。
+
+    反例（2026-11-04 实测）：写入是按 id upsert、**不改顺序**，而 read 把"第一条
+    指向 CCR 的条目"当现值。两者一撞，等值比对恒假漂移 ⇒ 巡检每 300s 写回一次
+    却永远修不好，一天产生 149 份备份，设置页常驻 ⚠ 且与 hub 值自相矛盾。
+    """
+
+    @staticmethod
+    def _entry(mid: str) -> dict:
+        return {"id": mid, "name": mid,
+                "url": "http://127.0.0.1:3456/v1/chat/completions"}
+
+    def test_hub_model_present_but_not_first_is_not_drift(self):
+        self._write(".workbuddy/models.json", json.dumps([
+            self._entry("alibaba/deepseek-v4.1-flash"),
+            self._entry("商汤/sensenova-6.8-flash"),
+        ]))
+        modelcfg.set_hub_model("codebuddy", "商汤/sensenova-6.8-flash")
+        self.assertEqual([d["id"] for d in modelcfg.drift_report()], [],
+                         "条目在册即一致，哪怕它不是第一条")
+
+    def test_missing_entry_is_real_drift_and_repair_readds(self):
+        self._write(".workbuddy/models.json", json.dumps([
+            self._entry("alibaba/deepseek-v4.1-flash"),
+        ]))
+        modelcfg.set_hub_model("codebuddy", "商汤/sensenova-6.8-flash")
+        self.assertIn("codebuddy", [d["id"] for d in modelcfg.drift_report()],
+                      "条目被桌面端重写掉 = 真漂移")
+        out = modelcfg.repair_drift()
+        self.assertIn("codebuddy", [r["id"] for r in out["repaired"]])
+        ids = [x["id"] for x in json.loads(self._read(".workbuddy/models.json"))]
+        self.assertIn("商汤/sensenova-6.8-flash", ids, "写回必须把条目补回来")
+        self.assertIn("alibaba/deepseek-v4.1-flash", ids, "不许动别人的条目")
+
+    def test_agent_state_current_follows_hub_when_present(self):
+        self._write(".workbuddy/models.json", json.dumps([
+            self._entry("alibaba/deepseek-v4.1-flash"),
+            self._entry("商汤/sensenova-6.8-flash"),
+        ]))
+        modelcfg.set_hub_model("codebuddy", "商汤/sensenova-6.8-flash")
+        a = modelcfg.agent_state("codebuddy")
+        self.assertEqual(a["current"], "商汤/sensenova-6.8-flash",
+                         "页面不许同时显示两个都生效的值")
+
+
 class MAutoDiscovery(_HomeFixture):
     """agent 清单自动发现（2026-10-25 用户令「应该是自动发现并添加」）。
 

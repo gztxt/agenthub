@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -26,6 +27,40 @@ _models_cache: dict = {}
 #: CCR config.sqlite 路径（readonly）
 _CCR_CONFIG_DB = Path.home() / ".claude-code-router" / "config.sqlite"
 
+#: provider ID 的短 hash 后缀（`openrouter-f86c8ca19f` → `openrouter`）
+_PROVIDER_SUFFIX_RE = re.compile(r'^(.*)-[0-9a-f]{8,}$')
+
+
+def _ccr_display_names() -> dict:
+    """从 CCR 配置取 `modelDisplayNames`（CCR `/v1/models` **不返回** display_name）。
+
+    CCR 的显示名只作用于它自己的 UI，网关清单里没有这个字段，所以设置页一直显示裸 ID。
+    这里按「与 `_fallback_catalog` 完全一致」的 provider 前缀规则拼出**客户端 ID**，
+    例如 `{"openrouter/stealth/crouton-alpha": "Crouton Alpha"}`。
+    读不到就是空表（不抛），调用方回落到裸 ID。
+    """
+    try:
+        conn = sqlite3.connect(f"file:{_CCR_CONFIG_DB}?mode=ro", uri=True, timeout=2.0)
+        rows = conn.execute("SELECT value_json FROM app_config WHERE key='default'").fetchall()
+        conn.close()
+        cfg = json.loads(rows[0][0]) if rows else {}
+    except Exception:  # noqa: BLE001 —— 显示名缺失不该让模型清单失败
+        return {}
+    out: dict = {}
+    for p in (cfg.get("Providers") or []):
+        raw = p.get("id", "").replace("provider-", "")
+        m = _PROVIDER_SUFFIX_RE.match(raw)
+        vendor = m.group(1) if m else raw
+        for mid, name in (p.get("modelDisplayNames") or {}).items():
+            if mid and name:
+                out[f"{vendor}/{mid}"] = name
+    return out
+
+
+def _label(mid: str, upstream: Optional[str], names: dict) -> str:
+    """显示名优先级：上游自带 > CCR 配置 > 裸 ID（三者都缺才用 ID）。"""
+    return upstream or names.get(mid) or mid
+
 
 def _fallback_catalog() -> tuple:
     """从 CCR config.sqlite 读 enabled providers 的完整模型 ID 清单（带 provider 前缀）。
@@ -38,8 +73,6 @@ def _fallback_catalog() -> tuple:
     而 /v1/models 返回时 CCR 会去掉后缀（变成 'alibaba'）。这里用正则剥掉，确保
     fallback 返回的 ID 与网关完全一致，不会造成前端 option value 与应用侧写入不匹配。
     """
-    import re as _re
-    _PROVIDER_SUFFIX_RE = _re.compile(r'^(.*)-[0-9a-f]{8,}$')
     try:
         conn = sqlite3.connect(f"file:{_CCR_CONFIG_DB}?mode=ro", uri=True, timeout=2.0)
         conn.row_factory = sqlite3.Row
@@ -55,6 +88,7 @@ def _fallback_catalog() -> tuple:
         return {"models": [], "groups": {}, "count": 0}, f"json: {e}"
     models = []
     groups: dict = {}
+    names = _ccr_display_names()
     for p in (cfg.get("Providers") or []):
         if not p.get("account", {}).get("enabled", False):
             continue
@@ -69,7 +103,8 @@ def _fallback_catalog() -> tuple:
             # `m == "free" or endswith(":free")`，对 `openrouter/openrouter/free`
             # 判成 paid（实测 2026-11-04），会在设置页弹一次假的「付费」确认。
             billing = model_billing(mid)
-            models.append({"id": mid, "name": m, "owner": vendor, "billing": billing})
+            models.append({"id": mid, "name": _label(mid, None, names),
+                           "owner": vendor, "billing": billing})
             groups.setdefault(vendor, []).append(mid)
     if not models:
         return {"models": [], "groups": {}, "count": 0}, "no enabled providers"
@@ -138,6 +173,8 @@ async def list_models(agent_id: Optional[str] = None,
         import asyncio
         import aiohttp as _aio
         out: list = []
+        # CCR 的显示名只在它自己配置里（`/v1/models` 不带），每次取一份传进去
+        _names = await asyncio.to_thread(_ccr_display_names)
         try:
             async with _aio.ClientSession() as s:
                 async with s.get(f"{base}/v1/models",
@@ -146,7 +183,7 @@ async def list_models(agent_id: Optional[str] = None,
                     if r.status == 200:
                         data = await r.json()
                         out = data.get("data") or []
-                        shaped = _shape_models(out, adapter_id)
+                        shaped = _shape_models(out, adapter_id, _names)
                         # 比对 SQLite 配置数：明显偏少 ⇒ 并把 SQLite 条目补进来
                         fb, fb_err = await asyncio.to_thread(_fallback_catalog)
                         if fb.get("count", 0) and shaped.get("count", 0) < fb["count"] * 0.8:
@@ -162,14 +199,14 @@ async def list_models(agent_id: Optional[str] = None,
                         if fb.get("count", 0):
                             return {**fb, "note": f"网关 HTTP {r.status}，已用 config.sqlite 兜底"}
                         # 非 200 也要带 error，否则会被缓存层当成「成功但清单为空」
-                        return {**_shape_models([], adapter_id),
+                        return {**_shape_models([], adapter_id, _names),
                                 "error": "上游返回 HTTP %d" % r.status}
         except Exception as e:  # noqa: BLE001 —— 语义与改前逐字一致：不抛，回 error 键
             fb, _fe = await asyncio.to_thread(_fallback_catalog)
             if fb.get("count", 0):
                 return {**fb, "note": f"网关异常（{str(e)[:80]}），已用 config.sqlite 兜底"}
             return {"models": [], "groups": {}, "error": str(e)[:200]}
-        return _shape_models(out, adapter_id)
+        return _shape_models(out, adapter_id, _names)
 
     try:
         payload, was_cached = await models_cache.cached_models(_bucket, _fetch, force=force)
@@ -178,10 +215,18 @@ async def list_models(agent_id: Optional[str] = None,
     return {**payload, "cached": was_cached}
 
 
+#: 上游定价为 0 但没有 `free`/`:free` 标记的模型（白名单，逐条带取证）
+_KNOWN_FREE = {
+    # 2026-11-05 实测：pricing prompt=0/completion=0，usage.cost=0，
+    # /api/v1/generation total_cost=0、upstream_inference_cost=0（stealth 系列）
+    "openrouter/stealth/crouton-alpha",
+}
+
+
 def model_billing(mid: str) -> str:
     """模型计费档：`"free"` / `"paid"`。**全仓唯一判定点**，前端只读不算。
 
-    判据只有一条：**ID 自带免费标记** ⇒ free，其余一律 paid。
+    判据：**ID 自带免费标记** 或命中已取证的 `_KNOWN_FREE` 白名单 ⇒ free，其余一律 paid。
 
     - `openrouter/openrouter/free`（末段 `free`）⇒ free
     - `openrouter/nvidia/nemotron-3.5-lightning:free`（`:free` 后缀）⇒ free
@@ -194,17 +239,26 @@ def model_billing(mid: str) -> str:
 
     【为什么不在前端按 ID 再判一遍】`AGENTS.md` 断点单源同理：两处规则必然漂。
     前端只渲染 `billing` 字段，缺字段时按 paid 处理（见 01-core-boot.js `modelIsFree`）。
+
+    【例外表 `_KNOWN_FREE`】上游定价确为 0、但 ID 里没有免费标记的模型只能靠白名单。
+    每加一条必须写明取证日期与取法（下面那条的取法是
+    `GET https://openrouter.ai/api/v1/models` 的 `pricing.prompt/completion` 双 0，
+    并用 `GET /api/v1/generation?id=` 反查 `total_cost=0`）。**不许凭印象加。**
     """
     if not mid:
         return "paid"
+    if (mid[4:] if mid.startswith("ccr/") else mid) in _KNOWN_FREE:
+        return "free"
     body = mid.rsplit("/", 1)[-1]
     if body == "free" or body.endswith(":free"):
         return "free"
     return "paid"
 
 
-def _shape_models(out: list, adapter_id: str) -> dict:
+
+def _shape_models(out: list, adapter_id: str, names: Optional[dict] = None) -> dict:
     """把上游的原始 model 列表去重 + 分组（判据与缓存无关，故抽成独立纯函数）。"""
+    names = names or {}
     seen = set()
     groups: dict = {}
     cleaned = []
@@ -213,7 +267,7 @@ def _shape_models(out: list, adapter_id: str) -> dict:
         if not mid or mid in seen:
             continue
         seen.add(mid)
-        cleaned.append({"id": mid, "name": m.get("display_name") or mid,
+        cleaned.append({"id": mid, "name": _label(mid, m.get("display_name"), names),
                         "owner": m.get("owned_by") or "?",
                         "billing": model_billing(mid)})
         # 分组键 = mid 第一段（vendor/）

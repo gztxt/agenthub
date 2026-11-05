@@ -276,13 +276,21 @@ class ShapeModels(unittest.TestCase):
         # 2026-10-21：`_shape_models` 起调用同模块的 `model_billing` 给每项标免费/付费。
         # 必须把它一起 exec 进同一个命名空间 —— 只抠 `_shape_models` 会得到
         # `NameError: model_billing is not defined`（这里红过一次，别再拆开）。
-        want = ("model_billing", "_shape_models")
+        # 2026-11-05：_shape_models 新增 _label 依赖与 Optional 注解，model_billing 新增
+        # _KNOWN_FREE 白名单——抽取时须一并带上，否则空命名空间里 NameError。
+        want = ("model_billing", "_shape_models", "_label")
         fns = [n for n in tree.body
                if isinstance(n, ast.FunctionDef) and n.name in want]
+        assigns = [n for n in tree.body
+                   if isinstance(n, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == "_KNOWN_FREE"
+                           for t in n.targets)]
         self.assertEqual(sorted(n.name for n in fns), sorted(want),
                          "api_models.py 里少了 %s" % (set(want) - {n.name for n in fns},))
-        ns: dict = {}
-        exec(compile(ast.Module(body=fns, type_ignores=[]), "<shape>", "exec"), ns)
+        self.assertEqual(len(assigns), 1, "api_models.py 里 _KNOWN_FREE 赋值缺失")
+        from typing import Optional
+        ns: dict = {"Optional": Optional}
+        exec(compile(ast.Module(body=fns + assigns, type_ignores=[]), "<shape>", "exec"), ns)
         shape = ns["_shape_models"]
         out = [{"id": "a/b", "display_name": "B"}, {"id": "a/b"}, {"id": "c"}]
         r = shape(out, "claude")

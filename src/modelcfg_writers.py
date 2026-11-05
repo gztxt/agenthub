@@ -393,6 +393,54 @@ def _pi_read() -> dict:
             "files": [str(sp), str(mp) if mp.exists() else str(sp)]}
 
 
+def _pi_enabled_merge(text: str, add=(), drop=()) -> Tuple[str, Optional[dict]]:
+    """把 `ccr-free/<id>` 合并进 settings.json 的 `enabledModels`（返回新文本 + 变更）。
+
+    为什么必须做（2026-11-05 用户报障「pi web 设置了模型也没有生效」）：
+    pi 的初始模型解析顺序是 **scopedModels[0] → saved default**
+    （`pi-coding-agent/dist/core/model-resolver.js:393-404`；pi-web 走同一套
+    `.next/server/app/api/models/refresh/route.js` 的 `scopedModels[0]` 兜底）。
+    ⇒ `enabledModels` 非空时，单写 `defaultModel`/`defaultProvider` **不会生效**：
+    新会话仍用白名单里的第一个模型，而设置页显示"已保存"。
+
+    只在白名单**本来非空**时动手：空/缺省 = 不限制（全部可用），此时写
+    defaultModel 天然生效；反过来往里补条目会无端挡掉其它模型。
+    """
+    try:
+        s = json.loads(text)
+    except json.JSONDecodeError:
+        return text, None
+    cur = s.get("enabledModels")
+    if not isinstance(cur, list) or not cur:
+        return text, None
+    drop_set = {str(x) for x in drop or ()}
+    cur_s = [str(x) for x in cur]
+    want = [x for x in cur_s if x not in drop_set]
+    added = []
+    for ref in add or ():
+        ref = str(ref)
+        if ref and ref not in want:
+            want.append(ref)
+            added.append(ref)
+    if want == cur_s:
+        return text, None
+    ch = {"where": "settings.json:enabledModels",
+          "from": f"{len(cur_s)} 条", "to": f"{len(want)} 条", "op": "set"}
+    if added:
+        ch["added"] = added
+    if drop_set:
+        ch["dropped"] = sorted(drop_set & set(cur_s))
+    if not drop_set:
+        # 只追加 ⇒ 逐条定点插入，文件里其它键一个字节都不动
+        new_text = text
+        for ref in added:
+            new_text = jsonspan.append_scalar(new_text, ("enabledModels",), ref)
+        return new_text, ch
+    # 要删条目（CCR 下线）⇒ 无法定点删除，整份重写（JSON 无注释，语义无损）
+    s["enabledModels"] = want
+    return json.dumps(s, ensure_ascii=False, indent=2) + "\n", ch
+
+
 def _pi_write(model: str):
     sp = _home() / ".pi" / "agent" / "settings.json"
     mp = _home() / ".pi" / "agent" / "models.json"
@@ -405,14 +453,19 @@ def _pi_write(model: str):
     if new is not None:
         for (k, v), (_path, old) in zip(pairs, olds):
             changes.append({"where": f"settings.json:{k}", "from": old, "to": v, "op": "set"})
-        out.append((sp, new, changes))
+        stext = new
     else:                                   # 键不全（新装环境）⇒ 老路径补齐
         s = json.loads(text)
         for k, v in pairs:
             old = str(s.get(k) or "")
             s[k] = v
             changes.append({"where": f"settings.json:{k}", "from": old, "to": v, "op": "set"})
-        out.append((sp, json.dumps(s, ensure_ascii=False, indent=2) + "\n", changes))
+        stext = json.dumps(s, ensure_ascii=False, indent=2) + "\n"
+    # 白名单里必须有它，否则 pi 取 scopedModels[0]（见 _pi_enabled_merge 的判据）
+    stext, ch3 = _pi_enabled_merge(stext, add=[f"{PI_CCR_PROVIDER}/{model}"])
+    if ch3:
+        changes.append(ch3)
+    out.append((sp, stext, changes))
     # 模型不在 ccr-free 清单里时补一条：pi 只认清单内的 id（实测 --model 传清单外 id 会报 unknown model）
     if mp.exists():
         mtext = _read_text(mp)
@@ -448,6 +501,120 @@ def _pi_write(model: str):
         if ch2 and not ch2_done:
             out.append((mp, json.dumps(m, ensure_ascii=False, indent=2) + "\n", ch2))
     return out
+
+
+def _pi_sync_models(ids, names=None, contexts=None) -> dict:
+    """CCR 清单 → ~/.pi/agent/models.json 的 ccr-free 目录 + settings 白名单。
+
+    2026-11-05 用户报障「pi web 没有同步更新 ccr 模型」：pi 的自定义 provider
+    是**静态目录**（models.json 的 models 数组），网关侧增删模型不会自己出现；
+    pi-web 的「刷新模型」只刷新内置 provider（`pi-ai/dist/models.js:187` 只挑
+    `refreshModels !== undefined` 的 provider，自定义 provider 没有 fetchModels）
+    ⇒ 刷了也 changed=false，模型列表永远是昨天那份。这里由 hub 定期落笔。
+
+    护栏与 `_dsh_sync_models` 同源：
+      ① 清单取不到/为空 ⇒ 跳过（不把"取不到"当"全部下线"）；
+      ② 条数不到现有的 60% ⇒ 只增不删（网关 CDN 抖动的已知故障面）；
+      ③ 写盘前时间戳备份（_backup），原子写（_atomic_write）；
+      ④ **不动默认模型** —— 那是用户的选择，目录变化不许悄悄换掉它。
+    顺序必须确定（新条目按 id 排序追加），否则每次 set 迭代顺序不同 ⇒ 每轮都判
+    "有变化"、每 10 分钟重写一次文件。
+    """
+    want: List[str] = []
+    for x in ids or ():
+        s = str(x).strip()
+        if s and s not in want:
+            want.append(s)
+    res = {"ok": True, "changed": 0, "files": [], "added": [], "removed": [], "errors": []}
+    if not want:
+        res.update(ok=False, error="CCR 清单为空，跳过（不把'取不到'当成'全部下线'）")
+        return res
+    mp = _home() / ".pi" / "agent" / "models.json"
+    sp = _home() / ".pi" / "agent" / "settings.json"
+    if not mp.exists():
+        res.update(ok=False, error=f"未找到 {mp}")
+        return res
+    try:
+        m = json.loads(_read_text(mp))
+        prov = (m.get("providers") or {}).get(PI_CCR_PROVIDER)
+        if not isinstance(prov, dict):
+            res.update(ok=False, error=f"models.json 无 providers.{PI_CCR_PROVIDER}")
+            return res
+        old = [x for x in (prov.get("models") or []) if isinstance(x, dict)]
+        old_ids = [str(x.get("id") or "") for x in old]
+        old_json = json.dumps(old, ensure_ascii=False, indent=2)   # 改动前快照（下面会就地更新条目）
+        floor = max(1, (len(old_ids) * 3 + 4) // 5)      # ceil(0.6 * n)
+        allow_remove = len(want) >= floor
+        want_set = set(want)
+        keep: List[dict] = []
+        seen = set()
+        for e in old:
+            mid = str(e.get("id") or "")
+            if not mid or mid in seen:
+                continue
+            if mid in want_set:
+                nm = (names or {}).get(mid)
+                ctx = (contexts or {}).get(mid)
+                if nm and e.get("name") != nm:
+                    e["name"] = nm
+                if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0 \
+                        and e.get("contextWindow") != ctx:
+                    e["contextWindow"] = ctx
+                keep.append(e)
+                seen.add(mid)
+            elif not allow_remove:                # 网关回包不全 ⇒ 旧条目留着
+                keep.append(e)
+                seen.add(mid)
+        for mid in sorted(want_set - seen):
+            e = {"id": mid, "name": (names or {}).get(mid) or mid}
+            e.update(_pi_model_specs(mid, m))
+            ctx = (contexts or {}).get(mid)
+            if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0:
+                e["contextWindow"] = ctx          # CCR 元数据优先于本机推断
+            keep.append(e)
+            seen.add(mid)
+        if keep != json.loads(old_json):
+            prov["models"] = keep                  # 整份重写的兜底路径也必须是新目录
+            new_models = json.dumps(keep, ensure_ascii=False, indent=2)
+            mtext = _read_text(mp)
+            try:
+                new_text = mtext.replace(old_json, new_models, 1)
+                if new_text == mtext:
+                    raise ValueError("span not found")
+            except Exception:  # noqa: BLE001 —— 形状不认识就整份重写，宁可多写一次
+                new_text = json.dumps(m, ensure_ascii=False, indent=2) + "\n"
+            _backup(mp, "pi-sync")
+            _atomic_write(mp, new_text)
+            res["changed"] += 1
+            res["files"].append(str(mp))
+            before_ids = set(old_ids)
+            res["added"] = [str(x.get("id")) for x in keep
+                            if str(x.get("id") or "") not in before_ids]
+            res["removed"] = [x for x in old_ids if x and x not in seen]
+        # 白名单同步：CCR 模型要出现在 pi-web 下拉里，且默认模型在册才生效
+        if sp.exists():
+            stext = _read_text(sp)
+            adds = [f"{PI_CCR_PROVIDER}/{x}" for x in sorted(want)]
+            drops = []
+            if allow_remove:
+                try:
+                    _en = json.loads(stext).get("enabledModels") or []
+                except json.JSONDecodeError:
+                    _en = []
+                prefix = PI_CCR_PROVIDER + "/"
+                drops = [str(r) for r in _en if isinstance(r, str)
+                         and r.startswith(prefix) and r[len(prefix):] not in want_set]
+            stext2, ch = _pi_enabled_merge(stext, add=adds, drop=drops)
+            if ch:
+                _backup(sp, "pi-sync")
+                _atomic_write(sp, stext2)
+                res["changed"] += 1
+                res["files"].append(str(sp))
+                res["enabled_added"] = ch.get("added") or []
+                res["enabled_dropped"] = ch.get("dropped") or []
+    except Exception as e:  # noqa: BLE001 —— 单轮失败只记错，下轮重试
+        res.update(ok=False, error=f"{type(e).__name__}: {e}")
+    return res
 
 
 def _grok_read() -> dict:

@@ -67,6 +67,7 @@ from modelcfg_writers import _toml_get  # 兼容旧调用方（测试直接打�
 from modelcfg_writers import *  # noqa: F401,F403
 from modelcfg_writers import _atomic_write, _backup, _home, _now, _read_text  # 私有名
 from modelcfg_writers import _dsh_sync_models  # 私有名：dsh 目录同步
+from modelcfg_writers import _pi_sync_models   # 私有名：pi 目录同步（2026-11-05）
 from modelcfg_verify import *  # noqa: F401,F403
 
 # 放宽字符集等于给引号逃逸与 argv 注入开门。
@@ -343,6 +344,28 @@ def sync_dsh_catalog() -> dict:
                 "error": cat["error"] or "CCR 清单不可用，本轮跳过"}
     out = _dsh_sync_models(cat["ids"], names=cat.get("names") or {},
                            contexts=cat.get("contexts") or {})
+    out["catalog_size"] = cat["size"]
+    return out
+
+
+# ── pi 目录自动同步（2026-11-05 用户报障「pi web 没有同步更新 ccr 模型」）──
+# pi 的 ccr-free provider 是静态目录（models.json），pi-web 的「刷新模型」只刷
+# 内置 provider（自定义 provider 没有 fetchModels ⇒ changed=false 是常态）。
+# 这里按与 dsh 同一套护栏把 CCR 清单落到 models.json + settings.enabledModels：
+# 只增删目录条目与白名单，不动默认模型。
+PI_SYNC_SEC = max(60, int(os.getenv("HUB_PI_SYNC_SEC", "600")))
+
+
+def sync_pi_catalog() -> dict:
+    """供后台循环调用：CCR 清单 → ~/.pi/agent/models.json（ccr-free）+ 白名单。"""
+    if os.getenv("HUB_PI_SYNC", "").lower() in ("0", "off", "false", "no"):
+        return {"ok": False, "skipped": True, "error": "disabled by HUB_PI_SYNC"}
+    cat = catalog_ids()
+    if not cat["checked"]:
+        return {"ok": False, "skipped": True,
+                "error": cat["error"] or "CCR 清单不可用，本轮跳过"}
+    out = _pi_sync_models(cat["ids"], names=cat.get("names") or {},
+                          contexts=cat.get("contexts") or {})
     out["catalog_size"] = cat["size"]
     return out
 

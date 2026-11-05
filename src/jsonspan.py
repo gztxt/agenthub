@@ -307,6 +307,30 @@ def _indent_unit(text: str, container: _Node) -> str:
     return "  "
 
 
+def append_scalar(text: str, path: Tuple[str, ...], value: Any) -> str:
+    """在 `path` 指向的数组末尾追加一个**标量**（只插入，不改任何已有字节）。
+
+    对象数组用 `append_object`；这个给 `enabledModels` 这类字符串白名单用
+    （2026-11-05：pi 的模型白名单必须在设模型时同步追加，整份重写会动到
+    settings.json 里所有其它键）。
+    """
+    arr = _walk(text, path)
+    if arr.kind != "array":
+        raise JsonSpanError(f"{'.'.join(path)} 不是数组")
+    close = arr.end - 1                       # 指向 ']'
+    lit = json.dumps(value, ensure_ascii=False)
+    if "\n" not in text[arr.start:arr.end]:
+        chunk = ", " + lit if arr.members else lit
+        return text[:close] + chunk + text[close:]
+    cind = _line_indent(text, close)
+    unit = _indent_unit(text, arr)
+    eind = cind + unit
+    if not arr.members:
+        return text[:close] + "\n" + eind + lit + "\n" + cind + text[close:]
+    last_end = arr.members[-1][4]
+    return text[:last_end] + ",\n" + eind + lit + text[last_end:]
+
+
 def append_object(text: str, path: Tuple[str, ...], obj: Dict[str, Any]) -> str:
     """在 `path` 指向的数组末尾追加一个对象（只插入，不改任何已有字节）。"""
     arr = _walk(text, path)

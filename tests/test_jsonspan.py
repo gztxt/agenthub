@@ -92,6 +92,19 @@ class CAppendObject(unittest.TestCase):
         self.assertEqual(out.splitlines()[:8], SRC.splitlines()[:8], "已有内容被重排")
         self.assertEqual(J.validate(out)["list"][-1], {"k": 1})
 
+    def test_append_scalar_multiline(self):
+        """enabledModels 这类字符串白名单：只追加一行，别处字节不动。"""
+        src = '{\n  "enabledModels": [\n    "Alibaba/auto"\n  ],\n  "keep": { "a": 1 }\n}\n'
+        out = J.append_scalar(src, ("enabledModels",), "ccr-free/x/y")
+        self.assertEqual(J.validate(out)["enabledModels"],
+                         ["Alibaba/auto", "ccr-free/x/y"])
+        self.assertIn('  "keep": { "a": 1 }', out, "数组外的键被重排了")
+        self.assertEqual(out.splitlines()[:2], src.splitlines()[:2])
+
+    def test_append_scalar_to_empty_array(self):
+        out = J.append_scalar('{\n  "a": []\n}\n', ("a",), "x")
+        self.assertEqual(J.validate(out)["a"], ["x"])
+
     def test_empty_array(self):
         out = J.append_object('{\n  "a": []\n}\n', ("a",), {"k": 1})
         self.assertEqual(J.validate(out)["a"], [{"k": 1}])

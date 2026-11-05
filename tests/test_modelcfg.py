@@ -305,6 +305,26 @@ class CApplyWritesWithBackup(_HomeFixture):
         self.assertIn("new/model-z", ids, "pi 只认清单内的模型 id，缺了必须补")
         self.assertIn("old/model-b", ids, "原有清单不许被覆盖")
 
+    def test_pi_write_registers_model_in_enabled_models(self):
+        """白名单非空时 pi 先取 scopedModels[0]（model-resolver.js:393）⇒ 只写
+        defaultModel 不生效，设置页却显示已保存。设模型必须同时进白名单。"""
+        self._write(".pi/agent/settings.json", json.dumps(
+            {"defaultProvider": "ccr-free", "defaultModel": "old/model-a",
+             "enabledModels": ["Alibaba/auto"]}))
+        modelcfg.apply_model("pi", "new/model-z")
+        s = json.loads(self._read(".pi/agent/settings.json"))
+        self.assertEqual(s["defaultModel"], "new/model-z")
+        self.assertEqual(s["enabledModels"], ["Alibaba/auto", "ccr-free/new/model-z"])
+        self.assertEqual(s["enabledModels"][0], "Alibaba/auto", "原有条目顺序不许被动")
+
+    def test_pi_write_leaves_empty_whitelist_alone(self):
+        """enabledModels 为空/缺省 = 不限制，此时补条目会无端挡掉其它模型。"""
+        self._write(".pi/agent/settings.json", json.dumps(
+            {"defaultProvider": "ccr-free", "defaultModel": "old/model-a"}))
+        modelcfg.apply_model("pi", "new/model-z")
+        s = json.loads(self._read(".pi/agent/settings.json"))
+        self.assertNotIn("enabledModels", s)
+
     def test_pi_new_entry_inherits_ctx_window(self):
         """新增条目必须带上已有声明：缺 contextWindow 会被 pi 兜底成 128000
         （pi-web 回显 128k，压缩阈值也跟着错，见 agent-knowledge/165）。"""
@@ -389,6 +409,69 @@ class CApplyWritesWithBackup(_HomeFixture):
                 self.assertFalse(p["files"][0]["writable"])
             finally:
                 os.chmod(path, 0o644)
+
+
+class PpiCatalogSync(_HomeFixture):
+    """CCR 清单 → pi 静态目录 + 白名单（2026-11-05「pi web 没有同步更新 CCR 模型」）。
+
+    为什么这些判据是硬的：pi 的自定义 provider 没有 fetchModels
+    （`pi-ai/dist/models.js:187` 只挑有它的 provider）⇒ pi-web 的「刷新模型」对
+    ccr-free 恒 changed=false，目录只能由 hub 落笔；而 enabledModels 非空时
+    pi 又先取 scopedModels[0]（`model-resolver.js:393`）⇒ 白名单不同步，
+    defaultModel 就是一句不生效的文案。
+    """
+
+    def test_syncs_catalog_and_whitelist(self):
+        self._write(".pi/agent/settings.json", json.dumps(
+            {"defaultProvider": "ccr-free", "defaultModel": "old/model-a",
+             "enabledModels": ["Alibaba/auto", "ccr-free/gone/model-x"]}))
+        r = modelcfg._pi_sync_models(
+            ["new/model-z"], names={"new/model-z": "New Z"},
+            contexts={"new/model-z": 1000000})
+        self.assertTrue(r["ok"], r)
+        self.assertIn("new/model-z", r["added"])
+        self.assertIn("old/model-b", r["removed"], "在册清单外的旧条目要下线")
+        m = json.loads(self._read(".pi/agent/models.json"))
+        ids = [x["id"] for x in m["providers"]["ccr-free"]["models"]]
+        self.assertEqual(ids, ["new/model-z"], "目录必须收敛到 CCR 清单（保留原顺序）")
+        ent = m["providers"]["ccr-free"]["models"][0]
+        self.assertEqual(ent["name"], "New Z")
+        self.assertEqual(ent["contextWindow"], 1000000, "CCR 元数据优先")
+        s = json.loads(self._read(".pi/agent/settings.json"))
+        self.assertEqual(s["defaultModel"], "old/model-a", "目录同步不许动用户默认模型")
+        self.assertIn("ccr-free/new/model-z", s["enabledModels"], "CCR 模型必须进白名单")
+        self.assertIn("Alibaba/auto", s["enabledModels"], "别人家的白名单条目不许被删")
+        self.assertNotIn("ccr-free/gone/model-x", s["enabledModels"], "下线条目要清出白名单")
+
+    def test_sync_is_idempotent(self):
+        modelcfg._pi_sync_models(["old/model-b", "new/model-z"])
+        before_m = self._read(".pi/agent/models.json")
+        before_s = self._read(".pi/agent/settings.json")
+        r = modelcfg._pi_sync_models(["new/model-z", "old/model-b"])
+        self.assertEqual(r["changed"], 0, "同样的清单再跑一次不许写盘（否则每轮重写文件）")
+        self.assertEqual(self._read(".pi/agent/models.json"), before_m)
+        self.assertEqual(self._read(".pi/agent/settings.json"), before_s)
+
+    def test_sync_keeps_old_entries_when_catalog_shrinks(self):
+        """网关 CDN 抖动时 /v1/models 会只回一部分（已知故障面）⇒ 只增不删。"""
+        models = [{"id": f"vendor/m{i}"} for i in range(10)]
+        self._write(".pi/agent/models.json", json.dumps(
+            {"providers": {"ccr-free": {"api": "openai-completions",
+                                        "baseUrl": "http://127.0.0.1:3456/v1",
+                                        "apiKey": "k-fixture", "models": models}}}))
+        r = modelcfg._pi_sync_models(["vendor/m0", "brand/new"])
+        self.assertTrue(r["ok"], r)
+        ids = [x["id"] for x in json.loads(self._read(".pi/agent/models.json"))
+               ["providers"]["ccr-free"]["models"]]
+        self.assertEqual(len(ids), 11, "清单只剩 2/10 时不许删旧条目")
+        self.assertIn("brand/new", ids)
+
+    def test_sync_skips_empty_catalog(self):
+        before = self._read(".pi/agent/models.json")
+        r = modelcfg._pi_sync_models([])
+        self.assertFalse(r["ok"])
+        self.assertTrue(r.get("skipped") or "为空" in (r.get("error") or ""))
+        self.assertEqual(self._read(".pi/agent/models.json"), before, "取不到清单时一个字都不许改")
 
 
 class DTerminalArgvWhitelist(unittest.TestCase):

@@ -221,7 +221,7 @@ class TestStatusHonesty(unittest.TestCase):
         self.assertEqual(st["frames"], 1)
         self.assertIn("at_limit", st)
         self.assertNotIn("capped", st)          # 推断不许用真值的名字
-        self.assertEqual(st["limits"]["retention_days"], 7)
+        self.assertEqual(st["limits"]["retention_days"], 30)  # 2026-11-05 用户裁定 7→30 天
         self.assertEqual(st["limits"]["max_session"], 32 * 1024 * 1024)
         self.assertEqual(st["limits"]["max_total"], 512 * 1024 * 1024)
 

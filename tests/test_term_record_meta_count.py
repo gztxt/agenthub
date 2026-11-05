@@ -201,7 +201,7 @@ class TestMetaCount(unittest.TestCase):
             r.feed("out", b"z" * 500)
         self.assertEqual(term_record.total_bytes(), 10000)
         db.execute("UPDATE term_recordings SET ts=? WHERE session_id='sC'",
-                   (time.time() - 8 * 86400,))
+                   (time.time() - 31 * 86400,))  # 保留期 30 天（2026-11-05 裁定），过期须 >30 天
         term_record.sweep()
         self.assertEqual(term_record.total_bytes(), _truth(),
                          "sweep 后计数与真值不符")

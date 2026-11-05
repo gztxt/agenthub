@@ -18,6 +18,7 @@ from . import sessions as _sessions  # noqa: F401 P1
 from . import docs as _docs  # noqa: F401 P1
 from . import memory as _memory  # noqa: F401 P1
 from . import logs as _logs  # noqa: F401 P1
+from . import tasks as _tasks  # noqa: F401 P2（2026-11-05 补 task 域）
 from ..adapter import REGISTRY  # noqa: F401
 
 __all__ = ["REGISTRY"]

@@ -908,6 +908,41 @@ async def health():
     # 取不到清单时报 unknown（`checked:false`），不判死 —— 与 intake 的 count=0 口径同源。
     # 覆盖 9 类 16 处写死模型，明细见 src/modelgate.py 模块头。
     out["model_gate"] = modelgate.status(catalog=out["ccr_gateway"].get("models") or [])
+    # catalog 源延迟（2026-11-05 P2）：只读 catalog.db 的 src.last_ok_at，报 max lag + 最慢源。
+    # 为什么必须有：2026-11-05 实测 docs lag 13.3h 而 /health 全绿——「静默不可用」家族又一例。
+    # 纯读、不改 status（源延迟 ≠ hub 坏了），异常不得把 /health 打挂；取不到一律 null。
+    try:
+        import sqlite3 as _sq
+        from datetime import datetime as _dt, timezone as _tz
+        from pathlib import Path as _P
+        _cp = _P(__file__).resolve().parents[1] / "data" / "catalog.db"
+        _con = _sq.connect(f"file:{_cp}?mode=ro", uri=True, timeout=2)
+        # adapter='migrate' 是 schedule.MANUAL_ADAPTERS 的一次性迁移快照（memindex.fed_proj），
+        # 无周期入口、last_ok_at 冻结在迁移日——计入只会常态假告警，与调度口径同源排除。
+        _rows = _con.execute(
+            "SELECT src_id,last_ok_at FROM src WHERE enabled=1 AND (adapter IS NULL OR adapter != 'migrate')"
+        ).fetchall()
+        _con.close()
+        _now = _dt.now(_tz.utc)
+        _max = None; _worst = None
+        for _sid, _ts in _rows:
+            if not _ts:
+                continue
+            try:
+                _t = _dt.fromisoformat(str(_ts).replace("Z", "+00:00"))
+                if _t.tzinfo is None:
+                    _t = _t.replace(tzinfo=_tz.utc)
+                _lag = (_now - _t).total_seconds()
+            except (ValueError, TypeError):
+                continue
+            if _max is None or _lag > _max:
+                _max = _lag; _worst = _sid
+        out["catalog_lag_s"] = int(_max) if _max is not None else None
+        out["catalog_worst_src"] = _worst
+    except Exception as e:  # noqa: BLE001 — 自证端点不许被情报字段打挂
+        out["catalog_lag_s"] = None
+        out["catalog_worst_src"] = None
+        out["catalog_lag_error"] = "%s: %s" % (type(e).__name__, str(e)[:120])
     # 出站熔断器状态（PT-20260927-12 A 档）：只列**开着的**闸 + 冷却剩余秒。
     # 为什么必须有：熔断一开，那些调用点会在**毫秒内**返回（不发网络）。
     # 没有这个字段，用户看到的是「GitHub 项目页空了」而没有任何原因字段——

@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_MAX_SESSION = 32 * 1024 * 1024
 DEFAULT_MAX_TOTAL = 512 * 1024 * 1024
-DEFAULT_RETENTION_DAYS = 7
+DEFAULT_RETENTION_DAYS = 30  # 2026-11-05 用户裁定：7→30 天
 
 _TRUE = {"1", "true", "yes", "on"}
 

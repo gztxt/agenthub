@@ -18,18 +18,17 @@ class MemoryAdapter(BaseAdapter):
     authority = 1  # 归档记忆在本库即权威
     adapter = "memory_archive"
     scan_mode = "incremental"
-    uri = "table://memories WHERE layer='ARCH'"
+    uri = "table://memories WHERE layer IN ('L1','ARCH') AND status='active'"  # 2026-11-05 用户裁定扩口径
 
     def probe(self) -> Dict[str, Any]:
         try:
             import db
-            # 确保 db 已初始化（使用 memindex.db 路径）
+            # 确保 db 已初始化（2026-11-05 修正：memories 表在 agents.db，不在 memindex.db）
             from pathlib import Path
             data_dir = Path(__file__).resolve().parents[3] / "data"
-            db.init_db(data_dir / "memindex.db")
+            db.init_db(data_dir / "agents.db")
             result = db.query(
-                "SELECT COUNT(*) AS n FROM memories WHERE layer=? AND status='active'",
-                ("ARCH",),
+                "SELECT COUNT(*) AS n FROM memories WHERE layer IN ('L1','ARCH') AND status='active'",
             )
             n = (result or [{"n": 0}])[0]["n"]
             return {"ok": True, "reason": None, "error": None, "count": n}
@@ -51,9 +50,8 @@ class MemoryAdapter(BaseAdapter):
 
         try:
             rows = db.query(
-                "SELECT id, category, content, source, session_id, created_at, updated_at"
-                " FROM memories WHERE layer=? AND status='active' ORDER BY id DESC",
-                ("ARCH",),
+                "SELECT id, layer, category, content, source, session_id, created_at, updated_at"
+                " FROM memories WHERE layer IN ('L1','ARCH') AND status='active' ORDER BY id DESC",
             )
         except Exception as e:
             return {
@@ -106,7 +104,7 @@ class MemoryAdapter(BaseAdapter):
                     "category": category,
                     "source": source,
                     "session_id": row.get("session_id"),
-                    "layer": "ARCH",
+                    "layer": row.get("layer") or "ARCH",
                 },
                 "meta": {"source": "memory_archive",
                          "mem_id": mem_id},

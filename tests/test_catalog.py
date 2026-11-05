@@ -416,10 +416,10 @@ class TestAdapters(CatalogCase):
             agents_adapter._discovered(db)
 
     def test_registry_has_p0_and_p1_sources(self):
-        """P0+P1 全部适配器注册检查。"""
+        """P0+P1 全部适配器注册检查（2026-11-05 新增 P2 tasks.local）。"""
         expected = {"agents.registry", "projects.local", "skills.disk",
                     "sessions.archived", "docs.filesystem",
-                    "memory.archive", "logs.hub"}
+                    "memory.archive", "logs.hub", "tasks.local"}
         self.assertEqual(expected, set(adapters.REGISTRY))
 
 

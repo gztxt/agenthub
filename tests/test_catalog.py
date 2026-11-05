@@ -256,6 +256,41 @@ class TestQuery(CatalogCase):
         self.assertEqual(2, query.query(con, "数据", k=3)["count"])
         self.assertEqual(3, query.query(con, "数据", domains="skill", k=3)["count"])
 
+    def test_windowed_ranking_equals_naive_full_join(self):
+        """窗口化只截前缀，不改排序：与「全量 JOIN + ORDER BY bm25」逐位一致。
+
+        插入 80 条造出 >60 候选（默认窗口 = k*3*4 = 120 只够一个窗口时也要能对上），
+        直接比 `_fts_rank` 的 oid 序列，绕开 `_finalize` 的加权重排。
+        """
+        for i in range(80):
+            self.add(native_key="k%02d" % i, hash_="h%02d" % i,
+                     chunks=["统一数据存储 " * (i % 7 + 1)])
+        con = self.readonly()
+        self.addCleanup(con.close)
+        match = '"统一数据存储"'
+        naive = [r[0] for r in con.execute(
+            "SELECT c.oid FROM chunk_fts f JOIN chunk c ON c.cid=f.rowid "
+            "JOIN obj o ON o.oid=c.oid JOIN src s ON s.src_id=o.src_id "
+            "WHERE chunk_fts MATCH ? AND o.status!='missing' "
+            "ORDER BY bm25(chunk_fts) LIMIT ?", (match, 30))]
+        got = query._fts_rank(con, "chunk_fts", match, [], [], 0, 30, ["统一数据存储"])
+        self.assertTrue(got["meta"]["ok"])
+        self.assertTrue(naive)
+        self.assertEqual(naive, [it["oid"] for it in got["items"]])
+
+    def test_capped_window_is_reported_as_degraded(self):
+        """窗口被过滤筛空且已到上限 ⇒ `capped` + degraded，不许静默少收。"""
+        self.add(native_key="hit", chunks=["统一数据存储 " * 5])
+        self.add(native_key="other", domain="doc", type="doc",
+                 chunks=["统一数据存储"])
+        con = self.readonly()
+        self.addCleanup(con.close)
+        with mock.patch.object(query, "_SCAN_WINDOWS", (1,)), \
+                mock.patch.object(query, "_MAX_SCAN", 1):
+            result = query.query(con, "统一数据存储", domains="doc", k=1)
+        self.assertIn("capped", str(result["degraded"]))
+        self.assertEqual(["other"], [x["native_key"] for x in result["items"]])
+
     def test_title_fallback_is_case_insensitive(self):
         self.add(native_key="cb", title="CodeBuddy", chunks=["无关正文"])
         con = self.readonly()

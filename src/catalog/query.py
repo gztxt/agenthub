@@ -32,6 +32,13 @@ RRF_K = 60
 #: 时效半衰期（天）
 RECENCY_HALFLIFE_D = 180
 
+#: 候选窗口倍数：先在 FTS 内按 bm25 排序取前缀，再 JOIN 元数据。
+#: 实测 `catalog` 有 6,658 个 trigram 候选：旧实现带 4 表 JOIN 排序 844ms(冷)/44ms(热)，
+#: 只取前缀再 JOIN 为 6ms。倍数递增是为了「过滤条件把窗口筛空」时不至于少收。
+_SCAN_WINDOWS = (4, 16, 64)
+#: 窗口上限。到达上限仍凑不满结果 ⇒ meta.capped=True 并进 degraded（不静默少收）。
+_MAX_SCAN = 5000
+
 _TOK_SPLIT = re.compile(r"[\s,，;；]+")
 
 
@@ -87,19 +94,23 @@ def query(con: sqlite3.Connection, q: str, domains: str = "", types: str = "",
     if use_tri:
         routing.append("chunk_fts")
         r = _fts_rank(con, "chunk_fts", " AND ".join(_phrase(t) for t in tri),
-                      want_domains, want_types, since, lim * 3)
+                      want_domains, want_types, since, lim * 3, toks)
         backends.append({"name": "catalog.chunk_fts", **r["meta"]})
         _merge(merged, r["items"], "fts")
         if not r["meta"]["ok"]:
             degraded.append("chunk_fts:%s" % r["meta"]["error"])
+        elif r["meta"].get("capped"):
+            degraded.append("chunk_fts:capped_%d" % r["meta"]["scanned"])
     if use_uni:
         routing.append("chunk_ftsu")
         r = _fts_rank(con, "chunk_ftsu", " AND ".join(uni),
-                      want_domains, want_types, since, lim * 3)
+                      want_domains, want_types, since, lim * 3, toks)
         backends.append({"name": "catalog.chunk_ftsu", **r["meta"]})
         _merge(merged, r["items"], "ftsu")
         if not r["meta"]["ok"]:
             degraded.append("chunk_ftsu:%s" % r["meta"]["error"])
+        elif r["meta"].get("capped"):
+            degraded.append("chunk_ftsu:capped_%d" % r["meta"]["scanned"])
 
     if not merged:
         # 标题兜底：短查询至少能在 title/uri 上 LIKE（全表小，13k 级可接受）
@@ -119,33 +130,44 @@ def query(con: sqlite3.Connection, q: str, domains: str = "", types: str = "",
 
 def _fts_rank(con: sqlite3.Connection, fts: str, match: str,
               want_domains: List[str], want_types: List[str], since: int,
-              limit: int) -> Dict[str, Any]:
-    """跑一张 FTS，按 bm25 取 top-N，返回 [{oid, cid, text, bm25}] + meta。"""
+              limit: int, toks: Sequence[str]) -> Dict[str, Any]:
+    """跑一张 FTS，按 bm25 取 top-N，返回 [{oid, cid, text, bm25, snippet}] + meta。
+
+    **窗口化**：`bm25()` 仍在 FTS 索引内算完整排名，但只取排名前缀，再 JOIN 元数据。
+    旧实现把 4 表 JOIN 塞进 `ORDER BY bm25()` ⇒ 候选有多少就 JOIN 多少：实测 `catalog`
+    （trigram 6,658 候选）热 44ms，且规划器会反向从 `obj_domain_mtime` 驱动（带域名过滤时
+    扫全部 33k 文档、190ms）。先取前缀后，同一查询 21~23ms，小候选查询 1.8ms。
+
+    排序不变；前缀被过滤条件筛空时才放大窗口，放到 `_MAX_SCAN` 仍不够就标 `capped`
+    并进 `degraded`——**不许静默少收**。
+    """
+    t0 = time.monotonic()
+    frag, fargs = _filter_sql(want_domains, want_types, since)
     sql = ("SELECT c.oid AS oid, c.cid AS cid, c.text AS text, "
            "o.title AS title, o.uri AS uri, o.mtime AS mtime, "
            "o.domain AS domain, o.type AS type, o.summary AS summary, "
            "o.native_key AS native_key, o.src_id AS src_id, "
-           "s.authority AS authority, "
-           "bm25(%s) AS bm FROM %s f "
-           "JOIN chunk c ON c.cid = f.rowid "
-           "JOIN obj o ON o.oid = c.oid JOIN src s ON s.src_id = o.src_id "
-           "WHERE %s MATCH ? AND c.oid = o.oid " % (fts, fts, fts))
-    args: List[Any] = [match]
-    if want_domains:
-        sql += "AND o.domain IN (%s) " % ",".join("?" * len(want_domains))
-        args += want_domains
-    if want_types:
-        sql += "AND o.type IN (%s) " % ",".join("?" * len(want_types))
-        args += want_types
-    if since:
-        sql += "AND o.mtime >= ? "
-        args.append(int(since))
-    sql += "AND o.status != 'missing' ORDER BY bm LIMIT ?"
-    args.append(limit)
-    t0 = time.monotonic()
+           "s.authority AS authority, f.bm AS bm FROM ("
+           "SELECT rowid AS cid, bm25(%(f)s) AS bm FROM %(f)s "
+           "WHERE %(f)s MATCH ? ORDER BY bm LIMIT ?) f "
+           "JOIN chunk c ON c.cid = f.cid JOIN obj o ON o.oid = c.oid "
+           "JOIN src s ON s.src_id = o.src_id "
+           "WHERE o.status != 'missing' %(frag)s "
+           "ORDER BY f.bm LIMIT ?" % {"f": fts, "frag": frag})
+    scanned, capped, rows = 0, False, []
     try:
-        rows = con.execute(sql, args).fetchall()
-        ok, err = True, None
+        for mult in _SCAN_WINDOWS:
+            window = min(_MAX_SCAN, max(limit, limit * mult))
+            rows = con.execute(sql, [match, window] + fargs + [limit]).fetchall()
+            scanned = window
+            if len(rows) >= limit:
+                break
+            more = con.execute(
+                "SELECT 1 FROM %s WHERE %s MATCH ? LIMIT 1 OFFSET ?"
+                % (fts, fts), (match, window)).fetchone() is not None
+            if not more:          # 候选已取尽，再放大也没有新行
+                break
+            capped = window >= _MAX_SCAN
     except sqlite3.Error as e:
         return {"items": [], "meta": {"ok": False, "hits": 0, "ms": 0.0,
                                       "error": "%s: %s" % (type(e).__name__, e)}}
@@ -157,23 +179,54 @@ def _fts_rank(con: sqlite3.Connection, fts: str, match: str,
             "domain": r["domain"], "type": r["type"],
             "summary": r["summary"], "native_key": r["native_key"],
             "src_id": r["src_id"], "authority": r["authority"],
-            "bm25": r["bm"], "snippet": _snippet(con, fts, r["cid"]),
+            "bm25": r["bm"], "snippet": _snippet(r["text"], toks),
         })
     return {"items": items,
-            "meta": {"ok": ok, "hits": len(items),
+            "meta": {"ok": True, "hits": len(items), "scanned": scanned,
+                     "capped": capped,
                      "ms": round((time.monotonic() - t0) * 1000, 1),
-                     "error": err}}
+                     "error": None}}
 
 
-def _snippet(con: sqlite3.Connection, fts: str, cid: int) -> str:
-    """取命中窗口；失败回退空串（snippet 不许把结果变没）。"""
-    try:
-        row = con.execute(
-            "SELECT snippet(%s, 0, '[', ']', '…', 24) FROM %s WHERE rowid=?"
-            % (fts, fts), (cid,)).fetchone()
-        return (row[0] if row else "")[:400]
-    except sqlite3.Error:
+def _filter_sql(want_domains: List[str], want_types: List[str],
+                since: int) -> Tuple[str, List[Any]]:
+    """过滤条件片段（obj 侧别名固定为 o）。"""
+    sql, args = "", []
+    if want_domains:
+        sql += "AND o.domain IN (%s) " % ",".join("?" * len(want_domains))
+        args += want_domains
+    if want_types:
+        sql += "AND o.type IN (%s) " % ",".join("?" * len(want_types))
+        args += want_types
+    if since:
+        sql += "AND o.mtime >= ? "
+        args.append(int(since))
+    return sql, args
+
+
+def _snippet(text: str, toks: Sequence[str], width: int = 120) -> str:
+    """命中窗口：取**首次出现**的词元位置切前后各 width 字。
+
+    不用 FTS5 的 `snippet()`：它对 30 条要 10ms（比检索本身还贵），且只用于展示，
+    不参与排序。这里用已经取回的 `chunk.text`，零额外查询。
+    """
+    t = (text or "").strip()
+    if not t:
         return ""
+    low = t.lower()
+    pos, hit = -1, ""
+    for tok in toks:
+        if not tok:
+            continue
+        i = low.find(tok.lower())
+        if i >= 0 and (pos < 0 or i < pos):
+            pos, hit = i, tok
+    if pos < 0:
+        return t[:width * 2]
+    a, b = max(0, pos - width), min(len(t), pos + len(hit) + width)
+    head = "…" if a > 0 else ""
+    tail = "…" if b < len(t) else ""
+    return head + t[a:pos] + "[" + t[pos:pos + len(hit)] + "]" + t[pos + len(hit):b] + tail
 
 
 def _title_like(con: sqlite3.Connection, q: str, want_domains: List[str],

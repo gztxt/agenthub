@@ -343,8 +343,9 @@ def assess(task: str, res: Dict[str, Any]) -> Dict[str, Any]:
     ref_state = ("skipped" if res.get("deep_reason") == "off"
                  else "hit" if rf.get("ok") else "down")
     route_state = {
-        "memory": "hit" if m.get("count") else ("down" if not m.get("ok") else "zero"),
-        "kb": "hit" if k.get("count") else ("down" if not k.get("ok") else "zero"),
+        # `down` 先于 `hit` 判：编目兜底会在主路挂掉时仍带 items，不能因此把故障洗白。
+        "memory": "down" if not m.get("ok") else ("hit" if m.get("count") else "zero"),
+        "kb": "down" if not k.get("ok") else ("hit" if k.get("count") else "zero"),
         "skill": "hit" if s.get("ok") else ("down" if s.get("error") else "zero"),
         "ref": ref_state,
     }
@@ -509,6 +510,92 @@ def _kb(task: str, routes: str, k: int = 8) -> Dict[str, Any]:
                       "score": r.get("score")})
     return {"ok": True, "count": int(d.get("count") or 0), "items": items,
             "degraded": d.get("degraded") or [], "took_ms": d.get("took_ms")}
+
+
+#: 统一编目兜底（PT-20261105-01）：**只在主路 0 命中/不可用时补位**。
+#: 主路正常时一次都不查 ⇒ 日常路径零额外延迟；只有查空那次多花 ~5ms。
+#:
+#: 分域取舍：编目库的 `memory` 域为空（TDAI 容器里的记忆没有并进来），所以记忆路补
+#: 归档会话 `session`；知识库补 `doc,skill`（wiki/agent-knowledge/技能正文都在里面）。
+#: 补来的条目照样过 `_flatten` 的相关性打分（cov/rel），不会凭空把 thin 顶成 ready。
+CATALOG_FALLBACK_DOMAINS = {"memory": "session", "kb": "doc,skill"}
+
+
+def _to_path(uri: str) -> str:
+    """`file:///a/b` → `/a/b`（其余 scheme 原样保留，别把 table:// 当路径用）。"""
+    u = uri or ""
+    if u.startswith("file://"):
+        return urllib.parse.unquote(u[7:])
+    return u
+
+
+def _catalog(task: str, route: str, limit: int = 5) -> Dict[str, Any]:
+    """查统一编目库（走本进程 REST `/api/catalog/query`，失败不抛）。
+
+    **检索词要压短**：编目 FTS 对多词元是 AND 语义，原句直接送进去几乎恒 0 命中
+    （实测「统一编目 检索 延迟 是否更快」5 个词元 ⇒ 0 条）。先试 `_keywords` 压出的
+    3 个词，仍 0 再退到**首个关键词**单词查询——两步封顶，不扫全表。
+    """
+    domains = CATALOG_FALLBACK_DOMAINS[route]
+    kws = [w for w in _keywords(task, 3).split() if w]
+    attempts = [" ".join(kws), kws[0]] if kws else [task]
+    seen: List[str] = []
+    for q in attempts:
+        if not q or q in seen:
+            continue
+        seen.append(q)
+        d = _self_get("/api/catalog/query", q=q, domains=domains, k=limit)
+        items = d.get("items")
+        # 形状校验：`_self_get` 在测试里常被整体打桩成 kb 形状，没有 `items` 就当不可用，
+        # 免得兜底路径把别的路的数据当成编目结果（也保证单测不碰生产库）。
+        if "error" in d or not d.get("ok") or not isinstance(items, list):
+            return {"ok": False, "count": 0, "items": [],
+                    "error": d.get("error") or d.get("degraded") or "编目接口不可用"}
+        if not items:
+            continue
+        out = []
+        for it in items[:limit]:
+            body = (it.get("snippet") or it.get("title") or "").strip()
+            row = {"category": it.get("domain"), "content": body,
+                   "source": "catalog:" + (it.get("domain") or "?"),
+                   "title": it.get("title") or "", "score": it.get("score")}
+            if route == "memory":
+                row["layer"] = "catalog"      # 记忆段按 layer 展示，保持形状一致
+            else:
+                row["path"] = _to_path(it.get("uri"))
+                row["content_clean"] = _body(body)
+            out.append(row)
+        return {"ok": True, "count": len(out), "items": out,
+                "via": "catalog:" + domains, "query": q, "took_ms": d.get("ms"),
+                "degraded": [d["degraded"]] if d.get("degraded") else []}
+    return {"ok": True, "count": 0, "items": [], "via": "catalog:" + domains,
+            "degraded": ["编目兜底 0 命中（已试 %d 组检索词）" % len(seen)]}
+
+
+def _fill(section: Dict[str, Any], task: str, route: str,
+          limit: int = 5) -> Dict[str, Any]:
+    """主路空/挂时用编目补位；**`ok` 保持主路口径**（主路挂了仍是 False）。
+
+    保持 `ok=False` 是有意的：`degraded` 判定靠它，不能拿兜底把「某一路挂了」洗白。
+    兜底本身不置 `ok`，只在 `via`/`fallback` 里说明，简报据此写「已用编目兜底」。
+    """
+    if section.get("count"):
+        return section
+    got = _catalog(task, route, limit)
+    if not got.get("ok") or not got.get("count"):
+        # 兜底也空：把「试过编目」这件事实写进备注，别让读者以为只查了主路。
+        if got.get("degraded") and section.get("ok"):
+            out = dict(section)
+            out["degraded"] = list(section.get("degraded") or []) + got["degraded"]
+            return out
+        return section
+    out = dict(section)
+    out.update({"items": got["items"], "count": got["count"],
+                "via": got["via"],
+                "fallback": {"from": "catalog", "why": "主路不可用" if not section.get("ok") else "主路 0 命中",
+                             "ms": got.get("took_ms")},
+                "degraded": list(section.get("degraded") or [])})
+    return out
 
 
 def _auto_call(task: str) -> str:
@@ -927,14 +1014,18 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
 
     # ── §1 四路盘点：先把"哪一路是什么状态"摆清楚，再谈内容 ──
     def _cell(name: str) -> tuple:
-        if name == "memory":
-            st = "命中" if m.get("count") else ("不可用" if not m.get("ok") else "0 命中")
-            note = m.get("error") or "、".join(m.get("degraded") or [])
-            return st, m.get("count") or 0, note or "—"
-        if name == "kb":
-            st = "命中" if k.get("count") else ("不可用" if not k.get("ok") else "0 命中")
-            note = k.get("error") or "、".join(k.get("degraded") or [])
-            return st, k.get("count") or 0, note or "—"
+        sec = {"memory": m, "kb": k}.get(name)
+        if sec is not None:
+            if sec.get("via"):          # 编目兜底：状态写「兜底」，别让读者以为是主路命中
+                st = "兜底命中"
+            elif sec.get("count"):
+                st = "命中"
+            else:
+                st = "不可用" if not sec.get("ok") else "0 命中"
+            note = sec.get("error") or "、".join(sec.get("degraded") or [])
+            if sec.get("via"):
+                note = "%s（%s）" % (sec["via"], (sec.get("fallback") or {}).get("why") or "主路未命中")
+            return st, sec.get("count") or 0, note or "—"
         if name == "skill":
             st = "命中" if s.get("ok") else ("不可用" if s.get("error") else "未命中")
             return st, 1 if s.get("ok") else 0, (s.get("reason") or s.get("error") or "—")
@@ -958,6 +1049,13 @@ def brief_md(task: str, res: Dict[str, Any]) -> str:
         out.append("\n> 记忆 **0 命中**（不是「没有记忆」，是这一组源里没匹配；要扩源加 mem_sources）。")
     if k.get("ok") and not k.get("count"):
         out.append("\n> 知识库 **0 命中**（先看备注里的降级项，再下「没有资料」的结论）。")
+    for label, sec in (("记忆", m), ("知识库", k)):
+        if sec.get("via"):
+            out.append(
+                "\n> %s：%s，以下条目来自**统一编目兜底**（`%s`，%sms）——"
+                "检索质量阈值比主路低，引用前先回原文核。" % (
+                    label, (sec.get("fallback") or {}).get("why") or "未命中",
+                    sec.get("via"), (sec.get("fallback") or {}).get("ms")))
     out.append("")
 
     out.append(f"## 2. 命中明细（按正文去重；弱相关 {plan['noise']} 条已折叠、"
@@ -1046,6 +1144,10 @@ async def run(inp: IntakeIn) -> Dict[str, Any]:
         guard("memory", lambda: asyncio.to_thread(_mem, task, inp.mem_sources)),
         guard("kb", lambda: asyncio.to_thread(_kb, task, inp.kb_routes)),
         guard("skill", lambda: _skill(task, caller)),
+    )
+    mem, kb = await asyncio.gather(
+        asyncio.to_thread(_fill, mem, task, "memory"),
+        asyncio.to_thread(_fill, kb, task, "kb"),
     )
     ref: Dict[str, Any] = {"ok": False, "error": "未查"}
     if why != "off":

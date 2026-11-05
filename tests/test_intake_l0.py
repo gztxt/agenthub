@@ -795,5 +795,91 @@ class RefCachedBranchTest(unittest.TestCase):
         self.assertIn("尚未落库", out["reason"])
 
 
+class TestCatalogFallback(unittest.TestCase):
+    """编目兜底（PT-20261105-01）：只补位、不抢主路、不掩盖故障。
+
+    三条判据：① 主路 0 命中时补位且标注 `via`；② 主路挂了仍是 `down`（不许用兜底
+    把 degraded 洗成 ready）；③ 主路有命中就一次都不查编目（正常路径零额外延迟）。
+    """
+
+    TASK = "统一编目 检索 延迟"
+
+    def _patch(self, mem, kb, cat):
+        """按 path 分派的 `_self_get` 桩；返回还原函数。"""
+        def fake(path, **kw):
+            if path == "/api/memory/search":
+                return mem
+            if path == "/api/kb/search":
+                return kb
+            if path == "/api/catalog/query":
+                return cat if not callable(cat) else cat(kw)
+            raise AssertionError("未预期的自调用：%s" % path)
+        old = intake._self_get
+        intake._self_get = fake
+        return lambda: setattr(intake, "_self_get", old)
+
+    @staticmethod
+    def _cat(n=2):
+        return {"ok": True, "count": n, "ms": 5.1, "degraded": None,
+                "items": [{"oid": "o%d" % i, "domain": "doc", "type": "doc",
+                           "title": "统一编目设计", "snippet": "统一编目把七个域并成一张表 %d" % i,
+                           "uri": "file:///fs/1000/ftp/技术文档/wiki/x%d.md" % i,
+                           "score": 0.9} for i in range(n)]}
+
+    def test_zero_hit_is_filled_and_labelled(self):
+        restore = self._patch({"ok": True, "count": 0, "memories": []},
+                              {"ok": True, "count": 0, "results": []}, self._cat())
+        try:
+            sec = intake._fill({"ok": True, "count": 0, "items": []}, self.TASK, "kb")
+        finally:
+            restore()
+        self.assertEqual(2, sec["count"])
+        self.assertEqual("catalog:doc,skill", sec["via"])
+        self.assertTrue(sec["ok"])
+        self.assertEqual("/fs/1000/ftp/技术文档/wiki/x0.md", sec["items"][0]["path"])
+        self.assertIn("统一编目", sec["items"][0]["content"])
+
+    def test_down_route_stays_down_after_backfill(self):
+        restore = self._patch({"error": "boom", "path": "/api/memory/search"},
+                              {"ok": True, "count": 0, "results": []}, self._cat())
+        try:
+            sec = intake._fill({"ok": False, "count": 0, "items": [], "error": "boom"},
+                               self.TASK, "memory")
+        finally:
+            restore()
+        self.assertEqual(2, sec["count"])         # 条目录进来了
+        self.assertFalse(sec["ok"])               # 但主路仍记故障
+        plan = intake.assess(self.TASK, {"memory": sec, "kb": {"ok": True, "count": 0, "items": []},
+                                         "skill": {"ok": False}, "ref": {"ok": False},
+                                         "deep_reason": "off"})
+        self.assertEqual("down", plan["routes"]["memory"])
+        self.assertEqual("degraded", plan["verdict"])
+
+    def test_primary_hit_never_queries_catalog(self):
+        def boom(kw):
+            raise AssertionError("主路有命中时不该查编目")
+        restore = self._patch({"ok": True, "count": 1, "memories": []},
+                              {"ok": True, "count": 1, "results": []}, boom)
+        try:
+            sec = intake._fill({"ok": True, "count": 1, "items": [{"content": "x"}]},
+                               self.TASK, "kb")
+        finally:
+            restore()
+        self.assertNotIn("via", sec)
+        self.assertEqual(1, sec["count"])
+
+    def test_non_catalog_shape_is_rejected(self):
+        """`_self_get` 被打桩成 kb 形状时不许把别的数据当编目结果（也保证单测不碰生产库）。"""
+        restore = self._patch({"ok": True, "count": 0, "memories": []},
+                              {"ok": True, "count": 0, "results": []},
+                              {"count": 1, "results": [{"path": "wiki/y.md"}]})
+        try:
+            sec = intake._fill({"ok": True, "count": 0, "items": []}, self.TASK, "kb")
+        finally:
+            restore()
+        self.assertEqual(0, sec["count"])
+        self.assertNotIn("via", sec)
+
+
 if __name__ == "__main__":
     unittest.main()

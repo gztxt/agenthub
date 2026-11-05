@@ -9302,7 +9302,10 @@ async function loadAssets() {
  * 状态变量用 var：go()（01 分片，拼接序在前）会经顶层 go(lsGet('hub.page'))
  * 同步走到本分片函数体，let 的 TDZ 静态序风险会被 test_tdz_order 判红——
  * 原 08-runlog 分片同教训（RL_FIRST/RL_CUR，v0.13.47 随运行日志页一并删除）。localStorage 一律走 lsGet/lsSet 守卫
- * （test_ls_guard R1：裸调用判红）。 */
+ * （test_ls_guard R1：裸调用判红）。
+ * 分档呈现：后端打分 tier=main（自有代码仓）| ref（第三方克隆/知识库/副本/嵌套）。
+ *   main 默认平铺；ref 进 <details> 折叠组（搜索时自动展开），点开行内动作照常用
+ *   ——分档只管呈现顺序，不删除条目；缺 tier 字段（旧后端）按 main 处理，不丢条目。 */
 
 var LP = [];         // 全量项目（过滤前的缓存）
 var lpSel = '';      // 当前选中项目 path（'' = 未选）
@@ -9533,8 +9536,23 @@ function lpRenderList() {
   const order = new Map(LP.map((p, i) => [p.path, i]));
   const idx = ordered.map(p => [p, order.get(p.path)])
     .filter(([p]) => !q || fuzzyMatch([[p.name, 3], [p.path, 1]], q) > 0);
-  box.innerHTML = idx.map(([p, i]) => lpRowHtml(p, i)).join('') ||
-    '<div class="hint" style="padding:10px">' + (q ? '无匹配项目' : '无项目') + '</div>';
+  /* 分档分组：main 平铺、ref 折叠。收藏置顶仍在其组内先行（ordered 已排好序）。 */
+  const mainRows = idx.filter(([p]) => p.tier !== 'ref');
+  const refRows = idx.filter(([p]) => p.tier === 'ref');
+  const rows = (list) => list.map(([p, i]) => lpRowHtml(p, i)).join('');
+  let html = '';
+  if (mainRows.length || !refRows.length) {
+    html += rows(mainRows) ||
+      (q ? '<div class="hint" style="padding:10px">无匹配的日常项目</div>' : '');
+  }
+  if (refRows.length) {
+    html += '<details' + (q ? ' open' : '') + ' style="margin-top:8px">' +
+      '<summary class="hint" style="cursor:pointer;padding:6px 10px">参考 / 归档（' +
+      refRows.length + '）——第三方克隆 · 知识库 · 脚本集 · 旧副本，点开仍可用</summary>' +
+      rows(refRows) + '</details>';
+  }
+  box.innerHTML = html || '<div class="hint" style="padding:10px">' +
+    (q ? '无匹配项目' : '无项目') + '</div>';
 }
 
 function lpRenderAgents() {
@@ -9568,7 +9586,9 @@ async function loadLocalProjects(force) {
     LP = d.projects || [];
     lpRenderList();
     lpRenderAgents();
-    if (hint) hint.textContent = (d.count || 0) + ' 个项目' + lpCountsText();
+    if (hint) hint.textContent = (d.tiers && d.tiers.main != null
+      ? '日常 ' + d.tiers.main + ' · 参考 ' + d.tiers.ref + ' · 共 ' : '') +
+      (d.count || 0) + ' 个项目' + lpCountsText();
     lpSyncPrefs();
     const meta = $('lpMeta');
     if (meta) meta.textContent = (d.roots || []).join(' · ') +

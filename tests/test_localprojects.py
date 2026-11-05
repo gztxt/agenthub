@@ -600,6 +600,86 @@ class TestLivePrecisionOnHost(unittest.TestCase):
         self.assertGreater(d["dropped_count"], 0, "剔除量必须如实上报（信封口径）")
 
 
+class TestTier(unittest.TestCase):
+    """分档（方案 A）：五维证据打分，main 平铺 / ref 折叠，误杀为零（只换组不删除）。
+
+    夹具仓默认只有 .git/HEAD：无 remote、无 reflog、无代码标记 ⇒ 全部中立，
+    score=0 ⇒ ref——L0 只断言分档字段存在与方向，不依赖具体数值之外的宿主状态。
+    """
+
+    def setUp(self):
+        self.tmp = _mktmp("l0lpt-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _mk(self, name: str, owner=None, code=True, docs_only=False):
+        d = _mkrepo(self.tmp, name)
+        if owner:
+            (d / ".git" / "config").write_text(
+                '[remote "origin"]\n\turl = https://github.com/%s/%s.git\n'
+                % (owner, name), encoding="utf-8")
+        if code:
+            (d / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        if docs_only:
+            (d / "README.md").write_text("# notes\n", encoding="utf-8")
+        logs = d / ".git" / "logs"
+        logs.mkdir(exist_ok=True)
+        (logs / "HEAD").write_text("0000000 1111111 t 1234567890 +0800\n",
+                                    encoding="utf-8")
+        os.utime(logs / "HEAD", (time.time(), time.time()))
+        return d
+
+    def _pj(self, d, sessions=0):
+        return {"name": d.name, "path": str(d), "sessions": sessions}
+
+    def test_own_code_repo_is_main_foreign_clone_is_ref(self):
+        own1 = self._mk("own1", owner="gztxt")
+        own2 = self._mk("own2", owner="gztxt")
+        ref = self._mk("thirdparty", owner="someone-else")
+        ps = lp._classify([self._pj(own1), self._pj(own2), self._pj(ref)])
+        by = {p["name"]: p for p in ps}
+        self.assertEqual(by["own1"]["tier"], "main", "自有+代码+近期 ⇒ 主线")
+        self.assertEqual(by["own2"]["tier"], "main")
+        self.assertEqual(by["thirdparty"]["tier"], "ref",
+                         "第三方克隆（-2）即使有代码也不进主线")
+        self.assertTrue(any("第三方克隆" in r for r in by["thirdparty"]["tier_reasons"]),
+                        "ref 必须带可读的扣分理由（否则用户不知道为什么被折叠）")
+
+    def test_docs_only_own_repo_is_ref(self):
+        a = self._mk("kitone", owner="gztxt", code=False, docs_only=True)
+        b = self._mk("kittwo", owner="gztxt")
+        ps = lp._classify([self._pj(a), self._pj(b)])
+        by = {p["name"]: p for p in ps}
+        self.assertEqual(by["kitone"]["tier"], "ref", "纯文档形态 -2 ⇒ 折叠")
+
+    def test_nested_repo_is_ref_even_if_own_code(self):
+        parent = self._mk("parent", owner="gztxt")
+        nested = self._mk("inner", owner="gztxt")
+        import shutil as _sh
+        moved = parent / "inner" / ".git"
+        (parent / "inner").mkdir(exist_ok=True)
+        _sh.copytree(nested, parent / "inner", dirs_exist_ok=True)
+        ps = lp._classify([self._pj(parent), self._pj(parent / "inner")])
+        by = {p["name"]: p for p in ps}
+        self.assertEqual(by["parent"]["tier"], "main")
+        self.assertEqual(by["inner"]["tier"], "ref", "嵌套检出 -3 ⇒ 折叠，不双列")
+
+    def test_unknown_owner_neutral_scores_ref_without_code(self):
+        d = _mkrepo(self.tmp, "bare")       # 无 remote、无代码、无 reflog
+        ps = lp._classify([self._pj(d)])
+        self.assertEqual(ps[0]["tier"], "ref")
+        self.assertEqual(ps[0]["score"], 0)
+        self.assertIn("tier_reasons", ps[0])
+
+    def test_envelope_carries_tier_counts(self):
+        d = lp._list_projects()
+        self.assertIn("tiers", d)
+        self.assertEqual(d["tiers"]["main"] + d["tiers"]["ref"], d["count"],
+                         "主线+参考必须等于总数（分档不许丢条目）")
+        for p in d["projects"][:5]:
+            self.assertIn(p["tier"], ("main", "ref"))
+            self.assertIn("score", p)
+
+
 class TestTermCwd(unittest.TestCase):
     """term.py 的 _cwd_or_none（创建端点的 cwd 校验）。"""
 

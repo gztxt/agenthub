@@ -75,19 +75,24 @@ class ProjectsAdapter(BaseAdapter):
                 "domain": "project", "type": "project", "native_key": nkey,
                 "uri": "file://%s" % path,
                 "title": str(p.get("name") or path)[:200],
-                "summary": "%s%s" % (
+                "summary": "%s%s%s" % (
                     "git 仓库" if p.get("git") else "目录",
                     "；cloudcli 会话 %d" % (p.get("sessions") or 0)
-                    if p.get("cloudcli") else ""),
+                    if p.get("cloudcli") else "",
+                    "；分档 " + ("日常" if p.get("tier") == "main" else "参考")
+                    if p.get("tier") else ""),
                 "mtime": mtime,
                 "size": None, "hash": digest,
                 "ext": {"root": path, "name": p.get("name"),
                         "branch": None, "dirty": None,
                         "last_commit": None,
+                        "tier": p.get("tier"),
+                        "tier_reasons": p.get("tier_reasons") or [],
                         "worktrees": 1 if p.get("worktree") else 0},
                 "meta": {"git": bool(p.get("git")),
                          "cloudcli": bool(p.get("cloudcli")),
                          "sessions": p.get("sessions"),
+                         "tier": p.get("tier"),
                          "roots": res.get("roots")},
                 "chunks": [],
             })

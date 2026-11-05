@@ -26,7 +26,9 @@ v0.13.31 精度收紧（用户裁定「本机根本没有那么多项目，79 �
 
 设计：
 - 纯 os.walk 手动剪枝（不 spawn git 子进程——term.py 的"全仓唯一拉起路径"纪律
-  同样适用于这里，且 walk 比 git ls-projects 免 per-repo fork）；
+  同样适用于这里，且 walk 比 git ls-projects 免 per-repo fork）；分档也只用文件
+  读（.git/config / 顶层目录名 / logs 时间戳），绝不 spawn git——证据可计数、
+  不按目录名猜；
 - 跳过点开头目录（.hermes/.claude/.nvm 等工具内部仓不是"项目"）与
   node_modules/venv 一类依赖目录；深度上限 3（实测三根全量 find maxdepth 3 仅
   93ms，剪枝后同量级）；
@@ -40,6 +42,13 @@ v0.13.31 精度收紧（用户裁定「本机根本没有那么多项目，79 �
 - GET 只读目录名/路径/时间戳，不读文件内容；不鉴权（与 /api/agents、
   /api/cloudcli/projects 同口径——列表是控制平面入口，写动作才要 token）；
 - 不埋 runlog（同 /api/agents 防噪声口径）。
+
+分档（方案 A，默认主线 + 参考折叠，误杀为零）：
+后端不再无分层平铺 48 条，而是逐条打分（remote 归属 / cloudcli 会话数 /
+内容形态 / 提交时新度 / 嵌套关系，全为文件证据）分出 ``tier=main``（自有
+代码仓：默认列表）与 ``tier=ref``（第三方克隆、知识库、脚本集、发布副本、
+嵌套检出等：进「参考 / 归档」折叠组，点开仍可用）。分档只管呈现顺序，
+不删除任何条目——误判最多只是换组，不丢项目。
 """
 from __future__ import annotations
 
@@ -362,21 +371,223 @@ def _merge_cloudcli(git_projects: List[Dict[str, Any]],
     return list(by_path.values()), dropped
 
 
+#: 分档阈值：score >= TIER_MAIN_MIN ⇒ main（默认列表），否则 ref（参考折叠）。
+#: 实测 48 条（2026-11-05）：主线 19 条 / 参考 29 条。
+TIER_MAIN_MIN = 4
+
+#: 内容形态：顶层有代码入口标记 ⇒ 有「可开会话的代码」实证。
+CODE_MARKERS = {"package.json", "pyproject.toml", "setup.py", "setup.cfg",
+                "requirements.txt", "go.mod", "Cargo.toml", "pom.xml",
+                "build.gradle", "settings.gradle", "Dockerfile",
+                "docker-compose.yml", "docker-compose.yaml"}
+CODE_DIRS = {"src", "app", "apps", "packages", "pages", "backend", "frontend",
+             "server", "public", "electron", "components", "cmd", "pkg",
+             "scripts"}
+#: 纯文档/数据形态：顶层只有文档与数据、没有代码入口 ⇒ 会话打开无意义。
+BINARY_SUFFIXES = (".AppImage", ".dmg", ".exe")
+
+REMOTE_URL_RE = re.compile(r"url\s*=\s*(\S+)")
+
+
+def _common_git_dir(d: Path) -> Path:
+    """仓库的 .git 目录（普通仓直接 d/.git；worktree 跟 gitdir → commondir）。"""
+    g = d / ".git"
+    if g.is_dir():
+        return g
+    if g.is_file():
+        target = _parse_gitdir_file(d)
+        if target:
+            t = Path(target)
+            try:
+                cd = (t / "commondir").read_text(encoding="utf-8",
+                                                errors="ignore").strip()
+            except OSError:
+                cd = ""
+            if cd:
+                common = Path(cd) if Path(cd).is_absolute() else t / cd
+                if common.is_dir():
+                    return common
+            if t.parent.name == "worktrees":      # <main>/.git/worktrees/<name>
+                return t.parent.parent
+            return t
+    return g
+
+
+def _remote_owner(path: str) -> Optional[str]:
+    """读 .git/config 的 remote.origin.url，返回 owner（github.com/owner/repo）。
+    读不到/无 remote ⇒ None（中立：无证据不惩罚，如刚初始化的新仓）。"""
+    cfg = _common_git_dir(Path(path)) / "config"
+    try:
+        text = cfg.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    m = REMOTE_URL_RE.search(text) if text else None
+    if not m:
+        return None
+    url = m.group(1).strip()
+    m2 = re.search(r"github\.com[/:]([^/]+)/", url)
+    if m2:
+        return m2.group(1)
+    m3 = re.search(r"[/:]([^/]+)/[^/]+?(?:\.git)?$", url)
+    return m3.group(1) if m3 else None
+
+
+def _top_entries(path: str) -> List[str]:
+    try:
+        return [e for e in os.listdir(path) if not e.startswith(".")]
+    except OSError:
+        return []
+
+
+def _has_code_shape(path: str) -> bool:
+    entries = _top_entries(path)
+    if not entries:
+        return False
+    lower = {e.lower() for e in entries}
+    markers = {m.lower() for m in CODE_MARKERS}
+    if lower & markers:
+        return True
+    if any(e in CODE_DIRS for e in entries):
+        return True
+    # 可执行脚本即代码入口（tailcat 的 .ps1 部署套件不全是文档）
+    if any(e.endswith((".py", ".sh", ".ps1", ".bat", ".js", ".ts"))
+           for e in entries):
+        return True
+    # 深度 2 的 manifest（Obscura/source/Cargo.toml：源码装在子目录里那类，
+    # 顶层只有 README+source+评估报告——见 2026-11-05 实测）
+    d = Path(path)
+    for e in entries:
+        sub = d / e
+        try:
+            if not sub.is_dir():
+                continue
+        except OSError:
+            continue
+        if e.startswith(".") or e in EXCLUDE_DIR_NAMES:
+            continue
+        try:
+            kids = {k.lower() for k in os.listdir(sub)}
+        except OSError:
+            continue
+        if kids & markers:
+            return True
+    return False
+
+
+def _is_docs_only(path: str) -> bool:
+    """顶层只有文档/数据/二进制、没有任何代码入口 ⇒ 只占列表位置。"""
+    entries = _top_entries(path)
+    if not entries:
+        return False
+    if _has_code_shape(path):
+        return False
+    doc_suffixes = (".md", ".txt", ".rst", ".pdf", ".docx", ".xlsx",
+                    ".pptx", ".lkcf", ".log", ".jsonl", ".yaml", ".yml")
+    for e in entries:
+        if e.endswith(doc_suffixes) or e.lower().endswith(BINARY_SUFFIXES):
+            continue
+        # 无扩展名的子目录按「目录内是否能自证代码」处理：含代码入口的上一道
+        # 已经拦下了（_has_code_shape），剩下的无扩展名目录是数据/解包产物
+        # （如 orca/squashfs-root），不许让真正的纯文档形态因为一个目录翻盘。
+        if "." not in e:
+            try:
+                if Path(path).joinpath(e).is_dir():
+                    continue
+            except OSError:
+                pass
+            return False
+    return True
+
+
+def _last_commit_ts(path: str) -> float:
+    """用 .git/logs/HEAD 的 mtime 近似最近提交时新度（不 spawn git）。
+    没有 reflog（裸灌夹具/浅拷）⇒ 0，中立。"""
+    log = _common_git_dir(Path(path)) / "logs" / "HEAD"
+    try:
+        return os.path.getmtime(log) if log.is_file() else 0.0
+    except OSError:
+        return 0.0
+
+
+def _classify(projects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """逐条打分分档：main（自有代码仓）| ref（第三方克隆/知识库/脚本集/副本/嵌套）。
+
+    五维全取文件证据（不按目录名猜）：
+    ① remote 归属：owner 出现频次最高的即「本机主号」（自有 +2）；其它 owner 的
+       克隆仓（公开仓库的镜像/参考副本）−2；无 remote 中立 0；
+    ② cloudcli 会话数：≥1 次 +2（用户亲手开过会话的目录）；
+    ③ 内容形态：有代码入口 +2；纯文档/纯二进制 −2；
+    ④ 时新度：logs/HEAD 近 90 天 +1，超 365 天 −1（裸夹具无 reflog ⇒ 0）；
+    ⑤ 嵌套：路径嵌在另一已收录仓库内 −3（hermes-agent 嵌在 Hermes 内，双列重复）。
+    每条把 reasons 写清——前端与用户都能看见为什么进了折叠组。
+    """
+    if not projects:
+        return projects
+    paths = [os.path.normpath(p["path"]) for p in projects]
+    owners = [_remote_owner(p["path"]) for p in projects]
+    counts: Dict[str, int] = {}
+    for o in owners:
+        if o:
+            counts[o] = counts.get(o, 0) + 1
+    top_owner = max(counts, key=counts.get) if counts else None
+    now = time.time()
+    for p, owner in zip(projects, owners):
+        score, reasons = 0, []
+        if owner:
+            if owner == top_owner:
+                score += 2
+                reasons.append(f"自有 remote（{owner}）+2")
+            else:
+                score -= 2
+                reasons.append(f"第三方克隆（{owner}）-2")
+        if (p.get("sessions") or 0) >= 1:
+            score += 2
+            reasons.append(f"cloudcli 会话 {p['sessions']} 次 +2")
+        if _has_code_shape(p["path"]):
+            score += 2
+            reasons.append("有代码入口（package/src/*.py）+2")
+        elif _is_docs_only(p["path"]):
+            score -= 2
+            reasons.append("纯文档/二进制形态 -2")
+        ts = _last_commit_ts(p["path"])
+        if ts:
+            age = now - ts
+            if age <= 90 * 86400:
+                score += 1
+                reasons.append("90 天内有提交 +1")
+            elif age > 365 * 86400:
+                score -= 1
+                reasons.append("超 365 天无提交 -1")
+        for other in paths:
+            if other != os.path.normpath(p["path"]) and \
+                    os.path.normpath(p["path"]).startswith(other + os.sep):
+                score -= 3
+                reasons.append(f"嵌套在 {os.path.basename(other)} 内 -3")
+                break
+        p["score"] = score
+        p["tier"] = "main" if score >= TIER_MAIN_MIN else "ref"
+        p["tier_reasons"] = reasons
+    return projects
+
+
 def _list_projects() -> Dict[str, Any]:
     """git 扫描 + cloudcli 合并去重，按最近活动倒序。"""
     t0 = time.monotonic()
     errors: List[str] = []
     git_projects, errors, stats = _scan_roots(ROOTS)
     merged, dropped = _merge_cloudcli(git_projects, errors)
+    merged = _classify(merged)
     merged.sort(key=lambda p: (-(p.get("last_ts") or 0.0), str(p.get("name") or "")))
     out = merged[:LIMIT]
+    n_main = sum(1 for p in out if p.get("tier") == "main")
     return {
         "ok": True,
         "count": len(out),
         "projects": [{k: p.get(k) for k in
                       ("name", "path", "git", "cloudcli", "sessions", "last_activity",
-                       "worktree")}
+                       "worktree", "tier", "score", "tier_reasons")}
                      for p in out],
+        "tiers": {"main": n_main, "ref": len(out) - n_main},
         "roots": list(ROOTS),
         "errors": errors,
         "dropped_count": len(dropped) + stats["excluded"] + stats["worktrees"],

@@ -354,21 +354,27 @@ def status(con: sqlite3.Connection) -> Dict[str, Any]:
         counts = {c["status"]: c["n"] for c in con.execute(
             "SELECT status, COUNT(*) AS n FROM obj WHERE src_id=? GROUP BY status",
             (r["src_id"],)).fetchall()}
-        lag = None
+        lag, lag_err = None, None
         if r["last_ok_at"]:
+            # `last_ok_at` 有两种写法：调度器写 `...Z`，一次性迁移源（adapter=migrate，
+            # 如 memindex.fed_proj）写 `YYYY-MM-DD HH:MM:SS` 无时区。旧实现只认
+            # `strptime("%Y-%m-%dT%H:%M:%SZ")` ⇒ 后者一律 `lag=None`，而调用方普遍把
+            # `None` 当「不滞后」（实测探针 `or 0` 直接报成 0.00h，与 verify 的 11 天打架）。
             try:
-                ts = _dt.datetime.strptime(
-                    r["last_ok_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
-                    tzinfo=_dt.timezone.utc)
+                ts = _dt.datetime.fromisoformat(
+                    str(r["last_ok_at"]).replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=_dt.timezone.utc)
                 lag = int((now - ts).total_seconds())
-            except ValueError:
-                lag = None
+            except (ValueError, TypeError) as exc:
+                lag_err = "%s: %s" % (type(exc).__name__, exc)
         out.append({
             "src_id": r["src_id"], "domain": r["domain"], "kind": r["kind"],
             "authority": r["authority"], "uri": r["uri"],
             "adapter": r["adapter"], "enabled": r["enabled"],
             "scan_mode": r["scan_mode"],
             "last_ok_at": r["last_ok_at"], "lag_s": lag,
+            "lag_err": lag_err,
             "last_ms": r["last_ms"], "last_err": r["last_err"],
             "objects": counts,
             "object_domains": {d["domain"]: d["n"] for d in con.execute(

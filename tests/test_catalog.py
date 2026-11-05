@@ -350,6 +350,22 @@ class TestQuery(CatalogCase):
         self.assertEqual("s1", result["sources"][0]["src_id"])
         self.assertIsNotNone(result["sources"][0]["lag_s"])
 
+    def test_status_parses_last_ok_at_without_tz_suffix(self):
+        """一次性迁移源写 `YYYY-MM-DD HH:MM:SS`（无 Z）也必须算得出 lag。
+
+        旧实现 `strptime("%Y-%m-%dT%H:%M:%SZ")` 只认一种写法 ⇒ 这类源静默变
+        `lag_s=None`，而调用方普遍把 None 当「不滞后」（实测探针报成 0.00h）。
+        """
+        self.writer.con.execute(
+            "UPDATE src SET last_ok_at='2026-10-25 13:48:24' WHERE src_id='s1'")
+        self.writer.con.commit()
+        con = self.readonly()
+        self.addCleanup(con.close)
+        src = query.status(con)["sources"][0]
+        self.assertIsNone(src["lag_err"], src["lag_err"])
+        self.assertIsNotNone(src["lag_s"])
+        self.assertGreater(src["lag_s"], 1000)
+
 
 class TestAdapters(CatalogCase):
     def test_fingerprint_stable_and_change_sensitive(self):

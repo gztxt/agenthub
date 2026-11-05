@@ -110,8 +110,13 @@ def verify(con: sqlite3.Connection) -> Dict[str, Any]:
             try:
                 import datetime as _dt
                 ts = _dt.datetime.fromisoformat(
-                    row["last_ok_at"].replace("Z", "+00:00")).timestamp()
-                lag = int(now - ts)
+                    str(row["last_ok_at"]).replace("Z", "+00:00"))
+                # 生产写入方 `store._now()` 是 UTC+Z；个别历史行（一次性迁移）没有时区，
+                # 必须**显式按 UTC** 解释。裸 `.timestamp()` 会按本机时区（CST +8）算，
+                # 与 `query.status()` / `/health` 差 8 小时 —— 同一事实三个入口三个数。
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=_dt.timezone.utc)
+                lag = int(now - ts.timestamp())
             except (ValueError, TypeError):
                 lag = None
         # 迁移源（adapter='migrate'）没有周期扫描，滞后不适用

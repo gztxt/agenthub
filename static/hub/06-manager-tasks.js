@@ -3,6 +3,30 @@ function toggleGroup(g) {
   lsSet('hub.nav.open', navOpen);
   renderNav();
 }
+
+/* 手风琴头键盘化（2026-11-05 Task 1，MDN Keyboard-navigable JS widgets 口径）：
+   组头已是原生 <button role=button>（Enter/Space 的切换由浏览器原生触发 click
+   ⇒ 委托里的 data-group 分支完成展开切换，本函数不重复处理）；这里只补
+   **组间移焦**：方向键上下在 .nav-acc-head 之间移动焦点，Home/End 跳首尾。
+   手风琴是单列垂直 widget：箭头键移动焦点（不是 Tab 序），tabindex 全部保持
+   0（原生 button 默认即 0，不写正值）。监听挂在侧栏静态容器上（#navTree
+   内容每 30s 被 renderNav 重写，监听不能挂在动态头上）。 */
+function navAccKeydown(e) {
+  if (keyTargetIsEditing(e)) return;
+  const head = e.target.closest && e.target.closest('.nav-acc-head');
+  if (!head) return;
+  const heads = Array.from(document.querySelectorAll('.nav-acc-head'));
+  let i = heads.indexOf(head);
+  if (i < 0) return;
+  let n = null;
+  if (e.key === 'ArrowDown') n = Math.min(i + 1, heads.length - 1);
+  else if (e.key === 'ArrowUp') n = Math.max(i - 1, 0);
+  else if (e.key === 'Home') n = 0;
+  else if (e.key === 'End') n = heads.length - 1;
+  else return;
+  e.preventDefault();
+  heads[n].focus();
+}
 /* 点左侧实体 → 右侧加载该实体工作台（复用既有 gotoChat / showDetail，不另起炉灶）
    形态一律交给 defaultModeOf()：它自己会读「上次显式选过的形态」再回落默认。
    这里以前另写了一份 embed > term > chat 优先级 —— 那份就是 09-25 故障的本体：
@@ -170,6 +194,8 @@ function initSidebar() {
   if (mqNarrow.addEventListener) mqNarrow.addEventListener('change', onBreak);
   else if (mqNarrow.addListener) mqNarrow.addListener(onBreak);   // Safari < 14
   // 事件委托：静态常驻项 + 手风琴动态项（含系统页）统一走这里
+  // 手风琴头键盘化：方向键/Home/End 在组头间移焦（监听挂静态 sb，不随 renderNav 重写丢）
+  sb.addEventListener('keydown', navAccKeydown);
   sb.addEventListener('click', e => {
     let el = e.target.closest('button[data-page]');
     if (el) { go(el.dataset.page); if (narrow()) apply(true); return; }

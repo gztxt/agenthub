@@ -616,7 +616,7 @@ function renderNav() {
     if (!body) body = '<div class="nav-empty">' + (AGENTS.length ? '无匹配' : '加载中…') + '</div>';
     return '<div class="nav-acc' + (open ? ' open' : '') + '">' +
       // v0.13.74：同上，收起态下手风琴头也只有图标，补 title/aria-label。
-      '<button class="nav-acc-head" data-group="' + g + '" aria-expanded="' + (open ? 'true' : 'false') + '"' +
+      '<button class="nav-acc-head" data-group="' + g + '" role="button" aria-expanded="' + (open ? 'true' : 'false') + '"' +
       ' title="' + escapeHtml(NAV_GROUPS[g]) + '" aria-label="' + escapeHtml(NAV_GROUPS[g]) + '">' +
       ico(open ? 'chevron-down' : 'chevron-right', null, 'caret') +
       ico(NAV_ICONS[g], 'md') +

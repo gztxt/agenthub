@@ -125,6 +125,9 @@
             --lh-tight: 1.35; --lh-base: 1.7; --lh-loose: 1.85;   /* 中文行高比西文松 */
             /* ── 图标系统：单一 SVG sprite（24 网格 / 1.9 描边），四档尺寸 ── */
             --ico-xs: 14px; --ico-sm: 16px; --ico-md: 18px; --ico-lg: 22px; --ico-xl: 26px;
+            /* Task 1（2026-11-05）：M3 导航图标 24dp 档——侧栏导航行图标专用，
+               其余五档不动（图标系统档位已写死在别处，新增档只服务侧栏一族） */
+            --ico-nav: 24px;
             /* ── 侧栏菜单行（v0.12.3）：行内只有「状态方块 + 名称」──
                状态文字串已从菜单行删除（点进去能否用由工作台判定，行内不预告），
                在线/离线图形口径统一交给 .s-badge；完整状态串仍在行 title 与工作台卡片 */
@@ -330,6 +333,11 @@
         .nav-item.on, .side-item.on { background: var(--sel-bg); border-color: var(--sel-border); color: var(--text-1); font-weight: 600; }
         .nav-item.on:hover, .side-item.on:hover { background: var(--sel-bg-hover); border-color: var(--sel-border-hover); }
         .nav-item.on .nav-port { color: var(--text-2); }
+        /* Task1-F1：M3 激活指示条（窄条方案：行高 40px，整行条会压字；条高 56px 为指示条高度判据） */
+        .nav-item, .side-item { position: relative; }
+        .nav-item.on::before { content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 3px; height: 56px; border-radius: 28px; background: var(--accent); }
+        /* Task1-F2：导航图标 24dp，只走 --ico-nav token（合并：不另写字面宽高） */
+        .nav-item svg.i,.side-item svg.i { width: var(--ico-nav); height: var(--ico-nav); }
         .nav-item .lbl, .side-item .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         /* v0.12.1：菜单行内间隙收到 6px，把省下的空间让给名称（分组含 3~5 个元素，每行省 6~12px） */
         .nav-item { gap: 6px; }
@@ -3358,7 +3366,7 @@
           + '符号阶梯=' + ['mdInline', 'openOverlay', 'renderHomeStats', 'settingsDelegates',
                           'termToast', 'termWriteReplay', 'termFindBind', 'startMemoryEdit',
                           'renderSkillInvocations', 'navItemHtml', 'histHtml', 'navRow',
-                          'renderNav', 'initSidebar', 'termTouchBind', 'bbRender']
+                          'renderNav', 'navAccKeydown', 'initSidebar', 'termTouchBind', 'bbRender']
               .map(function (k) { return k + ':' + (typeof window[k] === 'function' ? 1 : 0); }).join(' ') + '\n'
           + (L.length ? '异常清单(前8):\n' + L.slice(0, 8).join('\n') : '异常清单: 无');
       }
@@ -3397,6 +3405,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=5a23618a"></script>
+    <script src="/static/hub.js?v=1d7eaad5"></script>
 </body>
 </html>

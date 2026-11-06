@@ -27,6 +27,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 TPL = Path(__file__).resolve().parent.parent / "templates" / "index.html"
+HUB = Path(__file__).resolve().parent.parent / "static" / "hub.js"
 
 VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
         "meta", "param", "source", "track", "wbr"}
@@ -154,6 +155,82 @@ class TestDomStructure(unittest.TestCase):
     def test_main_closed_exactly_once(self):
         self.assertEqual(len(re.findall(r"</main\s*>", self.src)), 1,
                          "</main> 必须且只能出现一次")
+
+
+# ── Task 1（2026-11-05 全站壳与导航）新增结构判据 ──────────────────
+# 判据全部对着「源码事实」写（JS 分片拼接产物 + 模板 CSS 字面量），不靠
+# 真机渲染：本仓 L0 惯例（test_hubjs_split 同族）= 在文件文本上断言可证伪的量。
+
+class TestNavAccordionA11y(unittest.TestCase):
+    """手风琴头（.nav-acc-head）键盘化 + M3 激活指示条 + 触控目标（brief Step 2/3/4）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = HUB.read_text(encoding="utf-8")
+        cls.css = TPL.read_text(encoding="utf-8")
+
+    def _rule(self, sel):
+        """从模板里取一条选择器对应的 CSS 规则体（首个命中）。"""
+        m = re.search(re.escape(sel) + r"\s*\{([^}]*)\}", self.css)
+        self.assertIsNotNone(m, "CSS 里找不到规则：" + sel)
+        return m.group(1)
+
+    def test_accordion_head_has_aria_expanded_and_role_button(self):
+        # renderNav 生成的手风琴头：aria-expanded 随展开同步，role=button 明示可按键操作
+        self.assertRegex(self.js, r'(?s)<button class="nav-acc-head".{0,80}role="button".{0,40}aria-expanded="',
+                         "手风琴头缺 role=button / aria-expanded（renderNav 生成处）")
+
+    def test_accordion_keyboard_handlers_present(self):
+        # MDN 键盘可导航 widget：组头方向键/Home/End 移焦，Enter/Space 切换展开
+        self.assertIn("navAccKeydown", self.js)
+        self.assertRegex(self.js, r"ArrowDown|ArrowUp")
+        m = re.search(r"function\s+navAccKeydown\(.*?\n\}", self.js, re.S)
+        self.assertIsNotNone(m, "navAccKeydown 不是顶层函数声明（拼写/嵌套变了要同步符号阶梯）")
+        body = m.group(0)
+        # Enter/Space 由原生 <button> 的 click 委托接管（data-group 分支），
+        # navAccKeydown 只负责移焦，故不要求 Enter 分支（控制器裁定 F4）。
+        for k in ("ArrowDown", "ArrowUp", "Home", "End"):
+            self.assertIn(k, body, "navAccKeydown 缺键盘处理：%s" % k)
+
+    def test_no_positive_tabindex_in_nav_or_palette(self):
+        self.assertNotIn('tabindex="1"', self.js)
+        self.assertNotIn('tabindex="2"', self.js)
+        self.assertNotIn("tabindex='1'", self.js)
+
+    def test_nav_item_active_indicator_rule(self):
+        # M3 Navigation Drawer 激活指示条：.nav-item.on 专属高度 56px（M3 active indicator 56dp）
+        body = self._rule(".nav-item.on::before")
+        self.assertIn("height: 56px", body)
+        self.assertIn("border-radius: 28px", body)
+
+    def test_nav_icon_size_is_24px_token(self):
+        # M3 导航图标 24dp。尺寸只许走 token：模板声明 --ico-nav: 24px，
+        # 行内图标宽度引用 token（不写死 24px 字面量到选择器里）。
+        self.assertRegex(self.css, r"--ico-nav:\s*24px")
+        self.assertRegex(self.css, r"\.nav-item svg\.i,\.side-item svg\.i\s*\{[^}]*var\(--ico-nav\)")
+
+    def test_touch_targets_min_44px_wide_34px_narrow_tier(self):
+        # 触控目标：宽屏 44px；窄屏档 34px（分档偏好「一档一键」：同一档位内
+        # 用键名区分，不跨档写全局）。既有断言值不得改口径，只能核对在档。
+        self.assertIn("min-height: 44px", self.css)
+        self.assertIn("min-height: 34px", self.css)
+
+
+class TestNavKeyboardTopLevel(unittest.TestCase):
+    """navAccKeydown 是顶层 function 声明 ⇒ 必须已登记模板「符号阶梯」。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = HUB.read_text(encoding="utf-8")
+        cls.src = TPL.read_text(encoding="utf-8")
+
+    def test_nav_acc_keydown_registered_in_ladder_or_no_longer_toplevel(self):
+        top = re.search(r"^function\s+navAccKeydown\s*\(", self.js, re.M)
+        ladder = re.search(r"'符号阶梯='\s*\+\s*\[(.*?)\]", self.src, re.S)
+        self.assertIsNotNone(ladder, "模板里找不到 符号阶梯 清单")
+        if top:
+            self.assertIn("'navAccKeydown'", ladder.group(1),
+                          "新增顶层 function navAccKeydown 未登记符号阶梯（TestLadder 会红）")
 
 
 if __name__ == "__main__":

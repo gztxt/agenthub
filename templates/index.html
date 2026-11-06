@@ -1545,6 +1545,8 @@
         #runPanel.run-decomposing .sp-hd { border-left: 3px solid var(--muted); }
         #runPanel.run-running .sp-hd { border-left: 3px solid var(--accent); }
         #runPanel.run-done .sp-hd { border-left: 3px solid var(--sel-border); }
+        /* Task10 Botboy 窄屏：最近交接表保时间/谁列，内容列横滚（容器已有 .tscroll） */
+        @media (max-width: 767px) { #bbEx td:nth-child(3) { min-width: 220px; } }
         .kb-group { font-size: var(--fs-sm); font-weight: 700; color: var(--text-1); margin: 10px 0 4px; }
         .mx-matrix .mx-a-cnt b { color: var(--text-1); font-weight: 600; }
         .mx-matrix .mx-a-cnt .sup { color: var(--muted); }
@@ -3448,6 +3450,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=cd5f86e0"></script>
+    <script src="/static/hub.js?v=14ae2d91"></script>
 </body>
 </html>

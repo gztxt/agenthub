@@ -92,13 +92,14 @@ function assetResultsHtml(src, d, state, err) {
   if (state === 'down') {
     return '<span style="color:var(--danger-text)">该门面端点取不到（' +
       escapeHtml(err ? String(err.message).slice(0, 120) : 'HTTP 404') +
-      '）。<b>这不是"没有资产"</b>——多半是 hub 代码比进程新（未重启）或后端未启用。</span>';
+      '）。<b>这不是"没有资产"</b>——多半是 hub 代码比进程新（未重启）或后端未启用。</span>' +
+      ' <button class="btn ghost sm" data-asset="search">重试</button>';
   }
   if (state === 'degraded') {
     /* ★ 红向修正：降级态以前会落到 empty 分支里说「确实没有命中」，
        那恰好把「查不了」糊成「没有」——就是 09-22 那族静默不可用。 */
     return '<div class="hint" style="color:var(--warn)"><b>部分后端不可用</b>：'
-      + '下面的清单<b>不完整</b>，不能当作「没有资产」。</div>'
+      + '下面的清单<b>不完整</b>，不能当作「没有资产」。 <button class="btn ghost sm" data-asset="search">重试</button></div>'
       + (d && d.note ? '<div class="hint" style="color:var(--warn)">' + escapeHtml(d.note) + '</div>' : '')
       + (d ? backendLedger(d) : '')
       + (d && src.items(d).length ? itemListHtml(src, src.items(d))

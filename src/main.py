@@ -124,7 +124,7 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.191"
+VERSION = "0.13.192"
 
 # v0.13.191（2026-11-03）：混排没有优势不是「模型不够强」，是拆解层缺一整个字段。
 #   ① 病：同一条 UI 需求被拆给 4 家 agent 并行，`files` 全是同一两个文件，后写覆盖先写
@@ -661,6 +661,12 @@ app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 API_RATE_PER_MIN = int(os.getenv("API_RATE_PER_MIN", "60"))
 # ⚙设置口令：查看 TERM_TOKEN 等敏感配置时要求提供（为空则设置页不可用）
 HUB_PASSCODE = os.getenv("HUB_PASSCODE", "")
+# v0.13.192（P0 读令牌门）：非回环 GET 读端点须带凭据；HUB_READ_TOKENS=0 可整门关闭
+# （回滚开关，行为等同门不存在；豁免前缀逐条注入，同 CSP_REPORT 纪律）。
+if os.getenv("HUB_READ_TOKENS", "1") == "0":
+    writeauth.READ_TOKEN_DISABLED = True
+# 无凭据也放行的读前缀：设置页模型目录（只读公共清单）；逐条写明理由，勿顺手加白。
+writeauth._READ_TOKEN_ALLOW.add("/api/settings/model/catalog")  # 模型目录是公共清单，无会话面
 _api_rate: Dict[str, deque] = defaultdict(deque)
 _RATE_EXCLUDED_PREFIXES = ("/telemetry/events/", "/health", "/mcp", "/api/csp/report")
 _RATE_WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
@@ -709,6 +715,8 @@ async def api_rate_limit(request: Request, call_next):
 # ── P1-7 扩展：写端点鉴权闸门（实测 34 条写路由里 32 条此前不设防，6 条对匿名写回 200）。
 #    Starlette 里后注册的中间件在最外层 ⇒ 本闸门先于 api_rate_limit：被拒的请求既不该占限流预算，
 #    更不该走到 handler 里产生副作用（rebuild 重写记忆就是这类副作用）。 ──
+#    csp.middleware 注册在 csp 头之前、read_gate 之后 ⇒ 401 也带同一套安全头。
+app.middleware("http")(writeauth.read_gate)
 app.middleware("http")(write_gate)
 
 # ── v0.13.185：CSP / 安全响应头（默认 Report-Only，见 src/csp.py 头注释）──
@@ -858,7 +866,7 @@ except Exception as e:  # noqa: BLE001
 
 
 @app.get("/health")
-async def health():
+async def health(request: Request):
     """自证端点（P0-2）：不只看活没活，还要能看出「跑的是哪份代码」。
 
     旧口径只回 {status,service,version,port} ⇒ 版本漂移（进程报 0.13.2 / HEAD 已 0.13.3）
@@ -875,7 +883,11 @@ async def health():
     out = {"status": "ok", "service": "agenthub", "version": VERSION, "port": config.port,
            "db_ok": db_ok,
            "term_sessions": term_mod.alive_count(),
-           "term_idle_max_s": term_mod.idle_max_s()}
+           "term_idle_max_s": term_mod.idle_max_s(),
+           # v0.13.192（P0）：读令牌门状态 —— 工作台据此渲染红色横幅「非本机读需凭据」。
+           "read_auth": writeauth.read_banner_state(
+               request.client.host if request.client else "", "/", "", writeauth.secrets_from_env()),
+           }
     # 内存三口径（PT-20261024-08 B5）：**本体 / 托管子进程 / cgroup 记账**。
     # 为什么必须分开：2026-10-24 实测同一服务三个口径差 7 倍（判例 agent-knowledge/259）
     # ——进程 RSS 232MB、cgroup 进程合计 753MB、cgroup 记账 1.4~2.0GB（差额是 page cache）。

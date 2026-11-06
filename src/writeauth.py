@@ -116,6 +116,84 @@ def credential_name(provided: str, secrets: Iterable[str]) -> str:
     return "anonymous"
 
 
+#: 读端点令牌门（v0.13.192 / P0，方案 AgentHub优化设计方案.md §6.6）。
+#: `_is_loopback` 与 `_READ_TOKEN_ALLOW` 由 main.py 注册前注入（同 CSP_REPORT 的
+#: 注入模式，避免本模块 import main）。
+_is_loopback = lambda host: host in ("127.0.0.1", "::1")  # noqa: E731
+_READ_TOKEN_ALLOW: set = set()
+READ_TOKEN_DISABLED = False
+
+#: 非回环读请求的 401 体：detail 给人话（为什么 + 下一步），横幅按 detail 渲染，
+#: 两个字段给前端程序化判断（main.health() 复用同一判断，见 read_banner_state）。
+READ_DENY_BODY = {
+    "detail": "读端点需要凭据：非本机访问须带 x-hub-token / x-term-token（或 ?token=）。本机 127.0.0.1 保持匿名（保持一个版本）。",
+    "read_auth_required": True,
+    "reason": "non-loopback-without-token",
+}
+
+
+def read_verdict(client_host: str, path: str, provided: str, secrets: Iterable[str]) -> Tuple[str, str]:
+    """读令牌门纯判定（便于 L0 空 HOME 取证，同 decide 的形态）。返回 (verdict, reason)。
+
+    verdict："allow" / "deny" / "misconfig"。
+      · 回环来源 → allow（本地脚本/探针/嵌页零改动，保持一个版本）；
+      · 非回环 + 凭据命中 secrets → allow；
+      · 非回环 + 未命中：secrets 未配置 → misconfig（503，fail-closed 与写门同口径），
+        否则 → deny（401）。
+    """
+    if READ_TOKEN_DISABLED:
+        return "allow", "HUB_READ_TOKENS=0 整门关闭"
+    if _is_loopback(client_host or ""):
+        return "allow", "回环来源保持匿名"
+    if any(path.startswith(p) for p in _READ_TOKEN_ALLOW):
+        return "allow", "读放行前缀"
+    live = [s for s in secrets if s]
+    if not live:
+        return "misconfig", "服务端未配置 TERM_TOKEN/HUB_PASSCODE，非回环读端点一律拒绝（fail-closed）"
+    if not provided:
+        return "deny", "非本机访问读端点需要凭据（x-hub-token / x-term-token / ?token=）"
+    for s in live:
+        if hmac.compare_digest(provided, s):
+            return "allow", "凭据匹配"
+    return "deny", "凭据不匹配"
+
+
+def read_banner_state(client_host: str, path: str, provided: str, secrets: Iterable[str]) -> dict:
+    """`/health` 内嵌字段：前端工作台据此渲染红色横幅。只报判定结果，不回显凭据值。"""
+    verdict, reason = read_verdict(client_host, path, provided, secrets)
+    if verdict == "allow":
+        return {"state": "ok", "reason": None}
+    return {"state": "locked" if verdict == "deny" else "misconfig", "reason": reason}
+
+
+async def read_gate(request, call_next):
+    """读端点令牌门中间件。Starlette 后注册者最外层 ⇒ 注册在 write_gate 之前、
+    csp.middleware 之后 ⇒ csp 头覆盖它回 401，顺序安全。
+
+    放行面：非 GET 方法（写由 write_gate 管）；`/`（嵌页入口，CSP 报告/脚本同源依赖）；
+    `/health`（自证+探针）；`/static/`（页面自举，无数据面）；`/api/csp/report`；
+    以及 `_READ_TOKEN_ALLOW`（main 注入：`/api/settings/model/catalog` 等无凭据也能读的公共面，
+    逐条写理由，同 EXEMPT_PREFIXES 纪律）。其余 GET 一律按 read_verdict 判。"""
+    if request.method != "GET":
+        return await call_next(request)
+    path = request.url.path
+    host = request.client.host if request.client else ""
+    if (path in ("/", "/health", "/api/csp/report") or path.startswith("/static/")):
+        return await call_next(request)
+    provided = provided_token(request.headers.raw, request.url.query)
+    secrets = secrets_from_env()
+    verdict, reason = read_verdict(host, path, provided, secrets)
+    if verdict == "allow":
+        request.state.actor = "user:reader"
+        return await call_next(request)
+    status = 503 if verdict == "misconfig" else 401
+    print(f"[readgate] {status}：GET {path} 来源={host or '?'} —— {reason}")
+    body = dict(READ_DENY_BODY) if verdict == "deny" else {"detail": reason, "read_auth_required": True, "reason": "misconfig"}
+    return JSONResponse(body, status_code=status)
+
+
+
+
 def actor_of(request) -> str:
     """从 request.state 取审计身份；取不到 → "system"（后台循环/内部调用）。
 

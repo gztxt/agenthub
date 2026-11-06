@@ -18,7 +18,8 @@ def _contract_named_paths():
         if i < 0:
             break
         j = text.find("`", i + 4)
-        found.append(text[i + 4:j])
+        tok = text[i + 4:j].split(":")[0]  # 只校文件名，行号漂移由 L0 钉
+        found.append(tok)
         i = j + 1
     return found
 

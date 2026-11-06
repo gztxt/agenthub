@@ -3050,6 +3050,7 @@
                                 <input id="setPasscode" type="password" autocomplete="off" spellcheck="false"
                                        placeholder="设置口令（留空用本机缓存）" aria-label="设置口令"
                                        style="max-width:220px">
+                                <button class="btn ghost sm" type="button" onclick="passEye(this,'setPasscode')">显示</button>
                                 <!-- v0.13.45：不再带 disabled。置灰按钮不派发 click，
                                      用户点它得不到任何反馈（日志里连一条请求都没有）；
                                      未预览时由保存自己补一次预览。 -->
@@ -3098,6 +3099,7 @@
                         <label class="set-field">Key（<span id="ghTokenState" class="set-src">未设置</span>，留空表示不改动）
                             <input id="ghToken" type="password" autocomplete="off" spellcheck="false"
                                    placeholder="ghp_… / github_pat_…" aria-label="GitHub key">
+                            <button class="btn ghost sm" type="button" onclick="passEye(this,'ghToken')">显示</button>
                         </label>
                         <div class="set-sub">本地</div>
                         <label class="set-field">克隆落点<span class="set-src" id="ghCloneBaseSrc"></span>
@@ -3112,6 +3114,7 @@
                             <input id="ghPasscode" type="password" autocomplete="off" spellcheck="false"
                                    placeholder="设置口令（留空用本机缓存）" aria-label="设置口令"
                                    style="max-width:220px">
+                            <button class="btn ghost sm" type="button" onclick="passEye(this,'ghPasscode')">显示</button>
                             <button class="btn sm" type="button" data-settings-act="gh-test">测试连接</button>
                             <button class="btn sm" type="button" data-settings-act="gh-apply">保存（需口令）</button>
                             <button class="btn ghost sm" type="button" data-settings-act="gh-clear">清除设置</button>
@@ -3198,8 +3201,10 @@
                             </select>
                             <input id="logQ" type="search" autocomplete="off" spellcheck="false"
                                    placeholder="关键字：路径 / IP / 错误片段" aria-label="关键字" style="max-width:220px">
+                            <span class="hint" id="logHint">来源/级别/时间窗默认：全部来源 · 全部级别 · 24h</span>
                             <input id="logPasscode" type="password" autocomplete="off" spellcheck="false"
                                    placeholder="设置口令（留空用本机缓存）" aria-label="设置口令" style="max-width:200px">
+                            <button class="btn ghost sm" type="button" data-settings-act="pass-eye" data-target="logPasscode">显示</button>
                             <button class="btn sm" type="button" data-settings-act="log-refresh">刷新</button>
                             <button class="btn ghost sm" type="button" data-settings-act="log-copy">复制</button>
                             <button class="btn ghost sm" type="button" data-settings-act="log-export">导出 .log</button>
@@ -3408,7 +3413,7 @@
           // ② 按声明行**升序**排列 —— 阶梯第一个 0 才是响应体的切断位置；③ 覆盖面从头到尾
           // （首项在前 1%、末项在后 5% 内），否则尾部截断查不出来。
           // 防过期闸门：tests/test_hubjs_split.py 的 TestLadder 会逐项核对①②③，清单漂了即红。
-          + '符号阶梯=' + ['mdInline', 'openOverlay', 'renderHomeStats', 'settingsDelegates',
+          + '符号阶梯=' + ['mdInline', 'openOverlay', 'renderHomeStats', 'passEye', 'logQDebounced', 'logPageGo', 'settingsDelegates',
                           'termToast', 'termWriteReplay', 'termFindBind', 'termFontStep', 'startMemoryEdit', 'memQDebounced',
                           'skillQDebounced', 'renderSkillInvocations', 'kbQDebounced', 'telRangeSet', 'dagZoom', 'navItemHtml', 'histHtml', 'navRow',
                           'renderNav', 'navAccKeydown', 'initSidebar', 'lpQDebounced', 'lpClearFilter', 'ghQDebounced', 'ghClearFilter', 'termTouchBind', 'bbRender']
@@ -3450,6 +3455,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=14ae2d91"></script>
+    <script src="/static/hub.js?v=c8a0a1a6"></script>
 </body>
 </html>

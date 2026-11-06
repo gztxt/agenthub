@@ -1275,6 +1275,8 @@ $('setModelSel')?.addEventListener?.('change', function () {
   }
   SET_MODEL_PREV = sel.value;
   settingsModelHint(a);
+  /* Task11：选模型后自动预览 diff（保存前必须看到改了啥） */
+  settingsPreviewModel();
 });
 
 function settingsModelHint(a) {
@@ -1302,6 +1304,13 @@ function settingsModelHint(a) {
 }
 
 function setSelectedModel() { return $('setModelSel') ? $('setModelSel').value : ''; }
+/* Task11 口令 eye 切换：原生细节，只改 type 属性，不用新依赖 */
+function passEye(btn, id) {
+  const inp = $(id);
+  if (!inp) return;
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+  btn.textContent = inp.type === 'password' ? '显示' : '隐藏';
+}
 
 async function settingsPreviewModel() {
   if (!SET_AGENT) return toast('先选一个 agent', 'err');
@@ -1788,6 +1797,16 @@ async function settingsGithubRefresh() {
    var 声明而非 let：go()（06 分片顶层就会跑）可能经 settingsLogsLoad 读到它，
    与 setModelPageLoaded 同一条 TDZ 纪律。 */
 var LOG_LAST = null;      // 最近一次结果：复制/导出复用，不再为同一次查看打两次后端
+var logPage = 0;          // Task11 日志分页（JS 变量，每页 100 行）
+var logQTimer = null;
+function logQDebounced() {
+  if (logQTimer) clearTimeout(logQTimer);
+  logQTimer = setTimeout(function () { logPage = 0; settingsLogsLoad(); }, 300);
+}
+function logPageGo(d) {
+  logPage = Math.max(0, logPage + d);
+  if (LOG_LAST) settingsLogsRender(LOG_LAST);
+}
 
 function settingsLogsParams() {
   const p = new URLSearchParams();
@@ -1811,6 +1830,7 @@ async function settingsLogsLoad() {
   try {
     const d = await api('/api/hublog?' + settingsLogsParams().toString(), opt);
     LOG_LAST = d;
+    logPage = 0;
     settingsLogsRender(d);
   } catch (e) {
     LOG_LAST = null;
@@ -1845,7 +1865,13 @@ function settingsLogsRender(d) {
   } else {
     /* 复用 .set-diff/.set-diff-row 既有骨架（不新增 CSS 类与色 token）；
        级别只在行头的 .k 上着色，error=--danger / warn=--warn（:root 既有）。 */
-    body.innerHTML = '<div class="set-diff">' + es.map(e => {
+    /* Task11 日志分页：每页 100 行，滚动位置由浏览器保留（不另存） */
+    const per = 100;
+    const pages = Math.max(1, Math.ceil(es.length / per));
+    if (logPage >= pages) logPage = pages - 1;
+    const pageEs = es.slice(logPage * per, (logPage + 1) * per);
+    body.innerHTML = (pages > 1 ? '<div class="toolbar" style="margin-bottom:6px"><button class="btn ghost sm" onclick="logPageGo(-1)"' + (logPage === 0 ? ' disabled' : '') + '>上一页</button><span class="hint">第 ' + (logPage + 1) + '/' + pages + ' 页（共 ' + es.length + ' 条）</span><button class="btn ghost sm" onclick="logPageGo(1)"' + (logPage >= pages - 1 ? ' disabled' : '') + '>下一页</button></div>' : '') +
+      '<div class="set-diff">' + pageEs.map(e => {
       const lv = e.level === 'error' ? 'ERR' : e.level === 'warn' ? 'WARN' : 'INFO';
       const col = e.level === 'error' ? 'var(--danger)' : e.level === 'warn' ? 'var(--warn)' : 'var(--muted)';
       return '<div class="set-diff-row"><div class="k" style="color:' + col + '">' +
@@ -1981,6 +2007,7 @@ function settingsDelegates() {
       if (a === 'token-apply') return settingsApplyToken();
       if (a === 'token-toggle') return settingsToggleShow();
       /* 日志页（v0.13.46）：刷新 / 复制 / 导出 */
+      if (a === 'pass-eye') return passEye(act, act.dataset.target);
       if (a === 'log-refresh') return settingsLogsLoad();
       if (a === 'log-copy') return settingsLogsCopy();
       if (a === 'log-export') return settingsLogsExport();
@@ -1992,6 +2019,10 @@ function settingsDelegates() {
       const id = e.target && e.target.id;
       if (id === 'logSource' || id === 'logLevel' || id === 'logWindow' ||
           id === 'logSubject') return settingsLogsLoad();
+    });
+    /* Task11 日志关键字防抖：挂在同一委托出口（input 事件），不写 inline */
+    page.addEventListener('input', e => {
+      if (e.target && e.target.id === 'logQ') logQDebounced();
     });
   });
 }

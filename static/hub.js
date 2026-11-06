@@ -9642,6 +9642,12 @@ function lpSelect(i) {
   lpRenderList();   // 重画选中态（.on）
 }
 
+/* Task8 搜索防抖 300ms（过滤词只存 JS 变量，不进 localStorage） */
+var lpQTimer = null;
+function lpQDebounced() {
+  if (lpQTimer) clearTimeout(lpQTimer);
+  lpQTimer = setTimeout(lpRenderList, 300);
+}
 function lpRenderList() {
   const box = $('lpList');
   if (!box) return;
@@ -9676,9 +9682,14 @@ function lpRenderList() {
       rows(refRows) + '</details>';
   }
   box.innerHTML = html || '<div class="hint" style="padding:10px">' +
-    (q ? '无匹配项目' : '无项目') + '</div>';
+    (q ? '无匹配项目 <button class="btn ghost sm" onclick="lpClearFilter()">清除筛选</button>' : '无项目') + '</div>';
 }
 
+function lpClearFilter() {
+  var q = $('lpQ');
+  if (q) { q.value = ''; q.focus(); }
+  lpRenderList();
+}
 function lpRenderAgents() {
   const sel = $('lpAgent');
   if (!sel) return;
@@ -9999,6 +10010,12 @@ function ghFilter() {
     (!r.fork || showForks) && (!ghHiddenSet.has(r.full_name) || showHidden));
 }
 
+/* Task8 搜索防抖 300ms（过滤词只存 JS 变量，不进 localStorage） */
+var ghQTimer = null;
+function ghQDebounced() {
+  if (ghQTimer) clearTimeout(ghQTimer);
+  ghQTimer = setTimeout(ghRenderList, 300);
+}
 function ghRenderList() {
   const box = $('ghList');
   if (!box) return;
@@ -10010,11 +10027,16 @@ function ghRenderList() {
   const idx = ordered.filter(([r]) =>
     !q || fuzzyMatch([[r.name, 3], [r.full_name, 1]], q) > 0);
   box.innerHTML = idx.map(([r, i]) => ghRowHtml(r, i)).join('') ||
-    '<div class="hint" style="padding:10px">' + (q ? '无匹配仓库' : '无仓库') + '</div>';
+    '<div class="hint" style="padding:10px">' + (q ? '无匹配仓库 <button class="btn ghost sm" onclick="ghClearFilter()">清除筛选</button>' : '无仓库') + '</div>';
   const hint = $('ghHint');
   if (hint) hint.textContent = '显示 ' + idx.length + ' / ' + GH.length + ' 个仓库' + ghCountsText();
 }
 
+function ghClearFilter() {
+  var q = $('ghQ');
+  if (q) { q.value = ''; q.focus(); }
+  ghRenderList();
+}
 function ghRenderAgents() {
   const sel = $('ghAgent');
   if (!sel) return;
@@ -10079,7 +10101,7 @@ async function ghStart() {
   let cwd = (r.local && r.local.found) ? r.local.path : null;
   try {
     if (!cwd) {
-      if (btn) btn.disabled = true;
+      if (btn) { btn.disabled = true; btn.dataset.oldTxt = btn.textContent; btn.textContent = '克隆中…'; }
       toast('克隆中：' + (r.full_name || r.name) + '（首次可能较慢）…');
       const d = await api('/api/github/clone', {
         method: 'POST',
@@ -10098,7 +10120,7 @@ async function ghStart() {
   } catch (e) {
     toast('新建会话失败：' + (e.message || ''), 'err');
   } finally {
-    if (btn && ghSel != null && GH[ghSel]) btn.disabled = false;
+    if (btn && ghSel != null && GH[ghSel]) { btn.disabled = false; if (btn.dataset.oldTxt) btn.textContent = btn.dataset.oldTxt; }
   }
 }
 

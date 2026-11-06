@@ -1859,7 +1859,7 @@
         <section class="page" id="page-localprojects">
             <div class="panel" style="flex:1;min-height:0;display:flex;flex-direction:column;margin-bottom:0">
                 <div class="toolbar">
-                    <input id="lpQ" type="search" placeholder="按名称 / 路径过滤…" aria-label="过滤项目" autocomplete="off">
+                    <input id="lpQ" type="search" placeholder="按名称 / 路径过滤…" aria-label="过滤项目" autocomplete="off" oninput="lpQDebounced()">
                     <button class="btn sm ghost" onclick="loadLocalProjects(true)" title="重新扫描本机项目"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>重扫</button>
                     <label style="display:inline-flex;align-items:center;gap:0;flex:none" title="隐藏的项目默认不显示，勾选后全部回列"><input type="checkbox" id="lpHidden" onchange="lpRenderList()">显示隐藏</label>
                     <span class="hint" id="lpHint"></span>
@@ -1888,7 +1888,7 @@
         <section class="page" id="page-github">
             <div class="panel" style="flex:1;min-height:0;display:flex;flex-direction:column;margin-bottom:0">
                 <div class="toolbar">
-                    <input id="ghQ" type="search" placeholder="按名称 / 全名过滤…" aria-label="过滤仓库" autocomplete="off">
+                    <input id="ghQ" type="search" placeholder="按名称 / 全名过滤…" aria-label="过滤仓库" autocomplete="off" oninput="ghQDebounced()">
                     <label style="display:inline-flex;align-items:center;gap:0;flex:none" title="fork 默认隐藏——34 个 fork 多为别人的仓库">
                         <input type="checkbox" id="ghForks" onchange="ghRenderList()">显示 fork
                     </label>
@@ -3403,7 +3403,7 @@
           + '符号阶梯=' + ['mdInline', 'openOverlay', 'renderHomeStats', 'settingsDelegates',
                           'termToast', 'termWriteReplay', 'termFindBind', 'termFontStep', 'startMemoryEdit', 'memQDebounced',
                           'skillQDebounced', 'renderSkillInvocations', 'kbQDebounced', 'dagZoom', 'navItemHtml', 'histHtml', 'navRow',
-                          'renderNav', 'navAccKeydown', 'initSidebar', 'termTouchBind', 'bbRender']
+                          'renderNav', 'navAccKeydown', 'initSidebar', 'lpQDebounced', 'lpClearFilter', 'ghQDebounced', 'ghClearFilter', 'termTouchBind', 'bbRender']
               .map(function (k) { return k + ':' + (typeof window[k] === 'function' ? 1 : 0); }).join(' ') + '\n'
           + (L.length ? '异常清单(前8):\n' + L.slice(0, 8).join('\n') : '异常清单: 无');
       }
@@ -3442,6 +3442,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=592974ee"></script>
+    <script src="/static/hub.js?v=4b86c76f"></script>
 </body>
 </html>

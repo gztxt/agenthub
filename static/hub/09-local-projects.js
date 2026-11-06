@@ -231,6 +231,12 @@ function lpSelect(i) {
   lpRenderList();   // 重画选中态（.on）
 }
 
+/* Task8 搜索防抖 300ms（过滤词只存 JS 变量，不进 localStorage） */
+var lpQTimer = null;
+function lpQDebounced() {
+  if (lpQTimer) clearTimeout(lpQTimer);
+  lpQTimer = setTimeout(lpRenderList, 300);
+}
 function lpRenderList() {
   const box = $('lpList');
   if (!box) return;
@@ -265,9 +271,14 @@ function lpRenderList() {
       rows(refRows) + '</details>';
   }
   box.innerHTML = html || '<div class="hint" style="padding:10px">' +
-    (q ? '无匹配项目' : '无项目') + '</div>';
+    (q ? '无匹配项目 <button class="btn ghost sm" onclick="lpClearFilter()">清除筛选</button>' : '无项目') + '</div>';
 }
 
+function lpClearFilter() {
+  var q = $('lpQ');
+  if (q) { q.value = ''; q.focus(); }
+  lpRenderList();
+}
 function lpRenderAgents() {
   const sel = $('lpAgent');
   if (!sel) return;

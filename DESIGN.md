@@ -62,6 +62,8 @@
 - 会话历史：统一存储在 SQLite
 
 ### 4. Memory Center（记忆中心）
+> ⚠️ **旧口径（L1 可检索 / L2 近 30 天 / L3 长期 Profile）已作废（2026-11-07，v0.13.192）**，
+> 以 M1/M2/M3 为准（README 有对照表）：M1 最近 / M2 库 / M3 画像。旧句保留不删。
 - L1：可检索记忆（语义搜索）
 - L2：近 30 天工作记忆
 - L3：长期 Profile
@@ -87,7 +89,7 @@
 
 ```
 ~/agent-hub/
-├── src/                          # 43 个平铺模块（无子包，仅 adapters/ 例外，见下）
+├── src/                          # 119 个平铺 .py（2026-11-07 实测 48875 行；旧值「43 个」已过期，仅 adapters/catalog 两子包）
 │   ├── main.py                   # FastAPI 入口（VERSION 单一版本源 + 路由装配）
 │   ├── config.py                 # 配置管理（读 .env，override=True）
 │   ├── discovery.py              # Agent 自动发现

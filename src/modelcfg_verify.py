@@ -18,7 +18,7 @@ from modelcfg_writers import _now  # 私有名不在 star 里
 
 
 def _mf():
-    """惰性拿 modelcfg 模块（catalog_ids / hub_model / apply_model / _ccr_base）。"""
+    """惰性拿 modelcfg 模块（catalog_ids / hub_model / apply_model / _ccr_base / _ccr_api_key）。"""
     import modelcfg as _m
     return _m
 
@@ -128,7 +128,7 @@ def _live_probe(model: str) -> dict:
     req = urllib.request.Request(
         _mf()._ccr_base() + "/v1/chat/completions", data=body, method="POST",
         headers={"Content-Type": "application/json",
-                 "Authorization": "Bearer " + _ccr_api_key()})
+                 "Authorization": "Bearer " + _mf()._ccr_api_key()})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))

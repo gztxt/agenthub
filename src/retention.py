@@ -36,6 +36,21 @@ log = logging.getLogger(__name__)
 
 import db
 
+_LAST_SWEEP: Dict[str, object] = {
+    "last_ok_at": None,
+    "last_deleted": None,
+    "last_error": None,
+}
+
+
+def last_sweep_status() -> Dict[str, object]:
+    """最近一轮清理的状态（供 /health 读取）。
+
+    状态必须区分「还没跑过」与「跑过且删了 0 行」；返回浅副本，避免调用方
+    修改进程内状态。
+    """
+    return dict(_LAST_SWEEP)
+
 #: 清理循环间隔（秒）。默认 1 小时 —— 保留期以「天」计，1 小时粒度足够，
 #: 而 1 分钟级会把「删了没几行也付一次全表扫描的代价」放大 60 倍。
 DEFAULT_INTERVAL_S = int(os.getenv("RETENTION_SWEEP_INTERVAL_S", "3600"))
@@ -80,24 +95,34 @@ def sweep_profile_events(days: int = DEFAULT_PROFILE_EVENTS_DAYS) -> int:
 def sweep_term_recordings() -> int:
     """删掉超过保留期的 `term_recordings`（保留期由 `term_record` 单一来源给）。
 
-    返回删掉的行数；**沿用 `term_record.sweep()` 的既有实现**（含触发器计数），
-    本函数只负责「在定时任务里也能调到它」，不重复实现 SQL。
+    返回删掉的帧数：先按到期条件计数，再调用既有 `sweep()` 执行删除。
+    这样日志与 /health 显示真实行数，而不是既有的“删了至少一行即回 1”。
     """
     if not db.is_open():
         return 0
     try:
         import term_record
-        return 1 if term_record.sweep() else 0
+        cutoff = time.time() - term_record.retention_days() * 86400
+        rows = db.query(
+            "SELECT COUNT(*) AS n FROM term_recordings WHERE ts < ?", (cutoff,))
+        expired = int(rows[0]["n"]) if rows else 0
+        if not expired:
+            return 0
+        return expired if term_record.sweep() else 0
     except Exception:                                   # noqa: BLE001
         return 0
 
 
 def sweep_once() -> Dict[str, int]:
     """跑一轮全部清理。返回各表删掉的行数（供 /health 与日志读）。"""
-    return {
+    out = {
         "profile_events": sweep_profile_events(),
         "term_recordings": sweep_term_recordings(),
     }
+    _LAST_SWEEP["last_ok_at"] = int(time.time())
+    _LAST_SWEEP["last_deleted"] = dict(out)
+    _LAST_SWEEP["last_error"] = None
+    return out
 
 
 async def retention_loop(interval_s: int = DEFAULT_INTERVAL_S) -> None:
@@ -105,17 +130,23 @@ async def retention_loop(interval_s: int = DEFAULT_INTERVAL_S) -> None:
 
     ⚠ 与 `term.reap_loop` 同一个纪律：**必须有独立心跳**，不能寄生在前端轮询上。
     前端一关就没人回收 ⇒ 保留期会静默失效。
+
+    启动时先跑一轮再等待间隔；否则每次重启都要等满 INTERVAL_S，
+    短时间重部署会让已经到期的行继续堆积。
     """
     import asyncio
     while True:
-        try:
-            await asyncio.sleep(interval_s)
-        except asyncio.CancelledError:
-            raise
         try:
             out = sweep_once()
             if any(out.values()):
                 log.info("[retention] 清理：%s" % out)
         except Exception as e:                          # noqa: BLE001
+            _LAST_SWEEP["last_ok_at"] = int(time.time())
+            _LAST_SWEEP["last_deleted"] = None
+            _LAST_SWEEP["last_error"] = "%s: %s" % (type(e).__name__, str(e)[:160])
             log.warning("[retention] 清理异常（不影响其他功能）：%s: %s"
                         % (type(e).__name__, str(e)[:160]))
+        try:
+            await asyncio.sleep(interval_s)
+        except asyncio.CancelledError:
+            raise

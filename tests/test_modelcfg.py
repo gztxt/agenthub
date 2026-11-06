@@ -1243,6 +1243,77 @@ class MCatalogGuard(_CatalogFixture):
         self.assertEqual(modelcfg.hub_model("qoder"), "Qwen3.8-Max")
 
 
+class MLiveProbe(_HomeFixture):
+    """设置页「真实调用验证」(`verify-live`) 必须真能跑。
+
+    病根（2026-10-31 拆分 34d5d59 引入，11-05 才发现）：`_ccr_api_key` 留在
+    `modelcfg.py` 门面，而 `modelcfg_verify.py` 用的是 `from modelcfg_shape import *`
+    这类星号导入 —— 下划线开头的名字不进 star ⇒ `_live_probe` 一调用就
+    `NameError: name '_ccr_api_key' is not defined`，端点直接 500。
+    所有既有用例都只走 `live=False`，所以 3884 条测试全绿也照挂。
+    这里用假 urlopen 钉两件事：凭据解析得到（不是空串）+ 响应能解析，不依赖网关。
+    """
+
+    def test_live_probe_sends_credential_and_parses_response(self):
+        import urllib.request as _u
+        import modelcfg_verify
+
+        seen = {}
+
+        class _Resp:
+            status = 200
+
+            def read(self):
+                return b'{"model":"alibaba/qwen3.8-max"}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def _fake(req, timeout=0):
+            seen["url"] = req.full_url
+            seen["auth"] = req.get_header("Authorization") or ""
+            return _Resp()
+
+        orig = _u.urlopen
+        _u.urlopen = _fake
+        # 环境里的 CCR_OPENAI_KEY / CCR_AUTH_TOKEN 优先级高于文件（开发机常有），
+        # 留着会让断言读到真 key ⇒ 这里临时摘掉，专测「文件回落链」。
+        saved = {k: os.environ.pop(k, None)
+                 for k in ("CCR_OPENAI_KEY", "CCR_AUTH_TOKEN")}
+        try:
+            probe = modelcfg_verify._live_probe("alibaba/qwen3.8-max")
+        finally:
+            _u.urlopen = orig
+            for k, v in saved.items():
+                if v is not None:
+                    os.environ[k] = v
+        self.assertTrue(probe["ok"], probe)
+        self.assertEqual(probe["served_model"], "alibaba/qwen3.8-max")
+        self.assertEqual(seen["auth"], "Bearer ccr-key-fixture",
+                         "凭据必须解析到网关 key；空串会让上游 401")
+        self.assertTrue(seen["url"].endswith("/v1/chat/completions"), seen["url"])
+
+    def test_verify_live_includes_real_call_check(self):
+        """`live=True` 必须真的多出「真实调用」这条判据，而不是静默跳过。"""
+        import modelcfg_verify
+
+        orig = modelcfg_verify._live_probe
+        modelcfg_verify._live_probe = lambda m: {"ok": True, "status": 200,
+                                                 "served_model": m, "ms": 5}
+        try:
+            modelcfg.set_hub_model("claude", "alibaba/qwen3.8-max")
+            v = modelcfg_verify.verify_model("claude", live=True)
+        finally:
+            modelcfg_verify._live_probe = orig
+        names = [c["name"] for c in v["checks"]]
+        self.assertIn("真实调用", names)
+        live = [c for c in v["checks"] if c["name"] == "真实调用"][0]
+        self.assertTrue(live["ok"], live)
+
+
 class NEffectiveState(_CatalogFixture):
     """三通道 × 清单的单一判定（v0.13.164）。"""
 

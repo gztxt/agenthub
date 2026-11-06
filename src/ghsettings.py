@@ -112,6 +112,28 @@ def _backup(path: Path, tag: str) -> str:
     return str(bak)
 
 
+def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
+    """原子落盘：同目录临时文件 + fsync + os.replace。
+    避免 write_text 直写在崩溃/断电窗口留下半截 .env/token（A5）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}-{int(time.time())}")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        try:
+            os.chmod(tmp, mode)
+        except OSError:
+            pass
+        with tmp.open("ab") as fh:
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)  # type: ignore[call-arg]
+        except OSError:
+            pass
+
+
 # ── 存储层 ────────────────────────────────────────────────────────────────
 def _ensure_table() -> None:
     db.execute("CREATE TABLE IF NOT EXISTS github_settings ("
@@ -402,8 +424,7 @@ def _write_env(mapping: Dict[str, str]) -> Tuple[Optional[str], Optional[Dict[st
                 break
         if not hit:
             lines.append(f'{k}="{v}"')
-    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    ENV_FILE.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
+    _atomic_write_text(ENV_FILE, "\n".join(lines).rstrip("\n") + "\n")
     try:
         os.chmod(ENV_FILE, 0o600)
     except OSError:
@@ -417,8 +438,7 @@ def _write_token_file(tok: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]
         return None, None
     f = token_file()
     bak = _backup(f, "hub-ghsettings")
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(tok + "\n", encoding="utf-8")
+    _atomic_write_text(f, tok + "\n")
     try:
         os.chmod(f, 0o600)
     except OSError:                                  # 挂载卷不支持 chmod 时不致命

@@ -624,7 +624,48 @@ def listen_host_for(port: int, default: str = "0.0.0.0", *,
         return default
     if _start_binds_wide(start):
         return default
+    # 静态监听面优先于运行时探测：上游 socket 绑在通配地址 ⇒ 它本来就对 LAN 开放，
+    # 与「此刻 LAN IP 是否就绪」无关。探测只作最后兜底。
+    # 反例（2026-11-06 报障「基础设施里面板端口变 3208 且打不开」）：主机 22:33:59 重启、
+    # hub 22:34:26 起，比网络就绪早 ⇒ `_lan_ip()` 返空 ⇒ proxy-panel(:8083, 实绑 `*:8083`)
+    # 被判成只绑回环，桥 :3208 永久锁 127.0.0.1，而前端把回环换成当前主机
+    # （static/hub.js 的 lanUrl）⇒ 局域网访问恒 ERR_CONNECTION_REFUSED。
+    if _upstream_binds_wide(port):
+        return default
     return default if _upstream_lan_reachable(port) else "127.0.0.1"
+
+
+def _listen_addrs(port: int) -> set:
+    """该端口此刻处于 LISTEN 的本地地址（/proc/net/tcp{,6} 的十六进制原文）。"""
+    addrs = set()
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path, encoding="ascii", errors="replace") as fh:
+                next(fh, None)
+                for line in fh:
+                    fields = line.split()
+                    # sl local_address rem_address st ...
+                    if len(fields) < 4 or fields[3] != "0A":
+                        continue
+                    addr, _, raw_port = fields[1].partition(":")
+                    try:
+                        if int(raw_port, 16) != port:
+                            continue
+                    except ValueError:
+                        continue
+                    addrs.add(addr.upper())
+        except OSError:
+            continue
+    return addrs
+
+
+def _upstream_binds_wide(port: int) -> bool:
+    """上游是否绑在通配地址（0.0.0.0 / ::）。
+
+    读内核监听表而不是连一次：监听面是 socket 的静态属性，开机早期网络栈未就绪
+    也照样能读准。这条判据只回答「上游本来会不会被 LAN 访问到」，不放宽任何面板。
+    """
+    return bool(_listen_addrs(port) & {"00000000", "0" * 32})
 
 
 def _upstream_lan_reachable(port: int) -> bool:

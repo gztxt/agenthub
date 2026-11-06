@@ -12,6 +12,7 @@ L0 口径：不 import src.main、不起服务、不打网络。这里只验三�
 真键盘链路的验收在 `work/probe-bridge/probe_bridge.py`（红/绿各一次真鼠标+真按键），
 这一层只保证「改坏契约时立刻红」，不替代那个。
 """
+import socket
 import sys
 import unittest
 from pathlib import Path
@@ -218,10 +219,15 @@ class TestListenHost(unittest.TestCase):
 
     def setUp(self):
         self._orig_probe = embed_proxy._upstream_lan_reachable
+        self._orig_wide = embed_proxy._upstream_binds_wide
+        # 默认「上游没绑通配」：让下面的探测分支用例保持可预期；
+        # 只有专门测通配的用例才把判据打开。
+        embed_proxy._upstream_binds_wide = lambda port: False
         self._probe_calls = 0
 
     def tearDown(self):
         embed_proxy._upstream_lan_reachable = self._orig_probe
+        embed_proxy._upstream_binds_wide = self._orig_wide
 
     def _probe(self, alive):
         def f(port):
@@ -289,6 +295,32 @@ class TestListenHost(unittest.TestCase):
             embed_proxy.listen_host_for(8083, "0.0.0.0", upstream_host="127.0.0.1"),
             "0.0.0.0")
         self.assertEqual(self._probe_calls, 1)
+
+    def test_wildcard_listener_binds_wide_without_probe(self):
+        """2026-11-06 事故闸门：上游 socket 实绑 `*:8083` ⇒ 必须出宽口，不依赖探测。"""
+        self._probe(False)
+        embed_proxy._upstream_binds_wide = lambda port: True
+        self.assertEqual(
+            embed_proxy.listen_host_for(8083, "0.0.0.0", upstream_host="127.0.0.1"),
+            "0.0.0.0")
+        self.assertEqual(self._probe_calls, 0, "静态监听面已足以下判，不该再连一次")
+
+    def test_listen_addrs_read_proc(self):
+        """判据本身看真实 /proc：通配绑判 True，只绑回环判 False，没人在听也判 False。"""
+        embed_proxy._upstream_binds_wide = self._orig_wide
+        wide = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        wide.bind(("0.0.0.0", 0))
+        wide.listen(1)
+        loop = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        loop.bind(("127.0.0.1", 0))
+        loop.listen(1)
+        try:
+            self.assertTrue(embed_proxy._upstream_binds_wide(wide.getsockname()[1]))
+            self.assertFalse(embed_proxy._upstream_binds_wide(loop.getsockname()[1]))
+            self.assertFalse(embed_proxy._upstream_binds_wide(1))
+        finally:
+            wide.close()
+            loop.close()
 
     def test_start_binds_wide_negative(self):
         self.assertFalse(embed_proxy._start_binds_wide({"cmd": ["x", "--host", "127.0.0.1"]}))

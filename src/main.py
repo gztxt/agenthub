@@ -86,6 +86,7 @@ import modelgate                    # 配置模型 ⊂ 网关清单（2026-11-02
 import healthx                      # /health 派生量的纯函数层（L0 不 import src.main，故抽出来）
 import memview                     # 内存三口径可观测（本体/托管子进程/cgroup 记账）
 import retention                    # 保留期定时清理（term_recordings + profile_events）
+import datastore                    # 五域物理落点登记（/api/datastore 与 /health 共用）
 import resilience                   # 出站韧性层：退避重试 + 熔断（/health 的 breakers 字段）
 import settings_bundle as settings_bundle_mod  # 配置包导出/导入（PT-20260927-15，JSON，不引 YAML）
 import approvals as approvals_mod   # P1-2：审批三态（ASK + Preview-Approve-Commit-Verify）
@@ -908,6 +909,12 @@ async def health():
     # 取不到清单时报 unknown（`checked:false`），不判死 —— 与 intake 的 count=0 口径同源。
     # 覆盖 9 类 16 处写死模型，明细见 src/modelgate.py 模块头。
     out["model_gate"] = modelgate.status(catalog=out["ccr_gateway"].get("models") or [])
+    # 保留期清理状态：最近一轮删除数、完成时间与异常。
+    # 只读进程内状态，不触发清理，也不改 status（无清理读数 ≠ hub 已坏）。
+    try:
+        out["retention"] = retention.last_sweep_status()
+    except Exception as e:  # noqa: BLE001  # 情报字段不得把 /health 打挂
+        out["retention"] = {"error": "%s: %s" % (type(e).__name__, str(e)[:120])}
     # catalog 源延迟（2026-11-05 P2）：只读 catalog.db 的 src.last_ok_at，报 max lag + 最慢源。
     # 为什么必须有：2026-11-05 实测 docs lag 13.3h 而 /health 全绿——「静默不可用」家族又一例。
     # 纯读、不改 status（源延迟 ≠ hub 坏了），异常不得把 /health 打挂；取不到一律 null。
@@ -974,6 +981,19 @@ async def health():
     if not db_ok:
         out["status"] = "degraded"
     return out
+
+
+@app.get("/api/datastore")
+async def datastore_describe():
+    """五域物理落点登记：统一入口、数据库路径与延迟。
+
+    只读描述，不触发索引构建、清理或任何写操作；异常只返回结构化错误。
+    """
+    try:
+        return datastore.describe()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=503,
+                            detail="%s: %s" % (type(e).__name__, str(e)[:160]))
 
 
 # ── 领域路由（C2：已从本文件抽成独立 module，见 src/api_*.py）──

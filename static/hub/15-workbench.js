@@ -30,18 +30,12 @@ function wbStaleLine() {
 }
 
 function wbTasksLine() {
-  /* 待人工验收 = submitted 且非终态；数据在 loadWbTasks 异步到位后重渲。 */
   if (!WB_TASKS) return null;
-  const queue = WB_TASKS.runs || WB_TASKS.queue || [];
-  const submitted = queue.filter(t => t.status === 'submitted' || (t.state && t.state === 'awaiting_accept')).length;
-  const failed24h = queue.filter(t => {
-    const upd = t.updated_at || t.accepted_at || t.created_at || '';
-    if (t.status !== 'failed' && t.state !== 'failed') return false;
-    if (!upd) return false;
-    return (Date.now() - new Date(upd).getTime()) < WB_DONE_S * 1000;
-  }).length;
+  const submitted = WB_TASKS.submitted;
+  const failed24h = WB_TASKS.failed_24h;
+  if (submitted == null && failed24h == null) return null;  /* 任务面不可用：整行省略 */
   if (!submitted && !failed24h) return null;
-  return ('待人工验收 ' + submitted + ' · 失败(24h) ' + failed24h);
+  return ('待人工验收 ' + (submitted || 0) + ' · 失败(24h) ' + (failed24h || 0));
 }
 
 function renderWorkbench() {
@@ -87,9 +81,9 @@ function renderWorkbench() {
 
 async function loadWbTasks() {
   try {
-    const q = await api('/api/tasks/runs');
+    const q = await api('/api/agents/wb-summary');
     WB_TASKS = q;
-    renderWorkbench();
+    if (typeof renderWorkbench === 'function') renderWorkbench();
   } catch (e) { /* 任务面不可用不阻断首页：行省略 */ }
 }
 var WB_TASKS = null;  /* 顶层 var 避免 TDZ（06 分片 go() 早于本分片初始化，纪律同 01 声明） */

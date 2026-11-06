@@ -73,6 +73,48 @@ async def list_agents():
 # 为什么放在本文件而不是新建 router：`main.py` 的 include_router 列表是多会话
 # 共写热点（C3），能不碰就不碰。`api_agents` 本来就是「Agent 视图」的归属处。
 
+
+# P3 纳入闭环（v0.13.194，方案 §6.1）：唯一读端点 wb_summary —— 前端一次请求拿全
+# 工作台排序所需全量数据，取代 15-workbench 的多路并发拼装。
+# 注册位置：必须在 `{agent_id}` 之前（本端点挂在 /releases 之后、/{agent_id} 之前）。
+@router.get("/api/agents/wb-summary")
+async def wb_summary():
+    """工作台注意力排序数据源（只读聚合，无写副作用）。
+
+    返回：{agents, submitted, failed_24h, infra_count, self_addrs}
+    数据源：discovery（agent 清单）+ tasks（submitted 与 24h 内 failed 计数）。
+    任务面不可用不阻断 agent 面：submitted/failed_24h 回 null 并带 reason。
+    """
+    import datetime as _dt
+    if appstate.discovery is None:
+        raise HTTPException(status_code=503, detail="Discovery not initialized")
+    agents = await appstate.discovery.discover_all()
+    out = {
+        "agents": [a.to_dict() for a in agents],
+        "count": len(agents),
+        "infra_count": sum(1 for a in agents if a.kind != "agent"),
+        "self_addrs": profiles_mod.own_addrs(),
+    }
+    try:
+        import db as _hub_db
+        import datetime as _dt2
+        cutoff_iso = (_dt2.datetime.now(_dt2.timezone.utc) - _dt2.timedelta(hours=24)).isoformat()
+        rows = _hub_db.query(
+            "SELECT "
+            "SUM(CASE WHEN status='submitted' THEN 1 ELSE 0 END) AS sub_n, "
+            "SUM(CASE WHEN status='failed' AND COALESCE(updated_at, accepted_at, submitted_at, '') >= ? THEN 1 ELSE 0 END) AS f24_n "
+            "FROM tasks", (cutoff_iso,)
+        )
+        r = rows[0] if rows else {}
+        out["submitted"] = int(r.get("sub_n") or 0)
+        out["failed_24h"] = int(r.get("f24_n") or 0)
+    except Exception:  # noqa: BLE001
+        out["submitted"] = None
+        out["failed_24h"] = None
+        out["tasks_reason"] = "任务面不可用（不影响 agent 面）"
+    return out
+
+
 @router.get("/api/agents/releases")
 async def list_releases(agent_id: Optional[str] = None):
     """列出各 agent 的 release manifest（`agent_id` 给定时只算那一个）。

@@ -198,10 +198,14 @@ class TestNavAccordionA11y(unittest.TestCase):
         self.assertNotIn("tabindex='1'", self.js)
 
     def test_nav_item_active_indicator_rule(self):
-        # M3 Navigation Drawer 激活指示条：.nav-item.on 专属高度 56px（M3 active indicator 56dp）
-        body = self._rule(".nav-item.on::before")
-        self.assertIn("height: 56px", body)
-        self.assertIn("border-radius: 28px", body)
+        # 2026-11-07 用户裁定：选中只靠整行高亮，最左竖线指示条已删除
+        self.assertNotIn(".nav-item.on::before", self.css)
+
+    def test_nav_child_larger_than_parent_font(self):
+        # 子菜单名字大小/样式与父菜单一致、左对齐（不缩进、不缩小）
+        body = self._rule(".nav-item.is-child .lbl")
+        self.assertIn("var(--fs-base)", body)
+        self.assertIn("text-align: left", body)
 
     def test_nav_icon_size_is_24px_token(self):
         # M3 导航图标 24dp。尺寸只许走 token：模板声明 --ico-nav: 24px，

@@ -333,18 +333,16 @@
         .nav-item.on, .side-item.on { background: var(--sel-bg); border-color: var(--sel-border); color: var(--text-1); font-weight: 600; }
         .nav-item.on:hover, .side-item.on:hover { background: var(--sel-bg-hover); border-color: var(--sel-border-hover); }
         .nav-item.on .nav-port { color: var(--text-2); }
-        /* Task1-F1：M3 激活指示条（窄条方案：行高 40px，整行条会压字；条高 56px 为指示条高度判据） */
+        /* 2026-11-07 用户裁定：选中只靠整行高亮（.on 背景），最左竖线指示条删除。 */
         .nav-item, .side-item { position: relative; }
-        .nav-item.on::before { content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 3px; height: 56px; border-radius: 28px; background: var(--accent); }
         /* Task1-F2：导航图标 24dp，只走 --ico-nav token（合并：不另写字面宽高） */
         .nav-item svg.i,.side-item svg.i { width: var(--ico-nav); height: var(--ico-nav); }
-        .nav-item .lbl, .side-item .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .nav-item .lbl, .side-item .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
         /* v0.12.1：菜单行内间隙收到 6px，把省下的空间让给名称（分组含 3~5 个元素，每行省 6~12px） */
         .nav-item { gap: 6px; }
-        /* 子项（2026-11-07）：proxy-panel 下的 xray / openrung。只做缩进，不改交互；
-           不用 ::before 画竖线 —— .nav-item.on::before 已被激活指示条占用。 */
-        .nav-item.is-child { padding-left: 26px; }
-        .nav-item.is-child .lbl { font-size: var(--fs-sm); }
+        /* 子项（2026-11-07）：proxy-panel 下的 xray / openrung。子菜单名字大小/样式与父菜单一致、左对齐（不缩进、不缩小）。 */
+        .nav-item.is-child { padding-left: 10px; }
+        .nav-item.is-child .lbl { font-size: var(--fs-base); text-align: left; }
         .nav-item .nav-port { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--muted); font-family: var(--font-mono); }
         /* P2-B 活动指示：忙碌点。会话活着但空闲 >2min = 常亮；有动静 = 呼吸。
            色值全走 :root 实名 token（P1-14 之后本站不写字面色）。

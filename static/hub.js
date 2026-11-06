@@ -693,6 +693,16 @@ function renderHomeStats() {
   set('hsError', errs);
   const errCard = $('hsError');
   if (errCard && errCard.parentElement) errCard.parentElement.classList.toggle('alert', errs > 0);
+  /* Task2 补新鲜度：/api/agents 无 vitals 采集时刻字段（后端改造属非目标），
+     这里 as_of = 本次渲染时刻（AGENTS 到位点），与 M3/M8 同名口径。 */
+  const asOfEl = $('hsAsOf');
+  if (asOfEl) asOfEl.textContent = 'as_of ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  /* Task2 钻取：统计卡点击展开左侧对应分组（agents/infra，复用 navOpen 手风琴）。
+     「过滤到不可用」无现成过滤器（navMatch 是搜索框专用），故只开组不另起过滤。 */
+  const hsGroup = { agents: 'agents', running: 'agents', infra: 'infra', error: 'agents' };
+  document.querySelectorAll('#homeStat [data-hs]').forEach(b => {
+    b.onclick = () => { const g = hsGroup[b.dataset.hs]; if (!g) return; navOpen = g; lsSet('hub.nav.open', g); renderNav(); };
+  });
 }
 
 /* ── T5：定时拉 /health，驱动顶栏「需重启」标签 ──

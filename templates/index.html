@@ -531,6 +531,10 @@
         .home-stat .hs .n { font-size: var(--fs-2xl); font-weight: 700; line-height: 1.15; }
         .home-stat .hs .t { font-size: var(--fs-sm); color: var(--muted); margin-top: 4px; }
         .home-stat .hs.alert { border: 2px solid var(--accent); }
+        /* Task2 钻取：统计卡为 button，样式与原 div 一致（不另起长相） */
+        .home-stat button.hs { cursor: pointer; text-align: left; font: inherit; color: inherit; }
+        .home-stat button.hs:hover { border-color: var(--sel-border); }
+        .hs-asof { font-size: var(--fs-xs); color: var(--muted); margin-top: 4px; }
         .home-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: var(--fs-base); color: var(--text-2); }
         .home-legend .lg { display: inline-flex; align-items: center; gap: 7px; }
         .home-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; }
@@ -1703,11 +1707,12 @@
                     <p class="home-desc only-wide">左侧手风琴收拢全部 <b id="cntAgent">–</b> 个 Agent 与 <b id="cntInfra">–</b> 项基础设施，点选即在右侧打开对应工作台（终端 / 嵌入 / 对话 / 详情按各自能力动态给出）。Ctrl+k唤起搜索框支持所有功能检索。</p>
                     <p class="home-desc only-narrow">左侧 <b id="cntAgent2">–</b> 个 Agent 与 <b id="cntInfra2">–</b> 项基础设施。点左侧图标条进入；点图标条顶部按钮可展开带名称的完整列表。</p>
                     <div class="home-stat" id="homeStat">
-                        <div class="hs"><div class="n" id="hsAgent">–</div><div class="t">Agent</div></div>
-                        <div class="hs" title="可用 = vitals 实测能服的 Agent（装了≠能用：入口壳假卡、账号额度耗尽均不计入）"><div class="n" id="hsRunning">–</div><div class="t">可用</div></div>
-                        <div class="hs"><div class="n" id="hsInfra">–</div><div class="t">基础设施</div></div>
-                        <div class="hs"><div class="n" id="hsError">–</div><div class="t">异常</div></div>
+                        <button class="hs" type="button" data-hs="agents" title="点开左侧 AGENTS 组"><div class="n" id="hsAgent">–</div><div class="t">Agent</div></button>
+                        <button class="hs" type="button" data-hs="running" title="可用 = vitals 实测能服的 Agent（装了≠能用：入口壳假卡、账号额度耗尽均不计入）。点开左侧 AGENTS 组"><div class="n" id="hsRunning">–</div><div class="t">可用</div></button>
+                        <button class="hs" type="button" data-hs="infra" title="点开左侧基础设施组"><div class="n" id="hsInfra">–</div><div class="t">基础设施</div></button>
+                        <button class="hs" type="button" data-hs="error" title="点开左侧 AGENTS 组查看异常"><div class="n" id="hsError">–</div><div class="t">异常</div></button>
                     </div>
+                    <div class="hs-asof" id="hsAsOf"></div>
                     <div class="home-legend">
                         <span class="lg"><span class="s-badge running"></span>在线</span>
                         <span class="lg"><span class="s-badge installed"></span>可启动</span>
@@ -3405,6 +3410,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=1d7eaad5"></script>
+    <script src="/static/hub.js?v=64529550"></script>
 </body>
 </html>

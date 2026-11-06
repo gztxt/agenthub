@@ -515,6 +515,21 @@
         /* 首页网格同样不设 1000px 上限：main 已经铺满窗口，这里再卡一道会让概览页
            右半边照样空着（2560 视口实测内容只到 x=1246）。单列 grid 因此随 main 走。 */
         .home-wrap { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+        /* P2 工作台（v0.13.193）：注意力列表在上，统计摘要降级在下。窄屏单列、无新增浮层。 */
+        .wb-panel { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 12px 14px; }
+        .wb-hd { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+        .wb-hd b { font-size: var(--fs-base); }
+        .wb-asof { font-size: var(--fs-xs); color: var(--muted); }
+        .wb-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+        .wb-row:last-child { border-bottom: none; }
+        .wb-row.off { opacity: .7; }
+        .wb-row .btn { margin-left: auto; }
+        .wb-stxt { color: var(--muted); font-size: var(--fs-sm); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .wb-ico { width: 1.2em; text-align: center; flex: none; }
+        .wb-ico.! { color: #d9534f; font-weight: 700; }
+        .wb-ico.? { color: var(--muted); }
+        .wb-stlist .wb-row { border-bottom: 1px solid var(--border); }
+        .linklike { background: none; border: none; color: var(--accent); cursor: pointer; font: inherit; font-size: var(--fs-sm); }
         .home-intro { display: flex; flex-direction: column; gap: 16px; }
         .home-brand { display: flex; align-items: center; gap: 12px; }
         .home-mark { width: 54px; height: 54px; flex: none; display: grid; place-items: center; border-radius: 14px; border: 2px solid var(--accent); background: var(--accent); color: var(--on-accent); }
@@ -1712,6 +1727,13 @@
         <!-- 首页：说明区（Agent / 基础设施已全部收拢至左侧手风琴） -->
         <section class="page on" id="page-classroom">
             <div class="home-wrap">
+                <!-- P2 工作台（v0.13.193）：注意力排序，数据到位由 15-workbench.js 重渲；
+                     首页 10 秒内回答「谁需要我」。已停止折叠在底部。 -->
+                <div class="wb-panel" id="wbPanel">
+                    <div class="wb-hd"><b>需要你处理</b><span class="wb-asof" id="wbAsOf"></span></div>
+                    <div id="wbAttention"></div>
+                    <div id="wbStopped"></div>
+                </div>
                 <div class="home-intro">
                     <div class="home-brand">
                         <span class="home-mark"><svg class="brand-glyph" aria-hidden="true"><use href="#i-hubmark"/></svg></span>
@@ -3457,6 +3479,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=7f14b537"></script>
+    <script src="/static/hub.js?v=1328be7e"></script>
 </body>
 </html>

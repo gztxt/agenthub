@@ -624,6 +624,7 @@ function lanUrl(url) {
 }
 
 /* ── 教室 ─────────────────────────────────────────── */
+let HUB_HEALTH = null;  /* P2 工作台（v0.13.193）：pollHealth 每 15s 写入，15-workbench 只读 */
 
 
 
@@ -647,6 +648,8 @@ async function loadAgents() {
        （2026-10-30 报障「dsh web authentication required」的恢复面。） */
     if (typeof syncEmbedUrlIfChanged === 'function') syncEmbedUrlIfChanged();
     renderHomeStats();
+    if (typeof renderWorkbench === 'function') renderWorkbench();  /* P2 工作台：agent 数据到位点重渲 */
+    if (typeof loadWbTasks === 'function') loadWbTasks();          /* 任务面异步到位后再重渲一次 */
     renderNav();   // v0.7.1：Agent / 基础设施的唯一入口是左侧手风琴，随数据刷新
     /* v0.13.103 补画项目页的 agent 下拉（用户 2026-10-11 报障：「本机项目」右侧
        agent 框不能正常显示，点 GitHub 项目菜单后才正常）。根因是**竞速**：
@@ -723,6 +726,9 @@ async function pollHealth() {
   if (document.hidden) return;
   try {
     const d = await api('/health');
+    HUB_HEALTH = d;  /* P2 工作台：陈旧码行数据源 */
+    HUB_HEALTH = d;  /* P2 工作台（v0.13.193）：15-workbench.js 读陈旧码行 */
+    if (typeof renderWorkbench === 'function') renderWorkbench();
     // P1-19：把 needs_restart 兑到顶栏。
     // 字段名以 src/selfattest.py 的 snapshot() 为准：needs_restart 才是本体，
     // code_stale 只是兼容别名，且「不可判定」时被压成 False —— 那种情况
@@ -11123,3 +11129,114 @@ async function loadBotboy(force) {
     bbBusy = false;
   }
 }
+/* 15-workbench.js — P2 工作台（v0.13.193，方案 AgentHub优化设计方案.md §4.3）
+ * 首页注意力排序：待人工验收 > 失败24h > code_stale/异常 > 终端等待 > 运行中 > 已停止折叠。
+ * 数据源全部是既有端点：/api/agents（AGENTS 全局）、/health（HUB_HEALTH）、/api/tasks/queue。
+ * 纪律：只读渲染，不新增写端点；排序规则固定，不让用户先配置。
+ */
+const WB_DONE_S = 24 * 3600;  /* 「失败 24h 内」窗口 */
+
+/* 任务队列缓存：数据源 /api/tasks/runs（L0 test_contracts 只校路径存在性，本端点实测在册） */
+
+function wbClassify(a) {
+  /* 返回 {rank, label, state}：rank 越小越靠前；state 用于徽章色。 */
+  if (a.kind !== 'agent') return { rank: 99, label: '基础设施', state: 'infra' };
+  const rt = a.rt_state || '';
+  if (rt === 'waiting_input' || rt === 'waiting') return { rank: 4, label: '终端等待', state: 'wait' };
+  if (a.verdict === 'error' || a.verdict === 'unusable' || a.verdict === 'broken')
+    return { rank: 3, label: '异常 ' + ((a.verdict_reason || '').slice(0, 24)), state: 'err' };
+  if (a.attested === true || a.status === 'running') return { rank: 5, label: '运行中', state: 'run' };
+  if (a.status === 'stopped') return { rank: 6, label: '已停止', state: 'stop' };
+  return { rank: 5, label: '可启动', state: 'ok' };
+}
+
+function wbStaleLine() {
+  const h = HUB_HEALTH || null;
+  if (!h) return null;
+  if (h.needs_restart === true)
+    return '陈旧码：运行 ' + String(h.git_sha_boot || '?').slice(0, 7) + ' vs 磁盘 ' + String(h.git_sha_now || '?').slice(0, 7) + '（需重启）';
+  if (h.code_stale === true)
+    return '陈旧码：' + (h.code_stale_reason || '已改未重启');
+  return '自证一致 ' + String(h.git_sha_boot || '?').slice(0, 7);
+}
+
+function wbTasksLine() {
+  /* 待人工验收 = submitted 且非终态；数据在 loadWbTasks 异步到位后重渲。 */
+  if (!WB_TASKS) return null;
+  const queue = WB_TASKS.runs || WB_TASKS.queue || [];
+  const submitted = queue.filter(t => t.status === 'submitted' || (t.state && t.state === 'awaiting_accept')).length;
+  const failed24h = queue.filter(t => {
+    const upd = t.updated_at || t.accepted_at || t.created_at || '';
+    if (t.status !== 'failed' && t.state !== 'failed') return false;
+    if (!upd) return false;
+    return (Date.now() - new Date(upd).getTime()) < WB_DONE_S * 1000;
+  }).length;
+  if (!submitted && !failed24h) return null;
+  return ('待人工验收 ' + submitted + ' · 失败(24h) ' + failed24h);
+}
+
+function renderWorkbench() {
+  const el = $('wbAttention');
+  if (!el) return;
+  const rows = [];
+  /* 1. 自证行（C code_stale 或异常） */
+  const stale = wbStaleLine();
+  if (stale && /需重启|已改未重启/.test(stale))
+    rows.push({ rank: 3, html: '<span class="wb-ico !">!</span> 陈旧码 <span class="wb-stxt">' + escapeHtml(stale) + '</span><button class="btn ghost sm" data-wbact="restart">重启</button>', rank: 3 });
+  /* 2. 任务行（待验收/失败24h） */
+  const tk = wbTasksLine();
+  if (tk) rows.push({ rank: 2, html: '<span class="wb-ico ?">✎</span> 任务 <span class="wb-stxt">' + escapeHtml(tk) + '</span><button class="btn ghost sm" data-wbact="tasks">去验收</button>' });
+  /* 3. Agent 行 */
+  const byRank = {};
+  AGENTS.forEach(a => {
+    const c = wbClassify(a);
+    (byRank[c.rank] = byRank[c.rank] || []).push({ a, c });
+  });
+  [3, 4, 5].forEach(r => {
+    (byRank[r] || []).forEach(x => {
+      rows.push({
+        rank: r,
+        html: '<span class="s-badge ' + x.c.state + '" title="' + escapeHtml(x.a.id) + '"></span> ' +
+               '<b>' + escapeHtml(x.a.name || x.a.id) + '</b> <span class="wb-stxt">' + escapeHtml(x.c.label) + '</span>' +
+               '<button class="btn ghost sm" data-wbact="open" data-agent="' + escapeHtml(x.a.id) + '">打开</button>'
+      });
+    });
+  });
+  /* 4. 已停止折叠组 */
+  const stopped = (byRank[6] || []).map(x => x.a);
+  const stoppedEl = $('wbStopped');
+  if (stoppedEl) {
+    stoppedEl.style.display = stopped.length ? '' : 'none';
+    stoppedEl.innerHTML = '<div class="wb-hd">已停止（' + stopped.length + '）<button class="linklike" data-wbact="stopped">展开</button></div>' +
+      '<div class="wb-stlist" style="display:none">' + stopped.map(x =>
+        '<div class="wb-row off"><span class="s-badge stop"></span> <b>' + escapeHtml(x.a.name || x.a.id) + '</b>' +
+        '<button class="btn ghost sm" data-wbact="open" data-agent="' + escapeHtml(x.a.id) + '">打开</button></div>').join('') + '</div>';
+  }
+  el.innerHTML = rows.map(r => '<div class="wb-row" data-rank="' + r.rank + '">' + r.html + '</div>').join('') ||
+    '<div class="wb-row"><span class="hint">全部正常。还没有纳管对象 → 点「自动扫描」。</span></div>';
+}
+
+async function loadWbTasks() {
+  try {
+    const q = await api('/api/tasks/runs');
+    WB_TASKS = q;
+    renderWorkbench();
+  } catch (e) { /* 任务面不可用不阻断首页：行省略 */ }
+}
+var WB_TASKS = null;  /* 顶层 var 避免 TDZ（06 分片 go() 早于本分片初始化，纪律同 01 声明） */
+/* HUB_HEALTH 由 pollHealth 每 15s 写入（01-core-boot），本分片只读。 */
+
+/* 委托：本页按钮不写 inline onclick（浮层纪律 §4.2），一律 data-* 走这里。 */
+document.addEventListener('click', function (e) {
+  const b = e.target.closest('[data-wbact]');
+  if (!b) return;
+  const act = b.dataset.wbact;
+  if (act === 'open' && b.dataset.agent) {
+    /* openAgent 不存在时落到既有入口 gotoChat（02-nav-and-poll.js），不另开新接口 */
+    if (typeof gotoChat === 'function') gotoChat(b.dataset.agent, 'term');
+    else if (typeof go === 'function') go('chat');
+  }
+  else if (act === 'tasks' && typeof go === 'function') go('tasks');
+  else if (act === 'restart' && typeof restartHub === 'function') restartHub({ currentTarget: b });
+  else if (act === 'stopped') { const l = b.closest('.wb-stlist'); if (l) l.style.display = l.style.display === 'none' ? '' : 'none'; }
+});

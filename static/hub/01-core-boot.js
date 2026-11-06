@@ -624,6 +624,7 @@ function lanUrl(url) {
 }
 
 /* ── 教室 ─────────────────────────────────────────── */
+let HUB_HEALTH = null;  /* P2 工作台（v0.13.193）：pollHealth 每 15s 写入，15-workbench 只读 */
 
 
 
@@ -647,6 +648,8 @@ async function loadAgents() {
        （2026-10-30 报障「dsh web authentication required」的恢复面。） */
     if (typeof syncEmbedUrlIfChanged === 'function') syncEmbedUrlIfChanged();
     renderHomeStats();
+    if (typeof renderWorkbench === 'function') renderWorkbench();  /* P2 工作台：agent 数据到位点重渲 */
+    if (typeof loadWbTasks === 'function') loadWbTasks();          /* 任务面异步到位后再重渲一次 */
     renderNav();   // v0.7.1：Agent / 基础设施的唯一入口是左侧手风琴，随数据刷新
     /* v0.13.103 补画项目页的 agent 下拉（用户 2026-10-11 报障：「本机项目」右侧
        agent 框不能正常显示，点 GitHub 项目菜单后才正常）。根因是**竞速**：
@@ -723,6 +726,9 @@ async function pollHealth() {
   if (document.hidden) return;
   try {
     const d = await api('/health');
+    HUB_HEALTH = d;  /* P2 工作台：陈旧码行数据源 */
+    HUB_HEALTH = d;  /* P2 工作台（v0.13.193）：15-workbench.js 读陈旧码行 */
+    if (typeof renderWorkbench === 'function') renderWorkbench();
     // P1-19：把 needs_restart 兑到顶栏。
     // 字段名以 src/selfattest.py 的 snapshot() 为准：needs_restart 才是本体，
     // code_stale 只是兼容别名，且「不可判定」时被压成 False —— 那种情况

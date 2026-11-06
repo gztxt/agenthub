@@ -124,7 +124,7 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.192"
+VERSION = "0.13.193"
 
 # v0.13.191（2026-11-03）：混排没有优势不是「模型不够强」，是拆解层缺一整个字段。
 #   ① 病：同一条 UI 需求被拆给 4 家 agent 并行，`files` 全是同一两个文件，后写覆盖先写

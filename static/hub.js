@@ -4548,6 +4548,13 @@ async function saveMemoryEdit(id, btn) {
   }
 }
 
+/* Task4 搜索防抖 300ms：Enter 仍可用，输入停 300ms 后查（中文组合键期间 input 也会触发，
+   300ms 窗口内连续输入只查最后一次） */
+let memQTimer = null;
+function memQDebounced() {
+  if (memQTimer) clearTimeout(memQTimer);
+  memQTimer = setTimeout(loadMemories, 300);
+}
 async function loadMemories() {
   const p = new URLSearchParams();
   const q = ($('memQ') && $('memQ').value.trim()) || '';
@@ -4557,6 +4564,11 @@ async function loadMemories() {
   try {
     const d = await api('/api/memory/l1?' + p.toString());
     MX_L1_ROWS = d.memories || [];
+    /* Task4 排序：recent=最近写入，cat=分类后最近（前端排序，后端分页不变） */
+    const sort = ($('memSort') && $('memSort').value) || 'recent';
+    MX_L1_ROWS.sort((a, b) => sort === 'cat'
+      ? String(a.category || '').localeCompare(String(b.category || '')) || String(b.created_at || '').localeCompare(String(a.created_at || ''))
+      : String(b.created_at || '').localeCompare(String(a.created_at || '')));
     MX_L1_TOTAL = (typeof d.total === 'number') ? d.total : MX_L1_ROWS.length;
     MX_L1_LIMIT = d.limit || 50;
     MX_EDIT_ID = 0;

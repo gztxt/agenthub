@@ -10,7 +10,9 @@ import writeauth  # noqa: E402
 
 def test_read_verdict_loopback_anonymous_allowed(monkeypatch):
     secrets = ["sekret"]
-    for host in ("127.0.0.1", "::1"):
+    # 双栈 `HOST=::` 下 v4 回环连接的对端实测是 `::ffff:127.0.0.1`（v4-mapped v6），
+    # 漏它＝本机页面全被拒（2026-11-07 上线首探实踩）。
+    for host in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "::ffff:0:0:0:0:0:0:1"):
         v, r = writeauth.read_verdict(host, "/api/agents", "", secrets)
         assert v == "allow", (host, r)
 

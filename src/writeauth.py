@@ -119,7 +119,7 @@ def credential_name(provided: str, secrets: Iterable[str]) -> str:
 #: 读端点令牌门（v0.13.192 / P0，方案 AgentHub优化设计方案.md §6.6）。
 #: `_is_loopback` 与 `_READ_TOKEN_ALLOW` 由 main.py 注册前注入（同 CSP_REPORT 的
 #: 注入模式，避免本模块 import main）。
-_is_loopback = lambda host: host in ("127.0.0.1", "::1")  # noqa: E731
+_is_loopback = lambda host: host in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "::ffff:0:0:0:0:0:0:1")  # noqa: E731
 _READ_TOKEN_ALLOW: set = set()
 READ_TOKEN_DISABLED = False
 

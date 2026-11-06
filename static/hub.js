@@ -6785,6 +6785,12 @@ async function loadSkillBudget() {
 
 /* ── 知识库中心（v0.13.26 批4）──────────────────── */
 
+/* Task6 检索防抖 300ms：输入停顿后查；切换检索路不重查（只在 Enter/按钮时生效） */
+let kbQTimer = null;
+function kbQDebounced() {
+  if (kbQTimer) clearTimeout(kbQTimer);
+  kbQTimer = setTimeout(() => { if ($('kbQ') && $('kbQ').value.trim()) kbSearch(); }, 300);
+}
 async function kbSearch() {
   const q = $('kbQ').value.trim();
   if (!q) { toast('输入检索词', 'err'); return; }
@@ -6794,12 +6800,19 @@ async function kbSearch() {
   try {
     const d = await api('/api/kb/search?q=' + encodeURIComponent(q) + '&routes=' + encodeURIComponent(routes) + '&k=12');
     CENTER_HEALTH.kb = 'ok';
-    $('kbHint').textContent = d.count + ' 条 · ' + d.took_ms + 'ms · ' + (d.engine || '');
+    $('kbHint').textContent = d.count + ' 条 · ' + d.took_ms + 'ms · ' + (d.engine || '') +
+      ((d.count || 0) >= 12 ? '（已达单次上限 12 条，可能有更多）' : '');
     /* v0.13.28 批3/批4：逐路徽标（与记忆页 fedBadges 同构——替换只 toast 的半吊子表态） */
     const badges = $('kbBadges');
     if (badges) badges.innerHTML = fedBadges(d);
     renderQueryBar('kbQueryBar', q, d.count || 0, 'kbClear');
-    $('kbResults').innerHTML = (d.results || []).map(r => {
+    /* Task6 结果按检索路分组（kbGroup 小标题） */
+    const kbGroups = {};
+    (d.results || []).forEach(r => { const g = String(r.source || r.from || 'unknown'); (kbGroups[g] = kbGroups[g] || []).push(r); });
+    const kbGrouped = Object.keys(kbGroups).map(g => ({ g, rows: kbGroups[g] }));
+    $('kbResults').innerHTML = kbGrouped.map(grp =>
+      '<div class="kb-group">' + escapeHtml(grp.g) + ' · ' + grp.rows.length + ' 条</div>' +
+      grp.rows.map(r => {
       /* v0.13.28 批4：源徽标走 SRC_ABBR + src-* 三变体（替换裸拼 `tag turbovec`——
          CSS 无定义静默灰底的根因）；路径行可溯源，workspace/archived 命中且首段
          是 KB 四根之一 ⇒ 下钻按钮（复用 kbBrowse 单层能力，零后端改动）。 */
@@ -6815,7 +6828,7 @@ async function kbSearch() {
       '<br><span class="hint">' + escapeHtml(String(r.content || r.preview || '').slice(0, 200)) + '</span>' +
       (path ? '<br><span class="hint" style="font-family:var(--font-mono);font-size:var(--fs-xs)">' + escapeHtml(path.slice(0, 120)) + '</span>' + drill : '') +
       '</p></div>';
-    }).join('') ||
+    }).join('')).join('') ||
       '<div class="hint">零命中。' + (d.note || '') + '</div>';
     // 逐路表态：哪路挂了要说出来（不许全绿假装没挂）——徽标行已表达，toast 保留作主动提醒
     const bad = (d.backends || []).filter(b => !b.ok);

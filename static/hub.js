@@ -5174,6 +5174,10 @@ function switchSkillView(v) {
   if (v !== 'catalog' && v !== 'invocations' && v !== 'store' &&
       v !== 'weights' && v !== 'refs') return;
   SKILL_VIEW = v;
+  /* Task5 tab 记忆：只写 URL hash（不落盘 localStorage，加载不写盘口径） */
+  if (('skill-' + v) !== String(location.hash || '').replace(/^#/, '')) {
+    try { history.replaceState(null, '', '#skill-' + v); } catch (e) { location.hash = 'skill-' + v; }
+  }
   ['catalog', 'invocations', 'store', 'weights', 'refs'].forEach(k => {
     const tab = $('skillTab' + k[0].toUpperCase() + k.slice(1));
     const view = $('skillView' + k[0].toUpperCase() + k.slice(1));
@@ -5580,6 +5584,9 @@ function bindSkillTabs() {
   const bar = $('skillTabs');
   if (!bar || bar.__skTabs) return;
   bar.__skTabs = true;
+  /* hash 存在时按 hash 开对应 tab（刷新回目录的例外只在带 hash 时生效） */
+  const h = String(location.hash || '').replace(/^#skill-/, '');
+  if (['catalog', 'invocations', 'store', 'weights', 'refs'].includes(h)) switchSkillView(h);
   const tabs = () => Array.from(bar.querySelectorAll('[role="tab"]'));
   bar.addEventListener('click', e => {
     const t = e.target.closest('[data-skill-view]');
@@ -5919,6 +5926,12 @@ function resetSkillFilters() {
   renderSkillList();
 }
 
+/* Task5 目录搜索防抖 300ms（中文组合键期间只在停顿后查一次） */
+let skillQTimer = null;
+function skillQDebounced() {
+  if (skillQTimer) clearTimeout(skillQTimer);
+  skillQTimer = setTimeout(renderSkillList, 300);
+}
 function renderSkillList() {
   const q = ($('skillQ').value || '').toLowerCase();
   const route = $('skillRoute').value;

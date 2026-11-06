@@ -2576,7 +2576,7 @@
                         <div class="sk-stats" id="skillStats">加载中…</div>
                         <div class="sp-tools">
                             <div class="toolbar">
-                                <input id="skillQ" placeholder="按名称 / 描述过滤…" oninput="renderSkillList()" style="max-width:260px">
+                                <input id="skillQ" placeholder="按名称 / 描述过滤…" oninput="skillQDebounced()" style="max-width:260px">
                                 <button class="btn ghost sm sk-clear" id="skillQClear" hidden
                                         onclick="clearSkillFilter()" aria-label="清空搜索">清除</button>
                                 <select id="skillRoute" onchange="renderSkillList()" style="max-width:190px"><option value="">全部发现点</option></select>
@@ -3387,7 +3387,7 @@
           // 防过期闸门：tests/test_hubjs_split.py 的 TestLadder 会逐项核对①②③，清单漂了即红。
           + '符号阶梯=' + ['mdInline', 'openOverlay', 'renderHomeStats', 'settingsDelegates',
                           'termToast', 'termWriteReplay', 'termFindBind', 'termFontStep', 'startMemoryEdit', 'memQDebounced',
-                          'renderSkillInvocations', 'navItemHtml', 'histHtml', 'navRow',
+                          'skillQDebounced', 'renderSkillInvocations', 'navItemHtml', 'histHtml', 'navRow',
                           'renderNav', 'navAccKeydown', 'initSidebar', 'termTouchBind', 'bbRender']
               .map(function (k) { return k + ':' + (typeof window[k] === 'function' ? 1 : 0); }).join(' ') + '\n'
           + (L.length ? '异常清单(前8):\n' + L.slice(0, 8).join('\n') : '异常清单: 无');
@@ -3427,6 +3427,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=21f5e48e"></script>
+    <script src="/static/hub.js?v=4e9796ef"></script>
 </body>
 </html>

@@ -622,16 +622,8 @@ PROFILES: List[dict] = [
      "desc": "手机桥接 WebSocket :8765（无独立Web面板）"},
 
     # ── Services / Memory / Tools（仅快捷方式）────────────────
-    {"id": "xray", "name": "Xray Proxy", "kind": "service",
-     "detect": {"proc": [r"(^|/)xray run", r"(^|/)xray( |$)"]},
-     "cli": None, "port": 7890, "ui": None,
-     # 2026-11-07：挂到 Proxy Panel 下（parent），面板指 proxy-panel 的 :8083。
-     # 7890 是入口（proxy-failover 常驻），xray 自己的入站是 17890 —— 别拿 7890
-     # 判 xray 死活，那条 200 只说明入口活着。
-     "panel": "http://127.0.0.1:8083", "panel_auth": "basic",
-     "bridge_secret": os.path.expanduser("~/.config/proxy-panel.secret"),
-     "parent": "proxy-panel",
-     "desc": "主线路代理：入口 7890(http)/7891(http+socks)，xray 实际入站 17890/17891"},
+    # 2026-11-07 用户裁定：xray / openrung 不再单独出卡，两个面板已并入 proxy-panel
+    # （:8083 一个页面管订阅、节点池、双线切换、OpenRung 启停）。
     {"id": "proxy-panel", "name": "Proxy Panel", "kind": "service",
      "detect": {"proc": [r"proxy-panel/server.py"], "systemd": ["proxy-panel"]},
      "cli": None, "port": 8083, "ui": None, "panel": "http://127.0.0.1:8083",
@@ -641,16 +633,7 @@ PROFILES: List[dict] = [
      # 代补 Authorization（见 src/embed_proxy.py 的 LOGIN_HTML 段），所以这里仍出 embed。
      "panel_auth": "basic",
      "bridge_secret": os.path.expanduser("~/.config/proxy-panel.secret"),
-     "desc": "代理面板（下含 Xray / OpenRung 两个子面板）：xray 订阅与节点配置 :8083"},
-    {"id": "openrung", "name": "OpenRung", "kind": "service",
-     "detect": {"systemd": ["openrung-client"], "proc": [r"openrung-client connect"]},
-     "cli": None, "port": 18081, "ui": None,
-     # 18082 是开关面板（Basic，口令同 :8083）；18081 是本地代理端口（hybrid http+socks，
-     # 源码固定绑 127.0.0.1）。面板本身在 18082，别把 port 写成 18082 否则同卡两处打架。
-     "panel": "http://127.0.0.1:18082", "panel_auth": "basic",
-     "bridge_secret": os.path.expanduser("~/.config/proxy-panel.secret"),
-     "parent": "proxy-panel",
-     "desc": "备用线路（公共节点，德国/韩国）：本地代理 127.0.0.1:18081，:18082 面板控制启停与双线切换"},
+     "desc": "代理面板（融合）：xray 订阅/测速/节点池 + 双线切换（Xray ↔ OpenRung）+ OpenRung 启停 :8083"},
     {"id": "claude-mem", "name": "claude-mem", "kind": "service",
      "detect": {"systemd": ["claude-mem"], "proc": [r"claude-mem"]},
      "cli": None, "port": 37700, "ui": None, "panel": "http://127.0.0.1:37700",

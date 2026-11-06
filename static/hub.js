@@ -2787,6 +2787,8 @@ function termScheduleReconnect(ws) {
   if (!termSid) return;                   // 已解绑 / 会话已结束 ⇒ 不复活用户已经离开的会话
   const delay = TERM_RC_DELAYS[Math.min(termRcAttempt, TERM_RC_DELAYS.length - 1)];
   termRcAttempt++;
+  const stRc = $('termStatus');
+  if (stRc) { stRc.className = 'term-status st-rc'; const txRc = $('termStatusTxt'); if (txRc) txRc.textContent = '重连中（第 ' + termRcAttempt + ' 次，' + Math.round(delay / 1000) + 's 后）'; }
   termNotice('[连接中断——自动重连中，第 ' + termRcAttempt + ' 次（' + Math.round(delay / 1000) + 's 后）]');
   termToast('终端连接中断，正在重连（第 ' + termRcAttempt + ' 次）', 'err');
   termRcTimer = setTimeout(termRcFire, delay);
@@ -2827,6 +2829,13 @@ function termConnecting(on, ws) {
   if (ws && termWs !== ws) return;   // 迟到的旧连接事件不算数
   const pane = $('termPane');
   if (pane) pane.classList.toggle('connecting', !!on);
+  /* Task3 状态条：连接中/已连接（重连中由 termScheduleReconnect 置 st-rc） */
+  const st = $('termStatus');
+  if (st) {
+    st.className = 'term-status ' + (on ? 'st-conn' : 'st-ok');
+    const tx = $('termStatusTxt');
+    if (tx) tx.textContent = on ? '连接中…' : '已连接';
+  }
 }
 
 /* ring 是「最近 64KB 原始输出」，对整屏 TUI 往往只剩最后几帧增量：回放完屏幕大半是空的，
@@ -3753,6 +3762,15 @@ function termFindBind() {
   bind('termFindPrev', () => termFindRun(-1));
   bind('termFindNext', () => termFindRun(1));
   bind('termFindClose', termFindClose);
+  /* Task3 桌面字号：只存 JS 变量（不落盘），与触摸端捏合同一个 termFontDelta */
+  bind('termFontDown', () => termFontStep(-1));
+  bind('termFontUp', () => termFontStep(1));
+}
+/* Task3 桌面字号步进：termFontDelta 只在内存，刷新即回基准（不落盘） */
+let termFontDelta = 0;
+function termFontStep(d) {
+  termFontDelta = Math.max(-4, Math.min(10, termFontDelta + d));
+  if (term) term.options.fontSize = cssNum('--term-fs', 14) + termFontDelta;
 }
 /* 终端没在显示时不抢 Ctrl+F —— 那时浏览器自己的页内查找才是用户想要的 */
 document.addEventListener('keydown', e => {
@@ -3908,6 +3926,8 @@ function termConnect(sid, agent, opts) {
   ws.onclose = ev => {
     if (termWs !== ws) return;  // 旧连接的 close 不污染新会话画面
     termConnecting(false, ws);
+    const stOff = $('termStatus');
+    if (stOff) { stOff.className = 'term-status st-off'; const txOff = $('termStatusTxt'); if (txOff) txOff.textContent = '已断开（' + ev.code + '）'; }
     termHbStop();               // 本线心跳随本线收尸；重连成功后由新 socket 重新起一条
     const code = ev.code;
     if (code === 4404 || code === 4410) {   // 已退出/不存在 → 明确提示并刷新列表，绝不重连
@@ -3964,8 +3984,10 @@ function termOpenChip(sid, agent) { termConnect(sid, agent, { user: true }); }
 
 function termChipHtml(s) {
   const label = (s.title && s.title.trim()) ? s.title.trim() : ('新会话 ' + hhTime(Math.floor(s.created)));
+  const active = s.updated || s.created;
+  const fullTitle = label + ' · 最后活跃 ' + (active ? hhTime(Math.floor(active)) : '未知');
   return '<span class="sess-item' + (s.id === termSid ? ' cur' : '') + '" data-sid="' + s.id + '">' +
-         '<a href="javascript:void(0)" title="' + escapeHtml(label) + '"' +
+         '<a href="javascript:void(0)" title="' + escapeHtml(fullTitle) + '"' +
          ' onclick="termOpenChip(\'' + s.id + '\',\'' + s.agent_id + '\')"><span class="s-t">' +
          escapeHtml(label) + '</span></a>' +
          '<button class="sess-x" title="关闭此会话" aria-label="关闭此会话" ' +
@@ -4081,6 +4103,8 @@ async function chatSend() {
   const cwd = $('chatCwd')?.value || '';
   const msg = input.value.trim();
   if (!msg) return;
+  const sendBtn = $('chatSendBtn');
+  if (sendBtn) sendBtn.disabled = true;
   input.value = '';
   const box = $('chatMsgs');
   const me = document.createElement('div');
@@ -4103,6 +4127,7 @@ async function chatSend() {
     busy.textContent = txt;
     chatSessLoad();  // 刷新会话列表（title 等信息更新）
   } catch (e) { busy.className = 'msg err'; busy.textContent = '[错误] ' + e.message; }
+  if (sendBtn) sendBtn.disabled = false;
   box.scrollTop = box.scrollHeight;
 }
 

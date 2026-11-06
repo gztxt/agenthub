@@ -97,6 +97,8 @@ async function chatSend() {
   const cwd = $('chatCwd')?.value || '';
   const msg = input.value.trim();
   if (!msg) return;
+  const sendBtn = $('chatSendBtn');
+  if (sendBtn) sendBtn.disabled = true;
   input.value = '';
   const box = $('chatMsgs');
   const me = document.createElement('div');
@@ -119,6 +121,7 @@ async function chatSend() {
     busy.textContent = txt;
     chatSessLoad();  // 刷新会话列表（title 等信息更新）
   } catch (e) { busy.className = 'msg err'; busy.textContent = '[错误] ' + e.message; }
+  if (sendBtn) sendBtn.disabled = false;
   box.scrollTop = box.scrollHeight;
 }
 

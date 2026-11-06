@@ -1163,6 +1163,15 @@
                              background-size: 40% 100%; background-repeat: no-repeat;
                              opacity: 0; pointer-events: none; }
         #termPane.connecting .term-body::before { opacity: .5; animation: term-connecting 1.1s linear infinite; }
+        /* Task3 终端状态条（底部，窄屏不挤标题）：ok/conn/rc/off 四态 */
+        .term-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 10px; border-top: 1px solid var(--border); font-size: var(--fs-xs); color: var(--text-2); }
+        .term-status .dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+        .term-status.st-ok .dot { background: var(--accent); }
+        .term-status.st-conn .dot { background: var(--muted); }
+        .term-status.st-rc .dot { background: var(--accent); }
+        .term-status.st-off .dot { background: var(--muted); }
+        .term-status #termReconnect { display: none; }
+        .term-status.st-off #termReconnect, .term-status.st-rc #termReconnect { display: inline-block; }
         /* 终端内查找条：absolute 浮层，不参与 flex 布局 ⇒ 不影响 #termEl 内容盒尺寸 */
         .term-find { position: absolute; top: 6px; right: 10px; z-index: 30; display: none;
             align-items: center; gap: 5px; padding: 4px 5px; border-radius: 6px;
@@ -1780,10 +1789,13 @@
                                 <button class="tf-btn" id="termFindPrev" title="上一个（Shift+Enter）" aria-label="上一个">↑</button>
                                 <button class="tf-btn" id="termFindNext" title="下一个（Enter）" aria-label="下一个">↓</button>
                                 <button class="tf-btn" id="termFindClose" title="关闭（Esc）" aria-label="关闭查找">✕</button>
+                                <button class="tf-btn" id="termFontDown" title="字号减小（桌面）" aria-label="字号减小">A−</button>
+                                <button class="tf-btn" id="termFontUp" title="字号增大（桌面）" aria-label="字号增大">A+</button>
                             </div>
                             <!-- 终端右键菜单（v0.13.92）。WebGL 渲染器把终端画在 canvas 上，
                                  浏览器右键只给「图片另存为/复制图片」⇒ 自己接管 contextmenu，
                                  给回复制/粘贴/全选。同为 absolute 浮层，不占 flex 空间。 -->
+                            <div class="term-status st-ok" id="termStatus"><span class="dot"></span><span id="termStatusTxt">已连接</span><button class="btn ghost sm" id="termReconnect" onclick="termRcFire()">立即重连</button></div>
                             <div class="term-ctx" id="termCtx" role="menu" aria-label="终端菜单">
                                 <button class="tc-btn" id="termCtxCopy" role="menuitem">复制</button>
                                 <button class="tc-btn" id="termCtxPaste" role="menuitem">粘贴</button>
@@ -1821,8 +1833,8 @@
                         </div>
                         <div class="msgs" id="chatMsgs"><div class="hint" style="margin:auto">左侧选择一个 Agent</div></div>
                         <div class="composer">
-                            <input id="chatInput" placeholder="消息…" onkeydown="if(event.key==='Enter')chatSend()">
-                            <button class="btn" onclick="chatSend()">发送</button>
+                            <textarea id="chatInput" placeholder="消息…（Enter 发送，Shift+Enter 换行）" rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();chatSend()}"></textarea>
+                            <button class="btn" id="chatSendBtn" onclick="chatSend()">发送</button>
                         </div>
                     </div>
                 </div>
@@ -3369,7 +3381,7 @@
           // （首项在前 1%、末项在后 5% 内），否则尾部截断查不出来。
           // 防过期闸门：tests/test_hubjs_split.py 的 TestLadder 会逐项核对①②③，清单漂了即红。
           + '符号阶梯=' + ['mdInline', 'openOverlay', 'renderHomeStats', 'settingsDelegates',
-                          'termToast', 'termWriteReplay', 'termFindBind', 'startMemoryEdit',
+                          'termToast', 'termWriteReplay', 'termFindBind', 'termFontStep', 'startMemoryEdit',
                           'renderSkillInvocations', 'navItemHtml', 'histHtml', 'navRow',
                           'renderNav', 'navAccKeydown', 'initSidebar', 'termTouchBind', 'bbRender']
               .map(function (k) { return k + ':' + (typeof window[k] === 'function' ? 1 : 0); }).join(' ') + '\n'
@@ -3410,6 +3422,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=64529550"></script>
+    <script src="/static/hub.js?v=d7ee24bd"></script>
 </body>
 </html>

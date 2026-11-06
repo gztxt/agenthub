@@ -6,6 +6,12 @@
 const HUB_NARROW_MQ = window.matchMedia('(max-width: 767px)');
 const hubNarrow = () => HUB_NARROW_MQ.matches;
 
+/* 空闲多久算「在忙」（原在 12-activity.js）：会话活着但没动静超过 2 分钟 ⇒
+   只亮常点不闪。取 2 分钟照终端心跳（TERM_HB）量级定，人 thinking 一轮通常 <2min。
+   ⚠ 必须留在 01：侧栏行渲染（05 的 navItemHtml→activityDotHtml）会被顶层的
+   initSidebar()/loadAgents()/go() 同步调到，声明晚于这些语句就是 TDZ（09-23 事故同型）。 */
+const ACTIVITY_BUSY_S = 120;
+
 /* ── 行内 markdown（仅白名单两件套，2026-10-04）─────────────────────────────
  * 技能描述取自 `SKILL.md` 的 frontmatter，那些文件里本来就写着 markdown
  * （如 `**仅当任务落在 wigolo / obscura 覆盖不到的平台时使用**`），
@@ -8509,9 +8515,12 @@ function hlMatch(text, q) {
   }
   return result + escaped.slice(last);
 }
-function navItemHtml(a) {
+function navItemHtml(a, child) {
   const st = seatStateOf(a);
   const on = (curPage === 'chat' && a.id === chatPick) ? ' on' : '';
+  // 子项（画像 parent 指向本组父行，如 xray/openrung 挂在 proxy-panel 下）：
+  // 只加一个缩进类，交互语义与普通行完全相同。
+  const cls = 'nav-item' + (child ? ' is-child' : '') + on;
   // 窄栏里名称会截断，title 里给全量信息（名称 · 状态 · 端口 · 描述）
   const tip = a.name + ' · ' + seatLabelOf(a) + (a.port ? ' · :' + a.port : '') +
     (a.verdict_reason ? '\n' + a.verdict_reason : '') +
@@ -8534,7 +8543,7 @@ function navItemHtml(a) {
   /* P2-B：行尾忙碌点。有活着的终端会话才亮（12-activity 的 ACTIVITY 口径），
      无会话返回空串 ⇒ 零会话时侧栏与改动前逐像素一致。 */
   const busyDot = (typeof activityDotHtml === 'function') ? activityDotHtml(a) : '';
-  return '<button class="nav-item' + on + '" data-entity="' + escapeHtml(a.id) + '"' +
+  return '<button class="' + cls + '" data-entity="' + escapeHtml(a.id) + '"' +
     ' title="' + escapeHtml(tip) + '" aria-label="' + escapeHtml(a.name + ' ' + seatLabelOf(a)) + '">' +
     '<span class="s-badge ' + st + '"></span>' +
     '<span class="lbl">' + nameHtml + '</span>' +
@@ -8683,7 +8692,7 @@ async function termResume(agentId, sid) {
 }
 
 /* 菜单行 = 实体行本体 + （命中展开项时）历史块。renderNav 的三分支 map 统一走这里。 */
-function navRow(a) { return navItemHtml(a) + (a.id === histOpen ? histHtml(a.id) : ''); }
+function navRow(a, child) { return navItemHtml(a, child) + (a.id === histOpen ? histHtml(a.id) : ''); }
 
 function renderNav() {
   const box = $('navTree');
@@ -8708,12 +8717,21 @@ function renderNav() {
     const open = q ? true : navOpen === g;
     let body = '';
     if (g === 'infra') {
+      /* 子项分组（2026-11-07 用户要求「proxy panel 下加 xray/openrung 子菜单」）：
+         画像写 `parent: <id>` 的卡不单列，紧跟父行缩进显示。父子关系只认服务端
+         `parent` 字段，前端不另存映射；父行缺席（搜索命中子项而父项不匹配）时
+         子项退回普通行，不丢入口。 */
+      const byId = new Map(list.map(a => [a.id, a]));
+      const kidsOf = {};
+      list.forEach(a => { if (a.parent && byId.has(a.parent)) (kidsOf[a.parent] = kidsOf[a.parent] || []).push(a); });
+      const isKid = a => !!(a.parent && byId.has(a.parent));
+      const withKids = a => navRow(a) + (kidsOf[a.id] || []).map(c => navRow(c, true)).join('');
       NAV_SUB_KINDS.forEach(([k, label]) => {
-        const sub = list.filter(a => a.kind === k);
-        if (sub.length) body += '<div class="nav-sub">' + label + '</div>' + sub.map(navRow).join('');
+        const sub = list.filter(a => a.kind === k && !isKid(a));
+        if (sub.length) body += '<div class="nav-sub">' + label + '</div>' + sub.map(withKids).join('');
       });
-      const rest = list.filter(a => !NAV_SUB_KINDS.some(([k]) => k === a.kind));
-      if (rest.length) body += '<div class="nav-sub">其他</div>' + rest.map(navRow).join('');
+      const rest = list.filter(a => !NAV_SUB_KINDS.some(([k]) => k === a.kind) && !isKid(a));
+      if (rest.length) body += '<div class="nav-sub">其他</div>' + rest.map(withKids).join('');
     } else if (g === 'system' || g === 'settings') {
       /* 设置组与系统页同渲染（data-sys ⇒ 侧栏委托 go(page)），只是不挂健康点。 */
       /* v0.13.27：三中心（memory/skills/kb）行尾挂健康点（CENTER_HEALTH，
@@ -10499,9 +10517,9 @@ var ACTIVITY = {};          // agent_id → { n, latest, active_s }
 var activityLoaded = false;
 var activityFailed = false;
 
-/* 空闲多久算「在忙」：会话还活着但没动静超过 2 分钟 ⇒ 只亮常点不闪。
-   取 2 分钟是照终端心跳（TERM_HB）量级定的：人 thinking 一轮通常 <2min。 */
-const ACTIVITY_BUSY_S = 120;
+/* 空闲多久算「在忙」的定义迁到 01-core-boot.js（2026-11-07）：navItemHtml 会经
+   navRow 同步调到 activityDotHtml，而 05 的顶层 initSidebar()/loadAgents()/go()
+   都在 12 之前执行 —— const 留在本文件就是 TDZ 风险（tests/test_tdz_order.py 判红）。 */
 
 function activityMap(perAgent) {
   /* 输入是 /api/term/activity 的 per_agent（[{agent_id, n}]）。

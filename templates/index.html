@@ -341,6 +341,10 @@
         .nav-item .lbl, .side-item .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         /* v0.12.1：菜单行内间隙收到 6px，把省下的空间让给名称（分组含 3~5 个元素，每行省 6~12px） */
         .nav-item { gap: 6px; }
+        /* 子项（2026-11-07）：proxy-panel 下的 xray / openrung。只做缩进，不改交互；
+           不用 ::before 画竖线 —— .nav-item.on::before 已被激活指示条占用。 */
+        .nav-item.is-child { padding-left: 26px; }
+        .nav-item.is-child .lbl { font-size: var(--fs-sm); }
         .nav-item .nav-port { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--muted); font-family: var(--font-mono); }
         /* P2-B 活动指示：忙碌点。会话活着但空闲 >2min = 常亮；有动静 = 呼吸。
            色值全走 :root 实名 token（P1-14 之后本站不写字面色）。
@@ -3455,6 +3459,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=c8a0a1a6"></script>
+    <script src="/static/hub.js?v=7f14b537"></script>
 </body>
 </html>

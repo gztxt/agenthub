@@ -6,6 +6,12 @@
 const HUB_NARROW_MQ = window.matchMedia('(max-width: 767px)');
 const hubNarrow = () => HUB_NARROW_MQ.matches;
 
+/* 空闲多久算「在忙」（原在 12-activity.js）：会话活着但没动静超过 2 分钟 ⇒
+   只亮常点不闪。取 2 分钟照终端心跳（TERM_HB）量级定，人 thinking 一轮通常 <2min。
+   ⚠ 必须留在 01：侧栏行渲染（05 的 navItemHtml→activityDotHtml）会被顶层的
+   initSidebar()/loadAgents()/go() 同步调到，声明晚于这些语句就是 TDZ（09-23 事故同型）。 */
+const ACTIVITY_BUSY_S = 120;
+
 /* ── 行内 markdown（仅白名单两件套，2026-10-04）─────────────────────────────
  * 技能描述取自 `SKILL.md` 的 frontmatter，那些文件里本来就写着 markdown
  * （如 `**仅当任务落在 wigolo / obscura 覆盖不到的平台时使用**`），

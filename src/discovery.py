@@ -112,6 +112,10 @@ class AgentInfo:
     # 前端与诊断都能直接读，不用再从 entries 里反推「为什么少一个按钮」。
     ui_state: Optional[str] = None
     ui_note: Optional[str] = None
+    # ── 侧栏归属（2026-11-07）：画像写了 `parent: <id>` 的卡片不单列，挂到父行下面
+    # 作为子项（目前只有 xray / openrung 挂在 proxy-panel 下）。前端只读这个字段，
+    # 不在前端另存一份父子映射。
+    parent: Optional[str] = None
 
     def to_dict(self):
         return asdict(self)
@@ -212,6 +216,7 @@ class AgentDiscovery:
                 rt_state=vv.get("rt_state") or "", rt_note=vv.get("rt_note"),
                 rt_model=vv.get("rt_model"),
                 ui_state=p.get("ui_state"), ui_note=p.get("ui_note"),
+                parent=p.get("parent"),
                 boundary=p.get("boundary") or boundary.cell_for_profile(p)))
         # 动态注册/扫描项（一律 service 类，仅快捷方式）
         for c in self._custom_agents():

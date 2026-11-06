@@ -16,9 +16,9 @@ var ACTIVITY = {};          // agent_id → { n, latest, active_s }
 var activityLoaded = false;
 var activityFailed = false;
 
-/* 空闲多久算「在忙」：会话还活着但没动静超过 2 分钟 ⇒ 只亮常点不闪。
-   取 2 分钟是照终端心跳（TERM_HB）量级定的：人 thinking 一轮通常 <2min。 */
-const ACTIVITY_BUSY_S = 120;
+/* 空闲多久算「在忙」的定义迁到 01-core-boot.js（2026-11-07）：navItemHtml 会经
+   navRow 同步调到 activityDotHtml，而 05 的顶层 initSidebar()/loadAgents()/go()
+   都在 12 之前执行 —— const 留在本文件就是 TDZ 风险（tests/test_tdz_order.py 判红）。 */
 
 function activityMap(perAgent) {
   /* 输入是 /api/term/activity 的 per_agent（[{agent_id, n}]）。

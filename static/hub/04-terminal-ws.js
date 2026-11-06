@@ -2948,6 +2948,14 @@ function renderPorts() {
 
 /* ── 遥测 ─────────────────────────────────────────── */
 
+/* Task9 遥测范围档：JS 变量（不落盘），默认 24h；档位只改事件条数上限 */
+var telRange = '24h';
+function telRangeSet(r) {
+  telRange = r;
+  var hint = $('telRangeHint');
+  if (hint) hint.textContent = 'Token 聚合 · 范围 ' + r;
+  loadTelemetry();
+}
 async function loadTelemetry() {
   $('curlExample').textContent =
     '# Claude/pi 等 Agent 会话结束后上报用量（同 session 重报=覆盖）\n' +
@@ -2970,7 +2978,8 @@ async function loadTelemetry() {
         '</td><td>' + (p.success_rate >= 99 ? ico('check-circle', 'xs') : p.success_rate >= 80 ? ico('circle', 'xs') : ico('alert', 'xs')) + ' ' + p.success_rate + '%</td>' +
         '<td>' + p.avg_ms + 'ms</td><td>' + (p.max_ms || '-') + 'ms</td></tr>').join('') + '</tbody></table>'
       : '<div class="hint">暂无画像数据（对话/指挥官/DAG/定时执行后自动生成）</div>';
-    const e = await api('/telemetry/events?limit=20');
+    const telLimit = ({ '1h': 20, '6h': 50, '24h': 100, 'all': 200 })[telRange] || 100;
+    const e = await api('/telemetry/events?limit=' + telLimit);
     $('eventTable').innerHTML = '<table><thead><tr><th>时间</th><th>来源</th><th>会话</th><th>事件</th></tr></thead><tbody>' +
       (e.events || []).map(x => '<tr><td>' + (x.created_at || '').slice(5, 16).replace('T', ' ') + '</td><td>' + escapeHtml(x.source) + '</td><td style="font-family:var(--font-mono);font-size:var(--fs-sm)">' + escapeHtml((x.session_id || '').slice(0, 14)) + '</td><td>' + escapeHtml(x.event) + '</td></tr>').join('') +
       '</tbody></table>';

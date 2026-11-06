@@ -2517,7 +2517,13 @@
                 <div class="sp-card">
                     <div class="sp-hd">
                         <h3>用量与事件</h3>
-                        <div class="sp-r"><span class="hint">Token 聚合 · 最近 20 条</span></div>
+                        <div class="sp-r"><span class="hint" id="telRangeHint">Token 聚合 · 最近 20 条</span>
+                        <span class="toolbar" style="display:inline-flex;gap:4px;margin-left:8px">
+                            <button class="btn ghost sm" onclick="telRangeSet('1h')">1h</button>
+                            <button class="btn ghost sm" onclick="telRangeSet('6h')">6h</button>
+                            <button class="btn ghost sm" onclick="telRangeSet('24h')">24h</button>
+                            <button class="btn ghost sm" onclick="telRangeSet('all')">全量</button>
+                        </span></div>
                     </div>
                     <div class="sp-bd">
                         <div class="sp-grid">
@@ -3402,7 +3408,7 @@
           // 防过期闸门：tests/test_hubjs_split.py 的 TestLadder 会逐项核对①②③，清单漂了即红。
           + '符号阶梯=' + ['mdInline', 'openOverlay', 'renderHomeStats', 'settingsDelegates',
                           'termToast', 'termWriteReplay', 'termFindBind', 'termFontStep', 'startMemoryEdit', 'memQDebounced',
-                          'skillQDebounced', 'renderSkillInvocations', 'kbQDebounced', 'dagZoom', 'navItemHtml', 'histHtml', 'navRow',
+                          'skillQDebounced', 'renderSkillInvocations', 'kbQDebounced', 'telRangeSet', 'dagZoom', 'navItemHtml', 'histHtml', 'navRow',
                           'renderNav', 'navAccKeydown', 'initSidebar', 'lpQDebounced', 'lpClearFilter', 'ghQDebounced', 'ghClearFilter', 'termTouchBind', 'bbRender']
               .map(function (k) { return k + ':' + (typeof window[k] === 'function' ? 1 : 0); }).join(' ') + '\n'
           + (L.length ? '异常清单(前8):\n' + L.slice(0, 8).join('\n') : '异常清单: 无');
@@ -3442,6 +3448,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=4b86c76f"></script>
+    <script src="/static/hub.js?v=cd5f86e0"></script>
 </body>
 </html>

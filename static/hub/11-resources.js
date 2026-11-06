@@ -164,7 +164,7 @@ function toggleAgentProcs(agentId) {
 }
 
 async function killProc(agentId, pid, signal) {
-    if (!confirm("确定要 " + (signal === "SIGTERM" ? "结束" : "强制结束") + " 进程 PID " + pid + " 吗？")) return;
+    if (!confirm("确定要 " + (signal === "SIGTERM" ? "结束" : "强制结束") + " Agent「" + agentId + "」的进程 PID " + pid + " 吗？此操作不可逆。")) return;
 
     const rowEl = document.querySelector('#procs-' + agentId + ' tr[data-pid="' + pid + '"]');
     const killBtns = rowEl ? rowEl.querySelectorAll('button') : [];

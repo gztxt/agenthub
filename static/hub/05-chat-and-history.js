@@ -178,7 +178,7 @@ async function callToolSel() {
   if (!mcpToolSel) return toast('先点击选择一个工具', 'err');
   let args = {};
   const raw = $('mcCallArgs').value.trim();
-  if (raw) { try { args = JSON.parse(raw); } catch (e) { return toast('args 需为 JSON', 'err'); } }
+  if (raw) { try { args = JSON.parse(raw); } catch (e) { return toast('args 需为 JSON：' + e.message, 'err'); } }
   $('mcCallOut').style.display = 'block'; $('mcCallOut').textContent = '调用中…';
   try {
     const d = await api('/mcp/call', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ server: mcpToolSel.server, tool: mcpToolSel.tool, args: args, agent_id: 'manager' }) });

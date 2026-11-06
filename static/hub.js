@@ -7636,6 +7636,12 @@ function renderRunSummary(d) {
      现在结论行只留「轮次 · 成功/失败 · 停因」；阻塞/总数/耗时/tokens
      收进标题栏的「更多指标」折叠区（#runSummaryMore，默认收起）。
      数据全部仍在前端手里，一个不删，只改渲染位置。 */
+  /* Task7 runPanel 三态：拆解中（全 pending）/运行中（有进行中）/已完成（其余） */
+  var panel = $('runPanel');
+  if (panel) {
+    var started = ts.some(function (t) { return t.status !== 'pending'; });
+    panel.className = 'sp-card ' + (open ? 'run-running' : (started ? 'run-done' : 'run-decomposing'));
+  }
   var el = $('runSummary');
   if (!el) return;
   el.textContent = '第 ' + (meta.round || 1) + '/' + (d.max_rounds || '?') + ' 轮 · '
@@ -7885,6 +7891,18 @@ function renderTaskTable(tasks) {
   bindHandoff();
 }
 
+/* Task7 DAG 缩放：缩放状态只存 JS 变量（window._dagZoom），适配宽度为默认 */
+window._dagZoom = 1;
+function dagZoom(mode) {
+  var z = window._dagZoom || 1;
+  if (mode === 'fit') z = 1;
+  else if (mode === '100') z = 1;
+  else if (mode === 'in') z = Math.min(3, z + 0.25);
+  else if (mode === 'out') z = Math.max(0.25, z - 0.25);
+  window._dagZoom = z;
+  var host = $('dagSvg');
+  if (host) { host.style.transform = 'scale(' + z + ')'; host.style.transformOrigin = 'top left'; }
+}
 function renderDag(tasks) {
   const byId = {};
   tasks.forEach(t => byId[t.task_id] = t);
@@ -8078,7 +8096,14 @@ async function loadJobs() {
       '<tr><td colspan="8" class="hint">暂无任务</td></tr>';
   } catch (e) { toast(e.message, 'err'); }
 }
-async function toggleJob(id, en) { try { await api('/api/jobs/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !!en }) }); loadJobs(); } catch (e) { toast(e.message, 'err'); } }
+async function toggleJob(id, en) {
+  /* Task7 乐观更新：点击即改本地按钮，回包失败回滚 + toast（5xx 进待重试态由 toast 提示） */
+  const btn = document.querySelector('button[onclick*="toggleJob(\'' + id + '\'"]');
+  const oldTxt = btn ? btn.textContent : '';
+  if (btn) btn.textContent = en ? '✔ 启用' : '‖ 停用';
+  try { await api('/api/jobs/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !!en }) }); loadJobs(); }
+  catch (e) { if (btn) btn.textContent = oldTxt; toast('开关回滚：' + e.message, 'err'); }
+}
 async function runJobNow(id) { toast('执行中…'); try { const d = await api('/api/jobs/' + id + '/run', { method: 'POST' }); toast(d.status === 'success' ? '执行成功: ' + (d.result || '').slice(0, 60) : '执行失败: ' + (d.result || ''), d.status === 'success' ? 'ok' : 'err'); loadJobs(); } catch (e) { toast(e.message, 'err'); } }
 async function delJob(id) { if (!confirm('删除任务 ' + id + '？')) return; try { await api('/api/jobs/' + id, { method: 'DELETE' }); loadJobs(); } catch (e) { toast(e.message, 'err'); } }
 

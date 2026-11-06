@@ -1540,6 +1540,11 @@
         .mx-matrix th:first-child, .mx-matrix td:first-child { position: sticky; left: 0; background: var(--surface); z-index: 1; }
         /* Task6 知识库面包屑 sticky（回退不重拉：只改滚动不重发请求） */
         #kbCrumb { position: sticky; top: 0; z-index: 2; background: var(--surface); padding: 4px 0; }
+        /* Task7 时间线展开：默认 240px 限高，展开后不限高（保留默认） */
+        #runEvents.expanded { max-height: none !important; }
+        #runPanel.run-decomposing .sp-hd { border-left: 3px solid var(--muted); }
+        #runPanel.run-running .sp-hd { border-left: 3px solid var(--accent); }
+        #runPanel.run-done .sp-hd { border-left: 3px solid var(--sel-border); }
         .kb-group { font-size: var(--fs-sm); font-weight: 700; color: var(--text-1); margin: 10px 0 4px; }
         .mx-matrix .mx-a-cnt b { color: var(--text-1); font-weight: 600; }
         .mx-matrix .mx-a-cnt .sup { color: var(--muted); }
@@ -2330,6 +2335,12 @@
                     <div class="sp-scroll" id="taskAccRun">
                     <div class="sp-bd"><div id="runChain" class="hint"></div></div>
                     <div class="sp-bd">
+                        <div class="toolbar" style="margin-bottom:4px">
+                            <button class="btn ghost sm" onclick="dagZoom('fit')">适配宽度</button>
+                            <button class="btn ghost sm" onclick="dagZoom('100')">100%</button>
+                            <button class="btn ghost sm" onclick="dagZoom('in')">放大</button>
+                            <button class="btn ghost sm" onclick="dagZoom('out')">缩小</button>
+                        </div>
                         <div id="dagSvg" class="tscroll"></div>
                     </div>
                     <div class="sp-bd box flush tscroll">
@@ -2338,6 +2349,7 @@
                     </div>
                     <div class="sp-bd">
                         <details><summary class="hint">执行时间线（派发 / 升档 / 验证 / 重拆）</summary>
+                            <button class="btn ghost sm" id="runEventsExpand" onclick="var e=document.getElementById('runEvents');e.classList.toggle('expanded');this.textContent=e.classList.contains('expanded')?'收起':'展开'">展开</button>
                             <div id="runEvents" class="tscroll" style="max-height:240px;padding-top:8px"></div>
                         </details>
                     </div>
@@ -3390,7 +3402,7 @@
           // 防过期闸门：tests/test_hubjs_split.py 的 TestLadder 会逐项核对①②③，清单漂了即红。
           + '符号阶梯=' + ['mdInline', 'openOverlay', 'renderHomeStats', 'settingsDelegates',
                           'termToast', 'termWriteReplay', 'termFindBind', 'termFontStep', 'startMemoryEdit', 'memQDebounced',
-                          'skillQDebounced', 'renderSkillInvocations', 'kbQDebounced', 'navItemHtml', 'histHtml', 'navRow',
+                          'skillQDebounced', 'renderSkillInvocations', 'kbQDebounced', 'dagZoom', 'navItemHtml', 'histHtml', 'navRow',
                           'renderNav', 'navAccKeydown', 'initSidebar', 'termTouchBind', 'bbRender']
               .map(function (k) { return k + ':' + (typeof window[k] === 'function' ? 1 : 0); }).join(' ') + '\n'
           + (L.length ? '异常清单(前8):\n' + L.slice(0, 8).join('\n') : '异常清单: 无');
@@ -3430,6 +3442,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=fdf5e125"></script>
+    <script src="/static/hub.js?v=592974ee"></script>
 </body>
 </html>

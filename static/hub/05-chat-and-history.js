@@ -19,7 +19,14 @@ async function loadJobs() {
       '<tr><td colspan="8" class="hint">暂无任务</td></tr>';
   } catch (e) { toast(e.message, 'err'); }
 }
-async function toggleJob(id, en) { try { await api('/api/jobs/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !!en }) }); loadJobs(); } catch (e) { toast(e.message, 'err'); } }
+async function toggleJob(id, en) {
+  /* Task7 乐观更新：点击即改本地按钮，回包失败回滚 + toast（5xx 进待重试态由 toast 提示） */
+  const btn = document.querySelector('button[onclick*="toggleJob(\'' + id + '\'"]');
+  const oldTxt = btn ? btn.textContent : '';
+  if (btn) btn.textContent = en ? '✔ 启用' : '‖ 停用';
+  try { await api('/api/jobs/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !!en }) }); loadJobs(); }
+  catch (e) { if (btn) btn.textContent = oldTxt; toast('开关回滚：' + e.message, 'err'); }
+}
 async function runJobNow(id) { toast('执行中…'); try { const d = await api('/api/jobs/' + id + '/run', { method: 'POST' }); toast(d.status === 'success' ? '执行成功: ' + (d.result || '').slice(0, 60) : '执行失败: ' + (d.result || ''), d.status === 'success' ? 'ok' : 'err'); loadJobs(); } catch (e) { toast(e.message, 'err'); } }
 async function delJob(id) { if (!confirm('删除任务 ' + id + '？')) return; try { await api('/api/jobs/' + id, { method: 'DELETE' }); loadJobs(); } catch (e) { toast(e.message, 'err'); } }
 

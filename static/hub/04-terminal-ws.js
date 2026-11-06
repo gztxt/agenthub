@@ -3630,6 +3630,12 @@ function renderRunSummary(d) {
      现在结论行只留「轮次 · 成功/失败 · 停因」；阻塞/总数/耗时/tokens
      收进标题栏的「更多指标」折叠区（#runSummaryMore，默认收起）。
      数据全部仍在前端手里，一个不删，只改渲染位置。 */
+  /* Task7 runPanel 三态：拆解中（全 pending）/运行中（有进行中）/已完成（其余） */
+  var panel = $('runPanel');
+  if (panel) {
+    var started = ts.some(function (t) { return t.status !== 'pending'; });
+    panel.className = 'sp-card ' + (open ? 'run-running' : (started ? 'run-done' : 'run-decomposing'));
+  }
   var el = $('runSummary');
   if (!el) return;
   el.textContent = '第 ' + (meta.round || 1) + '/' + (d.max_rounds || '?') + ' 轮 · '
@@ -3879,6 +3885,18 @@ function renderTaskTable(tasks) {
   bindHandoff();
 }
 
+/* Task7 DAG 缩放：缩放状态只存 JS 变量（window._dagZoom），适配宽度为默认 */
+window._dagZoom = 1;
+function dagZoom(mode) {
+  var z = window._dagZoom || 1;
+  if (mode === 'fit') z = 1;
+  else if (mode === '100') z = 1;
+  else if (mode === 'in') z = Math.min(3, z + 0.25);
+  else if (mode === 'out') z = Math.max(0.25, z - 0.25);
+  window._dagZoom = z;
+  var host = $('dagSvg');
+  if (host) { host.style.transform = 'scale(' + z + ')'; host.style.transformOrigin = 'top left'; }
+}
 function renderDag(tasks) {
   const byId = {};
   tasks.forEach(t => byId[t.task_id] = t);

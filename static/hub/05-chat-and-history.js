@@ -443,7 +443,7 @@ async function startAgent(id) {
 }
 /* ── v0.13.0 左侧历史下拉：同一时刻只展开一个 agent（与 navOpen 手风琴同构，D3）。
    histOpen 进 localStorage；数据缓存在 HIST —— 30s loadAgents 重绘时不闪空白。 ── */
-const HIST_LIMIT = 8;                                   // v0.13.49：每 agent 8 条（原 5 条）
+const HIST_LIMIT = 15;                                   // v0.13.49：每 agent 8 条（原 5 条）；2026-11-08 提到 15 条
 /* ⚠ 声明位置是硬约束，不许往下挪：下面 histBootstrap() 是**顶层 IIFE**，会同步走
 histLoad() → renderNav() → 读本变量。09-23 自研 APP 事故就是顺序被破坏：手机那份
 localStorage 有 hub.term.token ⇒ 早期路径被激活，而 let 声明在 renderNav 之后 ⇒

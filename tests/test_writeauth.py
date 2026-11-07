@@ -89,24 +89,10 @@ class BRouteInventory(unittest.TestCase):
         self.assertEqual(sorted(p for _, p, _ in uncovered),
                          sorted(p for _, p, _ in routes if p.startswith(pre)),
                          "未被闸门覆盖的路由与豁免名单不吻合")
-        # 豁免基线 4 → 8（v0.13.42）：设置→GitHub 的四个写端点
-        # （/api/settings/github/{test,apply,clear,refresh}）是**同一个功能的一个入口**，
-        # 四条共用同一道 HUB_PASSCODE（错→401、未配→503 fail-closed），与已豁免的
-        # term-token / model/apply 完全同型：它们不碰 agent 配置，只写 hub 自己的
-        # github_settings 表（+ 可选回写文件，落笔前备份）。再叠一层 token 门，
-        # 用户在设置页就永远改不动地址与 key（自锁死）——与既有豁免同理。
-        # 8 → 9（v0.13.181）：/api/settings/model/undo —— 撤销上一次模型写入。
-        # 它**同样是写盘**（把配置文件还原到那次保存之前），所以必须与 apply 同一把
-        # HUB_PASSCODE（错→401、未配→503），且口令走 POST body 不进 URL。
-        # 还原源只取自 model_writes 表里记载的备份路径，不接受客户端传路径
-        # ⇒ 不构成任意文件写入口（tests/test_modelcfg.py:RUndo 逐条钉住）。
-        # 9 → 10（2026-11-07）：/api/users/login 密码登录端点 —— 自带密码校验 +
-        # 进程内限速（连败 5 次锁 60s）；若不豁免，未登录用户永远进不来＝自锁死
-        # （同 /api/settings/term-token 的豁免纪律）。它只签发该用户自己的会话
-        # Cookie，不碰其他用户面；改密走 /api/users/{name}/password（需已登录，不豁免）。
-        # 10 → 11（2026-11-07）：/api/users/logout 退出端点 —— 只吊销请求自带 Cookie
-        # 对应的会话并清 Cookie，幂等；会话过期后前端仍必须能调它，否则「退出」失效。
-        self.assertLessEqual(len(uncovered), 11,
+        # 2026-11-07 C 档：设置写端点（term-token / model / github）已全部收回登录闸门，
+        # 原 HUB_PASSCODE 自校验与对应豁免一并删除。豁免只剩 telemetry / login / logout
+        # 三条，都是「不豁免就自锁死」；上限由 11 收紧为 3。
+        self.assertLessEqual(len(uncovered), 3,
                              f"豁免口子涨到 {len(uncovered)} 条了，每加一条都要在这里交代清楚")
 
     def test_no_dead_exempt_entry(self):

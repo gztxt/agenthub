@@ -191,7 +191,7 @@ CREATE TABLE IF NOT EXISTS term_rec_meta (
     v INTEGER NOT NULL
 );
 -- v0.13.x 用户与按功能授权（2026-11-07 用户裁定新增）。此前全 hub 只有 .env 的
--- 两把共享 token（TERM_TOKEN/HUB_PASSCODE），无「用户」概念。三张表：
+-- 2026-11-07 C 档：两把共享 token（TERM_TOKEN/HUB_PASSCODE）已废弃，全站单一登录态。三张表：
 --   users            用户主档（username 唯一、is_admin）
 --   user_credentials 每用户多 token；**只存 sha256，绝不存明文/可逆**
 --   user_perms       每用户按「菜单节点 id」授权（module=NAV 节点；admin 绕过）

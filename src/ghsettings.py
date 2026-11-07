@@ -21,8 +21,7 @@ API 基址 `https://api.github.com`、token 文件 `/fs/1000/ftp/技术文档/gi
 - 操作范围（用户 09-27 裁定）：只读 + 克隆。本模块不新增任何远端写操作；
   「测试连接」只打 /user、/rate_limit 与一次 per_page=1 的仓库探针。
 
-端点（四个写端点一律自带 HUB_PASSCODE 校验：错→401、未配→503 fail-closed，
-与 /api/settings/term-token、/api/settings/model/apply 同口径）：
+端点（2026-11-07 C 档：四个写端点一律由 writeauth.write_gate 登录闸门保护）：
     GET  /api/settings/github          现值 + 掩码 + 来源 + 清单状态
     POST /api/settings/github/test     试连（不落盘）
     POST /api/settings/github/apply    落库（+ 可选回写文件）
@@ -31,7 +30,6 @@ API 基址 `https://api.github.com`、token 文件 `/fs/1000/ftp/技术文档/gi
 """
 from __future__ import annotations
 
-import hmac
 import json
 import logging
 import os
@@ -49,7 +47,7 @@ import db
 import outbound    # P2 C5：出站地址准入（与 mcpgw 共用同一份判据）
 import resilience
 import tdai_client
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 router = APIRouter(tags=["ghsettings"])
@@ -550,7 +548,6 @@ def view() -> Dict[str, Any]:
                      "clone_base": DEFAULT_CLONE_BASE},
         "files": {"token_file": str(token_file()), "env_file": str(ENV_FILE),
                   "env_exists": ENV_FILE.exists()},
-        "writable": bool(os.getenv("HUB_PASSCODE", "")),
     }
 
 
@@ -653,24 +650,15 @@ class GhIn(BaseModel):
     clone_base: Optional[str] = None
     token: Optional[str] = None
     write_files: bool = False
-    passcode: str = ""
 
 
 class TestIn(BaseModel):
     api_base: Optional[str] = None
     token: Optional[str] = None
     owner: Optional[str] = None
-    passcode: str = ""
 
 
-def _check_passcode(pc: str, request: Request, what: str) -> None:
-    want = os.getenv("HUB_PASSCODE", "")
-    if not want:
-        raise HTTPException(503, "未设置 HUB_PASSCODE，GitHub 设置已停用（fail-closed）")
-    if not hmac.compare_digest(pc or "", want):
-        ip = request.client.host if request and request.client else "?"
-        log.warning(f"[settings] GitHub 设置口令错误（{what}）：{ip}")
-        raise HTTPException(401, "口令错误")
+
 
 
 def _guard(e: GhSettingsError) -> HTTPException:
@@ -684,9 +672,8 @@ async def settings_github_view():
 
 
 @router.post("/api/settings/github/test")
-async def settings_github_test(body: TestIn, request: Request):
+async def settings_github_test(body: TestIn):
     """试连：不落盘。地址/key 可用 body 覆盖（先试后存）；缺省用已生效值。"""
-    _check_passcode(body.passcode, request, "test")
     eff = effective()
     api_base = _check_api_base(body.api_base) if body.api_base else eff["api_base"]
     tok = _check_token(body.token) if body.token else (
@@ -698,9 +685,8 @@ async def settings_github_test(body: TestIn, request: Request):
 
 
 @router.post("/api/settings/github/apply")
-async def settings_github_apply(body: GhIn, request: Request):
+async def settings_github_apply(body: GhIn):
     """落库（+ 可选回写 github.txt/.env）。回执含 diff 与备份路径（落笔证据）。"""
-    _check_passcode(body.passcode, request, "apply")
     try:
         fields, warn = normalize(body.model_dump())
     except GhSettingsError as e:
@@ -720,16 +706,14 @@ async def settings_github_apply(body: GhIn, request: Request):
 
 
 @router.post("/api/settings/github/clear")
-async def settings_github_clear(body: GhIn, request: Request):
+async def settings_github_clear(body: GhIn):
     """清掉 DB 设置（回落到 env/默认）。"""
-    _check_passcode(body.passcode, request, "clear")
     return clear()
 
 
 @router.post("/api/settings/github/refresh")
-async def settings_github_refresh(body: GhIn, request: Request):
+async def settings_github_refresh(body: GhIn):
     """清缓存并立即重拉清单（页面「刷新清单」按钮的后端半程）。"""
-    _check_passcode(body.passcode, request, "refresh")
     invalidate_cache()
     try:
         import githubprojects as gp

@@ -18,7 +18,7 @@ env_path = Path(__file__).parent.parent / ".env"
 #: 只有本模块反着来 ⇒ **同一个进程里端口能覆盖、数据目录不能**，是纯粹的配置层不一致。
 #:
 #: 为什么是**白名单**而不是改成 `override=False`：`.env` 存着全部凭据
-#: （`CCR_AUTH_TOKEN`/`HOOK_AUTH_TOKEN`/`TERM_TOKEN`/`HUB_PASSCODE`…，已被 .gitignore 排除）。
+#: （`CCR_AUTH_TOKEN`/`HOOK_AUTH_TOKEN`…，已被 .gitignore 排除；TERM_TOKEN/HUB_PASSCODE 已于 2026-11-07 废弃）。
 #: 一刀改成非覆盖 ⇒ 任何「不起 systemd 就裸跑」的场景都会丢凭据，
 #: 从「隔离不了」变成「全挂」。故只放行**下面这几个不含凭据的隔离旋钮**，
 #: 其余键继续由 `.env` 兜底，**生产行为逐字不变**。

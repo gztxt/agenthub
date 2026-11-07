@@ -621,59 +621,22 @@ class HRepairDrift(_HomeFixture):
 
 
 class EPasscodeGate(unittest.TestCase):
-    """HTTP 层：口令门必须 fail-closed（复用 writeauth 同款口径）。"""
+    """2026-11-07 C 档：HUB_PASSCODE 自校验已删除，写端点统一由 writeauth.write_gate
+    登录闸门保护。本类改为静态/契约层钉住「源码里不再有口令门」，防止共享口令回潮。"""
 
-    def setUp(self):
-        self.tmp = _mktmp("modelcfg-gate-")
-        self.old_pc = os.environ.get("HUB_PASSCODE")
-        self.old_home = os.environ.get("HOME")
-        os.environ["HOME"] = str(self.tmp)
-        db.init_db(self.tmp / "gate.db")
-
-    def tearDown(self):
-        if self.old_pc is None:
-            os.environ.pop("HUB_PASSCODE", None)
-        else:
-            os.environ["HUB_PASSCODE"] = self.old_pc
-        if self.old_home is not None:
-            os.environ["HOME"] = self.old_home
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def _err(self, coro):
-        """跑协程并取出它抛的 HTTPException（FastAPI 在测试里没有 TestClient 时用）。"""
-        import asyncio
-        from fastapi import HTTPException
-        try:
-            asyncio.run(coro)     # 新建 loop：unittest 主线程里 get_event_loop() 已不再自动创建
-        except HTTPException as e:
-            return e
-        return None
-
-    def test_missing_passcode_config_is_503(self):
-        os.environ.pop("HUB_PASSCODE", None)
-        e = self._err(modelcfg.settings_model_apply(
-            modelcfg.ApplyIn(agent_id="claude", model="m", passcode="x"), None))
-        self.assertIsNotNone(e, "没配口令必须拒绝，不能静默放行")
-        self.assertEqual(e.status_code, 503)
-
-    def test_wrong_passcode_is_401_and_never_echoed(self):
-        os.environ["HUB_PASSCODE"] = "secret-pc"
-        e = self._err(modelcfg.settings_model_apply(
-            modelcfg.ApplyIn(agent_id="claude", model="m", passcode="guess-me"), None))
-        self.assertIsNotNone(e)
-        self.assertEqual(e.status_code, 401)
-        self.assertNotIn("secret-pc", str(e.detail), "拒绝原因里回显了口令")
-
-    def test_undo_endpoint_is_behind_the_same_passcode_gate(self):
-        """撤销也写盘，必须与保存同一把口令（漏了就是"绕过口令改配置文件"）。"""
-        os.environ.pop("HUB_PASSCODE", None)
-        e = self._err(modelcfg.settings_model_undo(
-            modelcfg.UndoIn(agent_id="claude", passcode="x"), None))
-        self.assertEqual(e.status_code, 503, "未配口令必须 fail-closed")
-        os.environ["HUB_PASSCODE"] = "secret-pc"
-        e = self._err(modelcfg.settings_model_undo(
-            modelcfg.UndoIn(agent_id="claude", passcode="guess-me"), None))
-        self.assertEqual(e.status_code, 401)
+    def test_no_passcode_gate_in_source(self):
+        import inspect
+        from pathlib import Path
+        src = Path(modelcfg.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("_check_passcode", src, "口令校验函数又出现了")
+        self.assertNotIn("passcode", src, "入参里又混进 passcode 字段了")
+        for cls in (modelcfg.ApplyIn, modelcfg.VerifyLiveIn, modelcfg.UndoIn):
+            self.assertNotIn("passcode", cls.model_fields)
+        for fn in (modelcfg.settings_model_apply,
+                   modelcfg.settings_model_verify_live,
+                   modelcfg.settings_model_undo):
+            self.assertNotIn("request", inspect.signature(fn).parameters,
+                             f"{fn.__name__} 不该再吃 Request（口令校验已删）")
 
 
 

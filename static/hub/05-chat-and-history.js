@@ -344,7 +344,7 @@ const MODE_LABEL = { embed: '嵌入', term: '终端', chat: '对话', detail: '�
 /* v0.13.43 设置子菜单：与系统页同形态（data-sys → go(page) ⇒ 正文出页、窄屏自动收侧栏），
    只是单独成组挂在「系统」之下；这三项此前是右侧抽屉里的三个 tab。 */
 const SET_PAGES = [['settings-model', '模型', 'cpu'], ['settings-github', 'GitHub', 'globe'],
-                   ['settings-token', '终端口令', 'terminal'], ['settings-logs', '日志', 'activity'],
+                   ['settings-token', '认证状态', 'terminal'], ['settings-logs', '日志', 'activity'],
                    ['settings-users', '用户授权', 'eye'], ['settings-modelcalls', '模型计量', 'radar']];
 /* 2026-10-25：「设置 · 记忆存储」并入「系统 · 记忆中心」（同一份本机记忆的读写入口
    不该分居两个菜单，设置组也不该为 4 条便签单占一个一级项）。 */
@@ -353,7 +353,7 @@ const PAGE_LABELS = { classroom: '总览', chat: '统一对话', tasks: '协同'
                       assets: '资产', localprojects: '本机项目', github: 'GitHub 项目', resources: '资源监控',
                       botboy: 'Botboy',
                       'settings-model': '设置 · 模型', 'settings-github': '设置 · GitHub',
-                      'settings-token': '设置 · 终端口令',
+                      'settings-token': '设置 · 认证状态',
                       'settings-logs': '设置 · 日志',
                       'settings-users': '设置 · 用户授权',
                       'settings-modelcalls': '设置 · 模型计量' };
@@ -547,8 +547,8 @@ function histLoad(aid) {
 }
 
 /* 刷新后 histOpen 会从 localStorage 复原，但 HIST 缓存是空的——不补一次拉取，下拉就
-   永远停在「读取历史…」（实测 reload 必现）。没存过 token 时干脆收起：留个展开空壳更误导，
-   而且 termToken() 会在每次刷新都弹一次口令框。 */
+   永远停在「读取历史…」（实测 reload 必现）。未登录时干脆收起：留个展开空壳更误导，
+   而且 C 档后读端点只认会话 Cookie / HTTP Basic，token 弹窗已废弃。 */
 (function histBootstrap() {
   if (!histOpen) return;
   if (!TERM_HIST_AGENTS.includes(histOpen) || (!AUTH_USER && !lsGet('hub.login.user'))) {

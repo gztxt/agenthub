@@ -1764,7 +1764,7 @@
                 aria-label="资源监控" title="资源监控 · 查看所有 Agent 进程 CPU/内存占用，可一键结束占用资源的进程"><svg class="i" aria-hidden="true"><use href="#i-monitor"/></svg><span class="lbl">资源</span></button>
         <!-- AGENTS / 基础设施 / 系统 三组手风琴由 renderNav() 渲染 -->
         <div id="navTree"></div>
-        <!-- v0.13.43：设置从「右侧抽屉」改成手风琴第四组（模型 / GitHub / 终端口令），
+        <!-- v0.13.43：设置从「右侧抽屉」改成手风琴第四组（模型 / GitHub / 认证状态），
              由 renderNav() 渲染进 #navTree；子项与系统页同口径（data-sys → go(page)），
              正文在 main 里出页，不再有第二个浮层。 -->
         <button class="side-toggle" id="btnSideToggle" title="收起 / 展开侧栏"><svg class="i xs" aria-hidden="true"><use href="#i-panel-collapse"/></svg><span class="lbl">收起</span></button>
@@ -3102,7 +3102,7 @@
                 <div class="sp-card">
                     <div class="sp-hd">
                         <h3>模型设置</h3>
-                        <div class="sp-r"><span class="hint">选 agent → 选 CCR 模型 → 预览 → 口令保存</span></div>
+                        <div class="sp-r"><span class="hint">选 agent → 选 CCR 模型 → 预览 → 保存</span></div>
                     </div>
                     <div class="sp-bd">
                         <div class="hint" style="margin-bottom:10px">保存同时写入<b>该 agent 自己的配置文件</b>
@@ -3122,21 +3122,15 @@
                             <div id="setModelHint" class="hint" style="margin-top:4px"></div>
                             <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
                                 <button class="btn sm" type="button" data-settings-act="preview">预览变更</button>
-                                <!-- v0.13.164：执行逻辑自证。静态验证只读；真实调用要口令且会计费。 -->
+                                <!-- v0.13.164：执行逻辑自证。静态验证只读；真实调用会计费。 -->
                                 <button class="btn sm" type="button" data-settings-act="verify">验证生效</button>
                                 <button class="btn sm" type="button" data-settings-act="verify-live">真实验证（会调用网关）</button>
-                                <!-- v0.13.44：页内口令框。APP 内嵌 WebView 会吞掉 prompt()，
-                                     那种环境里"点保存毫无反应"就是这么来的；留了缓存口令时可不填。 -->
-                                <input id="setPasscode" type="password" autocomplete="off" spellcheck="false"
-                                       placeholder="设置口令（留空用本机缓存）" aria-label="设置口令"
-                                       style="max-width:220px">
-                                <button class="btn ghost sm" type="button" onclick="passEye(this,'setPasscode')">显示</button>
                                 <!-- v0.13.45：不再带 disabled。置灰按钮不派发 click，
                                      用户点它得不到任何反馈（日志里连一条请求都没有）；
                                      未预览时由保存自己补一次预览。 -->
-                                <button class="btn sm" type="button" id="setApplyBtn" data-settings-act="apply">保存（需口令）</button>
+                                <button class="btn sm" type="button" id="setApplyBtn" data-settings-act="apply">保存</button>
                                 <!-- v0.13.181：撤销上一次保存（把配置文件还原到那次之前的字节）。
-                                     与保存同一把口令；破坏性动作，前端会先 confirm。 -->
+                                     破坏性动作，前端会先 confirm。 -->
                                 <button class="btn sm" type="button" id="setUndoBtn" data-settings-act="undo"
                                         title="把该 agent 的配置文件还原到上一次保存之前（只撤最近一次）">撤销上次保存</button>
                             </div>
@@ -3161,7 +3155,7 @@
                     <div class="sp-bd">
                         <div class="hint" style="margin-bottom:10px">GitHub 项目页的<b>远程地址、key、归属、克隆落点</b>
                             都在这里改，<b>改完立即生效（不用重启）</b>；读取顺序：本页设置 → 环境变量 → 内置默认。
-                            key 只写不读（页面只显示掩码），保存需设置口令。</div>
+                            key 只写不读（页面只显示掩码）。</div>
                         <div class="set-sub">远程</div>
                         <label class="set-field">远程地址（API 基址）<span class="set-src" id="ghApiBaseSrc"></span>
                             <input id="ghApiBase" type="url" autocomplete="off" spellcheck="false"
@@ -3191,12 +3185,8 @@
                             <span>同时回写到 <code>github.txt</code> 与 <code>.env</code>（默认关；落笔前自动时间戳备份，重启后仍生效）</span>
                         </label>
                         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
-                            <input id="ghPasscode" type="password" autocomplete="off" spellcheck="false"
-                                   placeholder="设置口令（留空用本机缓存）" aria-label="设置口令"
-                                   style="max-width:220px">
-                            <button class="btn ghost sm" type="button" onclick="passEye(this,'ghPasscode')">显示</button>
                             <button class="btn sm" type="button" data-settings-act="gh-test">测试连接</button>
-                            <button class="btn sm" type="button" data-settings-act="gh-apply">保存（需口令）</button>
+                            <button class="btn sm" type="button" data-settings-act="gh-apply">保存</button>
                             <button class="btn ghost sm" type="button" data-settings-act="gh-clear">清除设置</button>
                             <button class="btn ghost sm" type="button" data-settings-act="gh-refresh">刷新清单</button>
                         </div>
@@ -3209,30 +3199,19 @@
             </div>
         </section>
 
-        <!-- 设置 · 终端口令 -->
+        <!-- 设置 · 认证状态（2026-11-07 C 档：共享口令已废弃，保留页面 ID 以免留下死菜单项） -->
         <section class="page sys" id="page-settings-token">
             <div class="sp">
                 <div class="sp-card">
                     <div class="sp-hd">
-                        <h3>终端口令</h3>
-                        <div class="sp-r"><span class="hint">HUB_PASSCODE · 口令只存在本浏览器</span></div>
+                        <h3>认证状态</h3>
+                        <div class="sp-r"><span class="hint">全站单一认证面 · 用户名 + 密码登录</span></div>
                     </div>
                     <div class="sp-bd">
-                        <div class="hint" style="margin-bottom:12px">查看敏感配置需先输入设置口令（HUB_PASSCODE，向 hub 索要）。口令只存在本浏览器。</div>
-                        <div style="display:flex;gap:8px;margin-bottom:8px">
-                            <button class="btn sm" id="btnViewToken" type="button" data-settings-act="token-view">查看终端 TERM_TOKEN</button>
-                            <button class="btn ghost sm" type="button" data-settings-act="token-clear">清除本机口令</button>
-                        </div>
-                        <div id="settingsTokenBox" style="display:none">
-                            <div class="token-box" id="settingsTokenVal"></div>
-                            <div style="display:flex;gap:8px;flex-wrap:wrap">
-                                <button class="btn sm" type="button" data-settings-act="token-copy">复制</button>
-                                <button class="btn sm" type="button" data-settings-act="token-apply">应用到终端（本浏览器不再弹框）</button>
-                                <button class="btn ghost sm" id="settingsToggleShow" type="button" data-settings-act="token-toggle">隐藏</button>
-                            </div>
-                        </div>
+                        <div class="hint" style="margin-bottom:12px">2026-11-07 起，终端与全部设置写端点统一由右上角「登录」（用户名 + 密码，HttpOnly 会话 Cookie）保护。</div>
+                        <div class="hint">原有的 TERM_TOKEN（终端共享 token）与 HUB_PASSCODE（设置口令）已废弃：代码不再读取、不再校验，保留在 .env 中仅为兼容历史配置，可安全移除。</div>
                     </div>
-                    <div class="sp-note">口令错 / 服务端未配时会立刻清除本机缓存，下次查看需重新输入。</div>
+                    <div class="sp-note">未登录时写操作返回 401；机器侧调用用 HTTP Basic（同一份用户名 + 密码）。</div>
                 </div>
             </div>
         </section>
@@ -3254,7 +3233,7 @@
                         <div class="hint" style="margin-bottom:10px">两路合并按时间倒序：
                             <b>服务日志</b>来自 systemd journald（手跑实例不经 systemd ⇒ 这一路为空）；
                             <b>操作事件</b>来自 profile_events 全量 source（对话 / 任务 / 定时 / MCP / 自建工具）。
-                            日志含 IP 与路径，读取需设置口令。</div>
+                            日志含 IP 与路径，读取需登录（会话 Cookie）。</div>
                         <div class="set-sub">筛选</div>
                         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
                             <select id="logSource" aria-label="日志来源">
@@ -3282,9 +3261,6 @@
                             <input id="logQ" type="search" autocomplete="off" spellcheck="false"
                                    placeholder="关键字：路径 / IP / 错误片段" aria-label="关键字" style="max-width:220px">
                             <span class="hint" id="logHint">来源/级别/时间窗默认：全部来源 · 全部级别 · 24h</span>
-                            <input id="logPasscode" type="password" autocomplete="off" spellcheck="false"
-                                   placeholder="设置口令（留空用本机缓存）" aria-label="设置口令" style="max-width:200px">
-                            <button class="btn ghost sm" type="button" data-settings-act="pass-eye" data-target="logPasscode">显示</button>
                             <button class="btn sm" type="button" data-settings-act="log-refresh">刷新</button>
                             <button class="btn ghost sm" type="button" data-settings-act="log-copy">复制</button>
                             <button class="btn ghost sm" type="button" data-settings-act="log-export">导出 .log</button>
@@ -3400,7 +3376,7 @@
                 <button class="btn sm ghost" onclick="skillCopySnippet()" title="复制 REST / MCP 两种接入片段到剪贴板">复制接入片段</button>
             </div>
             <div class="hint" style="margin-top:6px">「试调用」记一条 hub 调用流水（caller=web，可在「调用记录」看到）；「查看正文」不记账。
-                若提示 401，是浏览器保存的 TERM_TOKEN 与服务端不一致——旧值会被清空，重试时按弹窗输入当前 token。</div>
+                若提示 401，是登录会话已过期——重新登录即可（C 档后不再有 token 可填）。</div>
             <div class="toolbar" style="margin-top:8px">
                 <select id="skInstTo" style="min-width:150px" title="安装目标发现点（软链，不动本体；local 路只读不接受）"></select>
                 <button class="btn sm ghost" onclick="skillInstallFromDrawer()">安装到所选目标</button>
@@ -3594,7 +3570,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=76d69240';
+      var HUB_SRC = '/static/hub.js?v=e5eaaf04';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

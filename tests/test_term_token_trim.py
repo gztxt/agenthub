@@ -59,9 +59,8 @@ class TestTokenSitesRemoved(unittest.TestCase):
         self.assertNotIn("lsSet", body, "termToken 不得写回任何凭据")
 
     def test_settings_apply_no_longer_writes_token(self):
-        body = strip_comments(SRC.split("function settingsApplyToken", 1)[1].split("\n}", 1)[0])
-        self.assertNotIn("lsSet", body,
-                         "「应用到终端」不得再写 localStorage token —— token 认证已停用")
+        self.assertNotIn("function settingsApplyToken", SRC,
+                         "「应用到终端」入口已随共享口令废弃删除；若又出现 ⇒ token 认证回潮")
 
 
 @unittest.skipUnless(HAVE_NODE, "SKIP(node-missing): 行为层要真 node 跑抽出来的真代码")

@@ -493,11 +493,12 @@ class TestFrontendPage(unittest.TestCase):
         for act in ("log-refresh", "log-copy", "log-export"):
             self.assertIn(act, seg)
 
-    def test_lazy_load_hook_and_passcode_flow(self):
+    def test_lazy_load_hook_and_no_passcode_flow(self):
+        """2026-11-07 C 档：日志读端点走会话 Cookie，不再有页内口令框 / 不再弹 prompt。"""
         src = (_REPO / "static" / "hub" / "01-core-boot.js").read_text(encoding="utf-8")
         self.assertIn("settings-logs", src, "go() 缺日志页懒加载钩子")
         self.assertIn("settingsLogsLoad", src)
-        self.assertIn("logPasscode", src, "缺页内口令框取值（缺口令不该弹 prompt）")
+        self.assertNotIn("logPasscode", src, "共享口令框已废弃，不该回潮")
         self.assertNotIn("prompt(", src[src.index("function settingsLogsLoad"):
                                        src.index("function settingsLogsRender")])
 

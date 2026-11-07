@@ -97,7 +97,7 @@ POST /api/agents         {dir,name?}  GET  /api/ports
 DELETE /api/agents/{id}               GET  /api/memory/l1|search|l2|l3|context|l2/rebuild
 POST /telemetry/events/{source}       GET  /telemetry/events | /telemetry/usage/summary
 
-GET  /api/term/history/{agent_id}?limit=3   盘上历史会话（标题＝用户问题原文，需 x-term-token）
+GET  /api/term/history/{agent_id}?limit=3   盘上历史会话（标题＝用户问题原文，需登录）
 POST /api/term/sessions  {agent_id, session_id?}   带 session_id 即续聊该条历史
 ```
 
@@ -111,7 +111,7 @@ POST /api/term/sessions  {agent_id, session_id?}   带 session_id 即续聊该�
 
 ```bash
 bash agenthub/agent-hubctl.sh {start|stop|restart|status|log|token}   # 仓内脚本，自解析所在目录
-bash agenthub/agent-hubctl.sh token                # 打印当前生效的终端鉴权 token（只读 + 实弹验证）
+bash agenthub/agent-hubctl.sh token                # 提示 TERM_TOKEN 已废弃、给出登录态指引（C 档后不再打印 token）
 ```
 
 机制：起停一律经 `systemctl --user agenthub.service`（`Restart=always` 归 systemd 管），

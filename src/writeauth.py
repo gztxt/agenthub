@@ -27,36 +27,19 @@ WRITE_METHODS: Tuple[str, ...] = ("POST", "PUT", "PATCH", "DELETE")
 #: ① 浏览器 —— HttpOnly 会话 Cookie `hub_session`（/api/users/login 种下）；
 #: ② 机器 —— HTTP Basic（同一份用户名+密码）。
 #: `x-hub-token` / `x-term-token` / `?token=` 一律不再接受（任何残留调用点都是 bug，
-#: 不是"兼容期"）。设置页的 HUB_PASSCODE 是另一套（改模型/GitHub 的自校验口令），
-#: 与端点准入无关，仍保留。
+#: 不是"兼容期"）。2026-11-07 C 档：设置写端点已收口到同一登录闸门，
+#: HUB_PASSCODE / TERM_TOKEN 两套共享口令全部废弃，全站单一认证面。
 
 #: 不经过本闸门的写路由，**每条必须自带鉴权**，理由写死在这里。
+#: 2026-11-07 C 档：设置写端点（model / github / term-token）已全部收回登录闸门，
+#: 原来的 HUB_PASSCODE 自校验与对应豁免一并删除；只剩下面三条，都是「不豁免就自锁死」。
 EXEMPT_PREFIXES: Dict[str, str] = {
-    "/api/settings/term-token":
-        "它自己校验 HUB_PASSCODE（口令错→401）。若在这里拦掉，用户永远输不进口令＝自锁死。",
     "/telemetry/events/":
         "hook.py 自带方案：设了 HOOK_AUTH_TOKEN 必须 Bearer；未设则只允许回环来源。",
-    "/api/settings/model/apply":
-        "它自己校验 HUB_PASSCODE（错→401、未配→503），与同页的 term-token 同口径；"
-        "再叠一层 token 门 = 用户在设置页永远改不动模型（自锁死）。",
-    "/api/settings/model/verify-live":
-        "v0.13.164：真实验证会真打一次网关（付费模型按量计费），端点自己校验 "
-        "HUB_PASSCODE（错→401、未配→503）。与 apply 同口径，且口令走 POST body 不进 URL；"
-        "再叠 token 门会让设置页的「真实验证」永远 401。",
-    "/api/settings/model/undo":
-        "v0.13.181：撤销上一次模型写入会把配置文件还原（也是写盘），端点自己校验 "
-        "HUB_PASSCODE（错→401、未配→503），与 apply 同口径、口令走 POST body。"
-        "还原源只取自 DB 里记的备份路径，不接受客户端传路径。",
-    "/api/settings/github/":
-        "设置→GitHub 四个写端点（test/apply/clear/refresh）各自校验 HUB_PASSCODE"
-        "（错→401、未配→503）：地址与 key 只能从设置页改，再叠 token 门同样自锁死。"
-        "它们写的是 hub 自己的 github_settings 表（+ 可选回写文件，落笔前备份），"
-        "不碰 agent 配置。",
     "/api/users/login":
         "密码登录端点：自带密码校验（错→401）+ 进程内限速（连败 5 次锁 60s）。"
-        "若被 write_gate 当普通写端拦掉，未登录用户永远进不来＝自锁死（"
-        "同 /api/settings/term-token 的豁免纪律）。它只签发用户自己的会话 Cookie，"
-        "不碰其他用户面；改密走 /api/users/{name}/password（需已登录，不豁免）。",
+        "若被 write_gate 当普通写端拦掉，未登录用户永远进不来＝自锁死。"
+        "它只签发用户自己的会话 Cookie，不碰其他用户面；改密走 /api/users/{name}/password（需已登录，不豁免）。",
     "/api/users/logout":
         "退出端点：只吊销请求自带 Cookie 对应的会话并清 Cookie，幂等。"
         "未登录也必须能调（否则会话过期后前端连「退出」都做不到）。",

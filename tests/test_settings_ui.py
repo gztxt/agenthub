@@ -18,8 +18,10 @@ class TestSettingsUi(unittest.TestCase):
         self.assertIn("settingsPreviewModel()", self.js)
 
     def test_password_eye_toggles(self):
-        self.assertIn("pass-eye", self.tpl)
+        # 2026-11-07 C 档：日志页口令框已删；password eye 仍服务 GitHub PAT 框（inline onclick）。
+        self.assertIn("passEye", self.tpl)
         self.assertIn("passEye", self.js)
+        self.assertNotIn("logPasscode", self.tpl, "日志页共享口令框已废弃，不该回潮")
 
     def test_logs_search_debounce(self):
         self.assertIn("logQDebounced", self.js)

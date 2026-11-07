@@ -18,7 +18,7 @@
 - **卡片入口数据驱动**：Agent=原生会话(embed)/终端(term)/对话(chat)/↗UI；网关·服务·工具=**仅快捷方式**（打开面板/详情），无对话按钮
 - 教室页分区：座位=仅 Agent；「⚙️基础设施」折叠区放网关/服务/记忆/工具
 - **统一对话页三模式**：①有原生 Web UI 的 Agent（pi/qwenpaw/cloudcli）→ iframe 即时嵌入（实测无 XFO 阻塞）；②CLI Agent（claude/jcode/hermes/shell）→ **hub 自建 pty 终端**（`src/term.py`：WebSocket + xterm.js 本地化于 static/vendor/，命令白名单=画像 terminal.cmd，任意命令注入 400 拒绝，空闲 TTL 45min，重启全销毁）；③带上游模型的 Agent（claude/jcode，经 CCR OpenAI 兼容口）→ hub 内直连对话框（含模型 / 工作目录 / 会话切换）。**v0.10.0 起移除「智管对话」（hub-self）**——原自带 LLM 对话框功能初级、实测长期无人使用，已整体删除
-- 终端鉴权：可选 `TERM_TOKEN`（ws ?token=）；bash 卡可 `TERM_ALLOW_BASH=0` 关闭
+- 终端鉴权（2026-11-07 C 档后）：登录会话 Cookie / HTTP Basic；`TERM_TOKEN` 已废弃；bash 卡可 `TERM_ALLOW_BASH=0` 关闭
 - favicon 404 已修（内联 SVG data-URI）
 
 | 模块 | 来源 | 实现 |
@@ -106,10 +106,10 @@
 状态码分布 {422:16, 404:8, 400:2, 200:6, 401:2}   ⇒ 34 条里只有 2 条拒了，6 条对匿名写直接办成
 ```
 
-凭据口径：`x-hub-token` / `x-term-token` / `?token=`，值取 `TERM_TOKEN` 或 `HUB_PASSCODE`；
-**未配置任何凭据时返 503 而不是放行**（"没设口令"不等于"不用口令"）。
-豁免只有两条且各带理由：`/api/settings/term-token`（自校验口令，拦了会自锁死）、
-`/telemetry/events/*`（`hook.py` 自带 Bearer/回环方案）。白名单里若躺一条对不上任何路由的前缀，
+凭据口径（2026-11-07 C 档后）：全站单一认证面 —— 登录会话 Cookie / HTTP Basic；`x-hub-token` 等共享 token 与 `TERM_TOKEN`/`HUB_PASSCODE` 均已废弃；
+**未登录 → 401；用户库不可用 → 503（fail-closed，不放行）**。
+`EXEMPT_PREFIXES` 只剩三条且各带理由：`/telemetry/events/*`（`hook.py` 自带 Bearer/回环方案）、
+`/api/users/login` 与 `/api/users/logout`（不豁免就自锁死）。白名单里若躺一条对不上任何路由的前缀，
 `tests/test_writeauth.py` 直接判红（防永久盲点）。
 
 顺带堵掉 MCP 网关一个更隐蔽的问题：`_acl_check` 原写法 `if not agent_id: return`，而 `agent_id`
@@ -143,6 +143,8 @@
   端侧实测：建会话后**只读 /health**（它不调 `_reap`），TTL=8s 下会话自行归零。
 
 ### Batch C 收口：补终端鉴权 + 四处只在真浏览器/真帧序里才现形的缺陷（v0.13.6，2026-09-23）
+> 口径更新（2026-11-07 C 档）：本节是 09-23 的历史事故记录，其中 `x-term-token` / `_check_term_token`
+> 共享 token 方案已整体废弃；现行鉴权口径见上方「凭据口径（2026-11-07 C 档后）」与 `DESIGN.md`。
 
 **鉴权（P1-7）**：`GET /api/term/sessions` 与 `DELETE /api/term/sessions/{sid}` 此前**免鉴权**，
 而 `POST`（建会话）与 WS 早已要 token —— 三者拼起来就是一条完整的局域网攻击链：

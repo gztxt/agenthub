@@ -39,7 +39,6 @@ agent 清单怎么来（2026-10-25 用户令「应该是自动发现并添加」
 """
 from __future__ import annotations
 
-import hmac
 import json
 import logging
 import os
@@ -772,10 +771,9 @@ def undo_model(agent_id: str) -> dict:
 
 
 # ── HTTP 层 ────────────────────────────────────────────────────────
-# 三个端点两个读一个写。写端点自带 HUB_PASSCODE 校验（与 /api/settings/term-token
-# 同口径：口令错 401、服务端没配口令 503 —— "没设口令"不等于"不用口令"），
-# 并在 writeauth.EXEMPT_PREFIXES 里登记理由，避免"先要 token 又要口令"的双重门。
-from fastapi import APIRouter, HTTPException, Request  # noqa: E402
+# 2026-11-07 C 档：写端点一律由 writeauth.write_gate 的登录闸门保护，
+# 不再自带 HUB_PASSCODE 校验、也不再登记 EXEMPT_PREFIXES 豁免。
+from fastapi import APIRouter, HTTPException  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 router = APIRouter(tags=["modelcfg"])
@@ -784,17 +782,9 @@ router = APIRouter(tags=["modelcfg"])
 class ApplyIn(BaseModel):
     agent_id: str
     model: str
-    passcode: str = ""
 
 
-def _check_passcode(pc: str, request) -> None:
-    want = os.getenv("HUB_PASSCODE", "")
-    if not want:
-        raise HTTPException(503, "未设置 HUB_PASSCODE，模型设置已停用（fail-closed）")
-    if not hmac.compare_digest(pc or "", want):
-        ip = request.client.host if request and request.client else "?"
-        log.warning(f"[settings] 模型设置口令错误：{ip}")
-        raise HTTPException(401, "口令错误")
+
 
 
 def _guard(e: ModelCfgError) -> HTTPException:
@@ -818,8 +808,7 @@ async def settings_models():
 async def settings_model_verify(agent_id: str):
     """「验证生效」（静态）：逐条判据自证，只读、不产生任何调用。
 
-    真实调用见 `POST /api/settings/model/verify-live` —— 口令不能进 URL
-    （会被访问日志/浏览器历史留存），故另立 POST 端点。"""
+    真实调用见 `POST /api/settings/model/verify-live`（另立 POST 端点，避免参数进 URL）。"""
     try:
         return verify_model(agent_id, live=False)
     except ModelCfgError as e:
@@ -828,20 +817,15 @@ async def settings_model_verify(agent_id: str):
 
 class VerifyLiveIn(BaseModel):
     agent_id: str
-    passcode: str = ""
 
 
 class UndoIn(BaseModel):
     agent_id: str
-    passcode: str = ""
 
 
 @router.post("/api/settings/model/verify-live")
-async def settings_model_verify_live(body: VerifyLiveIn, request: Request):
-    """「真实调用验证」：用当前模型真打一次 CCR（max_tokens=1）。
-
-    会计费（付费模型按量）⇒ 与保存同口径要口令；口令走 POST body，不进 URL。"""
-    _check_passcode(body.passcode, request)
+async def settings_model_verify_live(body: VerifyLiveIn):
+    """「真实调用验证」：用当前模型真打一次 CCR（max_tokens=1），会计费（付费模型按量）。"""
     try:
         return verify_model(body.agent_id, live=True)
     except ModelCfgError as e:
@@ -862,8 +846,7 @@ async def settings_model_preview(agent_id: str, model: str = ""):
 
 
 @router.post("/api/settings/model/apply")
-async def settings_model_apply(body: ApplyIn, request: Request):
-    _check_passcode(body.passcode, request)
+async def settings_model_apply(body: ApplyIn):
     try:
         out = apply_model(body.agent_id, body.model)
     except ModelCfgError as e:
@@ -874,12 +857,11 @@ async def settings_model_apply(body: ApplyIn, request: Request):
 
 
 @router.post("/api/settings/model/undo")
-async def settings_model_undo(body: UndoIn, request: Request):
+async def settings_model_undo(body: UndoIn):
     """撤销上一次保存（v0.13.181）：把配置文件还原到那次保存前的字节。
 
-    与 apply 同一把口令：它同样是写盘动作，且写的是 agent 自己的配置文件。
+    它同样是写盘动作，且写的是 agent 自己的配置文件。
     """
-    _check_passcode(body.passcode, request)
     try:
         out = undo_model(body.agent_id)
     except ModelCfgError as e:

@@ -2,7 +2,7 @@
 """用户与按功能授权模块（v0.13.x，2026-11-07 用户裁定新增）。
 
 背景：此前全 hub 只有两把共享 token（TERM_TOKEN / HUB_PASSCODE，在 .env），
-无「用户」概念，前端 401 用原生 prompt() 且无权限过滤。本模块引入：
+2026-11-07 C 档已把两把共享 token 全部废弃，全站只认本模块的用户登录态。本模块引入：
 
 - 表 users / user_credentials / user_perms（db.init_db 的 SCHEMA 幂等建表）
   users:            用户主档（username 唯一、is_admin）
@@ -12,8 +12,7 @@
 鉴权口径（writeauth 集成点）：
 - token 校验顺序：先查 user_credentials（sha256 匹配）→ 命中则该请求身份 =
   user:<username>，perms = 该用户 user_perms 集合；
-- 查不到再回落 .env 的 TERM_TOKEN/HUB_PASSCODE（**兼容期**：命中即视为
-  「兼容旧令牌」，perms = 全模块，保证零行为变化；军规「新能力不换旧默认」）。
+- 查不到即视为未登录（共享 token 回落已删除；任何残留调用点都是 bug）。
 - perms 注入 request.state（actor 保持既有「凭据名」口径不变，另加 state.user /
   state.user_perms，**绝不回显 token 值**）。
 
@@ -70,7 +69,7 @@ _LABELS = {"classroom": "课堂", "localprojects": "本地项目", "github": "Gi
            "ports": "端口", "telemetry": "遥测", "memory": "记忆中心", "skills": "技能中心",
            "kb": "知识库", "mcp": "工具", "jobs": "定时", "tasks": "协同", "assets": "资产",
            "botboy": "Botboy", "settings-model": "模型", "settings-github": "GitHub",
-           "settings-token": "终端口令", "settings-logs": "日志", "settings-users": "用户授权",
+           "settings-token": "认证状态", "settings-logs": "日志", "settings-users": "用户授权",
            "settings-modelcalls": "模型计量"}
 
 

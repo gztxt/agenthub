@@ -144,8 +144,9 @@
 > `POST /api/tasks`）。实际规模：**95 个 HTTP 端点 + 1 个 WebSocket**（`grep -oE
 > '@(app|router)\.(get|post|put|patch|delete|websocket)\('` 全量取证）。下表按
 > 子系统分组，只列**主干**；分组标题即 `src/` 里的模块名，便于对照源码。
-> 鉴权口径：读端点匿名（与 `/api/agents` 同口径），写端点统一走
-> `src/writeauth.py::decide`（fail-closed：服务端没配口令 ⇒ 503 而不是放行）。
+> 鉴权口径（2026-11-07 C 档后）：写端点统一走 `src/writeauth.py::decide`
+> （只认登录会话 Cookie / HTTP Basic；fail-closed：用户库不可用 ⇒ 503 而不是放行）。
+> 共享 token（TERM_TOKEN / HUB_PASSCODE）已废弃；非回环读端点须登录。
 
 **核心（`main.py`）**
 

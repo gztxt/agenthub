@@ -91,7 +91,7 @@ class TestWriteGateStampsActor(unittest.TestCase):
                          "GET 不要求凭据，但身份仍要如实记为 anonymous")
 
     def test_exempt_path_stamps_user_exempt(self):
-        out, r, sentinel = self._run(None, method="POST", path="/api/settings/term-token")
+        out, r, sentinel = self._run(None, method="POST", path="/api/users/login")
         self.assertIs(out, sentinel)
         self.assertEqual(r.state.actor, "user:exempt")
 

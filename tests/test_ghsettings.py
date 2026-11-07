@@ -298,39 +298,29 @@ class TestFileWriteBack(_Base):
 
 
 class TestEndpointsGate(_Base):
-    """四个写端点：未配口令 → 503（fail-closed），错 → 401，对 → 放行。"""
+    """2026-11-07 C 档：四个写端点不再自带 HUB_PASSCODE 校验，统一由 write_gate 登录闸门保护。"""
 
     def _run(self, coro):
         return asyncio.run(coro)
 
-    def test_no_passcode_configured_is_503(self):
-        with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("HUB_PASSCODE", None)
-            for coro in (gs.settings_github_test(gs.TestIn(passcode="x"), _Req()),
-                         gs.settings_github_apply(gs.GhIn(api_base="https://api.github.com"), _Req()),
-                         gs.settings_github_clear(gs.GhIn(), _Req()),
-                         gs.settings_github_refresh(gs.GhIn(), _Req())):
-                with self.assertRaises(Exception) as cm:
-                    self._run(coro)
-                self.assertEqual(cm.exception.status_code, 503, "未配口令必须 fail-closed")
+    def test_no_passcode_gate_in_source(self):
+        src = (_REPO / "src" / "ghsettings.py").read_text(encoding="utf-8")
+        self.assertNotIn("_check_passcode", src, "口令校验函数又出现了")
+        self.assertNotIn("passcode", src, "入参里又混进 passcode 字段了")
 
-    def test_wrong_passcode_is_401(self):
-        with mock.patch.dict(os.environ, {"HUB_PASSCODE": "right-one"}):
-            with self.assertRaises(Exception) as cm:
-                self._run(gs.settings_github_apply(
-                    gs.GhIn(api_base="https://api.github.com", passcode="nope"), _Req()))
-            self.assertEqual(cm.exception.status_code, 401)
+    def test_request_models_have_no_passcode(self):
+        for cls in (gs.TestIn, gs.GhIn):
+            self.assertNotIn("passcode", cls.model_fields)
 
     def test_apply_ok_and_refresh_invalidates_cache(self):
         gp._cache["repos"] = [{"full_name": "a/b"}]
         gp._cache["at"] = 1e12
-        with mock.patch.dict(os.environ, {"HUB_PASSCODE": "right-one"}), \
-                mock.patch.object(gp, "_fetch_all", lambda tok: {"ok": True, "repos": []}):
+        with mock.patch.object(gp, "_fetch_all", lambda tok: {"ok": True, "repos": []}):
             out = self._run(gs.settings_github_apply(
-                gs.GhIn(api_base="https://api.github.com", passcode="right-one"), _Req()))
+                gs.GhIn(api_base="https://api.github.com")))
             self.assertTrue(out["applied"])
             self.assertIsNone(gp._cache["repos"], "改地址后旧清单必须立即失效")
-            r = self._run(gs.settings_github_refresh(gs.GhIn(passcode="right-one"), _Req()))
+            r = self._run(gs.settings_github_refresh(gs.GhIn()))
             self.assertTrue(r["ok"])
 
     def test_probe_success_shape(self):

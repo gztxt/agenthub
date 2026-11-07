@@ -30,7 +30,7 @@
 
 | 档 | 凭据 | 能力 |
 |---|---|---|
-| 本机操作者 | `x-hub-token` / `x-term-token` = `TERM_TOKEN` 或 `HUB_PASSCODE` | 读写全量 |
+| 本机操作者 | 登录会话 Cookie `hub_session` / 机器 HTTP Basic（用户名+密码） | 按用户 perms 授权 |
 | 观察者 | 无凭据，且来源为回环（127.0.0.1 / ::1 / v4-mapped） | 读；非回环一律 401（v0.13.192 起） |
 
 - 读门：`writeauth.read_gate`（v0.13.192）——回环匿名保持一个版本；`HUB_READ_TOKENS=0` 整门回滚。

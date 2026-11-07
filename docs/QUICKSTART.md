@@ -47,14 +47,16 @@ curl -s http://127.0.0.1:3102/health
 | `PORT` | 监听端口（默认 `3102`） | 建议 |
 | `HOST` | 监听地址，**必须 `::`**（双栈铁律） | 建议 |
 | `DATA_DIR` / `LOG_DIR` | 数据与日志目录（默认仓内 `./data`、`./logs`） | 建议 |
-| `TERM_TOKEN` | 终端 WS 与部分写端点的凭据；**不设=终端不可用** | 用终端则必须 |
-| `HUB_PASSCODE` | 控制台口令（另一种写端点凭据） | 视部署 |
+| `TERM_TOKEN` | **已废弃（2026-11-07 C 档）**：终端鉴权改走登录会话 Cookie / HTTP Basic，此项保留仅为兼容历史 .env | 勿用 |
+| `HUB_PASSCODE` | **已废弃（2026-11-07 C 档）**：设置写端点改由登录闸门保护，此项保留仅为兼容历史 .env | 勿用 |
 | `HOOK_AUTH_TOKEN` | 遥测写入口令；**空=仅回环可写** | 对外接入则必须 |
 | `CLAUDE_CCR_URL` / `JCODE_URL` / `PI_WEB_URL` / `TDAI_URL` | 各下游端点（自定义部署时改） | 视环境 |
 | `TERM_RECORD` | `1` 开终端录制（会写 `term_recordings` 表，见 §5 容量） | 可选 |
 
-**凭据口径**（`src/writeauth.py`，中间件形式覆盖全部写端点）：
-接受 `x-hub-token` / `x-term-token` / `?token=`；**未配置任何凭据时返回 503 而不是放行**。
+**凭据口径**（2026-11-07 C 档后，`src/writeauth.py` 登录闸门覆盖全部写端点）：
+浏览器用登录会话 Cookie `hub_session`，机器侧用 HTTP Basic（同一份用户名 + 密码）；
+`x-hub-token` / `x-term-token` / `?token=` 与 `TERM_TOKEN` / `HUB_PASSCODE` 全部废弃、不再接受。
+**未登录 → 401；用户库不可用 → 503（fail-closed，不放行）**。
 
 ## 3. 用 systemd user 守护（可选，本机做法）
 
@@ -95,7 +97,7 @@ systemctl --user status agenthub.service
 ## 6. 故障排查（按取证顺序，别跳步）
 
 1. **页面起不来** → 先看 `/health` 的 `code_stale`；`true` 就 `systemctl --user restart agenthub.service`。
-2. **终端连不上** → 查 `TERM_TOKEN` 是否配置（未配置时终端 **fail-closed**，返 503 不是 200）。
+2. **终端连不上 / 反复要求登录** → 先在页面完成「登录」（会话 Cookie），机器侧带 HTTP Basic；C 档后终端只认登录态，没有 TERM_TOKEN 可配。
 3. **某个 agent 卡在启动** → 见 `src/term.py` 的 PTY 初始尺寸注释（`0×0` 会让部分 TUI 永久卡死，v0.13.102 已修）。
 4. **改完不生效** → 前端静态资源走 ETag（由 `mtime+size` 算出）⇒ **`?v=` 破不了端侧缓存**，要硬刷新。
 

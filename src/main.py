@@ -8,7 +8,6 @@
 """
 import asyncio
 import hashlib
-import hmac
 import json
 import logging
 import os
@@ -48,7 +47,7 @@ import db
 import logjson
 
 # ── 日志先于其它 src 模块配置（v0.13.186）──
-# config / db / term 在 **import 期**就有诊断输出（.env 覆盖、WAL 检查点、TERM_TOKEN 兜底）。
+# config / db / term 在 **import 期**就有诊断输出（.env 覆盖、WAL 检查点等）。
 # 若等 app 组装完再 setup，这些记录在「无 handler」的 root 上会被静默丢弃 ——
 # print 换 logger 之后它们不会自己冒出来。JSON 开关读进程环境；本文件已在上面
 # load_dotenv 过 .env，因此 .env 里的 HUB_LOG_JSON 同样生效。
@@ -677,8 +676,6 @@ app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
 # ── 非 MCP 写路径按 IP 滑动窗口限流（风格对齐 mcpgw._check_rate）──────
 API_RATE_PER_MIN = int(os.getenv("API_RATE_PER_MIN", "60"))
-# ⚙设置口令：查看 TERM_TOKEN 等敏感配置时要求提供（为空则设置页不可用）
-HUB_PASSCODE = os.getenv("HUB_PASSCODE", "")
 # v0.13.192（P0 读令牌门）：非回环 GET 读端点须带凭据；HUB_READ_TOKENS=0 可整门关闭
 # （回滚开关，行为等同门不存在；豁免前缀逐条注入，同 CSP_REPORT 纪律）。
 if os.getenv("HUB_READ_TOKENS", "1") == "0":
@@ -687,8 +684,8 @@ if os.getenv("HUB_READ_TOKENS", "1") == "0":
 writeauth._READ_TOKEN_ALLOW.add("/api/settings/model/catalog")  # 模型目录是公共清单，无会话面
 writeauth._READ_TOKEN_ALLOW.add("/api/users/whoami")            # 2026-11-07：身份/模块查询须无凭据也能读（回环匿名，非回环由 read_gate 判）
 # 2026-11-07 登录：POST /api/users/login 是写方法不走 read_gate，但必须走 write_gate 的
-# **豁免**（它自己验密码 + 限速；若被 write_gate 当普通写端拦掉，未登录用户永远进不来＝自锁死，
-# 同 EXEMPT_PREFIXES 的 term-token 纪律）。豁免理由写死在 writeauth.EXEMPT_PREFIXES。
+# **豁免**（它自己验密码 + 限速；若被 write_gate 当普通写端拦掉，未登录用户永远进不来＝自锁死）。
+# 豁免理由写死在 writeauth.EXEMPT_PREFIXES。
 _api_rate: Dict[str, deque] = defaultdict(deque)
 _RATE_EXCLUDED_PREFIXES = ("/telemetry/events/", "/health", "/mcp", "/api/csp/report")
 _RATE_WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
@@ -1080,25 +1077,7 @@ app.include_router(system_router)
 
 # ── ⚙设置（口令保护的敏感配置查看）────────────────────────
 
-class PasscodeRequest(BaseModel):
-    passcode: str = ""
 
-
-@app.post("/api/settings/term-token")
-async def settings_term_token(request: Request, req: PasscodeRequest):
-    """口令正确时返回 TERM_TOKEN。
-
-    有意用 POST 而非 GET：现有 api_rate_limit 只拦写方法，
-    口令爆破会被 429 限流拦住（60 次/分钟/IP）。
-    """
-    if not HUB_PASSCODE:
-        raise HTTPException(503, "未设置 HUB_PASSCODE，请先在 .env 配置后再使用设置页")
-    if not hmac.compare_digest(req.passcode, HUB_PASSCODE):
-        ip = request.client.host if request.client else "?"
-        log.warning(f"[settings] 口令错误：{ip}")
-        raise HTTPException(401, "口令错误")
-    tok = os.getenv("TERM_TOKEN", "")
-    return {"term_token": tok, "set": bool(tok)}
 
 
 # ── 端口管理 ──────────────────────────────────────────────────────────

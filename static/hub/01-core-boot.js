@@ -252,8 +252,8 @@ var ghStars = new Set(), ghHiddenSet = new Set();
 
 /* ── 基础 ─────────────────────────────────────────── */
 
-/* v0.13.6 P1-7：写端点服务端强制凭据。**只有写操作才索取 token** ——
-   GET 也 prompt 的话，用户一打开页面就被口令框糊脸（读路径本来不需要）。 */
+/* 2026-11-07 C 档：全站单一认证面。写端点由 write_gate 的登录闸门保护，
+   身份只认登录会话 Cookie / HTTP Basic，不再索取任何共享 token。 */
 const WRITE_METHODS = { POST: 1, PUT: 1, PATCH: 1, DELETE: 1 };
 /* 2026-11-07 修复：29c0e08 重写 api() 时把这一行函数定义一起删掉了，
    但 api() 里三处仍在调用 ⇒ 每次请求都抛
@@ -1077,81 +1077,16 @@ async function verifyAgent(id) {
   } catch (e) { toast('体检失败：' + e.message, 'err'); }
 }
 
-/* ── 设置（口令保护的 TERM_TOKEN 查看/应用）──
-   v0.13.43：设置不再是抽屉。三个子页（模型 / GitHub / 终端口令）是 main 里的
-   section.page，由左侧「设置」手风琴组切换 —— 入口从 btnSettings 的 inline onclick
-   变成与系统页同口径的 data-sys ⇒ 委托 ⇒ go(page)，顺带继承"窄屏点完自动收侧栏"。 */
-/* 口令三源：页内输入框 → 本机缓存 → prompt（最后一源保留但不依赖它）。
-   页内框是 v0.13.44 加的：APP 内嵌 WebView 与部分手机浏览器会直接吞掉 prompt()
-   （返回 null 且不弹窗），那种环境里"点保存毫无反应"就是这么来的 —— 凡是靠
-   prompt 收口令的路径，在端侧都等于静默失败。 */
-function passcodeInput() {
-  for (const id of ['setPasscode', 'ghPasscode']) {
-    const el = $(id);
-    if (el && el.value.trim()) return el.value.trim();
-  }
-  return '';
-}
-function clearPasscodeInput() {
-  ['setPasscode', 'ghPasscode'].forEach(id => { const el = $(id); if (el) el.value = ''; });
-}
-function settingsPasscode() { return passcodeInput() || lsGet('hub.passcode') || ''; }
+/* ── 设置（2026-11-07 C 档：全站单一认证面 = 用户名+密码登录）──
+   三个子页（模型 / GitHub / 认证状态）是 main 里的 section.page，由左侧「设置」
+   手风琴组切换 —— 入口走 data-sys ⇒ 委托 ⇒ go(page)。
+   HUB_PASSCODE / TERM_TOKEN 两套共享口令已废弃，写端点由 writeauth.write_gate
+   登录闸门保护，浏览器请求自带 HttpOnly 会话 Cookie，不再收任何口令。 */
 
-async function settingsViewToken() {
-  let pc = settingsPasscode();
-  if (!pc) {
-    pc = prompt('请输入设置口令（HUB_PASSCODE，向 hub 索要；仅存本浏览器）') || '';
-    if (!pc) return;
-  }
-  try {
-    const d = await api('/api/settings/term-token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-HUB-PASSCODE': pc },
-      body: JSON.stringify({ passcode: pc })
-    });
-    lsSet('hub.passcode', pc);  // 验证通过才缓存
-    const box = $('settingsTokenBox');
-    box.style.display = 'block';
-    $('settingsTokenVal').dataset.token = d.term_token || '';
-    $('settingsTokenVal').textContent = d.set ? (d.term_token || '（空）') : '服务端未配置 TERM_TOKEN（终端鉴权走启动时自动生成的临时 token）';
-    $('settingsToggleShow').textContent = '隐藏';
-    if (!d.set) toast('服务端未显式配置 TERM_TOKEN', 'err');
-  } catch (e) {
-    lsRemove('hub.passcode');  // 口令错/失效则不缓存
-    $('settingsTokenBox').style.display = 'none';
-    toast(e.message, 'err');
-  }
-}
-
-function settingsToggleShow() {
-  const el = $('settingsTokenVal'), btn = $('settingsToggleShow');
-  if (el.textContent.indexOf('••') === 0) { el.textContent = el.dataset.token || ''; btn.textContent = '隐藏'; }
-  else { el.textContent = '••••••••••••••••••••'; btn.textContent = '显示'; }
-}
-
-function settingsCopyToken() {
-  const t = $('settingsTokenVal').dataset.token || '';
-  if (!t) return toast('无 token 可复制', 'err');
-  (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject())
-    .then(() => toast('已复制到剪贴板', 'ok'))
-    .catch(() => { prompt('请手动复制：', t); });
-}
-
-function settingsApplyToken() {
-  /* 2026-11-07：浏览器登录已全量改为用户名+密码（HttpOnly Cookie），
-     token 不再参与浏览器鉴权 ⇒ 这里不再写 localStorage，避免造成“已生效”的假象。 */
-  toast('Token 认证已停用：请用右上角「登录」（用户名+密码）', 'err');
-}
-
-function settingsClearPasscode() {
-  lsRemove('hub.passcode');
-  $('settingsTokenBox').style.display = 'none';
-  toast('已清除本机缓存口令，下次查看需重新输入', 'ok');
-}
 
 /* ── 设置 → 模型子菜单（v0.13.41）──────────────────────────────────────
    交互两步：先选 agent，再选该 agent 要用的 CCR 模型；保存前给 diff 预览，
-   保存时要口令（HUB_PASSCODE，与「终端口令」子页共用一个本机缓存的口令）。
+   保存直接走登录态（HttpOnly Cookie），不再收口令。
    三条纪律：
      ① **不新增浮层**：v0.13.43 起三个子页是 main 里的 section.page（抽屉已拆），
         切换由左侧手风琴 + go(page) 完成 —— 比"抽屉内切 section"更彻底：压根没有浮层；
@@ -1458,7 +1393,7 @@ function settingsModelHint(a) {
 }
 
 function setSelectedModel() { return $('setModelSel') ? $('setModelSel').value : ''; }
-/* Task11 口令 eye 切换：原生细节，只改 type 属性，不用新依赖 */
+/* password 框显示/隐藏切换（GitHub PAT 等）：原生细节，只改 type 属性，不用新依赖 */
 function passEye(btn, id) {
   const inp = $(id);
   if (!inp) return;
@@ -1569,27 +1504,15 @@ async function settingsApplyModel() {
     await settingsPreviewModel();              // 自动补预览；失败时里面已渲染 + toast
     if (!SET_DIFF || SET_DIFF.model !== model) return;
   }
-  let pc = settingsPasscode();
-  if (!pc) {
-    /* 不再用 prompt 收口令：APP 内嵌 WebView 与部分手机浏览器会直接吞掉它
-       （不弹窗、返回 null），那种环境里这一步等于静默失败。改成指路口令框。 */
-    const el = $('setPasscode');
-    if (el) el.focus();
-    settingsRenderError('保存未执行', new Error(
-      '请先在「设置口令」框里填入 HUB_PASSCODE（不再弹窗收集：手机/APP 会吞弹窗）'));
-    return toast('请先填设置口令', 'err');
-  }
+
   const btn = $('setApplyBtn');
   if (btn) btn.disabled = true;                // 只防连点，保存完立刻恢复
   try {
     const d = await api('/api/settings/model/apply', {
-      method: 'POST',
-      noToken: true,                          // 该端点只认 HUB_PASSCODE，别再索 TERM_TOKEN
+      method: 'POST', noToken: true,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent_id: SET_AGENT, model: model, passcode: pc })
+      body: JSON.stringify({ agent_id: SET_AGENT, model: model })
     });
-    lsSet('hub.passcode', pc);                // 通过了才缓存（与口令页同口径）
-    clearPasscodeInput();
     if (d.mode === 'clear') {
       toast(SET_AGENT + '：已撤销 hub 侧默认模型（配置文件未改动）', 'ok');
     } else {
@@ -1609,8 +1532,6 @@ async function settingsApplyModel() {
       settingsRenderApplied(d);               // 验证本身失败不推翻保存结果
     }
   } catch (e) {
-    if (/401|口令/.test(e.message)) lsRemove('hub.passcode');
-    clearPasscodeInput();
     settingsRenderError('保存失败', e);
     toast('保存失败：' + e.message, 'err');
   } finally {
@@ -1621,26 +1542,17 @@ async function settingsApplyModel() {
 /* v0.13.164：执行逻辑自证。
    用户反复报"设置好了没用"，而页面原来只有"已生效"三个字 —— 那三个字的唯一依据是
    HTTP 200。现在把四条判据（落点/清单/注入/通道）逐条摆出来，错了就指出哪一条错。
-   live=true 会真打一次网关（付费模型计费），口令走 POST body，不进 URL。 */
+   live=true 会真打一次网关（付费模型计费）。 */
 async function settingsVerifyModel(live) {
   if (!SET_AGENT) return toast('先选一个 agent', 'err');
-  let pc = '';
-  if (live) {
-    pc = settingsPasscode();
-    if (!pc) {
-      const el = $('setPasscode');
-      if (el) el.focus();
-      settingsRenderError('验证未执行', new Error('真实验证需要口令（会真调用网关）'));
-      return toast('真实验证需要口令', 'err');
-    }
-  }
+
   const box = $('setDiffBox');
   try {
     const v = live
       ? await api('/api/settings/model/verify-live', {
           method: 'POST', noToken: true,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ agent_id: SET_AGENT, passcode: pc })
+          body: JSON.stringify({ agent_id: SET_AGENT })
         })
       : await api('/api/settings/model/verify?agent_id=' + encodeURIComponent(SET_AGENT));
     settingsRenderVerify(v, live);
@@ -1717,15 +1629,10 @@ function settingsRefreshMeta(model) {
    为什么要这个：落盘前有备份，但回滚要人自己去目录里挑 .bak、判断哪份对、
    再手工 cp —— 手机上根本做不了。后端把「刚写的那次」记在 model_writes 表里，
    这里一键还原（还原前它还会再备份一次当前状态，撤错了还能再撤回去）。
-   破坏性动作 ⇒ 必须 confirm；口令与「保存」同口径（口令错 401 / 未配 503）。 */
+   破坏性动作 ⇒ 必须 confirm。 */
 async function settingsUndoModel() {
   if (!SET_AGENT) return toast('先选一个 agent', 'err');
-  const pc = settingsPasscode();
-  if (!pc) {
-    const el = $('setPasscode');
-    if (el) el.focus();
-    return toast('请先填设置口令', 'err');
-  }
+
   if (!window.confirm('把 ' + SET_AGENT + ' 的配置文件还原到「上一次保存之前」？\n\n' +
       '· 只撤销最近一次保存，更早的不动\n' +
       '· 还原前会再备份一次当前状态\n' +
@@ -1736,18 +1643,14 @@ async function settingsUndoModel() {
     const d = await api('/api/settings/model/undo', {
       method: 'POST', noToken: true,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent_id: SET_AGENT, passcode: pc })
+      body: JSON.stringify({ agent_id: SET_AGENT })
     });
-    lsSet('hub.passcode', pc);
-    clearPasscodeInput();
     SET_AGENTS = [];
     SET_DIFF = null;
     await settingsModelsLoad(true);
     settingsRenderUndone(d);
     toast(SET_AGENT + '：已还原 ' + (d.restored || []).length + ' 个文件', 'ok');
   } catch (e) {
-    if (/401|口令/.test(e.message)) lsRemove('hub.passcode');
-    clearPasscodeInput();
     settingsRenderError('撤销失败', e);
     toast('撤销失败：' + e.message, 'err');
   } finally {
@@ -1817,7 +1720,6 @@ function settingsGithubStatus(note) {
     ['key', (v.token && v.token.set) ? ((v.token.mask || '') + ' · ' + (v.token.type || '') +
       ' · 来源 ' + (v.token.source || '?')) : '未设置'],
     ['远端清单', L.count + ' 个仓库' + (L.cached ? '（缓存 ' + L.age_s + 's，点刷新重拉）' : '（未拉取）')],
-    ['口令门', v.writable ? '已启用（HUB_PASSCODE 已配）' : '未启用：服务端没配 HUB_PASSCODE，保存会被拒']
   ];
   box.innerHTML = rows.map(r => '<div><span class="k">' + escapeHtml(r[0]) + '：</span>' +
     '<span class="v">' + escapeHtml(r[1]) + '</span></div>').join('') +
@@ -1835,8 +1737,7 @@ function ghPayload(extra) {
   return Object.assign(p, extra || {});
 }
 
-/* 与模型页同口径（v0.13.45）：不向 prompt 要口令 —— 手机/APP WebView 会吞弹窗，
-   那种环境里"点了没反应"就是这么来的。缺口令就指回页面上的口令框并说明原因。 */
+/* 2026-11-07 C 档：错误直接呈现，不再有任何口令输入环节。 */
 function ghRenderError(prefix, e) {
   const box = $('ghStatus');
   if (!box) return;
@@ -1845,33 +1746,18 @@ function ghRenderError(prefix, e) {
   box.style.display = '';
 }
 
-async function ghAskPasscode(what) {
-  let pc = settingsPasscode();
-  if (!pc) {
-    const el = $('ghPasscode');
-    if (el) el.focus();
-    ghRenderError(what + '未执行', new Error(
-      '请先在「设置口令」框里填入 HUB_PASSCODE（不再弹窗收集：手机/APP 会吞弹窗）'));
-    return '';
-  }
-  return pc;
-}
 
 function ghPost(path, body) {
-  /* noToken：GitHub 四个写端点与模型保存同口径，只认 HUB_PASSCODE（已登记在
-     writeauth.EXEMPT_PREFIXES），索 TERM_TOKEN 只会多一个无关弹窗。 */
+  /* 2026-11-07 C 档：四个写端点走 write_gate 登录闸门，请求自带 HttpOnly Cookie。 */
   return api(path, { method: 'POST', noToken: true,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body) });
 }
 
 async function settingsGithubTest() {
-  let pc = await ghAskPasscode('测试连接');
-  if (!pc) return;
-  const p = ghPayload({ passcode: pc, api_base: $('ghApiBase').value.trim() || undefined });
+  const p = ghPayload({ api_base: $('ghApiBase').value.trim() || undefined });
   try {
     const d = await ghPost('/api/settings/github/test', p);
-    lsSet('hub.passcode', pc);
     if (!d.ok) return settingsGithubStatus('试连失败：' + (d.error || '未知'));
     const rate = d.rate || {};
     settingsGithubStatus('试连成功：' + (d.login || '?') + ' · key ' + (d.token_type || '') +
@@ -1879,18 +1765,14 @@ async function settingsGithubTest() {
         rate.remaining + '/' + rate.limit) + ' · 列仓库 ' + (d.repo_probe && d.repo_probe.ok ? '可用' : '不可用') +
       ' · ' + (d.took_ms || 0) + 'ms');
   } catch (e) {
-    if (/401|口令/.test(e.message)) lsRemove('hub.passcode');
     toast('试连失败：' + e.message, 'err');
   }
 }
 
 async function settingsGithubApply() {
-  let pc = await ghAskPasscode('保存 GitHub 设置');
-  if (!pc) return;
-  const p = ghPayload({ passcode: pc });
+  const p = ghPayload({});
   try {
     const d = await ghPost('/api/settings/github/apply', p);
-    lsSet('hub.passcode', pc);
     const box = $('ghDiff');
     if (box) {
       const ch = d.changes || [], fw = d.files_written || [];
@@ -1906,37 +1788,28 @@ async function settingsGithubApply() {
     await settingsGithubLoad(true);
     toast('GitHub 设置已保存（' + (d.applied || []).join('、') + '）', 'ok');
   } catch (e) {
-    if (/401|口令/.test(e.message)) lsRemove('hub.passcode');
     toast('保存失败：' + e.message, 'err');
   }
 }
 
 async function settingsGithubClear() {
   if (!confirm('清除 Hub 侧的 GitHub 设置（地址/key/归属/落点），回落到环境变量与内置默认？')) return;
-  let pc = await ghAskPasscode('清除 GitHub 设置');
-  if (!pc) return;
   try {
-    const d = await ghPost('/api/settings/github/clear', { passcode: pc });
-    lsSet('hub.passcode', pc);
+    const d = await ghPost('/api/settings/github/clear', {});
     await settingsGithubLoad(true);
     toast('已清除：' + ((d.cleared || []).join('、') || '（本来就是空的）'), 'ok');
   } catch (e) {
-    if (/401|口令/.test(e.message)) lsRemove('hub.passcode');
     toast('清除失败：' + e.message, 'err');
   }
 }
 
 async function settingsGithubRefresh() {
-  let pc = await ghAskPasscode('刷新远端清单');
-  if (!pc) return;
   try {
-    const d = await ghPost('/api/settings/github/refresh', { passcode: pc });
-    lsSet('hub.passcode', pc);
+    const d = await ghPost('/api/settings/github/refresh', {});
     await settingsGithubLoad(true);
     if (d.errors && d.errors.length) toast('重拉完成但有告警：' + d.errors[0], 'err');
     else toast('已重拉远端清单：' + d.count + ' 个仓库', 'ok');
   } catch (e) {
-    if (/401|口令/.test(e.message)) lsRemove('hub.passcode');
     toast('刷新失败：' + e.message, 'err');
   }
 }
@@ -1945,9 +1818,9 @@ async function settingsGithubRefresh() {
    数据源 GET /api/hublog：journald 服务日志 + profile_events 操作事件，合并按时间倒序。
    三条纪律与另三个设置页同源：① 无浮层（正文出页，筛选控件全在页内）；
    ② 按钮一律 data-settings-act 走同一委托，无 inline onclick；
-   ③ **鉴权失败不弹 prompt**（手机/APP WebView 吞弹窗 ⇒ 点了没反应）：原因写进
-      页内 #logStats 并 focus 口令框，与模型/GitHub 页 v0.13.45 的口径一致。
-   后端按写方法鉴权（GET 也要口令），故 token 由本页自己带（api() 只给写方法带）。
+   ③ **鉴权失败不弹 prompt**（手机/APP WebView 吞弹窗 ⇒ 点了没反应）：原因写进页内 #logStats。
+   2026-11-07 C 档：读端点身份就是会话 Cookie（api() 同源自动带），不再拼 x-hub-token、
+   不再二次输入口令；未登录 401 时提示重新登录。
    var 声明而非 let：go()（06 分片顶层就会跑）可能经 settingsLogsLoad 读到它，
    与 setModelPageLoaded 同一条 TDZ 纪律。 */
 var LOG_LAST = null;      // 最近一次结果：复制/导出复用，不再为同一次查看打两次后端
@@ -2220,17 +2093,14 @@ function settingsLogsError(e) {
   const box = $('logStats');
   const body = $('logBody');
   const msg = (e && e.message) || String(e);
-  if (/401|口令|缺少凭据/.test(msg)) lsRemove('hub.passcode');   // 存量口令失效：清掉再问，不循环
   if (body) body.innerHTML = '';
   if (box) {
     box.innerHTML = '<div class="v" style="color:var(--danger)">读取失败：' + escapeHtml(msg) +
       (e && e.http ? '（HTTP ' + escapeHtml(String(e.http)) + '）' : '') + '</div>' +
-      '<div class="hint">在「设置口令」框填 HUB_PASSCODE 再点刷新（不会弹窗）。' +
-      'HTTP 503 表示服务端没配 HUB_PASSCODE，填什么都没用。</div>';
+      '<div class="hint">本页身份是登录会话 Cookie：若会话已过期，重新登录后刷新即可。' +
+      'HTTP 401 = 未登录；503 = 用户库不可用（C 档后不再有口令可填）。</div>';
     box.style.display = '';
   }
-  const el = $('logPasscode');
-  if (el) el.focus();
   toast('日志读取失败：' + msg, 'err');
 }
 
@@ -2281,7 +2151,7 @@ function settingsLogsExport() {
   const t = settingsLogsText();
   if (!t) return toast('先刷新出日志再导出', 'err');
   /* 走 Blob 而不是 format=text 端点：已在页里的结果不必再打一次后端，
-     也省得把口令再塞进 URL（?token= 会被 uvicorn 记进访问行）。 */
+     也免得把凭据塞进 URL（?token= 会进 uvicorn 访问行）—— C 档后走会话 Cookie，无需拼串。 */
   const blob = new Blob([t], { type: 'text/plain;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -2294,7 +2164,7 @@ function settingsLogsExport() {
   toast('已导出 ' + LOG_LAST.entries.length + ' 条', 'ok');
 }
 
-/* 三个设置正文页的**唯一**委托出口：选 agent / 预览 / 保存 / GitHub / 口令 / 日志 */
+/* 三个设置正文页的**唯一**委托出口：选 agent / 预览 / 保存 / GitHub / 日志 */
 function settingsDelegates() {
   SET_PAGE_IDS.forEach(id => {
     const page = document.getElementById(id);
@@ -2319,14 +2189,7 @@ function settingsDelegates() {
       if (a === 'gh-apply') return settingsGithubApply();
       if (a === 'gh-clear') return settingsGithubClear();
       if (a === 'gh-refresh') return settingsGithubRefresh();
-      /* 终端口令页：原先是 inline onclick，随抽屉一起改走委托（同一个出口） */
-      if (a === 'token-view') return settingsViewToken();
-      if (a === 'token-clear') return settingsClearPasscode();
-      if (a === 'token-copy') return settingsCopyToken();
-      if (a === 'token-apply') return settingsApplyToken();
-      if (a === 'token-toggle') return settingsToggleShow();
       /* 日志页（v0.13.46）：刷新 / 复制 / 导出 */
-      if (a === 'pass-eye') return passEye(act, act.dataset.target);
       if (a === 'log-refresh') return settingsLogsLoad();
       if (a === 'log-copy') return settingsLogsCopy();
       if (a === 'log-export') return settingsLogsExport();

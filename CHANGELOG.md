@@ -1,3 +1,25 @@
+## 未发版 — 认证收口 C 档：共享口令全废弃（2026-11-07）
+
+> 用户裁定：设置菜单「终端口令」在已有用户名授权后已冗余，执行 C 档收口为单一认证面。
+> 取证：TERM_TOKEN 在 `src/*.py` 仅注释 + `main.py` 回显，零鉴权消费点（评估阶段生产 `code_stale=false`，取证的是真实现网代码）。
+
+- 后端：`writeauth.EXEMPT_PREFIXES` 删 5 条（term-token / model×3 / github），
+  只剩 telemetry / login / logout；`main.py` 删 `/api/settings/term-token` 端点与
+  `HUB_PASSCODE` 定义；`modelcfg.py` / `ghsettings.py` 拆 `_check_passcode`、Pydantic
+  `passcode` 字段与 `writable` 字段；写端点统一由登录闸门保护（fail-closed）。
+- 前端：分片 `01-core-boot.js` 删 27 处 passcode、6 个口令函数、delegates token 分支；
+  `index.html` 删两处口令输入框，「终端口令」子页改「认证状态」静态说明页
+  （保留 `page-settings-token` / `settings-token` ID，不动权限数据）；重建 `hub.js`。
+  全链路补齐：日志页删 `logPasscode` 框与 HUB_PASSCODE 错误文案（保留 `passEye` 供 ghToken 复用），
+  `agent-hubctl.sh token` 子命令改废弃指引，QUICKSTART/HISTORY/README 口径同步。
+- 护栏：`test_writeauth` 豁免上限 11→3；`verify_write_gate` 删 term-token 预期。
+- `.env` 的 `TERM_TOKEN` / `HUB_PASSCODE` 保留为死键（软链指向生产，未删值）。
+- 已验证：`build_hubjs.sh` 产物逐字节一致 + `node --check`；改动面 pytest 57 passed，
+  7 文件批仅剩 2 个与 C 无关的既有基线红；主树 L0 hermetic 3989 全绿对照（4 个
+  `release_p2` 全量状态污染红经单独跑 + 主树对照定性，非 C 引入）。
+- 待办：与 `4c68964`（模型计量）语义合并后重跑 L0、集成回主树、生产重启
+  （`term_sessions=1` 需用户签字）、端到端 + 浏览器复核。
+
 ## 未发版 — 设置→模型计量：接 CCR 全量账本（2026-11-07）
 
 > 状态：**代码已落盘 + 63 passed + 真账本端到端出数；待重启**（`term_sessions=1`，

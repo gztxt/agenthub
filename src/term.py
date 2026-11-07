@@ -423,6 +423,29 @@ def _check_term_token(provided: str, source: str) -> None:
         raise HTTPException(status_code=401, detail="term token required or invalid")
 
 
+def _check_term_auth(request, source: str) -> None:
+    """终端控制面鉴权（2026-11-07 用户裁定：浏览器一律用户名+密码）。
+    ① Cookie 会话（浏览器登录后自动携带）→ 放行；
+    ② 旧 X-TERM-TOKEN / ?token= → 放行（未迁移的脚本/嵌页，内部兼容面）。
+    两条都不命中 ⇒ 401。拒绝理由绝不回显凭据值。"""
+    try:
+        import users as _users
+        u, _p, _how = _users.identity_of(request)
+        if u:
+            return
+    except Exception:  # noqa: BLE001 —— 用户库不可用不阻断旧凭据路径
+        pass
+    provided = ""
+    try:
+        provided = request.headers.get("x-term-token", "") or request.query_params.get("token", "")
+    except Exception:  # noqa: BLE001
+        provided = ""
+    if provided and TERM_TOKEN and hmac.compare_digest(provided, TERM_TOKEN):
+        return
+    log.warning(f"[term] 拒绝：未登录且旧 token 无效（{source}）")
+    raise HTTPException(status_code=401, detail="login required")
+
+
 def _ensure_settings_table() -> None:
     """登录线索词存 DB 的键值表（与 ghsettings._ensure_table 同形）。"""
     db.execute("CREATE TABLE IF NOT EXISTS term_settings ("
@@ -864,8 +887,7 @@ def _cwd_or_none(raw: Optional[str]) -> Optional[str]:
 
 @router.post("/api/term/sessions")
 async def create_session(body: CreateIn, request: Request):
-    _check_term_token(request.headers.get("x-term-token", "")
-                      or request.query_params.get("token", ""), "POST /api/term/sessions")
+    _check_term_auth(request, "POST /api/term/sessions")
     prof = profiles.get_profile(body.agent_id)
     if not prof or not prof.get("terminal"):
         raise HTTPException(400, f"{body.agent_id} 无终端入口（仅画像白名单可拉起）")
@@ -973,8 +995,7 @@ async def list_sessions(request: Request):
     # P1-7：列表本身是**控制平面入口** —— 它漏 sid + agent_id + cmd + cwd + alive，
     # 而 DELETE 以前不鉴权 ⇒ 任何能撑到 3102 的一方（单前 **绑定 0.0.0.0**，局域网可达）
     # 可以「列 → 拿 sid → 杀」接力杀掉别人正在跑的会话。只堵 DELETE 不堵 GET 等于没堵。
-    _check_term_token(request.headers.get("x-term-token", "")
-                      or request.query_params.get("token", ""), "GET /api/term/sessions")
+    _check_term_auth(request, "GET /api/term/sessions")
     _reap()
     # 只展示活会话：已退出记录不再以"僵尸条目"出现（历史改由 /api/term/history 从磁盘直读）
     titles: Dict[str, Dict[int, str]] = {}
@@ -996,8 +1017,7 @@ async def list_sessions(request: Request):
 
 @router.get("/api/term/history/{agent_id}")
 async def agent_history(agent_id: str, request: Request, limit: int = Query(default=3, ge=1, le=20)):
-    _check_term_token(request.headers.get("x-term-token", "")
-                      or request.query_params.get("token", ""), "GET /api/term/history")
+    _check_term_auth(request, "GET /api/term/history")
     prof = profiles.get_profile(agent_id)
     if not prof or not prof.get("terminal"):
         raise HTTPException(400, f"{agent_id} 无终端入口，谈不上续聊历史")
@@ -1014,8 +1034,7 @@ async def agent_history(agent_id: str, request: Request, limit: int = Query(defa
 @router.get("/api/term/recording/{sid}")
 async def term_recording_status(sid: str, request: Request):
     """本会话录了多少、有没有触顶停录、上限是多少。界面据此明示，不能静默丢帧。"""
-    _check_term_token(request.headers.get("x-term-token", "")
-                      or request.query_params.get("token", ""), "GET /api/term/recording")
+    _check_term_auth(request, "GET /api/term/recording")
     sess = _sessions.get(sid)
     # 活会话报内存真值（含 capped 一等状态）；已退出的从盘上重建（进程重启后 Recorder
     # 已不在，capped 真值无从恢复 —— 那种情形 term_record.status只给 at_limit 推断值）。
@@ -1039,8 +1058,7 @@ async def term_recording_frames(sid: str, request: Request,
     仅在 `more=True` 时给出 —— 客户端原样回传即可续接，不会重复边界帧，
     也不会拿到一个永远取不到新帧的游标而空转轮询。
     """
-    _check_term_token(request.headers.get("x-term-token", "")
-                      or request.query_params.get("token", ""), "GET /api/term/recording/frames")
+    _check_term_auth(request, "GET /api/term/recording/frames")
     if not term_record.enabled():
         raise HTTPException(404, "recording 未启用")
     page = await asyncio.to_thread(term_record.frames_page, sid, limit, after_seq)
@@ -1053,8 +1071,7 @@ async def term_recording_frames(sid: str, request: Request,
 async def kill_session(sid: str, request: Request):
     # P1-7：杀掉别的会话 = 服务打断，与“建会话”同级危险（建已经被闸了）。
     # 前端六个调用点本来就带 termHeaders()，故此处只补服务端，不会造成界面断流。
-    _check_term_token(request.headers.get("x-term-token", "")
-                      or request.query_params.get("token", ""), "DELETE /api/term/sessions/{sid}")
+    _check_term_auth(request, "DELETE /api/term/sessions/{sid}")
     # 先摘出登记表 → 列表/新 WS 立即看不到（❌ 即时生效）；进程灭杀与资源回收走 kill→_force_kill→_cleanup
     sess = _sessions.pop(sid, None)
     if not sess:
@@ -1357,10 +1374,19 @@ def _attach_reader(sess: Session):
 
 @router.websocket("/ws/term/{sid}")
 async def term_ws(ws: WebSocket, sid: str, token: str = Query(default="")):
-    # 缺 token 即拒：query ?token= 与 header X-TERM-TOKEN 两种都接受
+    # 2026-11-07：浏览器一律 Cookie 会话（WS 握手自动带 Cookie）；旧 ?token= 保留给脚本。
+    ws_ok = False
+    try:
+        import users as _users
+        _ct = _users.cookie_session_token(ws)
+        if _ct:
+            _r, _p, _c = _users.resolve_token(_ct)
+            ws_ok = bool(_r and not _c)
+    except Exception:  # noqa: BLE001
+        ws_ok = False
     provided = token or ws.headers.get("x-term-token", "")
-    if not provided or not hmac.compare_digest(provided, TERM_TOKEN):
-        log.warning("[term] 拒绝：ws 握手 token 校验失败（/ws/term）")
+    if not ws_ok and not (provided and TERM_TOKEN and hmac.compare_digest(provided, TERM_TOKEN)):
+        log.warning("[term] 拒绝：ws 握手未登录且旧 token 无效（/ws/term）")
         # WS 握手阶段不能用 HTTPException（Starlette 在 ws 上下文不可靠），显式关闭 4401=未授权
         await ws.close(code=4401)
         return

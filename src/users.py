@@ -115,6 +115,69 @@ def resolve_token(provided: str) -> Tuple[Optional[dict], Optional[set], bool]:
     return None, None, True
 
 
+# ── 浏览器会话 Cookie（2026-11-07 用户裁定：Web 端全量用户名+密码认证）──────
+#: 会话 Cookie 名。HttpOnly ⇒ JS 读不到，XSS 也偷不走；SameSite=Lax ⇒ 跨站表单
+#: 提交不带会话（CSRF 最低门槛），本机/局域网同站请求正常携带。
+SESSION_COOKIE = "hub_session"
+SESSION_TTL_S = 7 * 24 * 3600
+
+
+def issue_session(user_row: dict) -> str:
+    """签发一个浏览器会话：随机串只进 Cookie，DB 只存 sha256（同 token 存储纪律）。
+    cred_type 复用 user_credentials 表，name 前缀 session- 便于改密时整批吊销。"""
+    tok = _secrets.token_urlsafe(32)
+    db.execute(
+        "INSERT INTO user_credentials(user_id, token_hash, name, created_at) VALUES(?,?,?,?)",
+        (user_row["id"], _sha(tok), "session-" + _secrets.token_hex(2), db._now()))
+    return tok
+
+
+def cookie_session_token(request: Request) -> str:
+    """从 Cookie 头取会话值。不用 request.cookies 是为了与 writeauth 的
+    raw-header 口径一致（L0 测试里 request 是裸对象，没有 .cookies）。"""
+    raw = ""
+    try:
+        raw = request.headers.get("cookie", "")
+    except Exception:  # noqa: BLE001
+        return ""
+    for part in (raw or "").split(";"):
+        k, _, v = part.strip().partition("=")
+        if k == SESSION_COOKIE:
+            return v
+    return ""
+
+
+def identity_of(request: Request) -> Tuple[Optional[dict], Optional[set], str]:
+    """请求身份解析：① Cookie 会话 → ② HTTP Basic（用户名+密码）。
+    返回 (user 行, perms, 来源)；来源 ∈ cookie / basic / anonymous。
+    这里**不接受** x-hub-token：浏览器面必须走 Cookie，机器面走 Basic。
+    旧共享口令的兼容面单独留在 writeauth 里判定，不在这里重新长回 token 路径。"""
+    tok = cookie_session_token(request)
+    if tok:
+        r, p, compat = resolve_token(tok)
+        if r and not compat:
+            return r, p, "cookie"
+        # Cookie 失效不直接判死：继续看 Basic（脚本可能同时带旧 Cookie）
+    auth = ""
+    try:
+        auth = request.headers.get("authorization", "")
+    except Exception:  # noqa: BLE001
+        return None, None, "anonymous"
+    if auth[:6].lower() == "basic ":
+        try:
+            raw = base64.b64decode(auth[6:].strip()).decode("utf-8")
+            name, pw = raw.split(":", 1)
+            rows = db.query("SELECT * FROM users WHERE username=?", (name,))
+            if rows and rows[0].get("pw_hash") and verify_password(pw, rows[0]["pw_hash"]):
+                r = rows[0]
+                perms = None if r["is_admin"] else _perm_set(r["id"])
+                return r, perms, "basic"
+        except Exception:  # noqa: BLE001 —— 坏 Basic 头按匿名处理，不回显任何内容
+            pass
+    return None, None, "anonymous"
+
+
+
 # ── 路由 ──
 class UserIn(BaseModel):
     username: str = Field(min_length=2, max_length=32, pattern=r"^[a-z0-9_-]+$")
@@ -202,8 +265,8 @@ class PasswordIn(BaseModel):
 
 @router.post("/api/users/login")
 async def login(body: LoginIn, request: Request):
-    """密码登录（2026-11-07）。成功 ⇒ 签发一个该用户的**会话 token**（随机串，
-    存 user_credentials，cred_type 复用 token 语义），前端拿去当 x-hub-token 用。
+    """密码登录（2026-11-07）。成功 ⇒ 签发 HttpOnly 会话 Cookie（7 天），**不回 token**。
+    浏览器之后每个请求由 Cookie 自动携带；脚本/机器客户端走 HTTP Basic（见 identity_of）。
     失败 ⇒ 401（不回显「用户名错/密码错」差异，防用户枚举——统一 401 文案）。"""
     import db as _db
     if not _db.is_open():
@@ -220,15 +283,31 @@ async def login(body: LoginIn, request: Request):
             raise HTTPException(429, "登录失败次数过多，60 秒内请稍后再试")
         raise HTTPException(401, "用户名或密码错误")
     _login_fail.pop(k, None)
-    # 签发会话 token（该用户名下，带 perms）
-    tok = _secrets.token_urlsafe(32)
-    _db.execute(
-        "INSERT INTO user_credentials(user_id, token_hash, name, created_at) VALUES(?,?,?,?)",
-        (rows[0]["id"], _sha(tok), "session-" + _secrets.token_hex(2), _db._now()))
+    # 签发浏览器会话：值只进 HttpOnly Cookie，DB 只存 sha256；**不回 token**。
+    tok = issue_session(rows[0])
     perms = None if rows[0]["is_admin"] else sorted(_perm_set(rows[0]["id"]))
-    return {"ok": True, "token": tok, "username": body.username,
-            "is_admin": bool(rows[0]["is_admin"]), "user_perms": perms,
-            "note": "把此 token 存为 x-hub-token 即可持续访问；吊销后失效"}
+    from starlette.responses import JSONResponse
+    resp = JSONResponse({"ok": True, "username": body.username,
+                         "is_admin": bool(rows[0]["is_admin"]), "user_perms": perms})
+    resp.set_cookie(SESSION_COOKIE, tok, max_age=SESSION_TTL_S, httponly=True,
+                    samesite="lax", path="/", secure=(request.url.scheme == "https"))
+    _db.log_asset_event("user", body.username, "update", "user:" + body.username,
+                        {"detail": "login ok; session cookie issued"})
+    return resp
+
+
+@router.post("/api/users/logout")
+async def logout(request: Request):
+    """退出登录：吊销当前 Cookie 对应会话并清 Cookie（幂等，未登录也返回 ok）。
+    2026-11-07：浏览器面不再持有任何 token ⇒ 退出只需删会话，不涉及本地凭据。"""
+    tok = cookie_session_token(request)
+    if tok:
+        db.execute("UPDATE user_credentials SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL",
+                   (db._now(), _sha(tok)))
+    from starlette.responses import JSONResponse
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(SESSION_COOKIE, path="/")
+    return resp
 
 
 @router.post("/api/users/{name}/password")
@@ -364,11 +443,17 @@ async def create_user(request: Request, body: UserIn):
 @router.get("/api/users/whoami")
 async def whoami(request: Request):
     """前端启动时调用：当前凭据解析出的用户 + 可见模块清单（全模块 = null）。
-    非回环带 token 时 read_gate 已注入 state.user / state.user_perms。"""
+    2026-11-07：Cookie 会话由 read_gate 注入 state.user；若上游没注入
+    （例如回环匿名面），这里再自行解析一次，保证闸门能拿到真实身份。"""
     u = getattr(request.state, "user", None)
     up = getattr(request.state, "user_perms", None)
     if u is None:
-        return {"username": "legacy", "is_admin": True, "user_perms": None}
+        try:
+            u, up, _how = identity_of(request)
+        except Exception:  # noqa: BLE001
+            u, up = None, None
+    if u is None:
+        return {"username": None, "is_admin": False, "user_perms": None}
     return {"username": u["username"], "is_admin": bool(u.get("is_admin", 0)),
             "user_perms": sorted(up) if up is not None else None}
 

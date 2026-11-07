@@ -551,7 +551,7 @@ function histLoad(aid) {
    而且 termToken() 会在每次刷新都弹一次口令框。 */
 (function histBootstrap() {
   if (!histOpen) return;
-  if (!TERM_HIST_AGENTS.includes(histOpen) || !lsGet('hub.term.token')) {
+  if (!TERM_HIST_AGENTS.includes(histOpen) || (!AUTH_USER && !lsGet('hub.login.user'))) {
     histOpen = '';
     lsRemove('hub.hist');
     return;

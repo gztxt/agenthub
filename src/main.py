@@ -890,9 +890,15 @@ except Exception as e:  # noqa: BLE001
 
 
 def _read_auth_of(request: Request) -> dict:
-    """读门状态（/health 与 read_gate 同口径）：用户会话 token 命中即 ok。
-    非回环 + 无凭据 ⇒ locked（前端据此显示「输入令牌/登录」横幅）。"""
+    """读门状态（/health 与 read_gate 同口径）：Cookie 会话 / Basic 命中即 ok。
+    非回环 + 无凭据 ⇒ locked（前端据此显示「登录」横幅）。"""
     host = request.client.host if request.client else ""
+    try:
+        ur, _up, _how = users_mod.identity_of(request)
+        if ur:
+            return {"state": "ok", "reason": None}
+    except Exception:  # noqa: BLE001
+        pass
     provided = writeauth.provided_token(request.headers.raw, request.url.query)
     st = writeauth.read_banner_state(host, "/", provided, writeauth.secrets_from_env())
     if st.get("state") != "ok" and provided:
@@ -903,6 +909,18 @@ def _read_auth_of(request: Request) -> dict:
         except Exception:  # noqa: BLE001
             pass
     return st
+
+
+def _health_user_of(request: Request) -> dict:
+    """当前请求的身份（只读投影）。匿名 ⇒ legacy 全模块（零行为变化）。"""
+    try:
+        u, perms, _how = users_mod.identity_of(request)
+        if u:
+            return {"username": u["username"], "is_admin": bool(u.get("is_admin", 0)),
+                    "user_perms": sorted(perms) if perms is not None else None}
+    except Exception:  # noqa: BLE001
+        pass
+    return {"username": "legacy", "is_admin": True, "user_perms": None}
 
 
 @app.get("/health")
@@ -928,9 +946,8 @@ async def health(request: Request):
            # 2026-11-07：用户会话 token 也算有效凭据（与 read_gate 同口径），否则登录后横幅不消失。
            "read_auth": _read_auth_of(request),
            # 2026-11-07 用户授权：当前请求身份（前端据此隐藏无权限菜单）。
-           # health 是回环匿名面，此处默认 legacy 全模块；非回环带 token 时 read_gate
-           # 已把 state.user/user_perms 注入，由 /api/whoami 端点回传（见 users.py）。
-           "user": {"username": "legacy", "is_admin": True, "user_perms": None},
+           # 浏览器带 Cookie / 脚本带 Basic 时据实回传；匿名（含回环）按旧口径 legacy 全模块。
+           "user": _health_user_of(request),
            }
     # 内存三口径（PT-20261024-08 B5）：**本体 / 托管子进程 / cgroup 记账**。
     # 为什么必须分开：2026-10-24 实测同一服务三个口径差 7 倍（判例 agent-knowledge/259）

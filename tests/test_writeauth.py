@@ -98,8 +98,10 @@ class BRouteInventory(unittest.TestCase):
         # 9 → 10（2026-11-07）：/api/users/login 密码登录端点 —— 自带密码校验 +
         # 进程内限速（连败 5 次锁 60s）；若不豁免，未登录用户永远进不来＝自锁死
         # （同 /api/settings/term-token 的豁免纪律）。它只签发该用户自己的会话
-        # token，不碰其他用户面；改密走 /api/users/{name}/password（需已登录，不豁免）。
-        self.assertLessEqual(len(uncovered), 10,
+        # Cookie，不碰其他用户面；改密走 /api/users/{name}/password（需已登录，不豁免）。
+        # 10 → 11（2026-11-07）：/api/users/logout 退出端点 —— 只吊销请求自带 Cookie
+        # 对应的会话并清 Cookie，幂等；会话过期后前端仍必须能调它，否则「退出」失效。
+        self.assertLessEqual(len(uncovered), 11,
                              f"豁免口子涨到 {len(uncovered)} 条了，每加一条都要在这里交代清楚")
 
     def test_no_dead_exempt_entry(self):

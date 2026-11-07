@@ -1139,13 +1139,8 @@ function openLoginModal(opts) {
       '<div class="modal-box" role="dialog" aria-label="登录" style="max-width:340px">' +
       '<div class="modal-hd"><b>登录 AgentHub</b><button class="modal-x" data-tokx aria-label="关闭">×</button></div>' +
       '<div class="modal-bd">' +
-      '<div style="display:flex;gap:6px;margin-bottom:10px;border-bottom:1px solid var(--border)" id="loginTabs">' +
-      '<button class="btn xs on" id="loginTabPw" type="button">账号密码</button>' +
-      '<button class="btn xs" id="loginTabTok" type="button">直接用 Token</button></div>' +
-      '<div id="loginPanePw">' +
       '<input id="loginUser" class="inp" placeholder="用户名（如 gztxt）" style="width:100%;margin-bottom:6px" autocomplete="username">' +
-      '<input id="loginPw" type="password" class="inp" placeholder="密码" style="width:100%" autocomplete="current-password"></div>' +
-      '<div id="loginPaneTok" style="display:none"><input id="tokIn" type="password" class="inp" placeholder="x-hub-token / 终端 TERM_TOKEN" style="width:100%" autocomplete="off"></div>' +
+      '<input id="loginPw" type="password" class="inp" placeholder="密码" style="width:100%" autocomplete="current-password">' +
       '<div id="loginErr" class="hint" style="color:#f88;margin-top:6px;min-height:14px"></div></div>' +
       '<div class="modal-ft"><button class="btn ghost" data-tokcancel>取消</button>' +
       '<button class="btn pri" data-tokok>登录</button></div></div>';
@@ -1164,39 +1159,19 @@ function openLoginModal(opts) {
     });
     m.querySelector('[data-tokx]').addEventListener('click', () => _closeTokenModal(null));
     m.querySelector('[data-tokcancel]').addEventListener('click', () => _closeTokenModal(null));
-    /* tab 切换（账号密码 / 直接用 Token）——不走 inline onclick，走委托 */
-    m.querySelector('#loginTabs').addEventListener('click', (e) => {
-      const b = e.target.closest('button');
-      if (!b) return;
-      const isPw = b.id === 'loginTabPw';
-      m.querySelector('#loginTabPw').classList.toggle('on', isPw);
-      m.querySelector('#loginTabTok').classList.toggle('on', !isPw);
-      m.querySelector('#loginPanePw').style.display = isPw ? '' : 'none';
-      m.querySelector('#loginPaneTok').style.display = isPw ? 'none' : '';
-      m.querySelector('#loginErr').textContent = '';
-    });
+    /* 2026-11-07：只保留「用户名 + 密码」一种登录方式，Token 输入面板已删除。 */
     m.querySelector('[data-tokok]').addEventListener('click', () => {
-      const usingPw = m.querySelector('#loginPanePw').style.display !== 'none';
-      if (usingPw) {
-        const u = (m.querySelector('#loginUser').value || '').trim();
-        const p = m.querySelector('#loginPw').value || '';
-        if (!u || !p) { m.querySelector('#loginErr').textContent = '用户名和密码都要填'; return; }
-        m.querySelector('#loginErr').textContent = '登录中…';
-        m.querySelector('[data-tokok]').disabled = true;
-        _doLogin(u, p).then((ok) => {
-          m.querySelector('[data-tokok]').disabled = false;
-          if (!ok) m.querySelector('#loginErr').textContent = '登录失败：用户名或密码错误（或被限速）';
-        });
-      } else {
-        const v = (m.querySelector('#tokIn').value || '').trim();
-        _closeTokenModal(v || null);
-      }
+      const u = (m.querySelector('#loginUser').value || '').trim();
+      const p = m.querySelector('#loginPw').value || '';
+      if (!u || !p) { m.querySelector('#loginErr').textContent = '用户名和密码都要填'; return; }
+      m.querySelector('#loginErr').textContent = '登录中…';
+      m.querySelector('[data-tokok]').disabled = true;
+      _doLogin(u, p).then((ok) => {
+        m.querySelector('[data-tokok]').disabled = false;
+        if (!ok) m.querySelector('#loginErr').textContent = '登录失败：用户名或密码错误（或被限速）';
+      });
     });
     m.querySelector('#loginPw').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') m.querySelector('[data-tokok]').click();
-      if (e.key === 'Escape') _closeTokenModal(null);
-    });
-    m.querySelector('#tokIn').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') m.querySelector('[data-tokok]').click();
       if (e.key === 'Escape') _closeTokenModal(null);
     });
@@ -1222,10 +1197,11 @@ async function _doLogin(u, p) {
       body: JSON.stringify({ username: u, password: p })
     });
     const d = await r.json();
-    if (r.ok && d.token) {
-      lsSet('hub.term.token', d.token);      // 会话 token 走同一个 storage key（旧口径）
-      lsSet('hub.login.user', u);            // 记住登录身份（右上角显示）
-      _closeTokenModal(d.token);
+    if (r.ok && d && d.username) {
+      /* 2026-11-07：服务端已种 HttpOnly 会话 Cookie；前端不存任何 token。 */
+      lsSet('hub.login.user', d.username);
+      _closeTokenModal(true);                // true = 登录成功，api() 重试分支据此重发
+      AUTH_USER = d.username;
       if (typeof applyAuthToNav === 'function') applyAuthToNav();
       if (typeof renderAuthBox === 'function') renderAuthBox();   // 顶栏身份/退出即时刷新
       return true;
@@ -1247,50 +1223,16 @@ if (typeof go !== 'undefined') {
   const _go = go;
   go = function (page) { _closeTokenModal(null); return _go(page); };
 }
-/* force=true：用户主动点的入口（顶栏登录 / 工作台「输入令牌」/ 导出会话）才允许
-   在这一轮再弹一次口令框；后台请求（api()/termHeaders()）一律静默返回 ''。 */
-function termToken(force) {
-  let t = lsGet('hub.term.token');
-  if (t) t = String(t).trim();          // trim① 读侧：存量脏值自愈
-  if (!t) {
-    /* trim② 写侧：落盘前必 trim。优先走原生 prompt（node 测试桩/无 document 兜底），
-       浏览器有 document 时改走模态弹窗 openTokenModal（异步，_promptTokenAsync 收集）。 */
-    let got = '';
-    if (typeof document !== 'undefined' && document.body && typeof openTokenModal === 'function') {
-      /* 浏览器：异步弹窗；此刻同步返回 ''，401 后 api() 重试分支重新取 lsGet。
-         只自动弹一次：api() 每个请求都会走 termToken()，pollHealth 15s 一轮 ⇒
-         旧写法每轮都重新弹，把用户正在输入的内容打断（2026-11-07）。后续 401
-         仍由 api() 的 _promptTokenAsync 兜底，不靠这里。 */
-      if (force || !_tokenAutoPrompted) {
-        _tokenAutoPrompted = true;
-        openTokenModal({ auto: true }).then((v) => {
-          const clean = (v || '').trim();
-          if (clean) lsSet('hub.term.token', clean);
-        }).catch(() => {});
-      }
-    } else if (typeof prompt === 'function') {
-      /* node 测试桩 / 无模态框环境：同步 prompt，同旧口径（行为层测试钉住这条） */
-      got = (prompt('请输入终端鉴权 TERM_TOKEN（也可在右上角「设置」查看后一键应用）') || '');
-      got = got.trim();
-      if (got) lsSet('hub.term.token', got);
-    }
-    return got;
-  }
-  return t;
-}
-function termHeaders(extra) {
-  return Object.assign({ 'X-TERM-TOKEN': termToken() }, extra || {});
-}
+/* 2026-11-07 用户裁定：浏览器不再持有任何 token。
+   termToken() 仅作兼容桩保留（全仓还有调用点），恒返回空串；
+   终端鉴权改由 HttpOnly 会话 Cookie 自动携带（WS 握手同样带 Cookie）。 */
+function termToken(force) { return ''; }
+function termHeaders(extra) { return Object.assign({}, extra || {}); }
 
 function wsUrl(path) {
-  /* ★ 必须 trim（2026-10-18 实弹取证）：同一个 token 在两条路径上待遇不同 —— HTTP 头里的
-     尾随空白会被 HTTP 解析器按 OWS 裁掉，`?token=%20` 不会。于是存量带空白的 token 表现为
-     「POST /api/term/sessions 200 + WS 握手 403」：会话建好、pty 活着，xterm 一个字节也收不到，
-     终端永久空白（不是 codebuddy 特有，全 agent 同形）。浏览器 localStorage 里的存量脏值
-     无法由服务端修（term.py 精确比对是对的，不许放宽），故在读侧自愈。 */
-  const t = String(lsGet('hub.term.token') || '').trim();
-  const sep = path.includes('?') ? '&' : '?';
-  return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + path + (t ? sep + 'token=' + encodeURIComponent(t) : '');
+  /* 2026-11-07：不再把 token 拼进 URL（?token= 会进浏览器历史/代理日志），
+     会话由同源 WS 握手自动携带的 Cookie 证明。 */
+  return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + path;
 }
 
 /* 是否该抢焦点：只有用户主动动作（新会话 / 点芯片 / 续聊历史）才聚焦。

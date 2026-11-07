@@ -255,31 +255,36 @@ var ghStars = new Set(), ghHiddenSet = new Set();
 /* v0.13.6 P1-7：写端点服务端强制凭据。**只有写操作才索取 token** ——
    GET 也 prompt 的话，用户一打开页面就被口令框糊脸（读路径本来不需要）。 */
 const WRITE_METHODS = { POST: 1, PUT: 1, PATCH: 1, DELETE: 1 };
-/* 2026-11-07 弹窗令牌收集器（与 03 分片 openTokenModal 配套）：
-   同步取已存 token；无则异步等模态弹窗结果（上限 90s，超时视为取消）。 */
-async function _promptTokenAsync() {
-  let t = lsGet('hub.term.token');
-  if (t) return String(t).trim();
-  if (typeof openTokenModal !== 'function') return '';   // 03 分片未加载兜底
+/* 2026-11-07 修复：29c0e08 重写 api() 时把这一行函数定义一起删掉了，
+   但 api() 里三处仍在调用 ⇒ 每次请求都抛
+   `ReferenceError: isWriteMethod is not defined`，登录后所有数据拉取全被
+   这个异常吃掉，页面只剩骨架（用户报「登录后不正常 / 刷新就白屏」）。
+   判据：01-core-boot.js 里 `isWriteMethod(` 的出现次数必须同时有定义。 */
+function isWriteMethod(m) { return !!WRITE_METHODS[String(m || 'GET').toUpperCase()]; }
+/* 2026-11-07 登录收集器（与 03 分片 openLoginModal 配套）：
+   401 时弹账号密码框，成功 ⇒ true；取消/超时 ⇒ false。不再读写任何 token。 */
+async function _promptLoginAsync() {
+  if (typeof openLoginModal !== 'function') return false;   // 03 分片未加载兜底
   /* 与 maybeAutoLoginPrompt 共用同一个「已弹过」标记：用户在这里点了取消，
-     600ms 后的首访自动弹窗就不该再糊他一次（2026-11-07）。 */
+     600ms 后的首访自动弹窗就不该再糊他一次。 */
   try { sessionStorage.setItem('hub.login.prompted', '1'); } catch (e) {}
-  const p = openTokenModal({ auto: true });
   const race = await Promise.race([
-    p.catch(() => ''),
-    new Promise(res => setTimeout(() => res(''), 90000))
+    openLoginModal({ auto: true }).catch(() => false),
+    new Promise(res => setTimeout(() => res(false), 90000))
   ]);
-  if (race) lsSet('hub.term.token', race);
-  return race || '';
+  return !!race;
 }
 
 /* 2026-11-07 用户授权：启动时问后端 whoami，按 user_perms 隐藏无权限菜单项。
    兼容旧令牌 / 回环匿名 ⇒ user_perms=null（全模块，零行为变化）。 */
 let AUTH_PERMS = null;   // null=全模块；set=可见模块；'loading'=还没问完
+let AUTH_USER = null;    // 2026-11-07：whoami 返回的登录名（Cookie 会话）；null=未登录
 async function loadAuthPerms() {
   try {
     const data = await api('/api/users/whoami');
     AUTH_PERMS = (data && data.user_perms) ? new Set(data.user_perms) : null;
+    AUTH_USER = (data && data.username) || null;
+    if (AUTH_USER) lsSet('hub.login.user', AUTH_USER);
   } catch (e) { AUTH_PERMS = null; }   // 拿不到 = 不隐藏（fail-open，同旧行为）
   applyAuthToNav();
   renderAuthBox();
@@ -315,11 +320,10 @@ function _isLocalHost() {
 function renderAuthBox() {
   const box = $('authBox');
   if (!box) return;
-  const tok = String(lsGet('hub.term.token') || '').trim();
-  const user = String(lsGet('hub.login.user') || '').trim();
-  if (tok) {
-    box.innerHTML = '<span class="who" title="当前登录身份：' + escapeHtml(user || '已登录') + '">'
-      + escapeHtml(user || '已登录') + '</span>'
+  const user = String(AUTH_USER || lsGet('hub.login.user') || '').trim();
+  if (user) {
+    box.innerHTML = '<span class="who" title="当前登录身份：' + escapeHtml(user) + '">'
+      + escapeHtml(user) + '</span>'
       + '<button class="btn xs ghost" type="button" data-authact="logout">退出</button>';
   } else {
     box.innerHTML = '<button class="btn xs pri" type="button" data-authact="login">登录</button>';
@@ -332,17 +336,18 @@ function renderAuthBox() {
       if (b.dataset.authact === 'login') {
         if (typeof openLoginModal === 'function') openLoginModal();
       } else if (b.dataset.authact === 'logout') {
-        lsRemove('hub.term.token'); lsRemove('hub.login.user');
-        /* 2026-11-07：退出必须回到登录闸门（未登录不加载工作台）——重载后由模板里的
-           引导脚本检测无 token，停在 #loginGate，不会注入 hub.js。 */
-        location.reload();
+        /* 2026-11-07：退出必须真的吊销服务端会话（HttpOnly Cookie 前端删不掉），
+           再 reload 回登录闸门。 */
+        fetch('/api/users/logout', { method: 'POST', credentials: 'same-origin' })
+          .catch(() => {})
+          .then(() => { lsRemove('hub.login.user'); location.reload(); });
       }
     });
   }
 }
 function maybeAutoLoginPrompt() {
   if (_isLocalHost()) return;
-  if (String(lsGet('hub.term.token') || '').trim()) return;
+  if (AUTH_USER) return;   // 已有 Cookie 会话
   try {
     if (sessionStorage.getItem('hub.login.prompted')) return;
     sessionStorage.setItem('hub.login.prompted', '1');
@@ -350,31 +355,22 @@ function maybeAutoLoginPrompt() {
   setTimeout(() => { if (typeof openLoginModal === 'function') openLoginModal({ auto: true }); }, 600);
 }
 async function api(path, opt) {
-  const o = opt || {};
-  /* v0.13.44：noToken 的写端点（设置页几个只认 HUB_PASSCODE 的端点，已登记在
-     writeauth.EXEMPT_PREFIXES）不再向 termToken() 索 TERM_TOKEN —— 那会先弹一个
-     "请输入终端鉴权 TERM_TOKEN" 的窗，跟保存模型毫无关系，用户只会以为保存卡住了。 */
-  /* v0.13.195：读门 401 同口径 —— 写请求与「带 read_auth_required 的读 401」都先注入
-     已存 token；仍 401 才清掉重问一次（只重试一次，不循环）。
-     判据：服务端 401 体带 read_auth_required 字段（read_gate 拒绝面），或写方法既有分支。 */
-  const isReadLocked = (o.method || 'GET') !== 'POST' && !isWriteMethod(o.method);
-  const haveTok = termToken();
-  if ((isWriteMethod(o.method) && !o.noToken) || (isReadLocked && haveTok)) {
-    if (haveTok) o.headers = Object.assign({}, o.headers, { 'x-hub-token': haveTok });
-  }
+  const o = Object.assign({ credentials: 'same-origin' }, opt || {});
+  /* 2026-11-07 用户裁定：浏览器不再持有任何 token —— 登录态由 HttpOnly Cookie 自动携带。
+     401 = 会话缺失/过期 ⇒ 弹登录框，登录成功后只重试一次（不循环）。
+     判据：写方法，或 401 体带 read_auth_required（读门拒绝面）。 */
   let r = await fetch(path, o);
   if (r.status === 401 && !o.__retried401) {
     const text0 = await r.text();
     let body0 = null;
     try { body0 = JSON.parse(text0); } catch (e0) { /* 非 JSON 401：原样抛 */ }
-    const needTok = isWriteMethod(o.method) || (body0 && body0.read_auth_required);
-    if (needTok) {
-      lsRemove('hub.term.token');
-      /* 2026-11-07：改走模态弹窗（openTokenModal）；旧 prompt() 已替换。
-         弹窗是异步的 —— 等用户输入/取消（最多 60s 超时视为取消），拿到 token 再重试一次。 */
-      const again = await _promptTokenAsync();
-      if (again) {
-        o = Object.assign({}, o, { headers: Object.assign({}, o.headers, { 'x-hub-token': again }), __retried401: true });
+    const needLogin = isWriteMethod(o.method) || (body0 && (body0.read_auth_required || body0.login_required));
+    if (needLogin) {
+      /* 2026-11-07：模态登录框（openLoginModal）异步收集账号密码；
+         成功返回 true，用户取消/超时返回 false。 */
+      const done = await _promptLoginAsync();
+      if (done) {
+        o.__retried401 = true;
         r = await fetch(path, o);
         const text1 = await r.text();
         let data1;
@@ -775,6 +771,12 @@ async function loadAgents() {
        location.hostname，见 lanUrl。空表时 lanUrl 只做回环替换（旧行为）。 */
     if (Array.isArray(d.self_addrs)) SELF_ADDRS = d.self_addrs;
     agentFailStreak = 0;
+    /* 2026-11-07：数据一到就先渲染左侧手风琴，再做可选的增强渲染。
+       此前 renderNav() 排在 renderWorkbench() 之后，而后者一旦抛异常
+       （v0.13.193 的 x.a 误用）就把整段 try 打断 ⇒ 侧栏永远停在
+       「AGENTS 0 加载中…」，用户看到的就是「登录后页面不正常」。
+       渲染顺序不该由增强面决定主面是否可见。 */
+    renderNav();
     /* 进程级 token 的入口（dsh / reasonix）：服务一重启地址里的 token 就换，
        而 embedFrame 只在 dataset.src 变化时才导航 ⇒ 页面开着不动的话，帧里会一直
        停着旧 token 那份 401。数据到位点跟进一次，不等用户手动「重试嵌入」。
@@ -1127,11 +1129,9 @@ function settingsCopyToken() {
 }
 
 function settingsApplyToken() {
-  /* 尾随空白会把「REST 通、WS 挂」的坑写进 localStorage（见 wsUrl 注释），写入口也 trim。 */
-  const t = ($('settingsTokenVal').dataset.token || '').trim();
-  if (!t) return toast('无 token 可应用', 'err');
-  lsSet('hub.term.token', t);
-  toast('已应用到终端（本浏览器后续自动携带）', 'ok');
+  /* 2026-11-07：浏览器登录已全量改为用户名+密码（HttpOnly Cookie），
+     token 不再参与浏览器鉴权 ⇒ 这里不再写 localStorage，避免造成“已生效”的假象。 */
+  toast('Token 认证已停用：请用右上角「登录」（用户名+密码）', 'err');
 }
 
 function settingsClearPasscode() {
@@ -2027,8 +2027,8 @@ async function usersChangePw(name) {
     await api('/api/users/' + encodeURIComponent(name) + '/password', {
       method: 'POST', body: JSON.stringify({ old_password: oldPw || '', new_password: np })
     });
-    toast('密码已更新；该用户既有会话 token 已吊销', 'ok');
-    if (isSelf) { lsRemove('hub.term.token'); lsRemove('hub.login.user'); renderAuthBox(); }
+    toast('密码已更新；该用户既有会话已吊销', 'ok');
+    if (isSelf) { lsRemove('hub.login.user'); lsRemove('hub.term.token'); location.reload(); }
     usersPanelLoad();
   } catch (e) { toast(e.message, 'err'); }
 }
@@ -4160,13 +4160,8 @@ function openLoginModal(opts) {
       '<div class="modal-box" role="dialog" aria-label="登录" style="max-width:340px">' +
       '<div class="modal-hd"><b>登录 AgentHub</b><button class="modal-x" data-tokx aria-label="关闭">×</button></div>' +
       '<div class="modal-bd">' +
-      '<div style="display:flex;gap:6px;margin-bottom:10px;border-bottom:1px solid var(--border)" id="loginTabs">' +
-      '<button class="btn xs on" id="loginTabPw" type="button">账号密码</button>' +
-      '<button class="btn xs" id="loginTabTok" type="button">直接用 Token</button></div>' +
-      '<div id="loginPanePw">' +
       '<input id="loginUser" class="inp" placeholder="用户名（如 gztxt）" style="width:100%;margin-bottom:6px" autocomplete="username">' +
-      '<input id="loginPw" type="password" class="inp" placeholder="密码" style="width:100%" autocomplete="current-password"></div>' +
-      '<div id="loginPaneTok" style="display:none"><input id="tokIn" type="password" class="inp" placeholder="x-hub-token / 终端 TERM_TOKEN" style="width:100%" autocomplete="off"></div>' +
+      '<input id="loginPw" type="password" class="inp" placeholder="密码" style="width:100%" autocomplete="current-password">' +
       '<div id="loginErr" class="hint" style="color:#f88;margin-top:6px;min-height:14px"></div></div>' +
       '<div class="modal-ft"><button class="btn ghost" data-tokcancel>取消</button>' +
       '<button class="btn pri" data-tokok>登录</button></div></div>';
@@ -4185,39 +4180,19 @@ function openLoginModal(opts) {
     });
     m.querySelector('[data-tokx]').addEventListener('click', () => _closeTokenModal(null));
     m.querySelector('[data-tokcancel]').addEventListener('click', () => _closeTokenModal(null));
-    /* tab 切换（账号密码 / 直接用 Token）——不走 inline onclick，走委托 */
-    m.querySelector('#loginTabs').addEventListener('click', (e) => {
-      const b = e.target.closest('button');
-      if (!b) return;
-      const isPw = b.id === 'loginTabPw';
-      m.querySelector('#loginTabPw').classList.toggle('on', isPw);
-      m.querySelector('#loginTabTok').classList.toggle('on', !isPw);
-      m.querySelector('#loginPanePw').style.display = isPw ? '' : 'none';
-      m.querySelector('#loginPaneTok').style.display = isPw ? 'none' : '';
-      m.querySelector('#loginErr').textContent = '';
-    });
+    /* 2026-11-07：只保留「用户名 + 密码」一种登录方式，Token 输入面板已删除。 */
     m.querySelector('[data-tokok]').addEventListener('click', () => {
-      const usingPw = m.querySelector('#loginPanePw').style.display !== 'none';
-      if (usingPw) {
-        const u = (m.querySelector('#loginUser').value || '').trim();
-        const p = m.querySelector('#loginPw').value || '';
-        if (!u || !p) { m.querySelector('#loginErr').textContent = '用户名和密码都要填'; return; }
-        m.querySelector('#loginErr').textContent = '登录中…';
-        m.querySelector('[data-tokok]').disabled = true;
-        _doLogin(u, p).then((ok) => {
-          m.querySelector('[data-tokok]').disabled = false;
-          if (!ok) m.querySelector('#loginErr').textContent = '登录失败：用户名或密码错误（或被限速）';
-        });
-      } else {
-        const v = (m.querySelector('#tokIn').value || '').trim();
-        _closeTokenModal(v || null);
-      }
+      const u = (m.querySelector('#loginUser').value || '').trim();
+      const p = m.querySelector('#loginPw').value || '';
+      if (!u || !p) { m.querySelector('#loginErr').textContent = '用户名和密码都要填'; return; }
+      m.querySelector('#loginErr').textContent = '登录中…';
+      m.querySelector('[data-tokok]').disabled = true;
+      _doLogin(u, p).then((ok) => {
+        m.querySelector('[data-tokok]').disabled = false;
+        if (!ok) m.querySelector('#loginErr').textContent = '登录失败：用户名或密码错误（或被限速）';
+      });
     });
     m.querySelector('#loginPw').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') m.querySelector('[data-tokok]').click();
-      if (e.key === 'Escape') _closeTokenModal(null);
-    });
-    m.querySelector('#tokIn').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') m.querySelector('[data-tokok]').click();
       if (e.key === 'Escape') _closeTokenModal(null);
     });
@@ -4243,10 +4218,11 @@ async function _doLogin(u, p) {
       body: JSON.stringify({ username: u, password: p })
     });
     const d = await r.json();
-    if (r.ok && d.token) {
-      lsSet('hub.term.token', d.token);      // 会话 token 走同一个 storage key（旧口径）
-      lsSet('hub.login.user', u);            // 记住登录身份（右上角显示）
-      _closeTokenModal(d.token);
+    if (r.ok && d && d.username) {
+      /* 2026-11-07：服务端已种 HttpOnly 会话 Cookie；前端不存任何 token。 */
+      lsSet('hub.login.user', d.username);
+      _closeTokenModal(true);                // true = 登录成功，api() 重试分支据此重发
+      AUTH_USER = d.username;
       if (typeof applyAuthToNav === 'function') applyAuthToNav();
       if (typeof renderAuthBox === 'function') renderAuthBox();   // 顶栏身份/退出即时刷新
       return true;
@@ -4268,50 +4244,16 @@ if (typeof go !== 'undefined') {
   const _go = go;
   go = function (page) { _closeTokenModal(null); return _go(page); };
 }
-/* force=true：用户主动点的入口（顶栏登录 / 工作台「输入令牌」/ 导出会话）才允许
-   在这一轮再弹一次口令框；后台请求（api()/termHeaders()）一律静默返回 ''。 */
-function termToken(force) {
-  let t = lsGet('hub.term.token');
-  if (t) t = String(t).trim();          // trim① 读侧：存量脏值自愈
-  if (!t) {
-    /* trim② 写侧：落盘前必 trim。优先走原生 prompt（node 测试桩/无 document 兜底），
-       浏览器有 document 时改走模态弹窗 openTokenModal（异步，_promptTokenAsync 收集）。 */
-    let got = '';
-    if (typeof document !== 'undefined' && document.body && typeof openTokenModal === 'function') {
-      /* 浏览器：异步弹窗；此刻同步返回 ''，401 后 api() 重试分支重新取 lsGet。
-         只自动弹一次：api() 每个请求都会走 termToken()，pollHealth 15s 一轮 ⇒
-         旧写法每轮都重新弹，把用户正在输入的内容打断（2026-11-07）。后续 401
-         仍由 api() 的 _promptTokenAsync 兜底，不靠这里。 */
-      if (force || !_tokenAutoPrompted) {
-        _tokenAutoPrompted = true;
-        openTokenModal({ auto: true }).then((v) => {
-          const clean = (v || '').trim();
-          if (clean) lsSet('hub.term.token', clean);
-        }).catch(() => {});
-      }
-    } else if (typeof prompt === 'function') {
-      /* node 测试桩 / 无模态框环境：同步 prompt，同旧口径（行为层测试钉住这条） */
-      got = (prompt('请输入终端鉴权 TERM_TOKEN（也可在右上角「设置」查看后一键应用）') || '');
-      got = got.trim();
-      if (got) lsSet('hub.term.token', got);
-    }
-    return got;
-  }
-  return t;
-}
-function termHeaders(extra) {
-  return Object.assign({ 'X-TERM-TOKEN': termToken() }, extra || {});
-}
+/* 2026-11-07 用户裁定：浏览器不再持有任何 token。
+   termToken() 仅作兼容桩保留（全仓还有调用点），恒返回空串；
+   终端鉴权改由 HttpOnly 会话 Cookie 自动携带（WS 握手同样带 Cookie）。 */
+function termToken(force) { return ''; }
+function termHeaders(extra) { return Object.assign({}, extra || {}); }
 
 function wsUrl(path) {
-  /* ★ 必须 trim（2026-10-18 实弹取证）：同一个 token 在两条路径上待遇不同 —— HTTP 头里的
-     尾随空白会被 HTTP 解析器按 OWS 裁掉，`?token=%20` 不会。于是存量带空白的 token 表现为
-     「POST /api/term/sessions 200 + WS 握手 403」：会话建好、pty 活着，xterm 一个字节也收不到，
-     终端永久空白（不是 codebuddy 特有，全 agent 同形）。浏览器 localStorage 里的存量脏值
-     无法由服务端修（term.py 精确比对是对的，不许放宽），故在读侧自愈。 */
-  const t = String(lsGet('hub.term.token') || '').trim();
-  const sep = path.includes('?') ? '&' : '?';
-  return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + path + (t ? sep + 'token=' + encodeURIComponent(t) : '');
+  /* 2026-11-07：不再把 token 拼进 URL（?token= 会进浏览器历史/代理日志），
+     会话由同源 WS 握手自动携带的 Cookie 证明。 */
+  return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + path;
 }
 
 /* 是否该抢焦点：只有用户主动动作（新会话 / 点芯片 / 续聊历史）才聚焦。
@@ -8531,15 +8473,15 @@ function exportStateText(state, count, extra) {
 }
 
 async function chatSessExport() {
-  const tk = termToken(true);   // 用户主动点导出 ⇒ 允许弹口令框（后台请求一律静默）
-  if (!tk) { toast(exportStateText('need-token', -1, {}), 'err'); return; }
+  /* 2026-11-07：导出是数据外流动作，服务端按写端点同等鉴权；
+     浏览器身份由 HttpOnly 会话 Cookie 自动携带，不再要 token。 */
   const p = new URLSearchParams({ format: 'json', limit: '1000',
                                   with_messages: '1', redact: '1' });
   if (chatPick) p.set('agent_id', chatPick);
   let r;
   try {
     r = await fetch('/api/sessions/export?' + p.toString(),
-                    { headers: { 'X-TERM-TOKEN': tk } });   // 头，不是 URL
+                    { credentials: 'same-origin' });
   } catch (e) {
     toast('导出失败：网络不可达（' + e.message + '）—— 不是没有会话', 'err');
     return;
@@ -8550,7 +8492,6 @@ async function chatSessExport() {
     let detail = '';
     try { const d = await r.json(); detail = (d && d.detail) || ''; } catch (e) { detail = ''; }
     const st = exportStateOf(r.status, cnt, detail);
-    if (st === 'bad-token') lsRemove('hub.term.token');   // 存量失效口令：清掉，下次重新问
     toast(exportStateText(st, cnt, { status: r.status, hits: hits }), 'err');
     return;
   }
@@ -9131,7 +9072,7 @@ function histLoad(aid) {
    而且 termToken() 会在每次刷新都弹一次口令框。 */
 (function histBootstrap() {
   if (!histOpen) return;
-  if (!TERM_HIST_AGENTS.includes(histOpen) || !lsGet('hub.term.token')) {
+  if (!TERM_HIST_AGENTS.includes(histOpen) || (!AUTH_USER && !lsGet('hub.login.user'))) {
     histOpen = '';
     lsRemove('hub.hist');
     return;
@@ -9494,7 +9435,8 @@ async function updateBadges() {
    * 而本函数每 60s 又拉同一 URL ⇒ 每 30s 两次、每 60s 三次重复请求。
    * 而 /api/agents 是全站最重的只读端点（25 个 agent，每次跑 docker ps + systemctl）。
    * 顺带消掉一个竞态：两条路径可能用**不同快照**渲染出不一致的徽章计数。
-   * /mcp/servers 与 /api/jobs 保留 fetch —— 那是确属不同的数据，AGENTS 里没有。 */
+   * /mcp/servers 与 /api/jobs 是不同数据（AGENTS 里没有），仍单独请求，
+   * 但 2026-11-07 起改走 api() —— 裸 fetch 不带凭据，LAN 下这两个徽章恒 401。 */
   /* 2026-10-08 用户要求删掉「总览」后面的数字 ⇒ setBadge('classroom', …) 随之删除
      （挂载点 #badge-classroom 已从 templates/index.html 摘掉；只删一边会留下永远
      el=null 的死调用）。all 仍被下面的 chat 徽章用着，AGENTS 这条读取保留。 */
@@ -9503,11 +9445,11 @@ async function updateBadges() {
     setBadge('chat', all.length);
   } catch (e) { /* 静默：徽章是增强，失败不影响主流程 */ }
   try {
-    const d = await (await fetch('/mcp/servers')).json();
+    const d = await api('/mcp/servers');
     setBadge('mcp', (d.servers || []).length);
   } catch (e) {}
   try {
-    const d = await (await fetch('/api/jobs')).json();
+    const d = await api('/api/jobs');
     setBadge('jobs', (d.jobs || []).filter(j => j.enabled).length);
   } catch (e) {}
 }
@@ -11673,8 +11615,8 @@ function renderWorkbench() {
     stoppedEl.style.display = stopped.length ? '' : 'none';
     stoppedEl.innerHTML = '<div class="wb-hd">已停止（' + stopped.length + '）<button class="linklike" data-wbact="stopped">展开</button></div>' +
       '<div class="wb-stlist" style="display:none">' + stopped.map(x =>
-        '<div class="wb-row off"><span class="s-badge stop"></span> <b>' + escapeHtml(x.a.name || x.a.id) + '</b>' +
-        '<button class="btn ghost sm" data-wbact="open" data-agent="' + escapeHtml(x.a.id) + '">打开</button></div>').join('') + '</div>';
+        '<div class="wb-row off"><span class="s-badge stop"></span> <b>' + escapeHtml(x.name || x.id) + '</b>' +
+        '<button class="btn ghost sm" data-wbact="open" data-agent="' + escapeHtml(x.id) + '">打开</button></div>').join('') + '</div>';
   }
   el.innerHTML = rows.map(r => '<div class="wb-row" data-rank="' + r.rank + '">' + r.html + '</div>').join('') ||
     '<div class="wb-row"><span class="hint">全部正常。还没有纳管对象 → 点「自动扫描」。</span></div>';

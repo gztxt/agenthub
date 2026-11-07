@@ -251,7 +251,8 @@ async function updateBadges() {
    * 而本函数每 60s 又拉同一 URL ⇒ 每 30s 两次、每 60s 三次重复请求。
    * 而 /api/agents 是全站最重的只读端点（25 个 agent，每次跑 docker ps + systemctl）。
    * 顺带消掉一个竞态：两条路径可能用**不同快照**渲染出不一致的徽章计数。
-   * /mcp/servers 与 /api/jobs 保留 fetch —— 那是确属不同的数据，AGENTS 里没有。 */
+   * /mcp/servers 与 /api/jobs 是不同数据（AGENTS 里没有），仍单独请求，
+   * 但 2026-11-07 起改走 api() —— 裸 fetch 不带凭据，LAN 下这两个徽章恒 401。 */
   /* 2026-10-08 用户要求删掉「总览」后面的数字 ⇒ setBadge('classroom', …) 随之删除
      （挂载点 #badge-classroom 已从 templates/index.html 摘掉；只删一边会留下永远
      el=null 的死调用）。all 仍被下面的 chat 徽章用着，AGENTS 这条读取保留。 */
@@ -260,11 +261,11 @@ async function updateBadges() {
     setBadge('chat', all.length);
   } catch (e) { /* 静默：徽章是增强，失败不影响主流程 */ }
   try {
-    const d = await (await fetch('/mcp/servers')).json();
+    const d = await api('/mcp/servers');
     setBadge('mcp', (d.servers || []).length);
   } catch (e) {}
   try {
-    const d = await (await fetch('/api/jobs')).json();
+    const d = await api('/api/jobs');
     setBadge('jobs', (d.jobs || []).filter(j => j.enabled).length);
   } catch (e) {}
 }

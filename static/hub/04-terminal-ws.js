@@ -4031,15 +4031,15 @@ function exportStateText(state, count, extra) {
 }
 
 async function chatSessExport() {
-  const tk = termToken(true);   // 用户主动点导出 ⇒ 允许弹口令框（后台请求一律静默）
-  if (!tk) { toast(exportStateText('need-token', -1, {}), 'err'); return; }
+  /* 2026-11-07：导出是数据外流动作，服务端按写端点同等鉴权；
+     浏览器身份由 HttpOnly 会话 Cookie 自动携带，不再要 token。 */
   const p = new URLSearchParams({ format: 'json', limit: '1000',
                                   with_messages: '1', redact: '1' });
   if (chatPick) p.set('agent_id', chatPick);
   let r;
   try {
     r = await fetch('/api/sessions/export?' + p.toString(),
-                    { headers: { 'X-TERM-TOKEN': tk } });   // 头，不是 URL
+                    { credentials: 'same-origin' });
   } catch (e) {
     toast('导出失败：网络不可达（' + e.message + '）—— 不是没有会话', 'err');
     return;
@@ -4050,7 +4050,6 @@ async function chatSessExport() {
     let detail = '';
     try { const d = await r.json(); detail = (d && d.detail) || ''; } catch (e) { detail = ''; }
     const st = exportStateOf(r.status, cnt, detail);
-    if (st === 'bad-token') lsRemove('hub.term.token');   // 存量失效口令：清掉，下次重新问
     toast(exportStateText(st, cnt, { status: r.status, hits: hits }), 'err');
     return;
   }

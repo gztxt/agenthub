@@ -130,19 +130,28 @@ class UsersL0(unittest.TestCase):
         self.assertEqual(got["settings-modelcalls"], "settings")
     def test_10_login_success_issues_token(self):
         """回归：成功路径曾因 k 只在失败分支赋值而 UnboundLocalError（HTTP 500）。
-        登录成功必须签发 token，且不再触碰未定义变量。"""
+        2026-11-07 改判：登录成功不再回 token，改种 HttpOnly 会话 Cookie；
+        该 Cookie 必须能解析回同一用户（浏览器刷新后的唯一凭据）。"""
         import asyncio
         _mkuser("dave", is_admin=True)
         db.execute("UPDATE users SET pw_hash=? WHERE username='dave'",
                    (users.hash_password("Pw12345678"),))
 
+        class _Url:
+            scheme = "http"
+
         class _Req:
             client = type("C", (), {"host": "127.0.0.1"})()
+            url = _Url()
 
-        r = asyncio.run(users.login(users.LoginIn(username="dave", password="Pw12345678"), _Req()))
-        self.assertTrue(r["ok"])
-        self.assertTrue(r["token"])
-        row, perms, compat = users.resolve_token(r["token"])
+        resp = asyncio.run(users.login(users.LoginIn(username="dave", password="Pw12345678"), _Req()))
+        # JSONResponse 的 body 是 bytes；不含 token 字段
+        self.assertNotIn(b'"token"', resp.body)
+        sc = resp.headers.get("set-cookie", "")
+        self.assertIn(users.SESSION_COOKIE + "=", sc)
+        self.assertIn("HttpOnly", sc)
+        tok = sc.split(users.SESSION_COOKIE + "=", 1)[1].split(";", 1)[0]
+        row, perms, compat = users.resolve_token(tok)
         self.assertEqual(row["username"], "dave")
         self.assertIsNone(perms)          # admin
     def test_11_create_user_perms_bind_to_new_id(self):

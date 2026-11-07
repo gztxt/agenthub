@@ -48,12 +48,15 @@ class TestExportButtonStatic(unittest.TestCase):
         self.assertIn(".download", fn)
         self.assertNotIn("await api(", fn, "api() 会 JSON.parse 毁掉文件字节，且不给 GET 带 token")
 
-    def test_token_goes_in_header_never_in_url(self):
-        """★ 红向钉子：token 进 URL 就等于把它写进访问日志与浏览器历史。"""
+    def test_no_token_and_cookie_is_used(self):
+        """2026-11-07 改判：浏览器不再持有 token ⇒ 导出只能靠同源 Cookie。
+        真正的红线变成「不得把任何凭据拼进 URL / 不得再要求用户输 token」。"""
         fn = extract_function(self.js, "chatSessExport")
-        self.assertIn("X-TERM-TOKEN", fn)
+        self.assertNotIn("X-TERM-TOKEN", fn, "token 认证已停用，导出不得再读终端 token")
+        self.assertNotIn("termToken", fn, "不得回潮到 termToken() 取凭据")
         self.assertNotIn("token=", fn, "URL 里出现 token= ⇒ 凭据外流面")
-        self.assertNotIn("location.href", fn, "整页跳转下载会把 token 带进历史")
+        self.assertNotIn("location.href", fn, "整页跳转下载会把凭据/会话带进历史")
+        self.assertIn("credentials: 'same-origin'", fn, "必须显式带同源 Cookie")
 
     def test_default_is_redacted(self):
         fn = extract_function(self.js, "chatSessExport")

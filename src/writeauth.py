@@ -50,8 +50,11 @@ EXEMPT_PREFIXES: Dict[str, str] = {
     "/api/users/login":
         "密码登录端点：自带密码校验（错→401）+ 进程内限速（连败 5 次锁 60s）。"
         "若被 write_gate 当普通写端拦掉，未登录用户永远进不来＝自锁死（"
-        "同 /api/settings/term-token 的豁免纪律）。它只签发用户自己的会话 token，"
+        "同 /api/settings/term-token 的豁免纪律）。它只签发用户自己的会话 Cookie，"
         "不碰其他用户面；改密走 /api/users/{name}/password（需已登录，不豁免）。",
+    "/api/users/logout":
+        "退出端点：只吊销请求自带 Cookie 对应的会话并清 Cookie，幂等。"
+        "未登录也必须能调（否则会话过期后前端连「退出」都做不到）。",
 }
 
 
@@ -175,44 +178,66 @@ async def read_gate(request, call_next):
     """读端点令牌门中间件。Starlette 后注册者最外层 ⇒ 注册在 write_gate 之前、
     csp.middleware 之后 ⇒ csp 头覆盖它回 401，顺序安全。
 
+    2026-11-07 用户裁定后口径：浏览器身份 = Cookie 会话（用户名+密码登录后由
+    /api/users/login 种下），机器身份 = HTTP Basic（同样用户名+密码）。
+    `x-hub-token` 仅作为内部兼容面保留（既有脚本/MCP 未迁移完），**浏览器不再使用**。
+
     放行面：非 GET 方法（写由 write_gate 管）；`/`（嵌页入口，CSP 报告/脚本同源依赖）；
     `/health`（自证+探针）；`/static/`（页面自举，无数据面）；`/api/csp/report`；
     以及 `_READ_TOKEN_ALLOW`（main 注入：`/api/settings/model/catalog` 等无凭据也能读的公共面，
-    逐条写理由，同 EXEMPT_PREFIXES 纪律）。其余 GET 一律按 read_verdict 判。"""
+    逐条写理由，同 EXEMPT_PREFIXES 纪律）。其余 GET 按「身份 → 回环 → 旧凭据」依次判。
+    """
     if request.method != "GET":
         return await call_next(request)
     path = request.url.path
     host = request.client.host if request.client else ""
+    # 公共面先放行：静态资源每页几十个请求，不该为它们查会话表。
     if (path in ("/", "/health", "/api/csp/report") or path.startswith("/static/")):
         return await call_next(request)
-    provided = provided_token(request.headers.raw, request.url.query)
-    secrets = secrets_from_env()
-    # 2026-11-07 修：用户会话 token（/api/users/login 签发）也是合法读凭据。
-    # 旧口径只认 .env 两把钥匙 ⇒ 局域网登录成功、请求仍全 401（用户报障形态）。
+    # ① Cookie / Basic 身份（浏览器与脚本的同一份用户名+密码）
     urow = None
     uperms = None
     try:
-        import users as _users_early
-        _r, _p, _compat = _users_early.resolve_token(provided)
-        if _r and not _compat:
-            urow, uperms = _r, _p
+        import users as _users_ident
+        urow, uperms, _how = _users_ident.identity_of(request)
     except Exception:  # noqa: BLE001 —— 用户库不可用不许把读面全打挂
-        pass
-    verdict, reason = ("allow", "用户会话 token") if urow else read_verdict(host, path, provided, secrets)
+        urow, uperms = None, None
+    # ② 未命中再看旧内部凭据（x-hub-token / ?token=），供未迁移的脚本/MCP
+    provided = provided_token(request.headers.raw, request.url.query)
+    secrets = secrets_from_env()
+    if urow is None and provided:
+        try:
+            import users as _users_early
+            _r, _p, _compat = _users_early.resolve_token(provided)
+            if _r and not _compat:
+                urow, uperms = _r, _p
+        except Exception:  # noqa: BLE001
+            pass
+    if urow is not None:
+        request.state.actor = "user:" + urow.get("username", "?")
+        request.state.user = urow
+        request.state.user_perms = uperms
+        return await call_next(request)
+    verdict, reason = read_verdict(host, path, provided, secrets)
     if verdict == "allow":
         request.state.actor = "user:reader"
         try:
-            if urow:
-                request.state.user = urow
-                request.state.user_perms = uperms
-            else:
+            if provided:
                 import users as _users
-                urow, uperms, compat = _users.resolve_token(provided)
-                if compat and not urow:
-                    urow = {"id": 0, "username": "legacy", "display": "兼容旧令牌",
-                            "is_admin": True, "created_at": "", "updated_at": ""}
-                request.state.user = urow
-                request.state.user_perms = uperms
+                urow2, uperms2, compat = _users.resolve_token(provided)
+                if compat or not urow2:
+                    urow2 = {"id": 0, "username": "legacy", "display": "兼容旧令牌",
+                             "is_admin": True, "created_at": "", "updated_at": ""}
+                    uperms2 = None
+                request.state.user = urow2
+                request.state.user_perms = uperms2
+            else:
+                # 匿名放行（回环 / 公共读前缀）⇒ 没有身份。
+                # 2026-11-07：此前这里塞了一个 legacy 全模块伪用户，导致
+                # /api/users/whoami 对匿名访客也回 username=legacy ⇒ 登录闸门
+                # 把未登录当成已登录，直接放行工作台（刷新后绕过登录页）。
+                request.state.user = None
+                request.state.user_perms = None
         except Exception:
             request.state.user = None
             request.state.user_perms = None
@@ -223,6 +248,19 @@ async def read_gate(request, call_next):
     return JSONResponse(body, status_code=status)
 
 
+
+
+def identity_ok(request) -> bool:
+    """本请求是否已有登录身份（Cookie 会话 / HTTP Basic）。
+    供各模块的「保险带」复用（api_sessions/audit/prefs/cloudcli 都在
+    全局 write_gate 之外再显式判一次）：有身份就放行，没有再走旧凭据判定，
+    避免这些二级闸门把已登录用户的请求重新打回 401。"""
+    try:
+        import users as _users
+        u, _p, _how = _users.identity_of(request)
+        return u is not None
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def actor_of(request) -> str:
@@ -248,11 +286,16 @@ async def write_gate(request, call_next):
     path = request.url.path
     provided = provided_token(request.headers.raw, request.url.query)
     secrets = secrets_from_env()
-    # 2026-11-07 修：用户会话 token 也是合法写凭据（per-user token 的本来用途）。
-    # 旧口径只认 .env 两把钥匙 ⇒ 登录成功后在用户授权页建用户/改密码仍 401。
+    # 2026-11-07 用户裁定：浏览器面写请求认 Cookie 会话，脚本面认 HTTP Basic；
+    # x-hub-token 仅作内部兼容（未迁移的脚本/MCP），浏览器不再使用。
     ureq = None
     uperms_req = None
-    if provided:
+    try:
+        import users as _users_ident
+        ureq, uperms_req, _how = _users_ident.identity_of(request)
+    except Exception:  # noqa: BLE001
+        ureq, uperms_req = None, None
+    if ureq is None and provided:
         try:
             import users as _users_w
             _r, _p, _c = _users_w.resolve_token(provided)
@@ -261,7 +304,7 @@ async def write_gate(request, call_next):
         except Exception:  # noqa: BLE001
             pass
     if ureq is not None:
-        verdict, reason = "allow", "用户会话 token"
+        verdict, reason = "allow", "用户会话（Cookie/Basic）"
     else:
         verdict, reason = decide(method, path, provided, secrets)
     if verdict in ("allow", "exempt"):

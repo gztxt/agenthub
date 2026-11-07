@@ -79,8 +79,8 @@ function renderWorkbench() {
     stoppedEl.style.display = stopped.length ? '' : 'none';
     stoppedEl.innerHTML = '<div class="wb-hd">已停止（' + stopped.length + '）<button class="linklike" data-wbact="stopped">展开</button></div>' +
       '<div class="wb-stlist" style="display:none">' + stopped.map(x =>
-        '<div class="wb-row off"><span class="s-badge stop"></span> <b>' + escapeHtml(x.a.name || x.a.id) + '</b>' +
-        '<button class="btn ghost sm" data-wbact="open" data-agent="' + escapeHtml(x.a.id) + '">打开</button></div>').join('') + '</div>';
+        '<div class="wb-row off"><span class="s-badge stop"></span> <b>' + escapeHtml(x.name || x.id) + '</b>' +
+        '<button class="btn ghost sm" data-wbact="open" data-agent="' + escapeHtml(x.id) + '">打开</button></div>').join('') + '</div>';
   }
   el.innerHTML = rows.map(r => '<div class="wb-row" data-rank="' + r.rank + '">' + r.html + '</div>').join('') ||
     '<div class="wb-row"><span class="hint">全部正常。还没有纳管对象 → 点「自动扫描」。</span></div>';

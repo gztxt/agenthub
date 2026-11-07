@@ -3324,19 +3324,21 @@
                 </div>
             </div>
         </section>
-        <!-- 设置 · 模型计量（2026-11-07，借鉴 LangChat monitor）：只读报表，看哪个模型烧多少 token。
+        <!-- 设置 · 模型计量（2026-11-07 上线，11-07 改判数据源）：全 agent 用量只读报表。
+             数据源 = CCR usage_events 账本（client 列辨识调用来源），只读，不落本地表。
              按钮走 settingsDelegates 委托，无 inline onclick。 -->
         <section class="page sys" id="page-settings-modelcalls">
             <div class="sp">
                 <div class="sp-card">
                     <div class="sp-hd">
                         <h3>模型调用计量</h3>
-                        <div class="sp-r"><span class="hint">只读 · 数据来源 model_call_logs 表</span></div>
+                        <div class="sp-r"><span class="hint">只读 · 数据来源 CCR usage_events（全 agent）</span></div>
                     </div>
                     <div class="sp-bd">
                         <div class="hint" style="margin-bottom:10px">
-                            记录每次模型调用的 token/耗时/场景（收口单点：llm._create_message）。
-                            HUB_MODEL_CALLS=0 可关计量（关闭后本表不再增长，历史数据保留）。
+                            汇总所有经 CCR 3456 的 agent 调用（按模型 / 调用来源，含 token 与均耗时）。
+                            数据由 CCR 账本实时落库；「场景分布」列即各调用来源(client)，非 agenthub 内部场景。
+                            agenthub 自身 LLM 调用的细粒度明细另存 model_call_logs，不参与本报表。
                         </div>
                         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
                             <button class="btn sm" type="button" data-settings-act="mcl-load">刷新计量报表</button>

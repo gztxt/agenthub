@@ -1,17 +1,22 @@
 # -*- coding: utf-8 -*-
-"""modelcalls 模型调用计量的 L0 测试（空 HOME、不连网，同 users/approvals 形态）。
+"""modelcalls 模型调用计量的 L0 测试（空 HOME、不连网、**不碰真 CCR 账本**）。
 
-钉住四条（写错任一 = 计量面失真或带倒真实 LLM 调用）：
-  1. record 正常落库（成功 + 失败两态，token 缺失补 0 不丢行）；
-  2. 未知场景落 "other"（不静默丢弃，与 asset_audit append-only 同纪律）；
-  3. overview 聚合正确（按模型/场景分桶、total 求和）；
-  4. db 未初始化时 record/ensure_schema 静默跳过（**绝不带倒调用方**——计量是附加价值，
-     不是准入条件，同 writeauth.actor_of 的「取不到不抛」口径）。
+两组口径分别钉住：
+  A. `record()` / `model_call_logs` —— agenthub 自身 manager LLM 调用的
+     append-only 明细（成功/失败两态、token 缺失补 0 不丢行、未知场景落 other）。
+  B. `overview()` —— 设置页「模型计量」的**全 agent 用量**报表，数据源是 CCR
+     `usage_events`（经 `CCR_USAGE_DB` 注入临时账本），**不是** A 那张表。
+     钉住：按模型/来源聚合、时间窗、fail-closed 带 note 不静默 0、`recent()` 明细。
+
+2026-11-07 改判：原实现 overview 读 A 的空表 ⇒ 页面恒 0 行。B 组就是防止
+「再接回空表」的回归闸门（同 AGENTS.md 第 11 条反例）。
 """
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -23,6 +28,45 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import db  # noqa: E402
 import modelcalls  # noqa: E402
+import usage_ledger  # noqa: E402
+
+
+_LEDGER_DDL = """CREATE TABLE usage_events(
+    id INTEGER PRIMARY KEY, created_at TEXT, request_id TEXT, client TEXT,
+    method TEXT, path TEXT, model TEXT, logical_model TEXT, provider TEXT,
+    credential_id TEXT, status_code INTEGER, duration_ms INTEGER,
+    input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+    cache_write_tokens INTEGER, total_tokens INTEGER, cost_usd REAL,
+    cost_source TEXT)"""
+
+
+def _iso_z(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _mk_ledger(rows=()):
+    """造临时 CCR 账本。rows = [(model, client, tin, tout, duration_ms, minutes_ago)]。
+
+    结构只取 `usage_ledger.summary()`/`recent()` 真正读的列；通过 `CCR_USAGE_DB`
+    覆盖点注入（`db_path()` 每次读 env），**绝不连生产账本**。
+    """
+    fd, p = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = sqlite3.connect(p)
+    conn.execute(_LEDGER_DDL)
+    now = datetime.now(timezone.utc)
+    for i, (model, client, tin, tout, ms, age_min) in enumerate(rows):
+        conn.execute(
+            "INSERT INTO usage_events(created_at, request_id, client, model, provider,"
+            " status_code, duration_ms, input_tokens, output_tokens, cache_read_tokens,"
+            " cache_write_tokens, total_tokens, cost_usd, cost_source)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (_iso_z(now - timedelta(minutes=age_min)), "r%d" % i, client, model,
+             model.split("/", 1)[0] if "/" in model else "", 200, ms,
+             tin, tout, 0, 0, tin + tout, 0.01, "openrouter"))
+    conn.commit()
+    conn.close()
+    return p
 
 
 def _fresh_db():
@@ -33,6 +77,34 @@ def _fresh_db():
 
 
 class ModelCallsL0(unittest.TestCase):
+    """两类用例共用：把 CCR_USAGE_DB 指到临时账本，隔离生产数据。"""
+
+    def setUp(self):
+        self._saved_ccr = os.environ.get("CCR_USAGE_DB")
+        self._ledger = _mk_ledger()
+        os.environ["CCR_USAGE_DB"] = self._ledger
+
+    def tearDown(self):
+        if self._saved_ccr is None:
+            os.environ.pop("CCR_USAGE_DB", None)
+        else:
+            os.environ["CCR_USAGE_DB"] = self._saved_ccr
+        try:
+            os.unlink(self._ledger)
+        except OSError:
+            pass
+
+    def _use_ledger(self, rows):
+        """用例内换成带数据的账本（替换 setUp 的空账本），返回路径。"""
+        try:
+            os.unlink(self._ledger)
+        except OSError:
+            pass
+        self._ledger = _mk_ledger(rows)
+        os.environ["CCR_USAGE_DB"] = self._ledger
+        return self._ledger
+
+    # ── A 组：agenthub 自身 LLM 调用明细（record / model_call_logs）──
 
     def test_01_record_success_with_tokens(self):
         _fresh_db()
@@ -67,51 +139,92 @@ class ModelCallsL0(unittest.TestCase):
         rows = db.query("SELECT scene FROM model_call_logs")
         self.assertEqual(rows[0]["scene"], "other")
 
-    def test_04_overview_aggregates_by_model_and_scene(self):
-        _fresh_db()
-        modelcalls.record("a/m", {"input_tokens": 10, "output_tokens": 5}, scene="kb")
-        modelcalls.record("a/m", {"input_tokens": 20, "output_tokens": 10}, scene="kb")
-        modelcalls.record("b/n", {}, scene="memory", status="error")
-        ov = modelcalls.overview(7)
-        self.assertEqual(ov["total_calls"], 3)
-        self.assertEqual(ov["total_tokens"], 45)
-        self.assertEqual(ov["by_scene"], {"kb": 2, "memory": 1})
-        m_a = next(m for m in ov["by_model"] if m["model"] == "a/m")
-        self.assertEqual(m_a["calls"], 2)
-        self.assertEqual(m_a["total_tokens"], 45)
-
-    def test_05_record_noop_when_db_closed(self):
-        # 连接未 init ⇒ record/ensure_schema 静默跳过，绝不抛（计量不打断调用方）
-        global _conn  # noqa
+    def test_04_record_noop_when_db_closed(self):
+        # 连接未 init ⇒ record/ensure_schema/overview 静默跳过，绝不抛（计量不打断调用方）
         import db as _dbmod
         saved = _dbmod._conn
         _dbmod._conn = None
         try:
             modelcalls.ensure_schema()   # 不应抛
             modelcalls.record("x/y", {})  # 不应抛
-            modelcalls.overview(7)        # 空数据合法返回，不应抛
+            modelcalls.overview(7)        # 账本为空合法返回，不应抛
         finally:
             _dbmod._conn = saved
 
-    def test_06_provider_split(self):
+    def test_05_provider_split(self):
         self.assertEqual(modelcalls._split_provider("alibaba/qwen3.8"), "alibaba")
         self.assertEqual(modelcalls._split_provider("nvidia/nemotron"), "nvidia")
         self.assertEqual(modelcalls._split_provider("no-slash-model"), "")
         self.assertEqual(modelcalls._split_provider(""), "")
 
-    def test_07_overview_empty_db_returns_zero(self):
-        _fresh_db()
-        ov = modelcalls.overview(7)
-        self.assertEqual(ov["total_calls"], 0)
-        self.assertEqual(ov["total_tokens"], 0)
-        self.assertEqual(ov["by_model"], [])
-
-    def test_08_build_router_returns_two_read_endpoints(self):
-        _fresh_db()
+    def test_06_build_router_returns_two_read_endpoints(self):
         r = modelcalls.build_router()
         paths = {getattr(x, "path", "") for x in r.routes}
         self.assertIn("/api/monitor/model-calls/overview", paths)
         self.assertIn("/api/monitor/model-calls", paths)
+
+    # ── B 组：全 agent 用量报表（overview / CCR usage_events）──
+
+    def test_07_overview_reads_ccr_ledger_not_local_table(self):
+        """核心回归：往 model_call_logs 写 3 行、往 CCR 账本写 3 行，
+        overview 必须读后者（页面不再恒 0）。"""
+        _fresh_db()
+        modelcalls.record("local/only", {"input_tokens": 1, "output_tokens": 1})
+        self._use_ledger([
+            ("alibaba/qwen3.8-flash", "Profile: Claude Code", 100, 50, 800, 1),
+            ("alibaba/qwen3.8-flash", "pi", 200, 100, 1200, 1),
+            ("deepseek-v4.1-flash", "Local Gateway", 10, 5, 300, 1),
+        ])
+        ov = modelcalls.overview(7)
+        self.assertEqual(ov["total_calls"], 3)
+        self.assertEqual(ov["total_tokens"], 465)
+        self.assertEqual(ov["source"], "ccr_usage_events")
+        self.assertEqual(ov["by_scene"],
+                         {"Profile: Claude Code": 1, "pi": 1, "Local Gateway": 1})
+        m = next(x for x in ov["by_model"] if x["model"] == "alibaba/qwen3.8-flash")
+        self.assertEqual(m["calls"], 2)
+        self.assertEqual(m["total_tokens"], 450)
+        self.assertEqual(m["provider"], "alibaba")
+        self.assertGreater(m["avg_ms"], 0)
+        self.assertNotIn("note", ov)
+
+    def test_08_overview_window_excludes_old_rows(self):
+        self._use_ledger([
+            ("m/recent", "pi", 10, 5, 100, 1),
+            ("m/old", "codex", 999, 999, 100, 40 * 24 * 60),  # 40 天前
+        ])
+        self.assertEqual(modelcalls.overview(7)["total_calls"], 1)
+        self.assertEqual(modelcalls.overview(30)["total_calls"], 1)
+        self.assertEqual(modelcalls.overview(90)["total_calls"], 2)
+
+    def test_09_overview_empty_ledger_returns_zero_without_note(self):
+        ov = modelcalls.overview(7)
+        self.assertEqual(ov["total_calls"], 0)
+        self.assertEqual(ov["total_tokens"], 0)
+        self.assertEqual(ov["by_model"], [])
+        self.assertNotIn("note", ov)  # 空账本是合法状态，不是故障
+
+    def test_10_overview_fail_closed_when_ledger_missing(self):
+        """账本缺失必须给 note 说明原因，不许静默 0 冒充「没调用」。"""
+        os.environ["CCR_USAGE_DB"] = "/nonexistent/dir/no-usage.sqlite"
+        ov = modelcalls.overview(7)
+        self.assertEqual(ov["total_calls"], 0)
+        self.assertIn("note", ov)
+        self.assertIn("CCR 用量账本不可用", ov["note"])
+
+    def test_11_summary_rows_carry_avg_ms(self):
+        self._use_ledger([("m/x", "pi", 10, 5, 1500, 1)])
+        data = usage_ledger.summary(group_by=("model",))
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["rows"][0]["avg_ms"], 1500)
+
+    def test_12_recent_maps_client_to_scene(self):
+        self._use_ledger([("m/x", "Profile: Codex", 10, 5, 900, 1)])
+        data = usage_ledger.recent(limit=10)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["rows"][0]["scene"], "Profile: Codex")
+        self.assertEqual(data["rows"][0]["status"], "success")
 
 
 if __name__ == "__main__":

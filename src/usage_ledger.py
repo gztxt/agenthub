@@ -25,6 +25,10 @@ UUIDv4 `19eccbce-…`，查不到探针 id）。⇒ 任务↔成本只能按 `cl
 
 fail-closed：账本缺失 / 打不开 / 聚合异常一律 `{"ok": False, "error": …}`，
 **绝不返回 0 当成功**。
+
+2026-11-07：`summary()` 的 rows 增加 `avg_ms`（AVG(duration_ms)），供设置页
+「模型计量」报表显示均耗时；新增 `recent()` 只读取最近 N 条明细。两者都只扩展
+只读面，不改 `/api/runlog/cost` 的既有行为。
 """
 from __future__ import annotations
 
@@ -115,6 +119,7 @@ def summary(group_by: Sequence[str] = ("client", "model"),
     任何失败返回 `{"ok":False,"error":…}`（**不抛、不静默 0**，端点据此回 503）。
 
     `group_by` 含白名单外维度 ⇒ `ValueError`（编程错误要炸在测试里，不是吞掉）。
+    rows 每行另带 `avg_ms`（该组 `AVG(duration_ms)`），供计量报表用。
     """
     cols = tuple(str(c).strip() for c in group_by if str(c).strip())
     if not cols:
@@ -160,6 +165,7 @@ def summary(group_by: Sequence[str] = ("client", "model"),
             " COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens,"
             " COALESCE(SUM(total_tokens),0) AS total_tokens,"
             " COALESCE(SUM(cost_usd),0) AS cost_usd,"
+            " COALESCE(AVG(duration_ms),0) AS avg_ms,"
             " SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS null_cost"
             f" FROM usage_events{where}"
             f" GROUP BY {sel}"
@@ -190,6 +196,52 @@ def summary(group_by: Sequence[str] = ("client", "model"),
         conn.close()
 
     return {**base, "ok": True, "rows": rows, "count": len(rows), "total": total}
+
+
+def recent(limit: int = 50, client: Optional[str] = None,
+           since: Optional[str] = None, until: Optional[str] = None,
+           path: Optional[str] = None) -> Dict[str, Any]:
+    """最近 N 条 `usage_events` 明细（只读；供「模型计量」明细端点用）。
+
+    字段映射成明细契约：`client→scene`（调用来源）、`status_code→status`，
+    其余列名沿用。`WHERE` 只拼白名单内的等值/范围条件，值一律参数化。
+    fail-closed 同 `summary()`：账本缺失/打不开 ⇒ `ok:false` + error，不回 0 当成功。
+    """
+    p = path or db_path()
+    base: Dict[str, Any] = {"db": p, "mode": "ro"}
+    if not os.path.exists(p):
+        return {**base, "ok": False, "error": f"usage ledger not found: {p}",
+                "rows": [], "count": 0}
+    lim = max(1, min(int(limit or 50), MAX_LIMIT))
+    conds: List[str] = []
+    params: List[Any] = []
+    if since:
+        conds.append("created_at>=?")
+        params.append(str(since))
+    if until:
+        conds.append("created_at<?")
+        params.append(str(until))
+    if client:
+        conds.append("client=?")
+        params.append(str(client))
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    try:
+        conn = _connect_ro(p)
+    except sqlite3.Error as e:  # noqa: BLE001
+        return {**base, "ok": False, "error": f"cannot open usage ledger (ro): {e}",
+                "rows": [], "count": 0}
+    try:
+        sql = ("SELECT model, provider, client AS scene,"
+               " CASE WHEN status_code BETWEEN 200 AND 299 THEN 'success' ELSE 'error' END AS status,"
+               " input_tokens, output_tokens, total_tokens, duration_ms, request_id, created_at"
+               f" FROM usage_events{where} ORDER BY created_at DESC LIMIT ?")
+        rows = [dict(r) for r in conn.execute(sql, (*params, lim))]
+    except sqlite3.Error as e:  # noqa: BLE001
+        return {**base, "ok": False, "error": f"usage ledger query failed: {e}",
+                "rows": [], "count": 0}
+    finally:
+        conn.close()
+    return {**base, "ok": True, "rows": rows, "count": len(rows)}
 
 
 def by_request(request_ids: Iterable[str], path: Optional[str] = None,

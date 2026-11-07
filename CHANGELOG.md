@@ -1,3 +1,19 @@
+## 未发版 — 设置→模型计量：接 CCR 全量账本（2026-11-07）
+
+> 状态：**代码已落盘 + 63 passed + 真账本端到端出数；待重启**（`term_sessions=1`，
+> 按「有活会话严禁 restart」停手，同 11-04 判例）。台账 `PT-20261107-02`，
+> 判例卡 `agent-knowledge/326`。
+
+- **报障**：设置 → 模型计量 完全没有运行，没有收集存储所有 agent 使用模型的数据。
+- **根因**：报表读的是 `model_call_logs`（0 行），而覆盖全 agent 的 CCR `usage_events`
+  （52,394 行）早已由 `usage_ledger` 封装却没接线 ⇒「两套并行实现接了空的那套」。
+  非空壳：`ensure_schema`/`record`/路由/页面/渲染全在，只是埋点只覆盖 agenthub 自身 LLM 客户端。
+- **药**：`overview()` 与明细端点切到 `usage_ledger`（`?mode=ro` 只读）；返回结构保持前端
+  `mclRender()` 契约 ⇒ 前端渲染零改动；页面文案改为真实数据源；测试补临时账本夹具钉回归。
+  `record()`/`model_call_logs` 保留（agenthub 自身调用明细，口径不同，不是报表数据源）。
+- **证据**：`pytest` 四模块 63 passed；真账本 `overview(7)` = 6,454 次 / 2.45 亿 tokens；
+  `summary()` 默认形态与 `/api/runlog/cost` 依赖未破坏。
+
 ## 未发版 — 设置→模型：dsh 可设置 + CCR 清单自动同步（2026-11-04）
 
 > 状态：**代码已落盘 + `tests/test_modelcfg.py` 123 passed（pytest 与 unittest 两套口径），

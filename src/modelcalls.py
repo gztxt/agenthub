@@ -1,18 +1,28 @@
 # -*- coding: utf-8 -*-
-"""模型调用计量模块（借鉴 LangChat `langchat-monitor`，2026-11-07 评估落地）。
+"""模型调用计量：设置页「模型计量」的**全 agent 用量**报表 + agenthub 自身明细。
 
-LangChat 的 `AigcModelCallLog` 模式：每次模型调用记
-  model / provider / 场景 / 状态 / input+output+total token / 耗时 ms，
-统计字段冗余存模型名（避免报表回表关联模型配置）。
+数据源口径（2026-11-07 改判，见 agent-knowledge/）：
+  唯一覆盖「所有 agent」的是 CCR 账本 `usage_events`
+  （`~/.claude-code-router/app-data/usage.sqlite`，`client` 列辨识调用来源），
+  由 `usage_ledger` 以 `?mode=ro` 只读聚合。原实现读自建表 `model_call_logs`，
+  而那张表只由 `llm._create_message()` 写（agenthub 自己的 manager LLM 客户端），
+  其它 agent（pi/claude/codex/codebuddy/grok/jcode…）直连 CCR 3456、一条都不进
+  ⇒ 上线后恒 0 行、页面恒显「暂无计量记录」。典型的「两套并行实现接了空的那套」。
 
-本机收口单点：`llm._create_message()`（chat_tools_loop 两处 + complete_free
-全过它）。本模块只做**记录**（append-only），不改任何既有调用语义；
-报表端点 `/api/monitor/model-calls/overview` 给设置页只读块用。
+两套数据各归各位，别再接错：
+  * `overview()` / `GET /api/monitor/model-calls/overview` → **全 agent 用量**（本报表，
+    数据源 = CCR usage_events，按 model 与 client 聚合，带均耗时）。
+  * `GET /api/monitor/model-calls` 明细 → 同上的最近 N 条（admin 排查用）。
+  * `record()` / `model_call_logs` → agenthub **自身** manager LLM 调用的
+    append-only 明细（status / error / request_id），仍由 `llm._create_message()` 埋点写入，
+    保留不删：它是「调用质量排错」口径，职责与全 agent 计量报表不同，**不是报表数据源**。
 
-表 `model_call_logs`：
-  id, model, provider, scene, status, input_tokens, output_tokens,
-  total_tokens, duration_ms, request_id, created_at
-  （status: success|error；scene: agent_chat|manager|memory|kb|refscout|other）
+返回结构保持与前端 `mclRender()` 的契约兼容（total_calls / total_tokens /
+by_model[] / by_scene / window_days / as_of），故前端渲染逻辑零改动。
+`by_scene` 沿用旧键名，内容改为 **client 分布**（各 agent 来源的调用数）。
+
+fail-closed：CCR 账本缺失 / 打不开 ⇒ `overview()` 回 `note` 让前端显示原因，
+**绝不返回 0 冒充「没调用」**（usage_ledger 口径：静默 0 = 谎报）。
 """
 from __future__ import annotations
 
@@ -21,10 +31,11 @@ import time
 from typing import Any, Dict, Optional
 
 import db
+import usage_ledger
 
 TABLE = "model_call_logs"
 
-# 场景白名单（报表按 scene 聚合；未知场景落 "other"，不丢弃——计量面宁可多记不可漏记）
+# 场景白名单（仅 record()/model_call_logs 明细用；overview 的分组维度是 CCR 的 client）
 SCENES = ("agent_chat", "manager", "memory", "kb", "refscout", "chat", "free", "other")
 
 _SCHEMA = """
@@ -49,7 +60,7 @@ CREATE INDEX IF NOT EXISTS idx_mcl_model ON model_call_logs(model, created_at);
 
 
 def ensure_schema() -> None:
-    """幂等建表。由 main.startup() 在 db.init_db 之后调用（同 modelgate/tasks 形态）。
+    """幂等建表（agenthub 自身 LLM 调用明细表）。由 main.startup() 调用。
     若连接尚未初始化（L0 独立调本模块）则跳过——建表交给调用方的 init_db。"""
     if not db.is_open():
         return
@@ -69,7 +80,10 @@ def _split_provider(model: str) -> str:
 def record(model: str, usage: Optional[dict], scene: str = "other",
            status: str = "success", duration_ms: Optional[int] = None,
            request_id: Optional[str] = None, error: Optional[str] = None) -> None:
-    """记一条模型调用（LangChat `ModelCallRecorder.record` 的等价）。
+    """记一条 **agenthub 自身** LLM 调用明细（LangChat `ModelCallRecorder.record` 等价）。
+
+    ⚠ 这不是「所有 agent 用量」的数据源（见模块 docstring）——只记经
+    `llm._create_message()` 的 manager 调用；全 agent 用量看 `overview()` / CCR 账本。
 
     幂等安全性：记账失败绝不允许带倒真实 LLM 调用——整段 try，失败仅打印一行。
     连接未初始化（L0 未 init_db）则静默跳过，不打断调用方。
@@ -100,52 +114,55 @@ def record(model: str, usage: Optional[dict], scene: str = "other",
 
 
 def overview(window_days: int = 7) -> Dict[str, Any]:
-    """模型调用总览（LangChat `/api/v1/monitor/model-calls/overview` 的等价）。
+    """**所有 agent** 的模型用量总览（数据源 = CCR usage_events 只读账本）。
 
-    返回：总调用数 / 总 token / 按模型聚合（调用数+token+平均耗时）/ 按场景聚合。
-    纯聚合，走 idx_mcl_created 时间窗过滤；无数据返回零值（不是报错——「没计量」是合法状态）。
-    db 未初始化 ⇒ 返回全零值（绝不让「看报表」这个只读动作因连接缺失而 500）。
+    `window_days`（天）换算成小时交给 `usage_ledger.window_bounds()`；
+    `summary(group_by=("client","model"))` 一次取回，按 model 聚合 `by_model`
+    （avg_ms 按调用数加权）、按 client 聚合 `by_scene`，总计取自 `total`（不受 limit 截断）。
+
+    返回结构兼容前端 `mclRender()`：total_calls / total_tokens / by_model[] /
+    by_scene / window_days / as_of，另加 source / attribution / cost_usd。
+    账本不可用 ⇒ 带 `note` 的零值结构（前端显示原因），不静默伪装成「没调用」。
     """
     import datetime as _dt
-    if not db.is_open():
-        return {"window_days": window_days, "total_calls": 0, "total_tokens": 0,
-                "by_model": [], "by_scene": {}, "as_of": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                "note": "db 未初始化（计量尚未启动）"}
-    end = _dt.datetime.now(_dt.timezone.utc)
-    start = end - _dt.timedelta(days=max(1, int(window_days)))
-    prefix = start.strftime("%Y-%m-%dT%H")  # 粗窗口（created_at 是 ISO 全串，前缀比较够用）
-    rows = db.query(
-        "SELECT model, scene, status, COUNT(*) AS n,"
-        " SUM(input_tokens) AS tin, SUM(output_tokens) AS tout, SUM(total_tokens) AS ttotal,"
-        " AVG(duration_ms) AS avg_ms"
-        " FROM model_call_logs WHERE created_at >= ? GROUP BY model, scene, status",
-        (prefix,))
+    days = max(1, int(window_days))
+    since, until = usage_ledger.window_bounds(days * 24)
+    data = usage_ledger.summary(group_by=("client", "model"),
+                                since=since, until=until,
+                                limit=usage_ledger.MAX_LIMIT)
+    as_of = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    if not data.get("ok"):
+        return {"window_days": days, "total_calls": 0, "total_tokens": 0,
+                "by_model": [], "by_scene": {}, "as_of": as_of,
+                "source": "ccr_usage_events",
+                "note": "CCR 用量账本不可用：" + str(data.get("error") or "unknown")}
+    total = data.get("total") or {}
     by_model: Dict[str, Dict[str, Any]] = {}
     by_scene: Dict[str, int] = {}
-    total_calls = 0
-    total_tokens = 0
-    for r in rows:
-        total_calls += r["n"]
-        total_tokens += int(r["ttotal"] or 0)
-        m = r["model"]
+    for r in data.get("rows") or []:
+        m = r.get("model") or "unknown"
+        c = r.get("client") or "unknown"
+        n = int(r.get("requests") or 0)
+        t = int(r.get("total_tokens") or 0)
+        ms = float(r.get("avg_ms") or 0)
         d = by_model.setdefault(m, {"model": m, "provider": _split_provider(m),
-                                     "calls": 0, "total_tokens": 0, "avg_ms": 0.0})
-        d["calls"] += r["n"]
-        d["total_tokens"] += int(r["ttotal"] or 0)
-        ms = r["avg_ms"]
-        d["avg_ms"] = round((d["avg_ms"] * (d["calls"] - 1) + (ms or 0)) / d["calls"], 1)
-        sc = r["scene"]
-        by_scene[sc] = by_scene.get(sc, 0) + r["n"]
-    for m in by_model.values():
-        if not m.get("avg_ms"):
-            m["avg_ms"] = 0.0
+                                    "calls": 0, "total_tokens": 0, "_ms_num": 0.0})
+        d["calls"] += n
+        d["total_tokens"] += t
+        d["_ms_num"] += ms * n
+        by_scene[c] = by_scene.get(c, 0) + n
+    for d in by_model.values():
+        d["avg_ms"] = round(d.pop("_ms_num") / d["calls"], 1) if d["calls"] else 0.0
     return {
-        "window_days": window_days,
-        "total_calls": total_calls,
-        "total_tokens": total_tokens,
+        "window_days": days,
+        "total_calls": int(total.get("requests") or 0),
+        "total_tokens": int(total.get("total_tokens") or 0),
         "by_model": sorted(by_model.values(), key=lambda x: -x["total_tokens"]),
         "by_scene": by_scene,
-        "as_of": end.isoformat(),
+        "as_of": as_of,
+        "source": "ccr_usage_events",
+        "attribution": data.get("attribution"),
+        "cost_usd": total.get("cost_usd"),
     }
 
 
@@ -159,32 +176,25 @@ router = None
 
 
 def build_router():
-    """main 导入 fastapi 可用时调用，返回挂接了三个端点的 APIRouter。"""
+    """main 导入 fastapi 可用时调用，返回挂接了两个端点的 APIRouter。"""
     global router
     from fastapi import APIRouter, Query
     router = APIRouter()
 
     @router.get("/api/monitor/model-calls/overview")
     async def mcl_overview(window_days: int = Query(default=7, ge=1, le=90)):
-        """模型调用计量总览（只读；设置页报表块消费）。"""
+        """全 agent 模型用量总览（只读；设置页报表块消费）。"""
         return overview(window_days)
 
     @router.get("/api/monitor/model-calls")
     async def mcl_list(limit: int = Query(default=50, le=500), scene: str = ""):
-        """最近 N 条明细（admin 排查用；只读）。db 未初始化 ⇒ 空清单（不 500）。"""
-        if not db.is_open():
-            return {"rows": [], "count": 0}
-        sql = ("SELECT model, provider, scene, status, input_tokens, output_tokens,"
-                 " total_tokens, duration_ms, request_id, created_at FROM model_call_logs")
-        args: list = []
-        where = []
-        if scene:
-            where.append("scene=?")
-            args.append(scene)
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY id DESC LIMIT ?"
-        args.append(limit)
-        return {"rows": db.query(sql, tuple(args)), "count": min(limit, 500)}
+        """最近 N 条全 agent 调用明细（admin 排查；数据源 = CCR usage_events，只读）。
+        `scene` 沿用旧参数名，实际按 client 过滤（保持端点契约兼容）。"""
+        data = usage_ledger.recent(limit=limit, client=scene or None)
+        if not data.get("ok"):
+            return {"rows": [], "count": 0, "source": "ccr_usage_events",
+                    "note": str(data.get("error") or "unknown")}
+        return {"rows": data["rows"], "count": data["count"],
+                "source": "ccr_usage_events"}
 
     return router

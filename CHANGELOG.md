@@ -118,6 +118,25 @@
   DevTools 只监听 `[::1]` ⇒ 直接跑 UI 探针必报「devtools 不可达」。本次用 `work/run-probe-collab.py`
   在导入前替换该方法绕过，共享文件未改。
 
+## v0.13.194 — 方案 P0/P1/P2/P3 四连：读令牌门 + 文档口径 + 工作台 + wb-summary（2026-11-07）
+
+> 方案：`技术文档/AgentHub优化设计方案.md` §6.6（读接口匿名裸奔）/ §5（记忆口径分裂）/ §4.3（工作台）/ §6.1（纳入闭环）。
+> 本机已实测落地 v0.13.191+（浮层唯一/终端重连/任务成功外证已解决，本四连不重复）。
+
+- **P0 读端点令牌门**（`writeauth.read_gate`，v0.13.192 落地）：
+  非回环 GET 须带 `x-hub-token`/`x-term-token`；回环匿名保持一个版本；`HUB_READ_TOKENS=0` 可整门回滚。
+  双栈 `HOST=::` 下 v4 回环对端实测 `::ffff:127.0.0.1`，回环判定必须含 v4-mapped 形式（首探实踩即修）。
+  L0：`tests/test_readtoken_l0.py` 11 例。
+- **P1 文档口径统一**（v0.13.193 前批）：
+  记忆 M1/M2/M3 替换旧 L1/L2/L3（README + DESIGN 加横幅不删）；新建 `docs/CONTRACTS.md` 六节契约
+  （状态机/记忆层/鉴权档/出站/重启护栏/版本防漂），`tests/test_contracts_paths.py` 路径互校 CI。
+- **P2 工作台注意力排序**（v0.13.193）：`static/hub/15-workbench.js`——
+  陈旧码/待验收 > 异常 > 终端等待 > 运行中 > 已停止折叠；数据源全既有端点，零新增写端点。
+- **P3 wb-summary 只读聚合**（v0.13.194）：`GET /api/agents/wb-summary`（路由在 `/{agent_id}` 之前）；
+  agent 面 + 任务计数（submitted / failed_24h），任务面不可用回 null+reason；L0 3 例。
+
+**未闭合**：`docs/CONTRACTS.md` 出站 HTTP 收敛（P3 outbound）与包收敛（P4）未开工。
+
 ## v0.13.191 — 混排三缺口：文件集闸门 / 派发权重 / 孤儿回收（2026-11-03）
 
 **起因**：同一批任务，混排结果比单会话更差、token 几倍，质量和效率没有优势。

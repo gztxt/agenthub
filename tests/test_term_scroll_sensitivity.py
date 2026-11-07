@@ -240,7 +240,7 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.191"
+    CURRENT_VERSION = "0.13.194"
     #: v0.13.190：本轮改的是「协同看板渲染」，不是终端滚动；版本钉照常跟版本号走。
     #: 这一版学到的不是「多加了几行渲染」，而是 **静态闸门判不了「渲染了没有」**：
     #: 容器在、CSS 全、pytest 全绿，JS 却从没写过那个 id ⇒ 用户看到一块空白。
@@ -332,6 +332,7 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     )
     VERSION_ROOT_CAUSES["0.13.175"] = (
         "扩池", "cli_agent.py", "available()", "needs_approval", "升档",
+
         "escalated_from_agent",
     )
     VERSION_ROOT_CAUSES["0.13.174"] = (
@@ -850,6 +851,11 @@ class TestScrollSensitivityPinned(unittest.TestCase):
                          "这些版本的根因关键字从 main.py 与 CHANGELOG.md 双双消失了：%s"
                          % missing)
 
+
+# 版本钉（模块级追加）：v0.13.192/193/194 不动终端滚动面（P0 读令牌门 / P2 工作台 / P3 wb-summary）。
+TestScrollSensitivityPinned.VERSION_ROOT_CAUSES["0.13.192"] = ("非回环 GET 须凭据", "回环匿名一版本", "读令牌门", "writeauth.read_gate")
+TestScrollSensitivityPinned.VERSION_ROOT_CAUSES["0.13.193"] = ("注意力排序", "纯前端", "15-workbench.js", "wb-summary")
+TestScrollSensitivityPinned.VERSION_ROOT_CAUSES["0.13.194"] = ("wb-summary", "只读聚合", "P3 wb-summary", "api_agents.wb_summary")
 
 if __name__ == "__main__":
     unittest.main()

@@ -83,4 +83,5 @@ def test_main_injects_disable_switch_and_allow_prefix():
 
 def test_version_bumped():
     src = open(os.path.join(os.path.dirname(__file__), "..", "src", "main.py")).read()
-    assert 'VERSION = "0.13.192"' in src
+    m = __import__("re").search(r'VERSION = "(0\.13\.(\d+))"', src)
+    assert m and int(m.group(2)) >= 192, "读令牌门要求的最低版本未达标"

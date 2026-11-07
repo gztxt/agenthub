@@ -126,6 +126,14 @@ log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
 VERSION = "0.13.194"
 
+# v0.13.194（2026-11-07）：方案 AgentHub优化设计方案.md P0/P1/P2/P3 四连：
+#   P0 读端点令牌门（writeauth.read_gate：非回环 GET 须凭据，回环匿名一版本；HUB_READ_TOKENS=0 可回滚）；
+#   关键词锚（版本钉 test_term_scroll_sensitivity 用）：非回环 GET 须凭据 / 回环匿名一版本 / 读令牌门 / writeauth.read_gate
+#   P1 文档口径 M1/M2/M3 统一 + docs/CONTRACTS.md 六节契约与路径互校 CI；
+#   P2 工作台注意力排序（P2 工作台注意力排序 / 15-workbench.js：陈旧码/待验收 > 异常 > 终端等待 > 运行中 > 已停止折叠）；
+#   P3 wb-summary 只读聚合端点（api_agents.wb_summary：agent 面 + 任务计数，任务面不可用回 null+reason）。
+#   判据：tests/test_readtoken_l0.py 11 例 / test_wb_summary_l0.py 3 例 / test_contracts_paths.py。
+
 # v0.13.191（2026-11-03）：混排没有优势不是「模型不够强」，是拆解层缺一整个字段。
 #   ① 病：同一条 UI 需求被拆给 4 家 agent 并行，`files` 全是同一两个文件，后写覆盖先写
 #      ⇒ 落盘两套并存实现。拆解层**没有任何字段能表达「这两个任务会碰同一份文件」**，

@@ -46,14 +46,17 @@ fi
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 HUB="${HUB_URL:-http://127.0.0.1:${PORT:-3102}}"
-TOKEN="${TERM_TOKEN:-${HUB_PASSCODE:-}}"
-if [ -z "$TOKEN" ] && [ -r "$REPO/.env" ]; then
-  TOKEN=$(grep -m1 '^TERM_TOKEN=' "$REPO/.env" 2>/dev/null | cut -d= -f2-)
+# 2026-11-07 用户裁定：机器侧身份 = HTTP Basic（共享 token 兼容面已删除）。
+HUB_USER="${HUB_BASIC_USER:-gztxt}"
+HUB_PW="${HUB_SUPERADMIN_PW:-}"
+if [ -z "$HUB_PW" ] && [ -r "$REPO/.env" ]; then
+  HUB_PW=$(grep -m1 '^HUB_SUPERADMIN_PW=' "$REPO/.env" 2>/dev/null | cut -d= -f2-)
 fi
-if [ -z "$TOKEN" ]; then
-  echo "FAIL: 无凭据（TERM_TOKEN / HUB_PASSCODE 未设置，且读不到 agenthub/.env）" >&2
+if [ -z "$HUB_PW" ]; then
+  echo "FAIL: 无凭据（HUB_SUPERADMIN_PW 未设置，且读不到 agenthub/.env）" >&2
   exit 2
 fi
+CURL_AUTH=(-u "$HUB_USER:$HUB_PW")
 
 HEALTH=$(curl -sf -m 5 "$HUB/health" 2>/dev/null) || {
   echo "FAIL: hub 不可达（$HUB/health）——自检必须先有在跑的服务" >&2; exit 2; }
@@ -69,7 +72,7 @@ fi
 
 post() {  # post <json-body> <timeout>
   curl -s -m "$2" -X POST "$HUB/api/intake/task" \
-    -H 'Content-Type: application/json' -H "x-hub-token: $TOKEN" -d "$1" 2>/dev/null
+    -H 'Content-Type: application/json' "${CURL_AUTH[@]}" -d "$1" 2>/dev/null
 }
 
 FAST_BODY='{"task":"自检：接单前置四查能否正常出简报","caller":"selfcheck","escalate":"off","auto_deep":false}'

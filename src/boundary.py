@@ -114,30 +114,30 @@ NEGATIVE_PROOFS: Dict[str, dict] = {
             {"id": "unknown_agent",
              "test": "tests/test_boundary.py::TestExecBoundaryNegative::test_unknown_agent_is_rejected",
              "what": "未知 agent ⇒ 400"},
-            {"id": "bad_token",
-             "test": "tests/test_boundary.py::TestExecBoundaryNegative::test_bad_token_is_rejected",
-             "what": "token 校验失败 ⇒ 401（无 token 即拒，非放行）"},
+            {"id": "no_credential",
+             "test": "tests/test_boundary.py::TestExecBoundaryNegative::test_no_credential_is_401",
+             "what": "无登录身份 ⇒ 401（Cookie 会话 / HTTP Basic 之外一律拒）"},
         ],
-        "fail_closed_by": "tests/test_boundary.py::TestExecBoundaryNegative::test_bad_token_is_rejected",
+        "fail_closed_by": "tests/test_boundary.py::TestExecBoundaryNegative::test_no_credential_is_401",
         "what": "term.create_session 是拉起进程的**唯一入口**：agent 无画像终端入口⇒400、"
                 "命令只出自画像模板（tests/test_term_launch_guard.py 另有 AST 钉子）、"
-                "token 校验失败⇒401（无 token 即拒，非放行）。",
+                "无 Cookie/Basic 身份⇒401（共享 token 面已删除）。",
     },
     "config_write": {
         "surface": [
-            {"id": "missing_secret",
-             "test": "tests/test_boundary.py::TestWriteBoundaryNegative::test_missing_secret_fails_closed",
-             "what": "未配口令 ⇒ misconfig(503)，不放行"},
-            {"id": "wrong_secret",
-             "test": "tests/test_boundary.py::TestWriteBoundaryNegative::test_wrong_secret_denied",
-             "what": "错口令 ⇒ deny(401)，不放行"},
-            {"id": "empty_secret",
-             "test": "tests/test_boundary.py::TestWriteBoundaryNegative::test_empty_secret_is_not_a_secret",
-             "what": "空口令不算口令 ⇒ 不放行"},
+            {"id": "users_db_down",
+             "test": "tests/test_boundary.py::TestWriteBoundaryNegative::test_users_db_down_fails_closed",
+             "what": "用户库不可用 ⇒ misconfig(503)，不放行"},
+            {"id": "anonymous",
+             "test": "tests/test_boundary.py::TestWriteBoundaryNegative::test_anonymous_with_users_ready_is_denied",
+             "what": "未登录 ⇒ deny(401)，不放行"},
+            {"id": "shared_token_removed",
+             "test": "tests/test_writeauth.py::ADecideTruthTable::test_no_token_channel_left",
+             "what": "共享 token 通道已删除 ⇒ 没有「另一个口令」可绕"},
         ],
-        "fail_closed_by": "tests/test_boundary.py::TestWriteBoundaryNegative::test_missing_secret_fails_closed",
-        "what": "writeauth.decide 集中中间件 + 路由清单静态护栏：未配口令⇒misconfig(503)、"
-                "错口令⇒deny(401)，**从不放行**。",
+        "fail_closed_by": "tests/test_boundary.py::TestWriteBoundaryNegative::test_users_db_down_fails_closed",
+        "what": "writeauth.decide 集中中间件 + 路由清单静态护栏：用户库不可用⇒misconfig(503)、"
+                "未登录⇒deny(401)，**从不放行**。",
     },
 }
 

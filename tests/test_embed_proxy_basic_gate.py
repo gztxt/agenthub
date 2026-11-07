@@ -54,9 +54,13 @@ class TestBasicGate(unittest.IsolatedAsyncioTestCase):
         self.tmp.close()
         self.up = await asyncio.start_server(_fake_upstream, "127.0.0.1", 0)
         up_port = self.up.sockets[0].getsockname()[1]
+        # hub_auth=False：本类测的是**桥内表单兜底**（EMBED_HUB_AUTH=0 排障态）。
+        # 默认 hub_auth=True 时门在 hub 会话上，未登录文档 302 回 hub 登录页，
+        # 那条路径由 tests/test_embed_authority_rewrite.py::TestBridgeHubGate 覆盖。
         self.px = embed_proxy.EmbedProxy(
             "测试桥", "127.0.0.1", up_port, listen_host="127.0.0.1",
-            listen_port=0, keys=True, auth_secret=self.tmp.name, title="Proxy Panel")
+            listen_port=0, keys=True, auth_secret=self.tmp.name, title="Proxy Panel",
+            hub_auth=False)
         self.assertTrue(await self.px.start())
         self.port = self.px.server.sockets[0].getsockname()[1]
 

@@ -35,6 +35,7 @@ sys.path.insert(0, str(_REPO / "src"))
 sys.path.insert(0, str(_REPO))
 
 import cloudcli  # noqa: E402
+import db        # noqa: E402
 import runlog    # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
@@ -190,11 +191,12 @@ class TestStart(_DbCase):
         with self._env():
             with self.assertRaises(HTTPException) as cm:
                 self._call(token="")
-            self.assertEqual(cm.exception.status_code, 401)
-        with self._env(term="", passcode=""):
+            # 无身份必须拒：用户库可用=401，不可用=503（fail-closed，二者都不是放行）
+            self.assertIn(cm.exception.status_code, (401, 503))
+        with mock.patch.object(db, "is_open", lambda: False):
             with self.assertRaises(HTTPException) as cm:
                 self._call(token="")
-            self.assertEqual(cm.exception.status_code, 503, "未配口令 fail-closed")
+            self.assertEqual(cm.exception.status_code, 503, "用户库不可用 fail-closed")
 
     def test_start_creates_session_via_cloudcli(self):
         """mock urllib：cloudcli 201 → sessionId/url 透传（埋点经 track 装饰器）。"""

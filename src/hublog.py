@@ -258,10 +258,7 @@ async def hublog_query(request: Request,
 
     GET 但**按写方法鉴权**（与 /api/runlog 同口径）：日志含 IP/路径/查询词。
     """
-    verdict, reason = writeauth.decide(
-        "POST", request.url.path,
-        writeauth.provided_token(request.headers.raw, request.url.query),
-        writeauth.secrets_from_env())
+    verdict, reason = writeauth.decide_req(request, "POST")
     if verdict not in ("allow", "exempt"):
         log.warning(f"[hublog] 拒绝 {verdict}：{request.url.path} "
                     f"来源={request.client.host if request.client else '?'} —— {reason}")

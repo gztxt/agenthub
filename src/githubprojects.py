@@ -522,10 +522,7 @@ async def github_clone(request: Request, body: CloneIn):
     """把白名单内的 GitHub 仓库浅克隆到 CLONE_BASE，返回本地路径。
     「本地没有的远端仓库，点新建会话即时同步」的后端半程。"""
     # ① 写闸（cloudcli POST /start 同款保险带；全局 write_gate 之外再显式判一次）
-    verdict, reason = writeauth.decide(
-        "POST", request.url.path,
-        writeauth.provided_token(request.headers.raw, request.url.query),
-        writeauth.secrets_from_env())
+    verdict, reason = writeauth.decide_req(request, "POST")
     if verdict not in ("allow", "exempt"):
         log.warning(f"[github] 拒绝 {verdict}：{request.url.path} "
                     f"来源={request.client.host if request.client else '?'} —— {reason}")

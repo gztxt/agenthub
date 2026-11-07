@@ -16,7 +16,10 @@ from pathlib import Path
 
 # 让 `import db` / `import users` 能解析（同 test_approvals 的形态）
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-os.environ["HOME"] = tempfile.mkdtemp()   # 空 HOME：防真实 .env/库混进来
+# 2026-11-07：删掉模块级 `os.environ["HOME"] = tempfile.mkdtemp()`。
+# db/users 都不读 HOME；但 unittest discover 是「先导入全部模块、再跑用例」，
+# 那行会把全局 HOME 改成临时目录，导致 L1 的 test_hublog 找不到真实 systemd unit。
+# 需要隔离的用例请在自己 setUp 里改并还原（同 test_modelcfg 的形态）。
 
 import db  # noqa: E402
 import users  # noqa: E402

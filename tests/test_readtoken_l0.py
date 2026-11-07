@@ -15,32 +15,30 @@ import writeauth  # noqa: E402
 class TestReadTokenL0(unittest.TestCase):
 
     def test_read_verdict_loopback_anonymous_allowed(self):
-        secrets = ["sekret"]
         # 双栈 `HOST=::` 下 v4 回环连接的对端实测是 `::ffff:127.0.0.1`（v4-mapped v6），
         # 漏它＝本机页面全被拒（2026-11-07 上线首探实踩）。
         for host in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "::ffff:0:0:0:0:0:0:1"):
-            v, r = writeauth.read_verdict(host, "/api/agents", "", secrets)
+            v, r = writeauth.read_verdict(host, "/api/agents", False, True)
             self.assertEqual(v, "allow", (host, r))
 
-    def test_read_verdict_nonloopback_no_token_denied(self):
-        v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", "", ["sekret"])
+    def test_read_verdict_nonloopback_anonymous_denied(self):
+        v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", False, True)
         self.assertEqual(v, "deny", (v, r))
 
-    def test_read_verdict_nonloopback_token_match_allowed(self):
-        v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", "sekret", ["sekret"])
+    def test_read_verdict_nonloopback_identity_allowed(self):
+        """2026-11-07：身份 = Cookie 会话 / HTTP Basic，不再是比较共享 token。"""
+        v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", True, True)
         self.assertEqual(v, "allow", (v, r))
-        v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", "wrong", ["sekret"])
-        self.assertEqual(v, "deny", (v, r))
 
-    def test_read_verdict_no_secrets_is_misconfig_not_open(self):
-        v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", "", [])
+    def test_read_verdict_users_db_down_is_misconfig_not_open(self):
+        v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", False, False)
         self.assertEqual(v, "misconfig", (v, r))
 
     def test_read_verdict_disabled_gate_always_allows(self):
         old = writeauth.READ_TOKEN_DISABLED
         writeauth.READ_TOKEN_DISABLED = True
         try:
-            v, _ = writeauth.read_verdict("8.8.8.8", "/api/memory/search", "", [])
+            v, _ = writeauth.read_verdict("8.8.8.8", "/api/memory/search", False, False)
             self.assertEqual(v, "allow")
         finally:
             writeauth.READ_TOKEN_DISABLED = old
@@ -50,17 +48,17 @@ class TestReadTokenL0(unittest.TestCase):
         allow = writeauth._READ_TOKEN_ALLOW
         allow.add("/api/settings/model/catalog")
         try:
-            v, _ = writeauth.read_verdict("8.8.8.8", "/api/settings/model/catalog", "", ["sekret"])
+            v, _ = writeauth.read_verdict("8.8.8.8", "/api/settings/model/catalog", False, True)
             self.assertEqual(v, "allow")
-            v, _ = writeauth.read_verdict("8.8.8.8", "/api/memory/search", "", ["sekret"])
+            v, _ = writeauth.read_verdict("8.8.8.8", "/api/memory/search", False, True)
             self.assertEqual(v, "deny")
         finally:
             allow.discard("/api/settings/model/catalog")
 
     def test_read_banner_state_shapes(self):
-        self.assertEqual(writeauth.read_banner_state("127.0.0.1", "/", "", ["k"])["state"], "ok")
-        self.assertEqual(writeauth.read_banner_state("8.8.8.8", "/", "", ["k"])["state"], "locked")
-        self.assertEqual(writeauth.read_banner_state("8.8.8.8", "/", "", [])["state"], "misconfig")
+        self.assertEqual(writeauth.read_banner_state("127.0.0.1", "/", False, True)["state"], "ok")
+        self.assertEqual(writeauth.read_banner_state("8.8.8.8", "/", False, True)["state"], "locked")
+        self.assertEqual(writeauth.read_banner_state("8.8.8.8", "/", False, False)["state"], "misconfig")
 
     def test_read_gate_is_async_middleware(self):
         self.assertTrue(asyncio.iscoroutinefunction(writeauth.read_gate))

@@ -16,6 +16,7 @@ v0.13.30 增补：cwd 进白名单。安全论证（写死在此，改前先读�
 import ast
 import os
 import sys
+import types
 import unittest
 from pathlib import Path
 
@@ -164,33 +165,28 @@ class TestCwdGate(unittest.TestCase):
                 term._cwd_or_none(bad)
 
 
-class TestTokenGate(unittest.TestCase):
-    """_check_term_token：空/错必须 401，且实现用常量时间比较"""
+class TestTermAuthGate(unittest.TestCase):
+    """_check_term_auth：没有 Cookie/Basic 身份必须 401；共享 token 面已删除。"""
 
-    def test_empty_rejected(self):
+    def test_no_credential_is_401(self):
+        req = types.SimpleNamespace(headers={})
         with self.assertRaises(Exception) as cm:
-            term._check_term_token("", "unit")
+            term._check_term_auth(req, "unit")
         self.assertEqual(getattr(cm.exception, "status_code", None), 401)
 
-    def test_wrong_rejected(self):
-        with self.assertRaises(Exception) as cm:
-            term._check_term_token(term.TERM_TOKEN + "x", "unit")
-        self.assertEqual(getattr(cm.exception, "status_code", None), 401)
+    def test_identity_passes(self):
+        req = types.SimpleNamespace(headers={"authorization": "Basic bDAtdGVzdDp4"})
+        term._check_term_auth(req, "unit")     # 不抛即通过
 
-    def test_correct_passes(self):
-        term._check_term_token(term.TERM_TOKEN, "unit")     # 不抛即通过
-
-    def test_token_is_not_empty_by_default(self):
-        """未配 TERM_TOKEN 时自动生成，绝不允许"空 token=不鉴权"的裸奔态"""
-        self.assertTrue(term.TERM_TOKEN, "TERM_TOKEN 为空：闸门形同虚设")
-        self.assertGreaterEqual(len(term.TERM_TOKEN), 16)
-
-    def test_uses_constant_time_compare(self):
+    def test_shared_token_channel_is_gone(self):
+        """兼容面确已删除：函数与 query 入口都不许回来。"""
+        self.assertFalse(hasattr(term, "_check_term_token"),
+                         "_check_term_token 又回来了 —— 共享 token 面没删干净")
         src = TERMSRC.read_text(encoding="utf-8")
-        i = src.find("def _check_term_token")
-        seg = src[i:i + 400] if i >= 0 else "<找不到 _check_term_token>"
-        self.assertIn("hmac.compare_digest", seg,
-                      "token 比较退化成 == 会引入计时侧信道（函数体前 400 字符附下）：\n" + seg)
+        self.assertNotIn("x-term-token", src.lower(),
+                         "term.py 仍出现 x-term-token")
+        self.assertNotIn("hmac.compare_digest", src,
+                         "term.py 仍在做共享 token 比较")
 
 
 class TestResumeArgvHostile(unittest.TestCase):

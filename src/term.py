@@ -4,18 +4,16 @@
 - 可执行命令 = profiles 画像白名单（terminal.cmd），API 只接受 agent_id，绝不接受任意命令
 - v0.13.0 续聊：命令仍只出自画像白名单 + 后端模板（sessions_store.resume_argv），
   客户端最多传一个过正则且实盘存在的 session id，传不进命令
-- 会话仅创建者主机可见（服务本身 LAN/Tailscale 信任域）；可选 TERM_TOKEN 鉴权（ws ?token=）
+- 会话仅创建者主机可见（服务本身 LAN/Tailscale 信任域）；鉴权 = Cookie 会话 / HTTP Basic
 - 空闲 TTL（默认 45min）自动回收；hub 重启即全部销毁（无残留 shell）
 """
 import asyncio
 import errno
-import hmac
 import json
 import logging
 import os
 import pty
 import re
-import secrets
 import shlex
 import signal
 import struct
@@ -40,11 +38,6 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-TERM_TOKEN = os.getenv("TERM_TOKEN", "")
-if not TERM_TOKEN:
-    # 兜底：未配置 token 时自动生成，避免"空 token=不鉴权"的裸奔状态
-    TERM_TOKEN = secrets.token_urlsafe(32)
-    log.warning(f"[term] TERM_TOKEN 未配置，已自动生成随机 token（前4位={TERM_TOKEN[:4]}，len={len(TERM_TOKEN)}）")
 IDLE_TTL_S = int(os.getenv("TERM_IDLE_TTL", "600"))
 #: **无人观看**时的更短 TTL（PT-20261024-08 B2）。
 #: 为什么需要两级：IDLE_TTL_S 判的是「会话整体静默」，
@@ -416,33 +409,18 @@ def describe_exit(status: Optional[int], hub_killed: bool = False) -> str:
     return ""
 
 
-def _check_term_token(provided: str, source: str) -> None:
-    """缺 token 即拒：校验失败记一行拒绝原因（绝不记录 token 值）"""
-    if not provided or not hmac.compare_digest(provided, TERM_TOKEN):
-        log.warning(f"[term] 拒绝：token 校验失败（{source}）")
-        raise HTTPException(status_code=401, detail="term token required or invalid")
-
-
 def _check_term_auth(request, source: str) -> None:
-    """终端控制面鉴权（2026-11-07 用户裁定：浏览器一律用户名+密码）。
-    ① Cookie 会话（浏览器登录后自动携带）→ 放行；
-    ② 旧 X-TERM-TOKEN / ?token= → 放行（未迁移的脚本/嵌页，内部兼容面）。
-    两条都不命中 ⇒ 401。拒绝理由绝不回显凭据值。"""
+    """终端控制面鉴权（2026-11-07 用户裁定：只有 Cookie 会话 / HTTP Basic）。
+    共享 token 兼容面已删除 —— 任何残留调用点都不会被接受（一律 401）。
+    拒绝理由绝不回显凭据值。"""
     try:
         import users as _users
         u, _p, _how = _users.identity_of(request)
         if u:
             return
-    except Exception:  # noqa: BLE001 —— 用户库不可用不阻断旧凭据路径
+    except Exception:  # noqa: BLE001 —— 用户库不可用不阻断其它路径
         pass
-    provided = ""
-    try:
-        provided = request.headers.get("x-term-token", "") or request.query_params.get("token", "")
-    except Exception:  # noqa: BLE001
-        provided = ""
-    if provided and TERM_TOKEN and hmac.compare_digest(provided, TERM_TOKEN):
-        return
-    log.warning(f"[term] 拒绝：未登录且旧 token 无效（{source}）")
+    log.warning(f"[term] 拒绝：未登录（{source}）")
     raise HTTPException(status_code=401, detail="login required")
 
 
@@ -609,7 +587,7 @@ class Session:
         # 下面三个调用点全是`if _rec.active` 的一次属性读 ⇒ 关闭态零开销、不建表写入。
         # 刻意挂在 Session 上而不是模块全局：一条会话一条录制，且随会话一起走完生命周期。
         # Recorder 只吃 pty 字节 / 客户端按键，从签名上够不到 self.child_env()
-        # （env 里有 TERM_TOKEN）—— 断"记初始环境变量"这条路靠签名，不靠自觉。
+        # （env 里有敏感值）—— 断"记初始环境变量"这条路靠签名，不靠自觉。
         self.recorder = term_record.Recorder(sid, agent_id)
         fcntl.fcntl(self.fd, fcntl.F_SETFL, os.O_NONBLOCK)
 
@@ -1029,8 +1007,8 @@ async def agent_history(agent_id: str, request: Request, limit: int = Query(defa
 
 # ── 终端会话录制（v0.13.59/ PT-20260927-16，2026-10-08 重做接线）────────
 # 鉴权口径与 /api/term/sessions 同级：sid 是**可操作句柄**（能取回整段会话的终端内容），
-# 比列表更敏感，故一律要 TERM_TOKEN，绝不开免token（对照 /api/term/activity 的取舍逻辑：
-# 那个端点只给聚合计数、不含任何句柄，才敢免 token）。
+# 比列表更敏感，故一律要登录身份，绝不开免登录（对照 /api/term/activity 的取舍逻辑：
+# 那个端点只给聚合计数、不含任何句柄，才敢免登录）。
 @router.get("/api/term/recording/{sid}")
 async def term_recording_status(sid: str, request: Request):
     """本会话录了多少、有没有触顶停录、上限是多少。界面据此明示，不能静默丢帧。"""
@@ -1052,7 +1030,7 @@ async def term_recording_frames(sid: str, request: Request,
     """回放：按 seq 升序返回已脱敏的帧（data 为 base64）。
 
     ⚠️ 这是**用户键入与 agent 输出的全量文本**出口 —— 即便是脱敏后的，也比会话列表
-    敏感得多，所以与 kill 同级鉴权（要 TERM_TOKEN），且绝不接受「免 token 读一帧」。
+    敏感得多，所以与 kill 同级鉴权（要登录身份），且绝不接受「免登录读一帧」。
 
     B14 续传点：带 `after_seq` 只取**严格更大**的 seq；回包里的 `next_after_seq`
     仅在 `more=True` 时给出 —— 客户端原样回传即可续接，不会重复边界帧，
@@ -1373,8 +1351,8 @@ def _attach_reader(sess: Session):
 
 
 @router.websocket("/ws/term/{sid}")
-async def term_ws(ws: WebSocket, sid: str, token: str = Query(default="")):
-    # 2026-11-07：浏览器一律 Cookie 会话（WS 握手自动带 Cookie）；旧 ?token= 保留给脚本。
+async def term_ws(ws: WebSocket, sid: str):
+    # 2026-11-07：只认 Cookie 会话（WS 握手自动带 Cookie）。共享 token 兼容面已删除。
     ws_ok = False
     try:
         import users as _users
@@ -1384,9 +1362,8 @@ async def term_ws(ws: WebSocket, sid: str, token: str = Query(default="")):
             ws_ok = bool(_r and not _c)
     except Exception:  # noqa: BLE001
         ws_ok = False
-    provided = token or ws.headers.get("x-term-token", "")
-    if not ws_ok and not (provided and TERM_TOKEN and hmac.compare_digest(provided, TERM_TOKEN)):
-        log.warning("[term] 拒绝：ws 握手未登录且旧 token 无效（/ws/term）")
+    if not ws_ok:
+        log.warning("[term] 拒绝：ws 握手未登录（/ws/term）")
         # WS 握手阶段不能用 HTTPException（Starlette 在 ws 上下文不可靠），显式关闭 4401=未授权
         await ws.close(code=4401)
         return

@@ -3592,7 +3592,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=4009a4e8';
+      var HUB_SRC = '/static/hub.js?v=76d69240';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');
@@ -3601,6 +3601,24 @@
       var pEl = document.getElementById('loginGatePw');
 
       function fail(msg) { err.textContent = msg || ''; btn.disabled = false; btn.textContent = '登录'; }
+      /* ?next= 回跳（2026-11-07）：浏览器直接打开某个嵌页桥端口（:32xx）时，桥发现没有
+         hub_session 就 302 到这里并带 next=原地址。登录成功后跳回去，用户只输一次密码。
+         ⚠ 必须是同主机 + http(s)，否则就是开放重定向（拿登录页当跳板）。 */
+      function nextUrl() {
+        try {
+          var n = new URLSearchParams(location.search).get('next');
+          if (!n) return '';
+          var u = new URL(n, location.href);
+          if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+          if (u.hostname !== location.hostname) return '';
+          return u.href;
+        } catch (e) { return ''; }
+      }
+      function afterLogin() {
+        var n = nextUrl();
+        if (n) { location.href = n; return; }
+        location.reload();
+      }
       function loadHub() {
         gate.style.display = 'none';
         var s = document.createElement('script');
@@ -3625,7 +3643,7 @@
           if (!x.ok || !x.d || !x.d.username) throw new Error('登录失败：用户名或密码错误（或被限速）');
           /* 2026-11-07：服务端已种 HttpOnly 会话 Cookie，前端不再存任何 token */
           localStorage.setItem('hub.login.user', x.d.username);
-          location.reload();
+          afterLogin();
         }).catch(function (e) { fail(e.message || '登录失败'); });
       });
 
@@ -3638,6 +3656,7 @@
         .then(function (d) {
           if (!d || !d.username) throw new Error('no-session');
           localStorage.setItem('hub.login.user', d.username);
+          if (nextUrl()) { afterLogin(); return; }
           loadHub();
         })
         .catch(function () {

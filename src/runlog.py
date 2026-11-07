@@ -421,10 +421,7 @@ def _require_read(request: Request) -> None:
     与 `/api/audit/list`（src/audit.py 先例）同级敏感。fail-closed：服务端没配口令
     ⇒ 503 而不是放行。**抽成函数而不是复制**：两个端点任一漏抄就是一条敞开的通道。
     """
-    verdict, reason = writeauth.decide(
-        "POST", request.url.path,
-        writeauth.provided_token(request.headers.raw, request.url.query),
-        writeauth.secrets_from_env())
+    verdict, reason = writeauth.decide_req(request, "POST")
     if verdict not in ("allow", "exempt"):
         # 只打 verdict/path/来源，绝不打凭据（与 audit.py 同一口径）
         log.warning(f"[runlog] 拒绝 {verdict}：{request.url.path} "

@@ -22,6 +22,7 @@ G. **形状校验的边界** —— 超长文本、非白名单偏好键、缺 i
 import json
 import pathlib
 import sys
+import types
 import unittest
 from pathlib import Path
 
@@ -32,6 +33,9 @@ import db            # noqa: E402
 import mcpgw         # noqa: E402 —— mcp_acl/mcp_servers 的建表归它（不在 db.SCHEMA 里）
 import settings_bundle as SB  # noqa: E402
 import tiers         # noqa: E402
+
+#: L0 身份替身（tests/authfix.py）把「带 Authorization 头」判为已登录。
+_AUTH = {"authorization": "Basic bDAtdGVzdDp4"}
 
 
 class _DbCase(unittest.TestCase):
@@ -372,12 +376,10 @@ class TestHttpEndpoints(_DbCase):
     这一组验「路由真的能用」：`_validate`/`apply_bundle` 全绿不代表端点能通 ——
     Pydantic 模型、鉴权头解析、Content-Disposition 都在这一层。
 
-    **凭据一律用 `mock.patch("writeauth.secrets_from_env")` 注入**，不碰真env：
-    ① `secrets_from_env()` 读的是 `TERM_TOKEN`/`HUB_PASSCODE`（writeauth.py:87）；
-    ② 仓内 `.env` 会被 `config.py` 的 `load_dotenv(override=True)` 灌进os.environ
-       （判例 107/179），所以「pop 掉 env」根本挡不住它。第一版用 `os.environ[...]`
-       赋值，结果拿到 `deny`(401) 而非 `misconfig`(503) —— **红灯不等于实现错，
-       先查判据本身读的是哪**。
+    2026-11-07 用户裁定删除共享 token 兼容面：身份 = Cookie 会话 / HTTP Basic。
+    L0 由 `tests/authfix.py` 把「带 Authorization 头」判为已登录（生产实现要查用户表 +
+    pbkdf2，空 HOME 下建不出账号）。fail-closed 的判据随之改成「用户库不可用 ⇒ 503」，
+    不再是「env 里没配口令 ⇒ 503」—— 后者是被删掉的旧模型。
     """
 
     def _client(self):
@@ -388,29 +390,24 @@ class TestHttpEndpoints(_DbCase):
         app.include_router(router)
         return TestClient(app)
 
-    def test_export_fail_closed_when_no_secret(self):
-        """服务端没配凭据 ⇒ **503 而不是放行**（fail-closed，同 writeauth.decide）。
+    def test_export_anonymous_is_401(self):
+        """未登录 ⇒ 401（若 200，导出就是一个无鉴权通道）。"""
+        with self._client() as c:
+            r = c.get("/api/settings/export")
+        self.assertEqual(r.status_code, 401, r.text)
 
-        若这条返回 200，导出就是一个无鉴权通道。
-        对照组：猜 token 也得拒 —— 注意此处**仍是 503**：`decide` 在 `secrets` 为空时
-        一律 `misconfig`，与客户端带没带 token 无关（没配凭据时「哪个 token」无从谈起）。
-        第一版把对照组期望写成 401，是把「无凭据」与「凭据错」两种态混了。
-        """
+    def test_export_userdb_down_is_503(self):
+        """用户库不可用 ⇒ **503 而不是放行**（fail-closed，同 writeauth.decide）。"""
         from unittest import mock
-        with mock.patch("writeauth.secrets_from_env", return_value=[]):
+        with mock.patch.object(db, "is_open", lambda: False):
             with self._client() as c:
                 r = c.get("/api/settings/export")
-                self.assertEqual(r.status_code, 503,
-                                 "未配凭据必须 503（fail-closed），实际 %s" % r.status_code)
-                r2 = c.get("/api/settings/export", headers={"x-hub-token": "guess"})
-                self.assertEqual(r2.status_code, 503, r2.status_code)
+        self.assertEqual(r.status_code, 503, r.text)
 
     def test_export_json_with_attachment_and_nostore(self):
-        from unittest import mock
         _mk_agent("a1")
-        with mock.patch("writeauth.secrets_from_env", return_value=["tok-A"]):
-            with self._client() as c:
-                r = c.get("/api/settings/export", headers={"x-hub-token": "tok-A"})
+        with self._client() as c:
+            r = c.get("/api/settings/export", headers=_AUTH)
         self.assertEqual(r.status_code, 200, r.text)
         cd = r.headers.get("content-disposition", "")
         self.assertIn("attachment; filename=", cd)
@@ -419,25 +416,20 @@ class TestHttpEndpoints(_DbCase):
         self.assertEqual(r.headers.get("x-content-type-options"), "nosniff")
         self.assertEqual(json.loads(r.text)["kind"], SB.BUNDLE_KIND)
 
-    def test_export_wrong_token_denied(self):
-        """错 token ⇒ 401。**样本必须纯 ASCII** —— HTTP 头带非 ASCII 会让
-        httpx 在编码层抛 UnicodeEncodeError，那不是本用例要验的东西
-        （第一版用 `tok-真`/`tok-错`，红因在传输层，判据根本没跑到）。"""
-        from unittest import mock
-        with mock.patch("writeauth.secrets_from_env", return_value=["tok-right"]):
-            with self._client() as c:
-                r = c.get("/api/settings/export", headers={"x-hub-token": "tok-wrong"})
-        self.assertEqual(r.status_code, 401, r.text)
+    def test_legacy_token_header_is_not_a_credential(self):
+        """共享 token 面确已删除：真实解析器看到 x-hub-token 仍按匿名处理。"""
+        import authfix
+        req = types.SimpleNamespace(headers={"x-hub-token": "guess"})
+        u, _p, how = authfix.real_identity_of(req)
+        self.assertIsNone(u)
+        self.assertEqual(how, "anonymous")
 
     def test_import_roundtrip_over_http(self):
-        from unittest import mock
         _mk_agent("a1", cmd="/usr/bin/foo")
-        hdr = {"x-hub-token": "tok-B"}
-        with mock.patch("writeauth.secrets_from_env", return_value=["tok-B"]):
-            with self._client() as c:
-                bundle = c.get("/api/settings/export", headers=hdr).json()
-                db.execute("DELETE FROM custom_agents")
-                r = c.post("/api/settings/import", json={"bundle": bundle}, headers=hdr)
+        with self._client() as c:
+            bundle = c.get("/api/settings/export", headers=_AUTH).json()
+            db.execute("DELETE FROM custom_agents")
+            r = c.post("/api/settings/import", json={"bundle": bundle}, headers=_AUTH)
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["applied"]["custom_agents"], 1)
         rows = db.query("SELECT command FROM custom_agents WHERE id='a1'")
@@ -445,12 +437,9 @@ class TestHttpEndpoints(_DbCase):
 
     def test_import_bad_bundle_returns_400_not_500(self):
         """形状错 ⇒ **400**（可读错误），不是 500（用户看不懂栈回溯）。"""
-        from unittest import mock
-        hdr = {"x-hub-token": "tok-C"}
-        with mock.patch("writeauth.secrets_from_env", return_value=["tok-C"]):
-            with self._client() as c:
-                r = c.post("/api/settings/import", json={"bundle": {"kind": "x"}},
-                           headers=hdr)
+        with self._client() as c:
+            r = c.post("/api/settings/import", json={"bundle": {"kind": "x"}},
+                       headers=_AUTH)
         self.assertEqual(r.status_code, 400, r.text)
         self.assertIn("配置包", r.text)
 

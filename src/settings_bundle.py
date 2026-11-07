@@ -291,10 +291,7 @@ def _require_auth(request: Request) -> None:
     拿到它的人就能在本机以外复现一整套调用。`GET` 不走 `write_gate`
     （它只拦写方法），所以这里必须显式判一次，否则就是一个无鉴权导出通道。
     """
-    verdict, reason = writeauth.decide(
-        "POST", request.url.path,          # 强制按写方法判
-        writeauth.provided_token(request.headers.raw, request.url.query),
-        writeauth.secrets_from_env())
+    verdict, reason = writeauth.decide_req(request, "POST")   # 强制按写方法判
     if verdict not in ("allow", "exempt"):
         # 只打 verdict/path/来源，绝不打凭据
         log.warning(f"[settings-bundle] 拒绝 {verdict}：{request.url.path} "

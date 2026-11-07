@@ -58,9 +58,8 @@ def _build_url(base, params):
     return base.rstrip("/") + "/api/hublog" + ("?" + qs if qs else "")
 
 
-def _fetch(url, passcode, timeout=DEFAULT_TIMEOUT):
-    req = urllib.request.Request(url, method="GET",
-                                 headers={"x-hub-token": passcode} if passcode else {})
+def _fetch(url, auth, timeout=DEFAULT_TIMEOUT):
+    req = urllib.request.Request(url, method="GET", headers=(auth or {}))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read().decode("utf-8", "replace")
@@ -95,7 +94,15 @@ def main(argv=None):
     # 链接那一侧 ⇒ 仓库根算成 /home/gztxt，读不到 agenthub/.env（实跑踩过）。
     repo = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     env = _read_env(a.env or os.path.join(repo, ".env"))
-    passcode = env.get("HUB_PASSCODE", "")
+    # 2026-11-07 用户裁定：机器侧身份 = HTTP Basic（共享 token 兼容面已删除）。
+    # 用户名缺省 gztxt，密码取 .env 既有的 HUB_SUPERADMIN_PW ⇒ 零新增凭据。
+    _user = env.get("HUB_BASIC_USER") or "gztxt"
+    _pw = env.get("HUB_SUPERADMIN_PW", "")
+    auth = {}
+    if _pw:
+        import base64 as _b64
+        auth = {"Authorization": "Basic " + _b64.b64encode(
+            ("%s:%s" % (_user, _pw)).encode("utf-8")).decode("ascii")}
     port = a.port or int(env.get("PORT") or 3102)
     base = a.base or ("http://127.0.0.1:%d" % port)
 
@@ -108,17 +115,17 @@ def main(argv=None):
         params["format"] = "json"
 
     url = _build_url(base, params)
-    if not passcode:
-        _die(EXIT_AUTH, "未读到 HUB_PASSCODE（.env=%s）——服务端也会按未鉴权拒绝"
+    if not auth:
+        _die(EXIT_AUTH, "未读到 HUB_SUPERADMIN_PW（.env=%s）——服务端也会按未登录拒绝"
              % (a.env or os.path.join(repo, ".env")))
-    status, body = _fetch(url, passcode)
+    status, body = _fetch(url, auth)
     if status == 0:
         _die(EXIT_NET, "连不上 %s —— %s（服务没起？systemctl --user restart agenthub.service）"
              % (base, body))
     if status in (401, 403):
-        _die(EXIT_AUTH, "鉴权被拒（HTTP %d）：口令与服务端 HUB_PASSCODE 不一致" % status)
+        _die(EXIT_AUTH, "鉴权被拒（HTTP %d）：用户名/密码与服务端不一致" % status)
     if status == 503:
-        _die(EXIT_AUTH, "服务端未配 HUB_PASSCODE（HTTP 503）：补进 .env 后重启服务")
+        _die(EXIT_AUTH, "服务端用户库不可用（HTTP 503）：先修 agenthub 启动")
     if status == 400:
         _die(EXIT_PARAM, "参数非法（HTTP 400）：%s" % body[:300])
     if status >= 500:

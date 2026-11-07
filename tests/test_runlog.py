@@ -8,7 +8,7 @@
 2. **失败路径语义不变**：装饰器对 HTTPException 只留痕后原样 re-raise，
    404/409/400 的诊断正文一个字都不许动（hub 刚做好的失败表态不能再剥一次）。
 3. **鉴权 fail-closed**：GET /api/runlog 按写方法判（运行日志含查询词可反推意图），
-   无凭据 401、未配置 503——照抄 /api/audit/list 先例。
+   无凭据 401、用户库不可用 503 —— 照抄 /api/audit/list 先例。
 4. **通道归因**：x-hub-channel: mcp 头 → channel=mcp（MCP 工具转调与浏览器直连可区分）。
 """
 import asyncio
@@ -243,12 +243,12 @@ class TestRunlogQuery(_Base):
                 self._call(token="")
             self.assertEqual(cm.exception.status_code, 401)
 
-    def test_misconfigured_503_fail_closed(self):
+    def test_userdb_down_503_fail_closed(self):
         self._seed()
-        with self._env(term="", passcode=""):
+        with mock.patch.object(db, "is_open", lambda: False):
             with self.assertRaises(HTTPException) as cm:
                 self._call(token="")
-            self.assertEqual(cm.exception.status_code, 503, "未配口令必须 fail-closed 503")
+            self.assertEqual(cm.exception.status_code, 503, "用户库不可用必须 fail-closed 503")
 
     def test_authenticated_returns_events(self):
         self._seed()

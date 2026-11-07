@@ -228,15 +228,15 @@ class TestWriteGateAsk(_Base):
         """ASK 面**之外**的写请求走原路（这条钉住「默认零行为变化」）。"""
         os.environ["HUB_ASK_PREFIXES"] = "/api/mcpgw/servers"
         out, called = self._gate("PUT", "/api/memory/l2",
-                                 headers={"x-hub-token": "unit-token"})
+                                 headers={"authorization": "Basic bDAtdGVzdDp4"})
         self.assertEqual(out, "DOWNSTREAM")
         self.assertEqual(called["n"], 1)
 
-    def test_bad_token_still_401_not_202(self):
+    def test_anonymous_still_401_not_202(self):
         os.environ["HUB_ASK_PREFIXES"] = "/api/mcpgw/servers"
-        out, called = self._gate("POST", "/api/mcpgw/servers/reg",
-                                 headers={"x-hub-token": "wrong"})
-        self.assertEqual(out.status_code, 401, "凭据错仍是 DENY，不得被 ASK 掩盖")
+        out, called = self._gate("POST", "/api/mcpgw/servers/reg", headers={})
+        self.assertIn(out.status_code, (401, 503),
+                      "未登录仍是 DENY（auth 401 / 用户库不可用 503），不得被 ASK 掩盖")
         self.assertEqual(called["n"], 0)
 
 

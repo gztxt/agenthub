@@ -15,7 +15,11 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-os.environ["HOME"] = tempfile.mkdtemp()
+# 2026-11-07：删掉模块级 `os.environ["HOME"] = tempfile.mkdtemp()`。
+# 本模块与 HOME 无关（只用 db），但那行在 **import 期**改全局环境：
+# unittest discover 会先把所有模块导入完再跑用例 ⇒ L1 的
+# test_hublog.test_real_systemd_unit_exists 随后读到假 HOME，报「真单元不存在」。
+# 需要隔离 HOME 的用例请在自己的 setUp 里改并还原。
 
 import db  # noqa: E402
 import modelcalls  # noqa: E402

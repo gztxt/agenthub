@@ -1188,7 +1188,7 @@ function openLoginModal(opts) {
   return _tokenModalPromise;
 }
 /* 账号密码登录：POST /api/users/login 拿会话 token 存 localStorage（与旧口径同 key，
-   后续请求 x-hub-token 自动带上）。失败返回 false（弹窗留着让用户重试/切 tab）。 */
+   后续请求由浏览器会话 Cookie 自动鉴权）。失败返回 false（弹窗留着让用户重试/切 tab）。 */
 async function _doLogin(u, p) {
   try {
     const r = await fetch('/api/users/login', {

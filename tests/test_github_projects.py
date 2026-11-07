@@ -41,6 +41,7 @@ import tiers  # noqa: E402
 
 os.environ.setdefault("TERM_TOKEN", "unit-test-token-not-production")
 
+import db                        # noqa: E402
 import githubprojects as gp     # noqa: E402
 import localprojects as lp      # noqa: E402
 
@@ -376,11 +377,12 @@ class TestCloneGuard(unittest.TestCase):
         with self._env():
             with self.assertRaises(Exception) as cm:
                 asyncio.run(self._call("gztxt/wantrepo", token=""))
-            self.assertEqual(cm.exception.status_code, 401)
-        with self._env(term="", passcode=""):
+            # 无身份必须拒：用户库可用=401，不可用=503（fail-closed，二者都不是放行）
+            self.assertIn(cm.exception.status_code, (401, 503))
+        with mock.patch.object(db, "is_open", lambda: False):
             with self.assertRaises(Exception) as cm2:
                 asyncio.run(self._call("gztxt/wantrepo", token=""))
-            self.assertEqual(cm2.exception.status_code, 503, "未配凭据 fail-closed")
+            self.assertEqual(cm2.exception.status_code, 503, "用户库不可用 fail-closed")
 
     def test_clone_failure_cleans_partial(self):
         """克隆 rc≠0：半成品（带 .git）必须被清走，绝不留残目录骗下一轮。"""

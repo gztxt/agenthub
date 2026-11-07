@@ -69,13 +69,7 @@ async def export_sessions(request: Request, format: str = "json", agent_id: Opti
          那是别的工具链的私有存档，批量外流属另一层隐私裁定，须用户点名；本端点只覆盖
          hub 自己库里的 `chat_sessions` / `chat_messages`。
     """
-    if writeauth.identity_ok(request):
-        verdict, reason = "allow", "登录会话（Cookie/Basic）"
-    else:
-        verdict, reason = writeauth.decide(
-            "POST", request.url.path,                   # 强制按写方法判：导出=数据外流
-            writeauth.provided_token(request.headers.raw, request.url.query),
-            writeauth.secrets_from_env())
+    verdict, reason = writeauth.decide_req(request, "POST")   # 强制按写方法判
     if verdict not in ("allow", "exempt"):
         log.warning(f"[export] 拒绝 {verdict}：{request.url.path} "
                     f"来源={request.client.host if request.client else '?'} —— {reason}")

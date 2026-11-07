@@ -537,9 +537,9 @@ function histLoad(aid) {
       // 新前端 + 未重启的旧后端＝路由不存在（FastAPI 回 Not Found）。说人话，别抛生涩 404。
       // ⚠️ 单元名 2026-10-08 起是 agenthub.service；写旧名的后果是教用户去重启一个
       // 已停用的单元（restart 它既起不来又会在 journald 里刷重试），等于给错药方。
-      // 401 同理：后端原文是英文 `term token required or invalid`，直接透出等于没提示。
+      // 401 同理：后端现在只说 `login required`（Cookie/Basic），直接透出等于没提示。
       const hint = /not\s*found|404/i.test(m) ? '后端未更新：需重启 agenthub.service 后生效'
-                 : /401|term token/i.test(m) ? '终端口令失效：到「设置 → 终端口令」重新应用后重试'
+                 : /401|login required|term token/i.test(m) ? '登录已失效：请刷新页面，或重新登录 hub 后重试'
                  : m;
       // 失败时保留上一次成功取到的行（有的话），只把提示挂上去——一次抖动不该清空清单。
       HIST[aid] = { items: prev.items || [], note: '', home: prev.home || '', loading: false, err: hint }; })

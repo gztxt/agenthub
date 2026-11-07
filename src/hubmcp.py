@@ -35,6 +35,7 @@
           拆解 → 选型 → 派发 → 验收 → 未达标自动重拆，最多 2 轮硬上限。默认 `confirm=False`
           只拆不落库 ⇒ 不花钱；`confirm=True` 才落库执行，`auto_rounds=True` 才自动重拆）
 """
+import base64
 import json
 import os
 import urllib.error
@@ -107,31 +108,45 @@ def _get(path: str, **params) -> dict:
         return {"error": f"{type(e).__name__}: {e}", "path": path}
 
 
+def _basic_header() -> dict:
+    """机器侧身份 = HTTP Basic（2026-11-07 用户裁定：共享 token 兼容面已删除）。
+
+    凭据**零新增**：用户名默认取内置超管（`HUB_BASIC_USER`，缺省 gztxt），
+    密码取 .env 里已有的 `HUB_SUPERADMIN_PW`（users.ensure_superadmin 建号时用的
+    就是它）。取不到就返回空 dict —— 调用方如实报 missing-credential，
+    绝不静默发一个必然 401 的请求。
+    """
+    user = os.getenv("HUB_BASIC_USER", "gztxt")
+    pw = os.getenv("HUB_SUPERADMIN_PW", "")
+    if not pw:
+        return {}
+    raw = ("%s:%s" % (user, pw)).encode("utf-8")
+    return {"Authorization": "Basic " + base64.b64encode(raw).decode("ascii")}
+
+
 def _post(path: str, body: dict, _timeout: float = 0, **params) -> dict:
     """转发 POST 到 hub 自身 REST（v0.13.127 PT-20261019-01：`hub_skill_invoke` 用）。
 
     与 `_get` 的两处差别，都是有原因的：
-    ① **带凭据**：POST 过 writeauth 全局中间件（x-hub-token / ?token=）。MCP server
-       与 hub 同进程（main.py 挂载），凭据名与 writeauth 完全同源
-       （`TERM_TOKEN`/`HUB_PASSCODE`，.env 经 load_dotenv 进 os.environ）⇒
-       **零新增凭据**，也不把 token 写进任何配置文件。取不到时如实回
+    ① **带凭据**：POST 过 writeauth 全局中间件。方式为 HTTP Basic
+       （`HUB_BASIC_USER` / `HUB_SUPERADMIN_PW`，均为 .env 既有项）⇒ **零新增凭据**，
+       也不把密码写进任何配置文件。取不到时如实回
        `error=...missing-credential`，不静默发一个必然 401 的请求。
     ② **不过 ALLOW_WRITE 门**：invoke 只往 hub 自己的遥测账本（profile_events）
        写一行，不碰任何用户状态/配置；若把它算「写工具」，未开 HUB_MCP_ALLOW_WRITE
        的部署就根本没有统一调用入口——Grill 裁定 2 的功能直接不存在。
        真正的配置写工具仍在 `if ALLOW_WRITE:` 段里，不受影响。
     """
-    token = os.getenv("TERM_TOKEN", "") or os.getenv("HUB_PASSCODE", "")
-    if not token:
+    hdr = _basic_header()
+    if not hdr:
         return {"error": "missing-credential", "path": path,
-                "detail": "hub 进程未配置 TERM_TOKEN/HUB_PASSCODE，POST 类工具不可用"}
+                "detail": "hub 进程未配置 HUB_SUPERADMIN_PW，POST 类工具不可用"}
     qs = urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "")})
     url = f"{HUB_URL}{path}" + (f"?{qs}" if qs else "")
     payload = json.dumps(body or {}).encode("utf-8")
     req = urllib.request.Request(url, data=payload, method="POST",
                                  headers={"Content-Type": "application/json",
-                                          "x-hub-token": token,
-                                          "x-hub-channel": "mcp"})
+                                          "x-hub-channel": "mcp", **hdr})
     try:
         with urllib.request.urlopen(req, timeout=_timeout or TIMEOUT_S) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -153,9 +168,9 @@ def _delete(path: str, _timeout: float = 0, **params) -> dict:
     """转发 DELETE 到 hub 自身 REST（PT-20261024-02 P5：`hub_skill_remove` 用）。
 
     与 `_post` 的三处同源，都是踩过的坑换来的，别单独"优化"掉：
-    ① **带凭据**：DELETE 过 writeauth 全局中间件（x-hub-token），凭据名同源
-       （`TERM_TOKEN`/`HUB_PASSCODE`，.env 经 load_dotenv 进 os.environ）⇒
-       零新增凭据、不写任何配置文件；取不到时如实回 `missing-credential`，
+    ① **带凭据**：DELETE 过 writeauth 全局中间件。方式为 HTTP Basic
+       （`HUB_BASIC_USER` / `HUB_SUPERADMIN_PW`，.env 既有项）⇒ 零新增凭据、
+       不写任何配置文件；取不到时如实回 `missing-credential`，
        不静默发一个必然 401 的请求。
     ② **不过 ALLOW_WRITE 门**：技能面写工具（install/remove）与 invoke/acquire/auto
        同族——它们改的是**技能投影**（软链），不是 hub 配置；门禁在 REST 层：
@@ -167,15 +182,14 @@ def _delete(path: str, _timeout: float = 0, **params) -> dict:
        都在上游正文里，剥掉它等于在 MCP 层把 hub 的失败表态再灭一次（与 _get/_post
        同一条教训）。正文过 scrub：技能与记忆正文是凭据高危面。
     """
-    token = os.getenv("TERM_TOKEN", "") or os.getenv("HUB_PASSCODE", "")
-    if not token:
+    hdr = _basic_header()
+    if not hdr:
         return {"error": "missing-credential", "path": path,
-                "detail": "hub 进程未配置 TERM_TOKEN/HUB_PASSCODE，DELETE 类工具不可用"}
+                "detail": "hub 进程未配置 HUB_SUPERADMIN_PW，DELETE 类工具不可用"}
     qs = urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "")})
     url = f"{HUB_URL}{path}" + (f"?{qs}" if qs else "")
     req = urllib.request.Request(url, method="DELETE",
-                                 headers={"x-hub-token": token,
-                                          "x-hub-channel": "mcp"})
+                                 headers={"x-hub-channel": "mcp", **hdr})
     try:
         with urllib.request.urlopen(req, timeout=_timeout or TIMEOUT_S) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -900,11 +914,8 @@ if ALLOW_WRITE:
         """写入一条 hub 记忆。默认不注册——需 HUB_MCP_ALLOW_WRITE=1 才启用。
         category 可填 fact|decision|constraint|preference。"""
         # v0.13.6：写端点统一要凭据（writeauth 闸门）。本工具默认不注册（HUB_MCP_ALLOW_WRITE=1 才有），
-        # 但若哪天打开，不带 token 就是"功能静默 401"——所以这里就把凭据带上。
-        _h = {"Content-Type": "application/json"}
-        _t = os.getenv("TERM_TOKEN", "")
-        if _t:
-            _h["x-hub-token"] = _t
+        # 但若哪天打开，不带凭据就是"功能静默 401"——所以这里就把凭据带上。
+        _h = {"Content-Type": "application/json", **_basic_header()}
         req = urllib.request.Request(
             f"{HUB_URL}/api/memory/l1",
             data=json.dumps({"content": content, "category": category, "layer": layer}).encode(),

@@ -62,17 +62,19 @@ class TestAuditApi(unittest.TestCase):
         self.assertEqual(cm.exception.status_code, 401)
         self.assertNotIn("good", str(cm.exception.detail))
 
-    def test_wrong_token_is_401(self):
-        with self._env():
-            with self.assertRaises(HTTPException) as cm:
-                self._call(token="bad")
-        self.assertEqual(cm.exception.status_code, 401)
+    def test_legacy_token_header_is_not_a_credential(self):
+        """2026-11-07 用户裁定删除共享 token 兼容面：真实解析器只认 Cookie/Basic。"""
+        import authfix
+        req = types.SimpleNamespace(headers={"x-hub-token": "good"})
+        u, _p, how = authfix.real_identity_of(req)
+        self.assertIsNone(u, "x-hub-token 仍被当成凭据 —— 兼容面没删干净")
+        self.assertEqual(how, "anonymous")
 
-    def test_unconfigured_is_503_not_allowed(self):
-        with self._env(term="", passcode=""):
+    def test_userdb_closed_is_503_not_allowed(self):
+        with mock.patch.object(db, "is_open", lambda: False):
             with self.assertRaises(HTTPException) as cm:
                 self._call(token="")
-        self.assertEqual(cm.exception.status_code, 503, "fail-closed：没设口令不等于不用口令")
+        self.assertEqual(cm.exception.status_code, 503, "fail-closed：用户库不可用不等于放行")
 
     def test_authorized_lists_newest_first(self):
         with self._env():

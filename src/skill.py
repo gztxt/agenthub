@@ -1222,7 +1222,7 @@ async def skill_invoke(req: InvokeRequest, request: Request):
     - 同名多路 409 带 candidates（镜像 /read）；未知名 404；软链越界 400。
     - 记账经 `runlog.track("skill.invoke")`：成功/失败都留痕，subject 计入
       `skill_usage._SUBJECTS` ⇒ 被显式调用过的技能不再上零调用僵尸榜。
-    - 鉴权：POST 过 writeauth 全局中间件（x-hub-token / ?token=）。
+    - 鉴权：POST 过 writeauth 全局中间件（浏览器 Cookie 会话 / 机器 HTTP Basic）。
     """
     if len(req.caller) > 64:
         raise HTTPException(400, "caller 过长（≤64 字符）")
@@ -1661,7 +1661,7 @@ async def skill_status(force: bool = Query(default=False)):
 #    重复副本必然漂移；
 # 2. **remove 只删软链**（islink 才动手）：真目录是权威本体，从 HTTP 端点删本体
 #    属不可逆破坏，一律 409 拒绝（无主副本处置另行裁定，不在本端点顺手做）。
-# 鉴权：POST/DELETE 自动过 writeauth 全局中间件（x-hub-token）；审计入 asset_audit
+# 鉴权：POST/DELETE 自动过 writeauth 全局中间件（Cookie 会话 / HTTP Basic）；审计入 asset_audit
 # （action=bind/unbind，asset_type=skill）。
 
 _NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]{0,80}\Z")

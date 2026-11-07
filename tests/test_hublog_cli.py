@@ -2,7 +2,7 @@
 
 重点不是"能不能发请求"，而是三条铁律：
   ① 关键字只走 urlencode（自由输入绝不能拼进命令行/裸串）；
-  ② 口令只进请求头，任何输出（含报错）都不许带它；
+  ② 口令只进 Authorization 头（HTTP Basic），任何输出（含报错）都不许带它；
   ③ 失败要有可判别的退出码（鉴权 2 / 网络 3 / 参数 4 / 服务端 5），
      否则子代理拿到一堆 200 空输出会当成"没日志"而不是"没权限"。
 """
@@ -23,6 +23,7 @@ hublog_cli = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(hublog_cli)
 
 PC = "S3cr3t-Passcode-Do-Not-Echo"
+_AUTH = {"Authorization": "Basic dGVzdDp4"}
 
 
 def _tmp_env(text):
@@ -69,7 +70,7 @@ class TestUrlBuilding(unittest.TestCase):
         self.assertIn("limit=5", url)
 
     def test_passcode_goes_to_header_only(self):
-        """口令只进 x-hub-token 头：URL 会进访问日志/history，头不会。"""
+        """口令只进 Authorization 头：URL 会进访问日志/history，头不会。"""
         captured = {}
 
         class _Resp:
@@ -87,9 +88,9 @@ class TestUrlBuilding(unittest.TestCase):
             return _Resp()
 
         with mock.patch.object(hublog_cli.urllib.request, "urlopen", _spy):
-            status, body = hublog_cli._fetch("http://127.0.0.1:3102/api/hublog", PC)
+            status, body = hublog_cli._fetch("http://127.0.0.1:3102/api/hublog", _AUTH)
         self.assertEqual(status, 200)
-        self.assertEqual(captured["headers"].get("X-hub-token"), PC)
+        self.assertEqual(captured["headers"].get("Authorization"), _AUTH["Authorization"])
         self.assertNotIn(PC, captured["url"], "口令只在请求头里，URL 会被日志/历史记下")
         self.assertNotIn("passcode", captured["url"])
 
@@ -107,7 +108,7 @@ class TestFetchAndExitCodes(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
     def test_401_means_auth_exit2_without_echoing_passcode(self):
-        env = _tmp_env("HUB_PASSCODE=%s\nPORT=3102\n" % PC)
+        env = _tmp_env("HUB_SUPERADMIN_PW=%s\nPORT=3102\n" % PC)
         code, out, err = self._run(
             ["--env", env, "--source", "error"], 401, '{"detail":"bad token"}')
         self.assertEqual(code, hublog_cli.EXIT_AUTH)
@@ -115,21 +116,22 @@ class TestFetchAndExitCodes(unittest.TestCase):
         os.unlink(env)
 
     def test_503_means_misconfig_exit2(self):
-        env = _tmp_env("HUB_PASSCODE=%s\n" % PC)
+        """503 = 服务端用户库不可用（fail-closed），必须报「先修什么」而不是只给 HTTP 码。"""
+        env = _tmp_env("HUB_SUPERADMIN_PW=%s\n" % PC)
         code, _o, err = self._run(["--env", env], 503, "misconfig")
         self.assertEqual(code, hublog_cli.EXIT_AUTH)
-        self.assertIn("HUB_PASSCODE", err, "要指名缺哪个环境变量，别只报 HTTP 码")
+        self.assertIn("用户库不可用", err)
         os.unlink(env)
 
     def test_network_failure_exit3(self):
-        env = _tmp_env("HUB_PASSCODE=%s\n" % PC)
+        env = _tmp_env("HUB_SUPERADMIN_PW=%s\n" % PC)
         code, _o, err = self._run(["--env", env], 0, "Connection refused")
         self.assertEqual(code, hublog_cli.EXIT_NET)
         self.assertIn("连不上", err)
         os.unlink(env)
 
     def test_bad_param_exit4_surfaces_server_reason(self):
-        env = _tmp_env("HUB_PASSCODE=%s\n" % PC)
+        env = _tmp_env("HUB_SUPERADMIN_PW=%s\n" % PC)
         code, _o, err = self._run(["--env", env, "--subject", "rm -rf"],
                                   400, "subject must be one of [...]")
         self.assertEqual(code, hublog_cli.EXIT_PARAM)
@@ -137,7 +139,7 @@ class TestFetchAndExitCodes(unittest.TestCase):
         os.unlink(env)
 
     def test_happy_path_prints_body(self):
-        env = _tmp_env("HUB_PASSCODE=%s\n" % PC)
+        env = _tmp_env("HUB_SUPERADMIN_PW=%s\n" % PC)
         code, out, _e = self._run(["--env", env], 200, "2026-09-27T16:00:00+0800 [ERRO] x\n")
         self.assertEqual(code, 0)
         self.assertIn("[ERRO]", out)
@@ -162,7 +164,7 @@ class TestFetchAndExitCodes(unittest.TestCase):
         with mock.patch.object(hublog_cli.urllib.request, "urlopen",
                                side_effect=urllib.error.HTTPError(
                                    "u", 400, "Bad Request", {}, io.BytesIO(body))):
-            status, text = hublog_cli._fetch("http://x/api/hublog", PC)
+            status, text = hublog_cli._fetch("http://x/api/hublog", _AUTH)
         self.assertEqual(status, 400)
         self.assertIn("nope", text)
 

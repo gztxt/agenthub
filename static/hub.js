@@ -356,6 +356,15 @@ function maybeAutoLoginPrompt() {
 }
 async function api(path, opt) {
   const o = Object.assign({ credentials: 'same-origin' }, opt || {});
+  /* 2026-11-07：body 是字符串时默认补 JSON Content-Type。
+     缺它 fetch 按 text/plain 发，FastAPI 把 body 当裸字符串 ⇒ 422
+     model_attributes_type（改密码/发 token/吊所有三个按钮就是这么全崩的）。
+     已有显式头不覆盖；FormData/Blob 等非字符串 body 不受影响。 */
+  if (typeof o.body === 'string') {
+    const hs = Object.assign({}, o.headers || {});
+    if (!Object.keys(hs).some(k => k.toLowerCase() === 'content-type')) hs['Content-Type'] = 'application/json';
+    o.headers = hs;
+  }
   /* 2026-11-07 用户裁定：浏览器不再持有任何 token —— 登录态由 HttpOnly Cookie 自动携带。
      401 = 会话缺失/过期 ⇒ 弹登录框，登录成功后只重试一次（不循环）。
      判据：写方法，或 401 体带 read_auth_required（读门拒绝面）。 */
@@ -2134,11 +2143,11 @@ async function settingsLogsLoad() {
   const body = $('logBody');
   if (!body) return;
   boxBusy('logBody', '加载中…');
-  const pc = ($('logPasscode') && $('logPasscode').value.trim()) || settingsPasscode();
-  const opt = pc ? { headers: { 'x-hub-token': pc } } : {};
+  // 2026-11-07：日志读端点的身份就是浏览器会话 Cookie（api() 同源自动带），
+  // 不再让用户在这里二次输入口令 / 不再拼 x-hub-token。
   settingsLogsSyncSubject();
   try {
-    const d = await api('/api/hublog?' + settingsLogsParams().toString(), opt);
+    const d = await api('/api/hublog?' + settingsLogsParams().toString());
     LOG_LAST = d;
     logPage = 0;
     settingsLogsRender(d);
@@ -2683,7 +2692,7 @@ async function startNativeUI(btn) {
   const old = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = '启动中…'; }
   try {
-    /* 凭据只交给 api() 注入 x-hub-token（写方法它本来就会问一次并带对头）。
+    /* 凭据由浏览器会话 Cookie 承担（api() 同源自动带），不再注入任何 token 头。
        调用处**不要**再传 termHeaders()：2026-10-25 实测在缺 token 的浏览器上
        这会先弹一次口令框，api() 再弹一次；两次都取消即回 401「缺少凭据」，
        用户看到的就是「启动失败：缺少凭据…」——即本次报障。 */
@@ -4209,7 +4218,7 @@ function openLoginModal(opts) {
   return _tokenModalPromise;
 }
 /* 账号密码登录：POST /api/users/login 拿会话 token 存 localStorage（与旧口径同 key，
-   后续请求 x-hub-token 自动带上）。失败返回 false（弹窗留着让用户重试/切 tab）。 */
+   后续请求由浏览器会话 Cookie 自动鉴权）。失败返回 false（弹窗留着让用户重试/切 tab）。 */
 async function _doLogin(u, p) {
   try {
     const r = await fetch('/api/users/login', {
@@ -6777,7 +6786,7 @@ async function skillCopySnippet() {
   const base = location.origin;
   const rest = [
     'curl -s -X POST ' + base + '/api/skill/invoke \\',
-    "  -H 'x-hub-token: <TERM_TOKEN>' \\",
+    "  -u '<用户名>:<密码>' \\",
     "  -H 'Content-Type: application/json' \\",
     '  -d \'{"name": "' + nm + '", "caller": "my-agent", "task": "<要干什么>"}\'',
   ].join('\n');
@@ -8440,16 +8449,16 @@ async function createJob() {
 
 /* ── 会话导出（件 1 / spec §3）──────────────────────────────────────────
    三个实测出来的坑，决定了这里为什么长这样：
-   ① 不能走 api()：01-core-boot.js 的 isWriteMethod() 只给 POST/PUT/PATCH/DELETE 带 token，
-      而 /api/sessions/export 是 **GET 却要写级鉴权**（后端显式 writeauth.decide("POST",…)）⇒ 必 401。
+   ① 不能走 api()：它按方法决定是否带凭据，而 /api/sessions/export 是 **GET 却要写级鉴权**
+      （后端显式 writeauth.decide_req(request, "POST")）⇒ 无凭据必 401。
    ② 不能用 api() 取体：它会 JSON.parse 成对象，CSV/JSON **文件字节**就毁了 ⇒ 必须 blob。
-   ③ token 不走 ?token=：那会进服务端访问日志与浏览器历史（本工作区三次凭据外流前例）⇒ 只走头。
+   ③ 凭据由浏览器会话 Cookie 自动携带（同源 fetch 默认带），不拼任何 token/URL。
    文案四态互斥（照抄 07-asset-panel.js 的红向口径）：**被拒绝不许说成"没有会话"**。
    窄屏口径：只加 1 个图标按钮，不做 format/redact 的一排开关（chrome 单行化优先级更高）；
    CSV 与 redact=0 走 API 参数，不在本轮做 UI（YAGNI，且给原文出口做 UI 需单独裁定）。 */
 function exportStateOf(status, count, detail) {
   if (status === 503) return 'misconfig';
-  if (status === 401) return /缺少凭据/.test(String(detail || '')) ? 'need-token' : 'bad-token';
+  if (status === 401) return 'need-token';   // 2026-11-07 起只有一种 401：未登录/会话失效
   if (status !== 200) return 'error';
   return (count > 0) ? 'ok' : 'empty';
 }
@@ -8463,8 +8472,8 @@ function exportStateText(state, count, extra) {
            (hits > 0 ? '，正文已打码）' : '）');
   }
   if (state === 'empty') return '导出成功，但这个范围内确实是 0 条会话（文件是空的，不是被拒）';
-  if (state === 'need-token') return '导出被拒：未提供凭据 —— 不是没有会话。请在「设置」里应用 TERM_TOKEN 后重试';
-  if (state === 'bad-token') return '导出被拒：凭据不匹配 —— 不是没有会话。存量口令可能已换过，已清除，请重新输入';
+  if (state === 'need-token') return '导出被拒：尚未登录 —— 不是没有会话。请先在 hub 登录后重试';
+  if (state === 'bad-token') return '导出被拒：登录已失效 —— 不是没有会话。请刷新页面重新登录后重试';
   if (state === 'misconfig') return '导出被拒：服务端未配置口令（fail-closed）—— 不是没有会话';
   // 'error' 必须是**显式分支**而不是掉进兜底：闸门按状态名逐个点名（缺一个即红），
   // 而兜底留给"将来新增状态忘了配文案"这种情况 —— 那时也要说清不是没有会话。
@@ -9058,9 +9067,9 @@ function histLoad(aid) {
       // 新前端 + 未重启的旧后端＝路由不存在（FastAPI 回 Not Found）。说人话，别抛生涩 404。
       // ⚠️ 单元名 2026-10-08 起是 agenthub.service；写旧名的后果是教用户去重启一个
       // 已停用的单元（restart 它既起不来又会在 journald 里刷重试），等于给错药方。
-      // 401 同理：后端原文是英文 `term token required or invalid`，直接透出等于没提示。
+      // 401 同理：后端现在只说 `login required`（Cookie/Basic），直接透出等于没提示。
       const hint = /not\s*found|404/i.test(m) ? '后端未更新：需重启 agenthub.service 后生效'
-                 : /401|term token/i.test(m) ? '终端口令失效：到「设置 → 终端口令」重新应用后重试'
+                 : /401|login required|term token/i.test(m) ? '登录已失效：请刷新页面，或重新登录 hub 后重试'
                  : m;
       // 失败时保留上一次成功取到的行（有的话），只把提示挂上去——一次抖动不该清空清单。
       HIST[aid] = { items: prev.items || [], note: '', home: prev.home || '', loading: false, err: hint }; })

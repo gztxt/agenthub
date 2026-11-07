@@ -152,13 +152,13 @@ class TestWriteGateBelt(unittest.TestCase):
             prefs.put_pref("projects.lp", req, prefs.PrefValue(stars=["/x"]))
         self.assertEqual(cm.exception.status_code, 401)
 
-    def test_token_put_allowed_and_audited(self):
+    def test_authenticated_put_allowed_and_audited(self):
         req = _token_put_request("/api/prefs/projects.lp")
         d = prefs.put_pref("projects.lp", req, prefs.PrefValue(stars=["/x"]))
         self.assertEqual(d["value"]["stars"], ["/x"])
         rows = db.query("SELECT actor FROM asset_audit WHERE asset_slug='projects.lp'")
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["actor"], "user:term-token")
+        self.assertEqual(rows[0]["actor"], "user:l0-test")
 
 
 class TestFrontendSyncPair(unittest.TestCase):

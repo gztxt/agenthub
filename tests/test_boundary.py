@@ -44,8 +44,10 @@ FOUR = {"enforced_covered", "enforced_uncovered",
 
 #: 绕过面 id 的冻结集（静默增删绕过路径会在这里红）
 FROZEN_SURFACE_IDS = {
-    "exec": {"agent_without_terminal_entry", "unknown_agent", "bad_token"},
-    "config_write": {"missing_secret", "wrong_secret", "empty_secret"},
+    # 2026-11-07：共享 token 兼容面删除后，「bad_token/错口令」不再是一类绕过面，
+    # 改为「无登录身份」与「用户库不可用」两条 fail-closed 面。
+    "exec": {"agent_without_terminal_entry", "unknown_agent", "no_credential"},
+    "config_write": {"users_db_down", "anonymous", "shared_token_removed"},
 }
 
 
@@ -252,20 +254,17 @@ class TestProofRegistryGate(unittest.TestCase):
 class TestExecBoundaryNegative(unittest.TestCase):
     """绕过路径真被拒：没有终端入口的 agent 拉不起来。
 
-    ⚠ 2026-10-16 修：这两个用例原先送**硬编码占位 token**，期望撞边界闸的 400，
-    实际撞的是 token 闸的 401 —— 从来没走到被测的边界判定。
-    根因是本文件模块头的 `os.environ.setdefault("TERM_TOKEN", ...)` **是空操作**：
-    `src/config.py` 顶部 `load_dotenv(env_path, override=True)` 无条件用 `.env` 覆盖环境，
-    `scripts/run_tier.py` 也不清 `TERM_TOKEN` ⇒ 模块级占位值设不进去。
-    修法：**用 `term.TERM_TOKEN` 本身**送进去 —— 先过鉴权、再验边界，
-    且不再依赖任何环境/顺序假设。token 闸本身由 `test_bad_token_is_rejected` 单独钉。
+    ⚠ 2026-11-07 改：共享 token 兼容面已删除，请求身份只认 Cookie 会话 / HTTP Basic。
+    L0 由 `tests/authfix.py` 把「带 Authorization 头」当已登录，所以这里送 Basic 头，
+    先过鉴权、再验被测的边界判定（不再依赖 TERM_TOKEN 环境值）。
     """
+
+    _AUTH = {"authorization": "Basic bDAtdGVzdDp4"}
 
     def _call(self, agent_id):
         import term
-        req = types.SimpleNamespace(
-            headers={"x-term-token": term.TERM_TOKEN},
-            query_params={})
+        req = types.SimpleNamespace(headers=dict(self._AUTH),
+                                    query_params={})
         return asyncio.run(term.create_session(term.CreateIn(agent_id=agent_id), req))
 
     def test_unlisted_agent_is_rejected(self):
@@ -280,35 +279,36 @@ class TestExecBoundaryNegative(unittest.TestCase):
             self._call("no-such-agent-xyz")
         self.assertEqual(cm.exception.status_code, 400)
 
-    def test_bad_token_is_rejected(self):
+    def test_no_credential_is_401(self):
         import term
         from fastapi import HTTPException
-        req = types.SimpleNamespace(headers={"x-term-token": "wrong"},
-                                    query_params={})
+        req = types.SimpleNamespace(headers={}, query_params={})
         with self.assertRaises(HTTPException) as cm:
             asyncio.run(term.create_session(term.CreateIn(agent_id="claude"), req))
         self.assertEqual(cm.exception.status_code, 401)
 
 
 class TestWriteBoundaryNegative(unittest.TestCase):
-    """绕过路径真被拒：写端点集中闸门 fail-closed，缺口气/错口气都不放行。"""
+    """绕过路径真被拒：写端点集中闸门 fail-closed。"""
 
     PATH = "/api/tasks/1/retry"
 
-    def test_missing_secret_fails_closed(self):
-        verdict, reason = writeauth.decide("POST", self.PATH, "", [])
-        self.assertNotEqual(verdict, "allow")
+    def test_users_db_down_fails_closed(self):
+        verdict, reason = writeauth.decide("POST", self.PATH, False, False)
         self.assertEqual(verdict, "misconfig")
         self.assertTrue(reason)
 
-    def test_wrong_secret_denied(self):
-        verdict, _ = writeauth.decide("POST", self.PATH, "wrong", ["real"])
-        self.assertNotEqual(verdict, "allow")
+    def test_anonymous_with_users_ready_is_denied(self):
+        verdict, _ = writeauth.decide("POST", self.PATH, False, True)
         self.assertEqual(verdict, "deny")
 
-    def test_empty_secret_is_not_a_secret(self):
-        verdict, _ = writeauth.decide("POST", self.PATH, "", ["", None])
-        self.assertNotEqual(verdict, "allow")
+    def test_identity_is_allowed(self):
+        verdict, _ = writeauth.decide("POST", self.PATH, True, True)
+        self.assertEqual(verdict, "allow")
+
+    def test_read_method_is_not_gated(self):
+        verdict, _ = writeauth.decide("GET", self.PATH, False, True)
+        self.assertEqual(verdict, "allow")
 
 
 class TestWiring(unittest.TestCase):

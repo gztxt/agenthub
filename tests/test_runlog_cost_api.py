@@ -3,7 +3,7 @@
 
 这个端点读的是 **CCR 账本**（不是 hub 的 profile_events）⇒ 三道钉子：
   ① 鉴权与 /api/runlog 同口径（GET 但按写方法判；账单＝数据外流面），
-     且**无凭据不回显凭据**、服务端没配口令必须 503（fail-closed，不是放行）；
+     且**无凭据不回显凭据**、用户库不可用必须 503（fail-closed，不是放行）；
   ② `group_by` 只收白名单，`logical_model` 明确 400（2026-09-07 判例）；
   ③ 账本拿不到必须 **503 + ok:false**，绝不回 `{rows:[],total:0}` 那种「静默 0」——
      免费模型 cost_usd 本就是 NULL，静默 0 会让成本看着比实际小。
@@ -109,17 +109,19 @@ class TestRunlogCostApi(unittest.TestCase):
         self.assertEqual(cm.exception.status_code, 401)
         self.assertNotIn("good", str(cm.exception.detail))
 
-    def test_wrong_token_is_401(self):
-        with self._env():
-            with self.assertRaises(HTTPException) as cm:
-                self._call(token="bad")
-        self.assertEqual(cm.exception.status_code, 401)
+    def test_legacy_token_is_not_a_credential(self):
+        """共享 token 兼容面已删除：真实解析器看到 x-hub-token 仍判匿名。"""
+        import authfix
+        req = types.SimpleNamespace(headers={"x-hub-token": "bad"})
+        u, _p, how = authfix.real_identity_of(req)
+        self.assertIsNone(u)
+        self.assertEqual(how, "anonymous")
 
-    def test_unconfigured_is_503_not_allowed(self):
-        with self._env(term="", passcode=""):
+    def test_userdb_down_is_503_not_allowed(self):
+        with mock.patch.object(db, "is_open", lambda: False):
             with self.assertRaises(HTTPException) as cm:
                 self._call(token="")
-        self.assertEqual(cm.exception.status_code, 503, "fail-closed：没设口令不等于不用口令")
+        self.assertEqual(cm.exception.status_code, 503, "fail-closed：用户库不可用不等于放行")
 
     # 正常路径 ------------------------------------------------------------
     def test_authorized_returns_aggregate(self):

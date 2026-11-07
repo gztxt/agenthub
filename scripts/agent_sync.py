@@ -45,24 +45,37 @@ ROOT = Path(__file__).resolve().parents[1]
 UI_ENTRY_TYPES = ("embed", "open")
 
 
-def _token(path: Optional[str]) -> str:
-    """取 TERM_TOKEN：显式文件 > 环境变量 > 仓根 .env。取不到返回空串（只读接口多半仍可用）。"""
-    if path:
-        cand = Path(path)
-    else:
-        cand = ROOT / ".env"
+def _env_val(path: Optional[str], key: str) -> str:
+    """从显式文件 > 仓根 .env > 环境变量取一个键。取不到返回空串。"""
+    cand = Path(path) if path else (ROOT / ".env")
     if cand.is_file():
         for line in cand.read_text(encoding="utf-8", errors="replace").splitlines():
             k, sep, v = line.partition("=")
-            if sep and k.strip() == "TERM_TOKEN":
+            if sep and k.strip() == key:
                 return v.strip().strip('"').strip("'")
-    return os.getenv("TERM_TOKEN", "")
+    return os.getenv(key, "")
 
 
-def _get(base: str, path: str, token: str, timeout: float = 8.0) -> dict:
+def _basic(path: Optional[str] = None) -> dict:
+    """机器侧身份 = HTTP Basic（2026-11-07 用户裁定：共享 token 兼容面已删除）。
+
+    用户名 `HUB_BASIC_USER`（缺省 gztxt）+ 密码 `HUB_SUPERADMIN_PW`，两者都是 .env
+    既有项 ⇒ 零新增凭据。取不到返回空 dict：只读接口在回环仍匿名可用，
+    写接口会如实 401（不静默重试、不偷偷降级）。
+    """
+    user = _env_val(path, "HUB_BASIC_USER") or "gztxt"
+    pw = _env_val(path, "HUB_SUPERADMIN_PW")
+    if not pw:
+        return {}
+    import base64
+    return {"Authorization": "Basic " + base64.b64encode(
+        ("%s:%s" % (user, pw)).encode("utf-8")).decode("ascii")}
+
+
+def _get(base: str, path: str, auth: dict, timeout: float = 8.0) -> dict:
     req = urllib.request.Request(base.rstrip("/") + path)
-    if token:
-        req.add_header("x-hub-token", token)
+    for k, v in (auth or {}).items():
+        req.add_header(k, v)
     with urllib.request.urlopen(req, timeout=timeout) as r:      # noqa: S310 - 只连本机 hub
         return json.loads(r.read().decode("utf-8"))
 
@@ -149,16 +162,17 @@ def render(rows: List[dict], probes: Optional[Dict[str, dict]] = None) -> str:
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="agent 四面对齐复验（菜单/模型/界面/终端）")
     ap.add_argument("--base-url", default=os.getenv("HUB_BASE", "http://127.0.0.1:3102"))
-    ap.add_argument("--token-file", default=None)
+    ap.add_argument("--env-file", dest="token_file", default=None,
+                    help="凭据所在的 .env（缺省取仓根 .env；机制见 _basic）")
     ap.add_argument("--agent", default=None, help="只看一张卡（id）")
     ap.add_argument("--probe", action="store_true", help="额外打 /ui-status（不拉起服务）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
-    token = _token(args.token_file)
+    auth = _basic(args.token_file)
     try:
-        agents_raw = _get(args.base_url, "/api/agents", token)
-        models_raw = _get(args.base_url, "/api/settings/models", token)
+        agents_raw = _get(args.base_url, "/api/agents", auth)
+        models_raw = _get(args.base_url, "/api/settings/models", auth)
     except (urllib.error.URLError, OSError, ValueError) as e:
         print(f"hub 不可达或返回异常：{e}", file=sys.stderr)
         return 2
@@ -181,7 +195,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             if r["ui_state"] != "ok":
                 continue
             try:
-                probes[r["id"]] = _get(args.base_url, f"/api/agents/{r['id']}/ui-status", token, 6.0)
+                probes[r["id"]] = _get(args.base_url, f"/api/agents/{r['id']}/ui-status", auth, 6.0)
             except (urllib.error.URLError, OSError, ValueError) as e:
                 probes[r["id"]] = {"ready": None, "error": str(e)[:60]}
 

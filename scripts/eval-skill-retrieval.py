@@ -91,13 +91,38 @@ def relevant(base: str, q: str, n: int = 3, llm_rerank: bool = False,
     return [str(x.get("name") or "") for x in items], (d.get("llm_rerank") or {})
 
 
+def _basic() -> dict:
+    """机器侧身份 = HTTP Basic（2026-11-07：共享 token 兼容面已删除）。
+
+    用户名 `HUB_BASIC_USER`（缺省 gztxt）+ 密码 `HUB_SUPERADMIN_PW`；env 缺失时
+    回落仓根 `.env`（cron 不会加载 .env）。取不到就返回空 dict，
+    只读接口在回环仍匿名可用，写接口会如实 401。
+    """
+    import base64 as _b64
+    from pathlib import Path as _P
+    env = {}
+    try:
+        f = _P(__file__).resolve().parents[1] / ".env"
+        if f.is_file():
+            for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+                k, sep, v = line.partition("=")
+                if sep and not k.strip().startswith("#"):
+                    env[k.strip()] = v.strip().strip('"').strip("'")
+    except Exception:  # noqa: BLE001
+        pass
+    user = os.getenv("HUB_BASIC_USER") or env.get("HUB_BASIC_USER") or "gztxt"
+    pw = os.getenv("HUB_SUPERADMIN_PW") or env.get("HUB_SUPERADMIN_PW") or ""
+    if not pw:
+        return {}
+    return {"Authorization": "Basic " + _b64.b64encode(
+        ("%s:%s" % (user, pw)).encode("utf-8")).decode("ascii")}
+
+
 def auto_accept(base: str, q: str) -> Dict[str, Any]:
     """打一次 `/auto`（**会记账**，见模块 docstring）。返回 ok/name/norm。"""
     body = json.dumps({"task": q, "caller": "skill-eval", "allow_store": False}).encode()
-    tok = os.getenv("HUB_TOKEN") or ""
     hdr = {"Content-Type": "application/json", "x-hub-channel": "skill-eval"}
-    if tok:
-        hdr["x-hub-token"] = tok
+    hdr.update(_basic())
     req = urllib.request.Request(base + "/api/skill/auto", data=body, headers=hdr, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=60) as r:

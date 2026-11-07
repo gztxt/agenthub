@@ -98,22 +98,17 @@ def put_pref(key: str, request: Request, v: PrefValue):
     if key not in PREF_KEYS:
         raise HTTPException(404, "未知偏好键")
     # 保险带：全局 write_gate 之外再显式判一次（githubprojects POST /clone 同款）
-    if writeauth.identity_ok(request):
-        verdict, reason = "allow", "登录会话（Cookie/Basic）"
-        provided = ""
-    else:
-        verdict, reason = writeauth.decide(
-            "PUT", request.url.path,
-            writeauth.provided_token(request.headers.raw, request.url.query),
-            writeauth.secrets_from_env())
-        provided = writeauth.provided_token(request.headers.raw, request.url.query)
+    verdict, reason = writeauth.decide_req(request, "PUT")
     if verdict not in ("allow", "exempt"):
         raise HTTPException(401 if verdict != "misconfig" else 503, reason)
-    # 审计身份直接按本次命中的凭据名算（write_gate 中间件设的 state.actor 在
-    # 直调/测试态不存在；凭据名口径与 actor_of 一致，只记名不记值）
-    if provided:
-        actor = "user:" + writeauth.credential_name(provided, writeauth.secrets_from_env())
-    else:
-        _u = getattr(request.state, "user", None)
-        actor = "user:" + (_u["username"] if _u else "reader")
+    # 审计身份按本次解析出的用户算（write_gate 中间件设的 state.actor 在
+    # 直调/测试态不存在 ⇒ 回落到 identity_of 再解析一次；只记用户名，不记任何凭据值）
+    _u = getattr(request.state, "user", None)
+    if not _u:
+        try:
+            import users as _users
+            _u, _p, _how = _users.identity_of(request)
+        except Exception:  # noqa: BLE001 —— 取不到身份不该把写操作打挂
+            _u = None
+    actor = "user:" + (_u["username"] if _u else "reader")
     return {"key": key, "value": _save_pref(key, normalize_value(v), actor)}

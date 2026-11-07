@@ -53,13 +53,7 @@ def _require_read(request: Request) -> None:
 
     抽成函数而不是复制（与 src/runlog.py 同一理由）：两个端点任一漏抄就是一条敞开的通道。
     """
-    if writeauth.identity_ok(request):
-        verdict, reason = "allow", "登录会话（Cookie/Basic）"
-    else:
-        verdict, reason = writeauth.decide(
-            "POST", request.url.path,                   # 强制按写方法判：批量读审计＝数据外流
-            writeauth.provided_token(request.headers.raw, request.url.query),
-            writeauth.secrets_from_env())
+    verdict, reason = writeauth.decide_req(request, "POST")   # 强制按写方法判
     if verdict not in ("allow", "exempt"):
         # 只打 verdict/path/来源，绝不打凭据（与 main.py 的 [export] 日志同一口径）
         log.warning(f"[audit] 拒绝 {verdict}：{request.url.path} "

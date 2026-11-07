@@ -39,31 +39,36 @@ def covered(path):
 
 
 class ADecideTruthTable(unittest.TestCase):
-    S = ["super-secret-token", "passcode-xyz"]
+    """2026-11-07 用户裁定后口径：准入只认「是否已登录」。
+    凭据只有两种 —— 浏览器 Cookie 会话 / 机器 HTTP Basic；共享 token 兼容面已删除。"""
 
     def test_reads_never_gated(self):
         for m in ("GET", "HEAD", "OPTIONS"):
-            self.assertEqual(writeauth.decide(m, "/api/memory/l2", "", self.S)[0], "allow")
+            self.assertEqual(writeauth.decide(m, "/api/memory/l2", False, True)[0], "allow")
 
-    def test_write_without_token_denied(self):
-        v, r = writeauth.decide("PUT", "/api/memory/l3", "", self.S)
+    def test_write_without_identity_denied(self):
+        v, r = writeauth.decide("PUT", "/api/memory/l3", False, True)
         self.assertEqual(v, "deny")
-        self.assertIn("缺少凭据", r)
+        self.assertIn("未登录", r)
 
-    def test_write_with_either_secret(self):
-        for t in self.S:
-            self.assertEqual(writeauth.decide("POST", "/api/scan/run", t, self.S)[0], "allow", t)
+    def test_write_with_identity_allowed(self):
+        for m in ("POST", "PUT", "PATCH", "DELETE"):
+            self.assertEqual(writeauth.decide(m, "/api/scan/run", True, True)[0], "allow", m)
 
-    def test_wrong_token_denied_and_never_echoes_secret(self):
-        v, r = writeauth.decide("DELETE", "/api/jobs/x", "guess-me", self.S)
+    def test_deny_reason_never_echoes_credential(self):
+        v, r = writeauth.decide("DELETE", "/api/jobs/x", False, True)
         self.assertEqual(v, "deny")
-        for s in self.S:
-            self.assertNotIn(s, r, "拒绝原因里回显了凭据")
-        self.assertNotIn("guess-me", r, "拒绝原因里回显了用户提交的凭据")
+        self.assertNotIn("token", r.lower(), "拒绝原因不该再引导用户去用 token")
+        self.assertNotIn("secret", r.lower())
 
-    def test_no_secret_configured_fails_closed(self):
-        v, r = writeauth.decide("POST", "/api/memory/l1", "anything", ["", ""])
-        self.assertEqual(v, "misconfig", "没配口令不等于不用口令 —— 必须拒（503）而不是放行")
+    def test_users_db_unavailable_fails_closed(self):
+        v, r = writeauth.decide("POST", "/api/memory/l1", False, False)
+        self.assertEqual(v, "misconfig", "无法判定身份时必须是 503 而不是放行")
+
+    def test_no_token_channel_left(self):
+        """共享 token 通道必须彻底消失：模块内不得再有取头/读 env 口令的函数。"""
+        for name in ("provided_token", "secrets_from_env", "credential_name", "TOKEN_HEADERS"):
+            self.assertFalse(hasattr(writeauth, name), f"{name} 仍在 —— 兼容面没删干净")
 
     def test_exempt_prefixes_each_have_reason(self):
         for p, why in writeauth.EXEMPT_PREFIXES.items():

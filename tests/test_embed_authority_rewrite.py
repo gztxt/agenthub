@@ -138,7 +138,10 @@ class TestBridgeEndToEnd(unittest.IsolatedAsyncioTestCase):
         up_port = self.up_srv.sockets[0].getsockname()[1]
         self.px = embed_proxy.EmbedProxy(
             "测试桥", "127.0.0.1", up_port, listen_host="127.0.0.1",
-            listen_port=0, keys=False, rewrite_authority=rewrite)
+            listen_port=0, keys=False, rewrite_authority=rewrite,
+            # 本文件验的是「出站改写」这条字节路径，不是登录门：
+            # 门（hub_session 校验 → 302/401）由 TestBridgeHubGate 单独覆盖。
+            hub_auth=False)
         self.assertTrue(await self.px.start())
         self.port = self.px.server.sockets[0].getsockname()[1]
         return f"127.0.0.1:{up_port}"
@@ -213,6 +216,65 @@ class TestBridgeEndToEnd(unittest.IsolatedAsyncioTestCase):
         seen = self.up.seen[0]
         self.assertIn(b"Host: " + CLIENT_HOST.encode(), seen, "未开 rewrite 的宿主必须保持原样")
         self.assertIn(b"Origin:", seen)
+
+
+class TestBridgeHubGate(unittest.IsolatedAsyncioTestCase):
+    """2026-11-07 用户裁定：桥的门 = hub 登录态。
+
+    判据三条（缺一条就会退化成「每家用自己一套登录」或「LAN 上免密可读」）：
+      ① 无 hub_session + 文档请求 → 302 到 hub 登录页，Location 带 next=原地址；
+      ② 无 hub_session + XHR/静态 → 401（不给半截页面、不放行数据面）；
+      ③ 有 hub_session 但无效 → 同样 302/401（不能凭"有 Cookie"就放行）。
+    """
+
+    async def _boot(self):
+        self.up = _Recorder()
+        self.up_srv = await asyncio.start_server(self.up, "127.0.0.1", 0)
+        up_port = self.up_srv.sockets[0].getsockname()[1]
+        self.px = embed_proxy.EmbedProxy(
+            "门测试", "127.0.0.1", up_port, listen_host="127.0.0.1",
+            listen_port=0, keys=False, hub_auth=True, hub_port=3102)
+        self.assertTrue(await self.px.start())
+        self.port = self.px.server.sockets[0].getsockname()[1]
+
+    async def _teardown(self):
+        await self.px.stop()
+        self.up_srv.close()
+
+    async def _req(self, raw: bytes) -> bytes:
+        r, w = await asyncio.open_connection("127.0.0.1", self.port)
+        w.write(raw)
+        await w.drain()
+        data = await asyncio.wait_for(r.read(65536), 3)
+        w.close()
+        return data
+
+    async def test_document_without_cookie_redirects_to_hub_login(self):
+        await self._boot()
+        data = await self._req(_doc_get("192.168.5.102:3202", "http://192.168.5.102:3202"))
+        await self._teardown()
+        self.assertIn(b"302", data.split(b"\r\n", 1)[0])
+        self.assertIn(b"Location: http://192.168.5.102:3102/?next=", data)
+        self.assertEqual(self.up.seen, [], "未登录不该碰到上游")
+
+    async def test_xhr_without_cookie_is_401(self):
+        await self._boot()
+        raw = (b"GET /api/agents HTTP/1.1\r\nHost: 192.168.5.102:3202\r\n"
+               b"Accept: application/json\r\n\r\n")
+        data = await self._req(raw)
+        await self._teardown()
+        self.assertIn(b"401", data.split(b"\r\n", 1)[0])
+        self.assertEqual(self.up.seen, [])
+
+    async def test_bad_cookie_is_still_rejected(self):
+        await self._boot()
+        raw = (b"GET / HTTP/1.1\r\nHost: 192.168.5.102:3202\r\n"
+               b"Cookie: hub_session=definitely-not-a-real-session\r\n"
+               b"Accept: text/html\r\n\r\n")
+        data = await self._req(raw)
+        await self._teardown()
+        self.assertIn(b"302", data.split(b"\r\n", 1)[0])
+        self.assertEqual(self.up.seen, [], "无效会话不得穿透到上游")
 
 
 class TestTargets(unittest.TestCase):

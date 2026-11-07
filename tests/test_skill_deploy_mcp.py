@@ -16,8 +16,8 @@
    TestClient 上的真 REST → 真 symlink 落 tmp 盘，realpath 指向权威副本；
    remove 后软链消失、权威目录原样。
 4. **remove 硬边界**：真实目录 409 拒删且内容不灭。
-5. **写门禁不回归**：无 token ⇒ `missing-credential` 诚实失败（不静默发必然 401
-   的请求）；错 token ⇒ REST 层 401（门没被绕过）。
+5. **写门禁不回归**：进程没配 `HUB_SUPERADMIN_PW` ⇒ `missing-credential` 诚实失败
+   （不静默发必然 401 的请求）；未登录 ⇒ REST 层 401/503（门没被绕过）。
 6. **审计成对**：install 记 bind、remove 记 unbind（asset_audit append-only）。
 """
 import json
@@ -27,6 +27,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 _REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
@@ -88,16 +89,19 @@ class _DeployCase(unittest.TestCase):
     # 「失败表态透传」断言就会假绿。
     def _install_fakes(self, token: str = TOKEN):
         client = self.client
+        # 2026-11-07：身份 = Cookie / HTTP Basic，共享 token 面已删除。
+        # token 非空 ⇒ 带 Basic 头；空串 ⇒ 不带任何凭据（模拟未登录）。
+        hdr = {"authorization": "Basic bDAtdGVzdDp4"} if token else {}
 
         def fake_post(path, body, _timeout=0, **params):
-            r = client.post(path, json=body, headers={"x-hub-token": token})
+            r = client.post(path, json=body, headers=hdr)
             if r.status_code >= 400:
                 return {"error": f"hub REST {r.status_code}", "path": path,
                         "http": r.status_code, "detail": r.text[:400]}
             return r.json()
 
         def fake_delete(path, _timeout=0, **params):
-            r = client.delete(path, params=params, headers={"x-hub-token": token})
+            r = client.delete(path, params=params, headers=hdr)
             if r.status_code >= 400:
                 return {"error": f"hub REST {r.status_code}", "path": path,
                         "http": r.status_code, "detail": r.text[:400]}
@@ -238,19 +242,18 @@ class TestWriteGate(_DeployCase):
     def test_missing_credential_is_honest_failure(self):
         self.hubmcp._post = self._saved_post      # 用真转发（它会先查凭据）
         self.hubmcp._delete = self._saved_delete
-        os.environ.pop("TERM_TOKEN", None)
-        os.environ.pop("HUB_PASSCODE", None)
-        out = json.loads(self.hubmcp.hub_skill_install(
-            name="demo", from_route="src", targets="dst"))
-        self.assertEqual(out.get("error"), "missing-credential", out)
-        out2 = json.loads(self.hubmcp.hub_skill_remove(name="demo", route="dst"))
-        self.assertEqual(out2.get("error"), "missing-credential", out2)
+        with mock.patch.dict(os.environ, {"HUB_SUPERADMIN_PW": ""}):
+            out = json.loads(self.hubmcp.hub_skill_install(
+                name="demo", from_route="src", targets="dst"))
+            self.assertEqual(out.get("error"), "missing-credential", out)
+            out2 = json.loads(self.hubmcp.hub_skill_remove(name="demo", route="dst"))
+            self.assertEqual(out2.get("error"), "missing-credential", out2)
 
-    def test_wrong_token_rejected_by_rest_gate(self):
-        self._install_fakes(token="wrong-token")
+    def test_anonymous_rejected_by_rest_gate(self):
+        self._install_fakes(token="")
         out = json.loads(self.hubmcp.hub_skill_install(
             name="demo", from_route="src", targets="dst"))
-        self.assertEqual(out.get("http"), 401, out)
+        self.assertIn(out.get("http"), (401, 503), out)
         self.assertFalse((self.b / "demo").exists(), "401 不许留下半点副作用")
 
 

@@ -228,6 +228,19 @@ def main(argv):
         _anchor = Path(saved_home or str(Path.home()))
         os.environ["MEMINDEX_DB"] = str(_anchor / "hub-l0test-fixtures" / "no-such-memindex.db")
         print("[tier] 已把 memindex 投影钉到不存在的路径（L0 不读生产索引）")
+        # L0 身份替身（2026-11-07）：真实 users.identity_of 需要会话行 + pbkdf2 校验，
+        # 而 L0 是空 HOME/临时库，150 条既有夹具的语义是「带凭据头 = 已登录」。
+        # 替身只活在 tests/authfix.py，不引入任何生产侧 env 开关。
+        try:
+            # 必须先把 src 放进 sys.path：authfix.install() 要 import users，
+            # 而本脚本只有 ROOT（仓根），users.py 在 src/ 下。少了这一行，
+            # 异常会被下面的 except 吞成一行警告，随后全是 401 —— 假红灾难。
+            sys.path.insert(0, str(ROOT / "src"))
+            sys.path.insert(0, str(ROOT / "tests"))
+            import authfix  # noqa: E402
+            authfix.install()
+        except Exception as e:  # noqa: BLE001
+            print("[tier] ⚠ authfix 未装上：%s（身份相关用例会红）" % e)
 
     # 2026-10-05：摘掉 FORCE_COLOR（同一个「L0 不该继承调用者环境」的关切）。
     # 本机 shell 里 FORCE_COLOR=3 是常态，于是 node 把 console.log(数字) 染成 ANSI：

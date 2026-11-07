@@ -148,6 +148,45 @@ def _cookie_has(header: bytes, name: str, token: str) -> bool:
 
 
 
+def _hub_session_ok(header: bytes) -> bool:
+    """请求是否带着**有效的 hub 登录 Cookie**（`hub_session`）。
+
+    为什么桥不自己再要一次口令（2026-11-07 用户裁定「在 agenthub 打开无需再登录，
+    浏览器直接打开才要验证」）：Cookie 是 host-only、**不按端口隔离**，所以 hub
+    (:3102) 登录后种下的 `hub_session` 会随 iframe 请求自动带到各桥端口 —— 桥只需
+    校验它，就能把「hub 登录态」当唯一口令。浏览器直接打开桥端口时没有这个
+    Cookie（没在 hub 登录过），于是会被送回 hub 登录页。
+    校验复用 users.resolve_token（同一张 user_credentials 表，sha256 比对），
+    桥自己不签发、不缓存、不落任何凭据。
+    """
+    for ln in header.split(b"\r\n"):
+        if not ln.lower().startswith(b"cookie:"):
+            continue
+        for part in ln[7:].split(b";"):
+            k, _, v = part.strip().partition(b"=")
+            if k.decode(errors="replace") != "hub_session":
+                continue
+            tok = v.decode(errors="replace")
+            if not tok:
+                return False
+            try:
+                import users as _users
+                row, _perms, compat = _users.resolve_token(tok)
+                return bool(row and not compat)
+            except Exception:  # noqa: BLE001 —— 用户库不可用一律当未登录（fail-closed）
+                return False
+    return False
+
+
+def _host_of(header: bytes) -> str:
+    """请求头里的 Host（用于把未登录访客送回**同一台机器的** hub 登录页）。"""
+    for ln in _HDR_SPLIT.split(header):
+        if ln.lower().startswith(b"host:"):
+            v = ln[5:].strip().decode(errors="replace")
+            return v.split(":", 1)[0].strip("[]")
+    return ""
+
+
 def _is_upgrade(header: bytes) -> bool:
     return b"upgrade:" in header.lower() or b"upgrade" in header.lower().split(b"\r\n", 1)[0]
 
@@ -696,18 +735,25 @@ class EmbedProxy:
                  listen_host: str = "0.0.0.0", listen_port: int = 3103,
                  css: str = "", keys: bool = True,
                  auth_secret: str = "", title: str = "",
-                 rewrite_authority: bool = False):
+                 rewrite_authority: bool = False,
+                 hub_auth: bool = True, hub_port: int = 3102):
         self.name = name
         self.upstream = (upstream_host, int(upstream_port))
         self.listen = (listen_host, int(listen_port))
         self.server: asyncio.base_events.Server | None = None
         self.extra = (css.encode() if css else b"") + (KEYS_JS.encode() if keys else b"")
-        # 非空 ⇒ 这个桥是「带门的桥」：未登录先给表单，登录后服务端代补 Basic。
+        # 非空 ⇒ 这个桥代持上游 Basic（面板口令文件）。**不再**拿它当用户口令：
+        # 用户只要在 hub 登录过，桥就自动补上（2026-11-07 用户裁定）。
         self.auth_secret = (auth_secret or "").strip()
         self.title = title or name
         # 按 Host 判来源的上游（首指 dsh）：请求出桥前把 Host 换成上游 authority，
         # 并摘 Origin —— 详见 _rewrite_authority 的报障记录。
         self.rewrite_authority = bool(rewrite_authority)
+        # hub_auth=True ⇒ 桥的门 = hub 登录态（Cookie hub_session）。
+        # 未登录的文档请求 302 回 hub 登录页，其余 401。关掉即回落到「桥自己出口令表单」
+        # 的旧形态（EMBED_HUB_AUTH=0，仅供排障）。
+        self.hub_auth = bool(hub_auth)
+        self.hub_port = int(hub_port)
         self._secret_cache: tuple[float | None, str] = (None, "")
 
     # ── 口令读取（按 mtime 缓存：面板轮换口令后无需重启 hub）──
@@ -739,8 +785,8 @@ class EmbedProxy:
 
     async def _serve(self, reader: asyncio.StreamReader,
                      writer: asyncio.StreamWriter) -> None:
-        """无口令桥：行为与改前完全一致；有口令桥：先过门，再带 Auth 透传。"""
-        if not self.auth_secret:
+        """门 = hub 登录态；需要时由桥代补上游 Basic（用户零输入）。"""
+        if not self.hub_auth and not self.auth_secret:
             await _handle(reader, writer, self.upstream, self.extra,
                           rewrite_authority=self.rewrite_authority)
             return
@@ -750,6 +796,29 @@ class EmbedProxy:
             writer.close()
             return
         method, path = _req_line(header)
+        if self.hub_auth:
+            if not _hub_session_ok(header):
+                # 未登录：文档/顶层导航送回 hub 登录页（登录后浏览器带着 Cookie 回来），
+                # 其余（XHR/静态/WS）一律 401 —— 不给半截页面，也不偷偷放行数据面。
+                doc_like = (method == b"GET" and (b"text/html" in header.lower()
+                                                  or path == b"/" or bool(_HTML_PATH.search(path))))
+                if doc_like and not _is_upgrade(header):
+                    host = _host_of(header) or "127.0.0.1"
+                    nxt = urllib.parse.quote("http://%s:%d%s" % (host, self.listen[1],
+                                                                 path.decode(errors="replace") or "/"))
+                    loc = "http://%s:%d/?next=%s" % (host, self.hub_port, nxt)
+                    await self._write(writer, (
+                        "HTTP/1.1 302 Found\r\nLocation: %s\r\n"
+                        "Content-Length: 0\r\nCache-Control: no-store\r\n"
+                        "Connection: close\r\n\r\n" % loc).encode())
+                else:
+                    await self._send(writer, 401, b"login required (AgentHub)")
+                return
+            await _handle(reader, writer, self.upstream, self.extra,
+                          pre_header=header, auth=self._auth_header(),
+                          rewrite_authority=self.rewrite_authority)
+            return
+        # 旧形态（EMBED_HUB_AUTH=0 排障用）：桥自己出口令表单
         token = self._cookie_token()
         if method == b"POST" and path == b"/__hub_login":
             await self._login(reader, writer, header, token)

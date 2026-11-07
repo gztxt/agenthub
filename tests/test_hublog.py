@@ -14,8 +14,9 @@
    （日志页是"用户能自由输入"的少数入口之一）。
 4. **journald 不可用是数据不是异常**：非 systemd / 超时 ⇒ sources[].ok=false + 说明，
    另一路照常出，绝不整页 500。
-5. **鉴权按写方法判**：未配口令 503（fail-closed）、错 401、对放行 —— 与
-   /api/runlog、/api/audit/list 同口径。日志含 IP/路径/查询词，批量读＝窥史。
+5. **鉴权按写方法判**（2026-11-07 起身份 = Cookie 会话 / HTTP Basic）：未登录 401、
+   用户库不可用 503（fail-closed）、已登录放行 —— 与 /api/runlog、/api/audit/list 同口径。
+   日志含 IP/路径/查询词，批量读＝窥史。
 """
 import asyncio
 import json
@@ -197,20 +198,18 @@ class TestEndpoint(unittest.TestCase):
         args.update(kw)
         return self._run(hublog.hublog_query(req, **args))
 
-    def test_no_passcode_configured_is_503(self):
-        with self.assertRaises(Exception) as cm:
-            self._run(hublog.hublog_query(_Req(_hdr("x"))))
+    def test_userdb_down_is_503(self):
+        with mock.patch.object(db, "is_open", lambda: False):
+            with self.assertRaises(Exception) as cm:
+                self._run(hublog.hublog_query(_Req([])))
         self.assertEqual(getattr(cm.exception, "status_code", None), 503,
-                         "服务端没配口令必须 fail-closed，不能放行")
+                         "用户库不可用必须 fail-closed，不能放行")
 
-    def test_missing_and_wrong_credential_are_401(self):
+    def test_missing_credential_is_401(self):
         os.environ["HUB_PASSCODE"] = PASSCODE
         with self.assertRaises(Exception) as cm:
             self._run(hublog.hublog_query(_Req([])))
         self.assertEqual(getattr(cm.exception, "status_code", None), 401)
-        with self.assertRaises(Exception) as cm2:
-            self._run(hublog.hublog_query(_Req(_hdr("wrong"))))
-        self.assertEqual(getattr(cm2.exception, "status_code", None), 401)
 
     def test_ok_returns_events_and_stats(self):
         os.environ["HUB_PASSCODE"] = PASSCODE

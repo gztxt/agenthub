@@ -23,7 +23,12 @@ from starlette.responses import JSONResponse
 import approvals
 
 WRITE_METHODS: Tuple[str, ...] = ("POST", "PUT", "PATCH", "DELETE")
-TOKEN_HEADERS: Tuple[str, ...] = ("x-hub-token", "x-term-token")
+#: 2026-11-07 用户裁定：**共享 token 兼容面已删除**。请求凭据只有两种：
+#: ① 浏览器 —— HttpOnly 会话 Cookie `hub_session`（/api/users/login 种下）；
+#: ② 机器 —— HTTP Basic（同一份用户名+密码）。
+#: `x-hub-token` / `x-term-token` / `?token=` 一律不再接受（任何残留调用点都是 bug，
+#: 不是"兼容期"）。设置页的 HUB_PASSCODE 是另一套（改模型/GitHub 的自校验口令），
+#: 与端点准入无关，仍保留。
 
 #: 不经过本闸门的写路由，**每条必须自带鉴权**，理由写死在这里。
 EXEMPT_PREFIXES: Dict[str, str] = {
@@ -65,63 +70,44 @@ def exempt_reason(path: str) -> Optional[str]:
     return None
 
 
-def provided_token(headers: Iterable[Tuple[bytes, bytes]], query: str) -> str:
-    """从头或 ?token= 取凭据。query 保留是为了给不能自定义头的客户端留一条路，
-       与 term.py 既有口径一致（它一直允许 ?token=）。"""
-    want = {h.encode().lower() for h in TOKEN_HEADERS}
-    for k, v in headers:
-        if k.lower() in want:
-            return v.decode("latin-1")
-    for part in (query or "").split("&"):
-        if part.startswith("token="):
-            return part[6:]
-    return ""
-
-
-def decide(method: str, path: str, provided: str, secrets: Iterable[str]) -> Tuple[str, str]:
+def decide(method: str, path: str, identity: bool, users_ready: bool) -> Tuple[str, str]:
     """纯判定，便于 L0 空 HOME 下取证。返回 (verdict, reason)。
 
+    `identity`：本次请求是否已解析出登录用户（Cookie 会话或 HTTP Basic）。
+    `users_ready`：用户库是否可用（不可用 ⇒ 503，而不是把所有人的写操作放行）。
+
     fail-closed 的两处细节：
-      · 未配置任何凭据 → 503 而不是放行（"没设口令"不等于"不用口令"）；
-      · 比较一律 hmac.compare_digest，且**拒绝原因里绝不回显任何凭据**。
+      · 用户库不可用 → 503 而不是放行（"不知道该不该信"不等于"可以写"）；
+      · 拒绝原因里绝不回显任何凭据。
     """
     if method.upper() not in WRITE_METHODS:
         return "allow", "非写方法"
     why = exempt_reason(path)
     if why:
         return "exempt", why
-    live = [s for s in secrets if s]
-    if not live:
-        return "misconfig", "服务端未配置 TERM_TOKEN/HUB_PASSCODE，写端点一律拒绝（fail-closed）"
-    if not provided:
-        return "deny", "缺少凭据（x-hub-token / x-term-token / ?token=）"
-    for s in live:
-        if hmac.compare_digest(provided, s):
-            return "allow", "凭据匹配"
-    return "deny", "凭据不匹配"
+    if identity:
+        return "allow", "登录用户（Cookie 会话 / HTTP Basic）"
+    if not users_ready:
+        return "misconfig", "用户库不可用，写端点一律拒绝（fail-closed）"
+    return "deny", "未登录（须 hub 会话 Cookie 或 HTTP Basic）"
 
 
-def secrets_from_env() -> list:
-    return [os.getenv("TERM_TOKEN", ""), os.getenv("HUB_PASSCODE", "")]
+def decide_req(request, method: str = "") -> Tuple[str, str]:
+    """给各模块「保险带」用的一行式封装：自己解析身份，不再接受共享 token。
 
-
-#: 凭据的**名字**（顺序与 secrets_from_env 严格一致）。审计只记"用了哪把钥匙"，绝不记钥匙本身。
-SECRET_NAMES: Tuple[str, ...] = ("term-token", "hub-passcode")
-
-
-def credential_name(provided: str, secrets: Iterable[str]) -> str:
-    """provided 命中了哪一把凭据的**名字**；未提供/未命中 → "anonymous"。
-
-    为什么新增而不改 `decide()`：decide 的 (verdict, reason) 被中间件与
-    `/api/sessions/export` 端点共用，且 tests/test_writeauth.py 12 例钉着签名。
-    改返回值＝零收益地撞 12 例既有闸门；新增纯函数则两边都不动。
+    `method` 留空则用请求自身的；导出/审计这类「GET 也算数据外流」的端点显式传
+    "POST"，保持改动前「强制按写方法判」的语义。
     """
-    if not provided:
-        return "anonymous"
-    for name, s in zip(SECRET_NAMES, secrets):
-        if s and hmac.compare_digest(provided, s):
-            return name
-    return "anonymous"
+    try:
+        ok = identity_ok(request)
+    except Exception:  # noqa: BLE001
+        ok = False
+    try:
+        import db as _db
+        ready = _db.is_open()
+    except Exception:  # noqa: BLE001
+        ready = False
+    return decide(method or request.method, request.url.path, ok, ready)
 
 
 #: 读端点令牌门（v0.13.192 / P0，方案 AgentHub优化设计方案.md §6.6）。
@@ -134,20 +120,20 @@ READ_TOKEN_DISABLED = False
 #: 非回环读请求的 401 体：detail 给人话（为什么 + 下一步），横幅按 detail 渲染，
 #: 两个字段给前端程序化判断（main.health() 复用同一判断，见 read_banner_state）。
 READ_DENY_BODY = {
-    "detail": "读端点需要凭据：非本机访问须带 x-hub-token / x-term-token（或 ?token=）。本机 127.0.0.1 保持匿名（保持一个版本）。",
+    "detail": "读端点需要登录：非本机访问须先在 hub 登录（浏览器）或带 HTTP Basic（脚本）。本机 127.0.0.1 保持匿名（保持一个版本）。",
     "read_auth_required": True,
-    "reason": "non-loopback-without-token",
+    "reason": "non-loopback-anonymous",
 }
 
 
-def read_verdict(client_host: str, path: str, provided: str, secrets: Iterable[str]) -> Tuple[str, str]:
+def read_verdict(client_host: str, path: str, identity: bool,
+                 users_ready: bool) -> Tuple[str, str]:
     """读令牌门纯判定（便于 L0 空 HOME 取证，同 decide 的形态）。返回 (verdict, reason)。
 
     verdict："allow" / "deny" / "misconfig"。
       · 回环来源 → allow（本地脚本/探针/嵌页零改动，保持一个版本）；
-      · 非回环 + 凭据命中 secrets → allow；
-      · 非回环 + 未命中：secrets 未配置 → misconfig（503，fail-closed 与写门同口径），
-        否则 → deny（401）。
+      · 非回环 + 已登录（Cookie/Basic）→ allow；
+      · 非回环 + 未登录：用户库不可用 → misconfig（503，与写门同口径），否则 deny（401）。
     """
     if READ_TOKEN_DISABLED:
         return "allow", "HUB_READ_TOKENS=0 整门关闭"
@@ -155,37 +141,33 @@ def read_verdict(client_host: str, path: str, provided: str, secrets: Iterable[s
         return "allow", "回环来源保持匿名"
     if any(path.startswith(p) for p in _READ_TOKEN_ALLOW):
         return "allow", "读放行前缀"
-    live = [s for s in secrets if s]
-    if not live:
-        return "misconfig", "服务端未配置 TERM_TOKEN/HUB_PASSCODE，非回环读端点一律拒绝（fail-closed）"
-    if not provided:
-        return "deny", "非本机访问读端点需要凭据（x-hub-token / x-term-token / ?token=）"
-    for s in live:
-        if hmac.compare_digest(provided, s):
-            return "allow", "凭据匹配"
-    return "deny", "凭据不匹配"
+    if identity:
+        return "allow", "登录用户（Cookie 会话 / HTTP Basic）"
+    if not users_ready:
+        return "misconfig", "用户库不可用，非回环读端点一律拒绝（fail-closed）"
+    return "deny", "非本机访问读端点须先登录（Cookie 会话 / HTTP Basic）"
 
 
-def read_banner_state(client_host: str, path: str, provided: str, secrets: Iterable[str]) -> dict:
+def read_banner_state(client_host: str, path: str, identity: bool, users_ready: bool) -> dict:
     """`/health` 内嵌字段：前端工作台据此渲染红色横幅。只报判定结果，不回显凭据值。"""
-    verdict, reason = read_verdict(client_host, path, provided, secrets)
+    verdict, reason = read_verdict(client_host, path, identity, users_ready)
     if verdict == "allow":
         return {"state": "ok", "reason": None}
     return {"state": "locked" if verdict == "deny" else "misconfig", "reason": reason}
 
 
 async def read_gate(request, call_next):
-    """读端点令牌门中间件。Starlette 后注册者最外层 ⇒ 注册在 write_gate 之前、
+    """读端点门中间件。Starlette 后注册者最外层 ⇒ 注册在 write_gate 之前、
     csp.middleware 之后 ⇒ csp 头覆盖它回 401，顺序安全。
 
-    2026-11-07 用户裁定后口径：浏览器身份 = Cookie 会话（用户名+密码登录后由
+    2026-11-07 用户裁定：浏览器身份 = Cookie 会话（用户名+密码登录后由
     /api/users/login 种下），机器身份 = HTTP Basic（同样用户名+密码）。
-    `x-hub-token` 仅作为内部兼容面保留（既有脚本/MCP 未迁移完），**浏览器不再使用**。
+    **共享 token（x-hub-token / x-term-token / ?token=）已整体删除**，不再有兼容分支。
 
     放行面：非 GET 方法（写由 write_gate 管）；`/`（嵌页入口，CSP 报告/脚本同源依赖）；
     `/health`（自证+探针）；`/static/`（页面自举，无数据面）；`/api/csp/report`；
     以及 `_READ_TOKEN_ALLOW`（main 注入：`/api/settings/model/catalog` 等无凭据也能读的公共面，
-    逐条写理由，同 EXEMPT_PREFIXES 纪律）。其余 GET 按「身份 → 回环 → 旧凭据」依次判。
+    逐条写理由，同 EXEMPT_PREFIXES 纪律）。其余 GET 按「身份 → 回环」依次判。
     """
     if request.method != "GET":
         return await call_next(request)
@@ -194,7 +176,7 @@ async def read_gate(request, call_next):
     # 公共面先放行：静态资源每页几十个请求，不该为它们查会话表。
     if (path in ("/", "/health", "/api/csp/report") or path.startswith("/static/")):
         return await call_next(request)
-    # ① Cookie / Basic 身份（浏览器与脚本的同一份用户名+密码）
+    # Cookie / Basic 身份（浏览器与脚本的同一份用户名+密码）
     urow = None
     uperms = None
     try:
@@ -202,45 +184,25 @@ async def read_gate(request, call_next):
         urow, uperms, _how = _users_ident.identity_of(request)
     except Exception:  # noqa: BLE001 —— 用户库不可用不许把读面全打挂
         urow, uperms = None, None
-    # ② 未命中再看旧内部凭据（x-hub-token / ?token=），供未迁移的脚本/MCP
-    provided = provided_token(request.headers.raw, request.url.query)
-    secrets = secrets_from_env()
-    if urow is None and provided:
-        try:
-            import users as _users_early
-            _r, _p, _compat = _users_early.resolve_token(provided)
-            if _r and not _compat:
-                urow, uperms = _r, _p
-        except Exception:  # noqa: BLE001
-            pass
     if urow is not None:
         request.state.actor = "user:" + urow.get("username", "?")
         request.state.user = urow
         request.state.user_perms = uperms
         return await call_next(request)
-    verdict, reason = read_verdict(host, path, provided, secrets)
+    try:
+        import db as _db_r
+        users_ready = _db_r.is_open()
+    except Exception:  # noqa: BLE001
+        users_ready = False
+    verdict, reason = read_verdict(host, path, False, users_ready)
     if verdict == "allow":
         request.state.actor = "user:reader"
-        try:
-            if provided:
-                import users as _users
-                urow2, uperms2, compat = _users.resolve_token(provided)
-                if compat or not urow2:
-                    urow2 = {"id": 0, "username": "legacy", "display": "兼容旧令牌",
-                             "is_admin": True, "created_at": "", "updated_at": ""}
-                    uperms2 = None
-                request.state.user = urow2
-                request.state.user_perms = uperms2
-            else:
-                # 匿名放行（回环 / 公共读前缀）⇒ 没有身份。
-                # 2026-11-07：此前这里塞了一个 legacy 全模块伪用户，导致
-                # /api/users/whoami 对匿名访客也回 username=legacy ⇒ 登录闸门
-                # 把未登录当成已登录，直接放行工作台（刷新后绕过登录页）。
-                request.state.user = None
-                request.state.user_perms = None
-        except Exception:
-            request.state.user = None
-            request.state.user_perms = None
+        # 匿名放行（回环 / 公共读前缀）⇒ 没有身份。
+        # 2026-11-07：此前这里塞了一个 legacy 全模块伪用户，导致
+        # /api/users/whoami 对匿名访客也回 username=legacy ⇒ 登录闸门
+        # 把未登录当成已登录，直接放行工作台（刷新后绕过登录页）。
+        request.state.user = None
+        request.state.user_perms = None
         return await call_next(request)
     status = 503 if verdict == "misconfig" else 401
     print(f"[readgate] {status}：GET {path} 来源={host or '?'} —— {reason}")
@@ -284,10 +246,8 @@ async def write_gate(request, call_next):
     """
     method = request.method
     path = request.url.path
-    provided = provided_token(request.headers.raw, request.url.query)
-    secrets = secrets_from_env()
-    # 2026-11-07 用户裁定：浏览器面写请求认 Cookie 会话，脚本面认 HTTP Basic；
-    # x-hub-token 仅作内部兼容（未迁移的脚本/MCP），浏览器不再使用。
+    # 2026-11-07 用户裁定：写请求只认 Cookie 会话 / HTTP Basic；
+    # 共享 token（x-hub-token / x-term-token / ?token=）已整体删除。
     ureq = None
     uperms_req = None
     try:
@@ -295,21 +255,15 @@ async def write_gate(request, call_next):
         ureq, uperms_req, _how = _users_ident.identity_of(request)
     except Exception:  # noqa: BLE001
         ureq, uperms_req = None, None
-    if ureq is None and provided:
-        try:
-            import users as _users_w
-            _r, _p, _c = _users_w.resolve_token(provided)
-            if _r and not _c:
-                ureq, uperms_req = _r, _p
-        except Exception:  # noqa: BLE001
-            pass
-    if ureq is not None:
-        verdict, reason = "allow", "用户会话（Cookie/Basic）"
-    else:
-        verdict, reason = decide(method, path, provided, secrets)
+    try:
+        import db as _db_w
+        users_ready = _db_w.is_open()
+    except Exception:  # noqa: BLE001
+        users_ready = False
+    verdict, reason = decide(method, path, ureq is not None, users_ready)
     if verdict in ("allow", "exempt"):
         actor = ("user:exempt" if verdict == "exempt"
-                 else ("user:" + ureq["username"] if ureq else "user:" + credential_name(provided, secrets)))
+                 else ("user:" + ureq["username"] if ureq else "user:anonymous"))
         request.state.actor = actor
         if verdict == "allow":
             ask = approvals.ask_reason(path)
@@ -325,22 +279,16 @@ async def write_gate(request, call_next):
                     print(f"[writegate] 202：{method} {path} ASK（{why}）审批 id={rec['id']}")
                     return JSONResponse({"detail": ask, "requires_approval": True,
                                          "approval": rec, "why": why}, status_code=202)
-        # 2026-11-07 用户授权：解析「这个 token 属于哪个用户 + 可见模块」。
-        # 命中用户表 ⇒ state.user(行) + state.user_perms(set|None)；
-        # 回落 .env 兼容口令（含 exempt 面）⇒ 全模块（user_perms=None）保证零行为变化。
+        # 身份注入：Cookie/Basic 已解析出 ureq ⇒ 直接用；exempt 面（自带口令的
+        # 设置端点）没有会话身份，但仍要记 state.user 供审计读（admin 语义）。
         try:
             if ureq is not None:
                 request.state.user = ureq
                 request.state.user_perms = uperms_req
-                return await call_next(request)
-            import users as _users
-            urow, uperms, compat = _users.resolve_token(provided) if verdict == "allow" else (None, None, True)
-            if compat or not urow:
-                urow = {"id": 0, "username": "legacy", "display": "兼容旧令牌",
-                        "is_admin": True, "created_at": "", "updated_at": ""}
-                uperms = None
-            request.state.user = urow
-            request.state.user_perms = uperms
+            else:
+                request.state.user = {"id": 0, "username": "exempt", "display": "豁免端点",
+                                      "is_admin": True, "created_at": "", "updated_at": ""}
+                request.state.user_perms = None
         except Exception:  # 审计面失败不得打断业务（与 actor_of 同口径）
             request.state.user = None
             request.state.user_perms = None

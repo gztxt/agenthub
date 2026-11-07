@@ -2335,7 +2335,7 @@ async function skillCopySnippet() {
   const base = location.origin;
   const rest = [
     'curl -s -X POST ' + base + '/api/skill/invoke \\',
-    "  -H 'x-hub-token: <TERM_TOKEN>' \\",
+    "  -u '<用户名>:<密码>' \\",
     "  -H 'Content-Type: application/json' \\",
     '  -d \'{"name": "' + nm + '", "caller": "my-agent", "task": "<要干什么>"}\'',
   ].join('\n');
@@ -3998,16 +3998,16 @@ async function createJob() {
 
 /* ── 会话导出（件 1 / spec §3）──────────────────────────────────────────
    三个实测出来的坑，决定了这里为什么长这样：
-   ① 不能走 api()：01-core-boot.js 的 isWriteMethod() 只给 POST/PUT/PATCH/DELETE 带 token，
-      而 /api/sessions/export 是 **GET 却要写级鉴权**（后端显式 writeauth.decide("POST",…)）⇒ 必 401。
+   ① 不能走 api()：它按方法决定是否带凭据，而 /api/sessions/export 是 **GET 却要写级鉴权**
+      （后端显式 writeauth.decide_req(request, "POST")）⇒ 无凭据必 401。
    ② 不能用 api() 取体：它会 JSON.parse 成对象，CSV/JSON **文件字节**就毁了 ⇒ 必须 blob。
-   ③ token 不走 ?token=：那会进服务端访问日志与浏览器历史（本工作区三次凭据外流前例）⇒ 只走头。
+   ③ 凭据由浏览器会话 Cookie 自动携带（同源 fetch 默认带），不拼任何 token/URL。
    文案四态互斥（照抄 07-asset-panel.js 的红向口径）：**被拒绝不许说成"没有会话"**。
    窄屏口径：只加 1 个图标按钮，不做 format/redact 的一排开关（chrome 单行化优先级更高）；
    CSV 与 redact=0 走 API 参数，不在本轮做 UI（YAGNI，且给原文出口做 UI 需单独裁定）。 */
 function exportStateOf(status, count, detail) {
   if (status === 503) return 'misconfig';
-  if (status === 401) return /缺少凭据/.test(String(detail || '')) ? 'need-token' : 'bad-token';
+  if (status === 401) return 'need-token';   // 2026-11-07 起只有一种 401：未登录/会话失效
   if (status !== 200) return 'error';
   return (count > 0) ? 'ok' : 'empty';
 }
@@ -4021,8 +4021,8 @@ function exportStateText(state, count, extra) {
            (hits > 0 ? '，正文已打码）' : '）');
   }
   if (state === 'empty') return '导出成功，但这个范围内确实是 0 条会话（文件是空的，不是被拒）';
-  if (state === 'need-token') return '导出被拒：未提供凭据 —— 不是没有会话。请在「设置」里应用 TERM_TOKEN 后重试';
-  if (state === 'bad-token') return '导出被拒：凭据不匹配 —— 不是没有会话。存量口令可能已换过，已清除，请重新输入';
+  if (state === 'need-token') return '导出被拒：尚未登录 —— 不是没有会话。请先在 hub 登录后重试';
+  if (state === 'bad-token') return '导出被拒：登录已失效 —— 不是没有会话。请刷新页面重新登录后重试';
   if (state === 'misconfig') return '导出被拒：服务端未配置口令（fail-closed）—— 不是没有会话';
   // 'error' 必须是**显式分支**而不是掉进兜底：闸门按状态名逐个点名（缺一个即红），
   // 而兜底留给"将来新增状态忘了配文案"这种情况 —— 那时也要说清不是没有会话。

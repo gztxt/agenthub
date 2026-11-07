@@ -356,6 +356,15 @@ function maybeAutoLoginPrompt() {
 }
 async function api(path, opt) {
   const o = Object.assign({ credentials: 'same-origin' }, opt || {});
+  /* 2026-11-07：body 是字符串时默认补 JSON Content-Type。
+     缺它 fetch 按 text/plain 发，FastAPI 把 body 当裸字符串 ⇒ 422
+     model_attributes_type（改密码/发 token/吊所有三个按钮就是这么全崩的）。
+     已有显式头不覆盖；FormData/Blob 等非字符串 body 不受影响。 */
+  if (typeof o.body === 'string') {
+    const hs = Object.assign({}, o.headers || {});
+    if (!Object.keys(hs).some(k => k.toLowerCase() === 'content-type')) hs['Content-Type'] = 'application/json';
+    o.headers = hs;
+  }
   /* 2026-11-07 用户裁定：浏览器不再持有任何 token —— 登录态由 HttpOnly Cookie 自动携带。
      401 = 会话缺失/过期 ⇒ 弹登录框，登录成功后只重试一次（不循环）。
      判据：写方法，或 401 体带 read_auth_required（读门拒绝面）。 */
@@ -2134,11 +2143,11 @@ async function settingsLogsLoad() {
   const body = $('logBody');
   if (!body) return;
   boxBusy('logBody', '加载中…');
-  const pc = ($('logPasscode') && $('logPasscode').value.trim()) || settingsPasscode();
-  const opt = pc ? { headers: { 'x-hub-token': pc } } : {};
+  // 2026-11-07：日志读端点的身份就是浏览器会话 Cookie（api() 同源自动带），
+  // 不再让用户在这里二次输入口令 / 不再拼 x-hub-token。
   settingsLogsSyncSubject();
   try {
-    const d = await api('/api/hublog?' + settingsLogsParams().toString(), opt);
+    const d = await api('/api/hublog?' + settingsLogsParams().toString());
     LOG_LAST = d;
     logPage = 0;
     settingsLogsRender(d);

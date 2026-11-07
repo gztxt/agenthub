@@ -319,7 +319,7 @@ async function startNativeUI(btn) {
   const old = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = '启动中…'; }
   try {
-    /* 凭据只交给 api() 注入 x-hub-token（写方法它本来就会问一次并带对头）。
+    /* 凭据由浏览器会话 Cookie 承担（api() 同源自动带），不再注入任何 token 头。
        调用处**不要**再传 termHeaders()：2026-10-25 实测在缺 token 的浏览器上
        这会先弹一次口令框，api() 再弹一次；两次都取消即回 401「缺少凭据」，
        用户看到的就是「启动失败：缺少凭据…」——即本次报障。 */

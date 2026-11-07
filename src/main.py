@@ -554,7 +554,7 @@ VERSION = "0.13.195"
 #     按钮）置一次性 `_embedAutoStartPending`，由本次探活消费；后台轮询不会顺手起服务。
 #   ② 凭据弹两次 + 原始 401：调用处传 `termHeaders()` 会先 prompt 一次，`api()` 再
 #     prompt 一次；两次取消即回 401「缺少凭据」⇒ 用户看到的就是「启动失败」。
-#     改为只由 `api()` 注入 `x-hub-token`，401 给可操作提示（去设置应用 TERM_TOKEN）。
+#     改为由浏览器会话 Cookie 鉴权（api() 同源自动带），401 时弹登录框。
 #   ③ 判活口径错两层：浏览器侧探活对 IPv6-only 后端永远假死（qwenpaw 只监听
 #     `[::]:8088`，UI 走 hub 注入代理 :3103）；服务端单栈 `port_open` 同样判死。
 #     新增 `GET /api/agents/{id}/ui-status`，由 hub **双栈**判定就绪，前端只读结论。
@@ -757,7 +757,7 @@ app.middleware("http")(csp.middleware)
 CSP_REPORT_PATH = "/api/csp/report"
 _CSP_REPORT_MAX = 64 * 1024
 writeauth.EXEMPT_PREFIXES[CSP_REPORT_PATH] = (
-    "浏览器 CSP 上报无法携带 x-hub-token（规范不允许自定义头）；端点只写日志、"
+    "浏览器 CSP 上报无法携带自定义凭据头（规范不允许）；端点只写日志、"
     "不落库、不产生副作用，且有 64KB 上限与非 JSON 丢弃 ⇒ 与 /telemetry/events/ 同口径。")
 
 
@@ -899,20 +899,20 @@ def _read_auth_of(request: Request) -> dict:
             return {"state": "ok", "reason": None}
     except Exception:  # noqa: BLE001
         pass
-    provided = writeauth.provided_token(request.headers.raw, request.url.query)
-    st = writeauth.read_banner_state(host, "/", provided, writeauth.secrets_from_env())
-    if st.get("state") != "ok" and provided:
-        try:
-            ur, _up, compat = users_mod.resolve_token(provided)
-            if ur and not compat:
-                return {"state": "ok", "reason": None}
-        except Exception:  # noqa: BLE001
-            pass
-    return st
+    try:
+        import db as _db_b
+        ready = _db_b.is_open()
+    except Exception:  # noqa: BLE001
+        ready = False
+    return writeauth.read_banner_state(host, "/", False, ready)
 
 
 def _health_user_of(request: Request) -> dict:
-    """当前请求的身份（只读投影）。匿名 ⇒ legacy 全模块（零行为变化）。"""
+    """当前请求的身份（只读投影）。匿名 ⇒ username=None。
+
+    2026-11-07：共享 token 兼容面删除后不再有「legacy 全模块」这个身份；
+    原先对匿名回 legacy/is_admin=True 会让探针把未登录当成管理员。
+    """
     try:
         u, perms, _how = users_mod.identity_of(request)
         if u:
@@ -920,7 +920,7 @@ def _health_user_of(request: Request) -> dict:
                     "user_perms": sorted(perms) if perms is not None else None}
     except Exception:  # noqa: BLE001
         pass
-    return {"username": "legacy", "is_admin": True, "user_perms": None}
+    return {"username": None, "is_admin": False, "user_perms": None}
 
 
 @app.get("/health")
@@ -1490,7 +1490,9 @@ async def startup():
                 _embed_proxy = embed_proxy_mod.EmbedProxy(
                     "QwenPaw", "127.0.0.1", qp["port"],
                     listen_host=os.getenv("EMBED_PROXY_HOST", config.host),
-                    listen_port=profiles_mod.EMBED_PROXY_PORT)
+                    listen_port=profiles_mod.EMBED_PROXY_PORT,
+                    hub_auth=(os.getenv("EMBED_HUB_AUTH", "1") == "1"),
+                    hub_port=config.port)
                 await _embed_proxy.start()
         except Exception as e:
             log.warning(f"[Agent Hub] 注入代理启动失败（不影响其他功能）：{type(e).__name__}: {e}")
@@ -1518,7 +1520,9 @@ async def startup():
                     listen_port=port, keys=True,
                     auth_secret=str(t.get("secret") or ""),
                     title=str(t.get("name") or t["id"]),
-                    rewrite_authority=bool(t.get("rewrite_host")))
+                    rewrite_authority=bool(t.get("rewrite_host")),
+                    hub_auth=(os.getenv("EMBED_HUB_AUTH", "1") == "1"),
+                    hub_port=config.port)
                 if await px.start():
                     _embed_bridges.append(px)
                     profiles_mod.EMBED_PROXY_MAP[str(t["id"])] = "http://127.0.0.1:%d" % port

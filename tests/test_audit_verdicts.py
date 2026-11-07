@@ -126,8 +126,8 @@ class TestVerdictsEndpoint(unittest.TestCase):
                 self._call(token="")
         self.assertEqual(cm.exception.status_code, 401)
 
-    def test_unconfigured_is_503(self):
-        with self._env(term="", passcode=""):
+    def test_userdb_closed_is_503(self):
+        with mock.patch.object(db, "is_open", lambda: False):
             with self.assertRaises(HTTPException) as cm:
                 self._call(token="")
         self.assertEqual(cm.exception.status_code, 503)

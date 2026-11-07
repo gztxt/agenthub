@@ -160,13 +160,7 @@ async def cloudcli_start(request: Request, body: StartIn):
     按写方法判（writeauth）：创建会话是写动作；铸 JWT 转调 cloudcli REST。
     cloudcli 服务不可达 ⇒ 如实报错（项目清单不受影响——两条链路解耦）。
     """
-    if writeauth.identity_ok(request):
-        verdict, reason = "allow", "登录会话（Cookie/Basic）"
-    else:
-        verdict, reason = writeauth.decide(
-            "POST", request.url.path,
-            writeauth.provided_token(request.headers.raw, request.url.query),
-            writeauth.secrets_from_env())
+    verdict, reason = writeauth.decide_req(request, "POST")   # 强制按写方法判
     if verdict not in ("allow", "exempt"):
         log.warning(f"[cloudcli] 拒绝 {verdict}：{request.url.path} "
                     f"来源={request.client.host if request.client else '?'} —— {reason}")

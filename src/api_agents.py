@@ -218,7 +218,7 @@ async def unregister_agent(agent_id: str):
 #
 # 安全边界：执行目标**只能**取自 `profiles.UI_START`（服务端常量，按 agent id 白名单），
 # 请求体不参与命令构造 ⇒ 本端点不提供任意命令执行。与 /api/term/sessions 的权限同级
-# （同一个写闸门，需要 x-hub-token / ?token=）。
+# （同一个写闸门，需要浏览器 Cookie 会话或 HTTP Basic）。
 def _ui_targets(agent_id: str, spec: Optional[dict], p: dict) -> List[tuple]:
     """探活目标 `[(host, port), …]`，按可信度排序、去重保序。
 

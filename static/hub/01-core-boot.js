@@ -296,7 +296,12 @@ function applyAuthToNav() {
   /* 手风琴组：renderNav 已渲染时直接隐藏对应行；未渲染则交给 renderNav 下次刷新 */
   if (typeof renderNav === 'function') renderNav();
 }
-if (typeof window !== 'undefined') window.addEventListener('DOMContentLoaded', () => { loadAuthPerms(); });
+/* 2026-11-07：hub.js 改为登录闸门通过后**动态注入**，那时 DOMContentLoaded 早已触发 ⇒
+   只挂事件会永远等不到，顶栏不会出现身份/退出，权限也套不上。按 readyState 分流。 */
+if (typeof window !== 'undefined') {
+  if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', () => { loadAuthPerms(); });
+  else loadAuthPerms();
+}
 
 /* 2026-11-07 登录入口：顶栏常显，不依赖 401 触发。
    之前只有读/写 401 才会弹 openLoginModal，而 LAN 访问走「兼容旧令牌」分支返回 200
@@ -328,9 +333,9 @@ function renderAuthBox() {
         if (typeof openLoginModal === 'function') openLoginModal();
       } else if (b.dataset.authact === 'logout') {
         lsRemove('hub.term.token'); lsRemove('hub.login.user');
-        _tokenAutoPrompted = false;   // 退出后允许下一轮无 token 请求再自动弹一次
-        AUTH_PERMS = null; renderAuthBox(); applyAuthToNav();
-        toast('已退出登录', 'ok');
+        /* 2026-11-07：退出必须回到登录闸门（未登录不加载工作台）——重载后由模板里的
+           引导脚本检测无 token，停在 #loginGate，不会注入 hub.js。 */
+        location.reload();
       }
     });
   }

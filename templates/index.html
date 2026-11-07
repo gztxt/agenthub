@@ -1011,6 +1011,21 @@
             line-height: 1; padding: 0 4px; cursor: pointer; }
         #tokenModal .modal-bd { padding: 14px; }
         #tokenModal .modal-ft { display: flex; justify-content: flex-end; gap: 8px; padding: 0 14px 14px; }
+        /* 登录闸门（2026-11-07 用户要求）：主页面就是登录页，登录成功后由引导脚本
+           才注入 /static/hub.js —— 未登录时项目 JS 与数据一个请求都不发。
+           初始 display:flex（不是先渲染骨架再盖），避免未登录时闪一眼后台。 */
+        #loginGate { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center;
+            justify-content: center; padding: 16px; background: var(--bg); }
+        #loginGate .lg-card { width: min(360px, 100%); background: var(--surface);
+            border: 1px solid var(--border); border-radius: 16px;
+            box-shadow: 0 20px 60px var(--shadow-lg); padding: 22px; }
+        #loginGate .lg-brand { display: flex; align-items: center; gap: 8px;
+            font-weight: 600; font-size: var(--fs-lg); }
+        #loginGate .lg-sub { color: var(--text-2); font-size: var(--fs-sm); margin: 4px 0 6px; }
+        #loginGate label { display: block; font-size: var(--fs-sm); color: var(--text-2); margin: 10px 0 4px; }
+        #loginGate input { width: 100%; }
+        #loginGate .lg-err { min-height: 18px; margin-top: 8px; font-size: var(--fs-sm); color: var(--danger-text); }
+        #loginGate .lg-btn { width: 100%; margin-top: 10px; }
         .modal { width: min(560px, 92vw); background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 20px; max-height: 86vh; overflow-y: auto; }
         .modal h3 { margin-bottom: 14px; font-size: var(--fs-lg); line-height: var(--lh-tight); }
         .modal .row { display: flex; gap: 8px; margin-bottom: 10px; }
@@ -1678,6 +1693,23 @@
         <symbol id="i-alert" viewBox="0 0 24 24"><path d="m10.3 3.9-8.1 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.8-3.1l-8.1-14a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></symbol>
         <symbol id="i-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/></symbol>
     </svg>
+    <!-- 登录闸门：未登录只显示这一层；引导脚本在 body 末尾（验证 token 后才注入 hub.js） -->
+    <div id="loginGate" role="dialog" aria-modal="true" aria-label="登录 AgentHub">
+        <form class="lg-card" id="loginGateForm" autocomplete="on">
+            <div class="lg-brand">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="1.6" aria-hidden="true"><use href="#i-hubmark"/></svg>
+                <span>AgentHub</span>
+            </div>
+            <div class="lg-sub">请先登录，登录后才加载工作台</div>
+            <label for="loginGateUser">用户名</label>
+            <input id="loginGateUser" name="username" autocomplete="username" placeholder="用户名">
+            <label for="loginGatePw">密码</label>
+            <input id="loginGatePw" name="password" type="password" autocomplete="current-password" placeholder="密码">
+            <div class="lg-err" id="loginGateErr" role="alert"></div>
+            <button class="btn pri lg-btn" id="loginGateBtn" type="submit">登录</button>
+        </form>
+    </div>
     <div class="header">
         <h1 class="brand" title="Agent Hub"><svg class="brand-glyph" aria-hidden="true"><use href="#i-hubmark"/></svg><span class="brand-word"><span class="bw-a">Agent</span><span class="bw-b">Hub</span></span></h1>
         <div class="hstats">
@@ -3555,6 +3587,65 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=91ea8faa"></script>
+    <!-- 登录闸门引导（2026-11-07）：验过 token 才注入 hub.js —— 未登录时工作台代码与
+         数据请求一个都不发。登录成功走 reload，重载后由这里验活再放行。
+         ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
+    <script>
+    (function () {
+      var HUB_SRC = '/static/hub.js?v=2aac99df';
+      var gate = document.getElementById('loginGate');
+      var form = document.getElementById('loginGateForm');
+      var err = document.getElementById('loginGateErr');
+      var btn = document.getElementById('loginGateBtn');
+      var uEl = document.getElementById('loginGateUser');
+      var pEl = document.getElementById('loginGatePw');
+
+      function fail(msg) { err.textContent = msg || ''; btn.disabled = false; btn.textContent = '登录'; }
+      function loadHub() {
+        gate.style.display = 'none';
+        var s = document.createElement('script');
+        s.src = HUB_SRC;
+        s.onerror = function () { gate.style.display = 'flex'; fail('hub.js 加载失败：检查 agenthub 服务'); };
+        document.body.appendChild(s);
+      }
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var u = (uEl.value || '').trim(), p = pEl.value || '';
+        if (!u || !p) { fail('用户名和密码都要填'); return; }
+        btn.disabled = true; btn.textContent = '登录中…'; err.textContent = '';
+        fetch('/api/users/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: u, password: p })
+        }).then(function (r) {
+          return r.json().then(function (d) { return { ok: r.ok, d: d }; },
+                                function () { return { ok: false, d: {} }; });
+        }).then(function (x) {
+          if (!x.ok || !x.d.token) throw new Error('登录失败：用户名或密码错误（或被限速）');
+          localStorage.setItem('hub.term.token', x.d.token);
+          localStorage.setItem('hub.login.user', u);
+          location.reload();
+        }).catch(function (e) { fail(e.message || '登录失败'); });
+      });
+
+      var tok = (localStorage.getItem('hub.term.token') || '').trim();
+      var known = (localStorage.getItem('hub.login.user') || '').trim();
+      if (known) uEl.value = known;
+      if (!tok) { uEl.focus(); return; }          /* gate 初始就是 flex，保持显示 */
+      fetch('/api/users/whoami', { headers: { 'x-hub-token': tok } })
+        .then(function (r) { if (!r.ok) throw new Error('token 失效'); return r.json(); })
+        .then(function (d) {
+          if (!d || !d.username || d.username === 'legacy') throw new Error('无用户身份');
+          localStorage.setItem('hub.login.user', d.username);
+          loadHub();
+        })
+        .catch(function () {
+          localStorage.removeItem('hub.term.token');
+          localStorage.removeItem('hub.login.user');
+          err.textContent = '';
+          uEl.focus();
+        });
+    })();
+    </script>
 </body>
 </html>

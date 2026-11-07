@@ -83,6 +83,7 @@ import staticguard
 import tdai_client
 import gwprobe                      # 上游网关（CCR）连通性 + 模型注册清单的缓存式体检
 import modelgate                    # 配置模型 ⊂ 网关清单（2026-11-02 第 11 点：死 ID 闸门）
+import modelcalls as modelcalls_mod # 2026-11-07 模型调用计量（借鉴 LangChat）
 import healthx                      # /health 派生量的纯函数层（L0 不 import src.main，故抽出来）
 import memview                     # 内存三口径可观测（本体/托管子进程/cgroup 记账）
 import retention                    # 保留期定时清理（term_recordings + profile_events）
@@ -100,6 +101,7 @@ import writeauth                    # 导出端点按写端点同等鉴权（复
 import audit as audit_mod           # 资产变更审计的只读查询门面（GET /api/audit/list）
 import refscout as refscout_mod     # PT-20261021-04：参考情报（GitHub 借鉴源采集 + 三轴打分）
 import intake as intake_mod         # PT-20261022-01：接单前置（四查一简报）
+import users as users_mod           # 2026-11-07 用户与按功能授权模块
 import runlog as runlog_mod         # 运行日志：三中心检索留痕 + GET /api/runlog 查询门面
 import cloudcli as cloudcli_mod     # CloudCLI 项目直达：项目清单（直读 auth.db）+ 会话启动代理
 import localprojects as localprojects_mod  # 本机项目清单（多根 git 扫描 + cloudcli 合并）
@@ -683,6 +685,10 @@ if os.getenv("HUB_READ_TOKENS", "1") == "0":
     writeauth.READ_TOKEN_DISABLED = True
 # 无凭据也放行的读前缀：设置页模型目录（只读公共清单）；逐条写明理由，勿顺手加白。
 writeauth._READ_TOKEN_ALLOW.add("/api/settings/model/catalog")  # 模型目录是公共清单，无会话面
+writeauth._READ_TOKEN_ALLOW.add("/api/users/whoami")            # 2026-11-07：身份/模块查询须无凭据也能读（回环匿名，非回环由 read_gate 判）
+# 2026-11-07 登录：POST /api/users/login 是写方法不走 read_gate，但必须走 write_gate 的
+# **豁免**（它自己验密码 + 限速；若被 write_gate 当普通写端拦掉，未登录用户永远进不来＝自锁死，
+# 同 EXEMPT_PREFIXES 的 term-token 纪律）。豁免理由写死在 writeauth.EXEMPT_PREFIXES。
 _api_rate: Dict[str, deque] = defaultdict(deque)
 _RATE_EXCLUDED_PREFIXES = ("/telemetry/events/", "/health", "/mcp", "/api/csp/report")
 _RATE_WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
@@ -840,6 +846,8 @@ app.include_router(admission_mod.router)        # P2 C7：/api/admission（外�
 app.include_router(hublog_mod.router)
 app.include_router(refscout_mod.router)          # PT-20261021-04：/api/ref/*（情报卡）
 app.include_router(intake_mod.router)            # PT-20261022-01：/api/intake/task（四查一简报）
+app.include_router(users_mod.router)             # 2026-11-07：/api/users（用户/按功能授权）
+app.include_router(modelcalls_mod.build_router())   # 2026-11-07：/api/monitor/model-calls/*（模型调用计量）
 if os.getenv("HUB_CATALOG", "0") == "1":
     import api_catalog as api_catalog_mod
     app.include_router(api_catalog_mod.router)    # PT-20261025-12：统一编目只读门面
@@ -881,6 +889,22 @@ except Exception as e:  # noqa: BLE001
     log.warning(f"[Agent Hub] Hub MCP server 挂载失败（主服务不受影响）：{type(e).__name__}: {e}")
 
 
+def _read_auth_of(request: Request) -> dict:
+    """读门状态（/health 与 read_gate 同口径）：用户会话 token 命中即 ok。
+    非回环 + 无凭据 ⇒ locked（前端据此显示「输入令牌/登录」横幅）。"""
+    host = request.client.host if request.client else ""
+    provided = writeauth.provided_token(request.headers.raw, request.url.query)
+    st = writeauth.read_banner_state(host, "/", provided, writeauth.secrets_from_env())
+    if st.get("state") != "ok" and provided:
+        try:
+            ur, _up, compat = users_mod.resolve_token(provided)
+            if ur and not compat:
+                return {"state": "ok", "reason": None}
+        except Exception:  # noqa: BLE001
+            pass
+    return st
+
+
 @app.get("/health")
 async def health(request: Request):
     """自证端点（P0-2）：不只看活没活，还要能看出「跑的是哪份代码」。
@@ -901,8 +925,12 @@ async def health(request: Request):
            "term_sessions": term_mod.alive_count(),
            "term_idle_max_s": term_mod.idle_max_s(),
            # v0.13.192（P0）：读令牌门状态 —— 工作台据此渲染红色横幅「非本机读需凭据」。
-           "read_auth": writeauth.read_banner_state(
-               request.client.host if request.client else "", "/", "", writeauth.secrets_from_env()),
+           # 2026-11-07：用户会话 token 也算有效凭据（与 read_gate 同口径），否则登录后横幅不消失。
+           "read_auth": _read_auth_of(request),
+           # 2026-11-07 用户授权：当前请求身份（前端据此隐藏无权限菜单）。
+           # health 是回环匿名面，此处默认 legacy 全模块；非回环带 token 时 read_gate
+           # 已把 state.user/user_perms 注入，由 /api/whoami 端点回传（见 users.py）。
+           "user": {"username": "legacy", "is_admin": True, "user_perms": None},
            }
     # 内存三口径（PT-20261024-08 B5）：**本体 / 托管子进程 / cgroup 记账**。
     # 为什么必须分开：2026-10-24 实测同一服务三个口径差 7 倍（判例 agent-knowledge/259）
@@ -1394,6 +1422,9 @@ async def startup():
     actionplane_mod.ensure_schema()
     # PT-20261021-04：情报卡与采集任务两表（幂等建表）
     refscout_mod.ensure_schema()
+    modelcalls_mod.ensure_schema()   # 2026-11-07 模型调用计量表（幂等）
+    users_mod.ensure_superadmin()   # 2026-11-07 内置超管 gztxt（幂等；pw 走 HUB_SUPERADMIN_PW env）
+    users_mod.seed_menu_items()     # 2026-11-07 菜单配置表首灌（幂等；只插不存在的行）
     tasks_mod.set_context(
         chat_fn=lambda a, m, s=None, mo=None, tr=None: _chat_dispatch(a, m, s, mo, tr),
         # 派发目标取**可执行池**而非菜单：① `AgentDiscovery` 从来没有

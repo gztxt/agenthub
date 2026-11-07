@@ -344,7 +344,8 @@ const MODE_LABEL = { embed: '嵌入', term: '终端', chat: '对话', detail: '�
 /* v0.13.43 设置子菜单：与系统页同形态（data-sys → go(page) ⇒ 正文出页、窄屏自动收侧栏），
    只是单独成组挂在「系统」之下；这三项此前是右侧抽屉里的三个 tab。 */
 const SET_PAGES = [['settings-model', '模型', 'cpu'], ['settings-github', 'GitHub', 'globe'],
-                   ['settings-token', '终端口令', 'terminal'], ['settings-logs', '日志', 'activity']];
+                   ['settings-token', '终端口令', 'terminal'], ['settings-logs', '日志', 'activity'],
+                   ['settings-users', '用户授权', 'eye'], ['settings-modelcalls', '模型计量', 'radar']];
 /* 2026-10-25：「设置 · 记忆存储」并入「系统 · 记忆中心」（同一份本机记忆的读写入口
    不该分居两个菜单，设置组也不该为 4 条便签单占一个一级项）。 */
 const PAGE_LABELS = { classroom: '总览', chat: '统一对话', tasks: '协同', jobs: '定时',
@@ -353,7 +354,9 @@ const PAGE_LABELS = { classroom: '总览', chat: '统一对话', tasks: '协同'
                       botboy: 'Botboy',
                       'settings-model': '设置 · 模型', 'settings-github': '设置 · GitHub',
                       'settings-token': '设置 · 终端口令',
-                      'settings-logs': '设置 · 日志' };
+                      'settings-logs': '设置 · 日志',
+                      'settings-users': '设置 · 用户授权',
+                      'settings-modelcalls': '设置 · 模型计量' };
 const navOpenStored = lsGet('hub.nav.open');
 let navOpen = navOpenStored === null ? 'agents' : navOpenStored;   // 首屏默认展开 AGENTS；'' = 用户主动全收起
 let curPage = '';
@@ -575,13 +578,15 @@ function renderNav() {
   const box = $('navTree');
   if (!box) return;
   const q = ($('navSearch') ? $('navSearch').value.trim() : '').toLowerCase();
-  const all = AGENTS.filter(a => a.kind === 'agent');
-  const infra = AGENTS.filter(a => a.kind !== 'agent');
+  const all = AGENTS.filter(a => a.kind === 'agent').filter(a => (typeof _permOk !== 'function') || _permOk(a.id));
+  const infra = AGENTS.filter(a => a.kind !== 'agent').filter(a => (typeof _permOk !== 'function') || _permOk(a.id));
+  const _sysOk = SYS_PAGES.filter(([p]) => (typeof _permOk !== 'function') || _permOk(p));
+  const _setOk = SET_PAGES.filter(([p]) => (typeof _permOk !== 'function') || _permOk(p));
   const lists = {
     agents: q ? all.filter(a => navMatch(a, q)) : all.slice().sort((x, y) => navRank(x) - navRank(y) || String(x.name||'').localeCompare(String(y.name||''), 'zh')),
     infra: q ? infra.filter(a => navMatch(a, q)) : infra.slice().sort((x, y) => navRank(x) - navRank(y) || String(x.name||'').localeCompare(String(y.name||''), 'zh')),
-    system: q ? [] : SYS_PAGES,
-    settings: q ? [] : SET_PAGES,   // v0.13.43：设置组（模型 / GitHub / 终端口令）
+    system: q ? [] : _sysOk,
+    settings: q ? [] : _setOk,   // 2026-11-07 用户授权：叶子级按 user_perms 过滤
   };
   // 搜索结果计数
   let totalMatch = 0;
@@ -645,6 +650,13 @@ function renderNav() {
   }).join('');
   /* 内容没变就不重写 DOM —— loadAgents 每 30s 刷一次，重写会把 #navTree 的滚动位置弹回顶部 */
   if (html !== _navHtml) { box.innerHTML = html; _navHtml = html; }
+  /* 2026-11-07 用户授权：顶栏 4 项（HTML 直写，data-sys=模块 id）按 user_perms 显隐 */
+  if (typeof _permOk === 'function') {
+    const _top = { classroom: 'btnNavHome', localprojects: 'btnNavProjects', github: 'btnNavGithub', resources: 'btnNavResources' };
+    Object.entries(_top).forEach(([mod, id]) => {
+      const el = $(id); if (el) el.style.display = _permOk(mod) ? '' : 'none';
+    });
+  }
   // 搜索结果计数提示
   const countEl = $('navSearchCount');
   if (countEl) countEl.textContent = q ? ' 共 ' + totalMatch + ' 项' : '';

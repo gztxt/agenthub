@@ -1,87 +1,88 @@
-# P0 读端点令牌门（v0.13.192，方案 AgentHub优化设计方案.md §6.6）L0 判据。
-# 纪律同 test_writeauth.py：纯函数判 + 中间件形态验证，不拉活网络。
+# 读令牌门 L0 判据（v0.13.192 P0）：非回环 GET 须凭据、回环匿名保持一版本。
+# 2026-11-07 收成 TestCase：原模块级裸 test_（含 1 个 pytest 的 monkeypatch fixture）
+# 只有 pytest 收、unittest discover 不收 ⇒ tier parity 对账差 11 条。
+# monkeypatch 参数手工改成保存/恢复（unittest 无 fixture 机制）。
+import asyncio
 import os
 import sys
+import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import writeauth  # noqa: E402
 
 
-def test_read_verdict_loopback_anonymous_allowed(monkeypatch):
-    secrets = ["sekret"]
-    # 双栈 `HOST=::` 下 v4 回环连接的对端实测是 `::ffff:127.0.0.1`（v4-mapped v6），
-    # 漏它＝本机页面全被拒（2026-11-07 上线首探实踩）。
-    for host in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "::ffff:0:0:0:0:0:0:1"):
-        v, r = writeauth.read_verdict(host, "/api/agents", "", secrets)
-        assert v == "allow", (host, r)
+class TestReadTokenL0(unittest.TestCase):
+
+    def test_read_verdict_loopback_anonymous_allowed(self):
+        secrets = ["sekret"]
+        # 双栈 `HOST=::` 下 v4 回环连接的对端实测是 `::ffff:127.0.0.1`（v4-mapped v6），
+        # 漏它＝本机页面全被拒（2026-11-07 上线首探实踩）。
+        for host in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "::ffff:0:0:0:0:0:0:1"):
+            v, r = writeauth.read_verdict(host, "/api/agents", "", secrets)
+            self.assertEqual(v, "allow", (host, r))
+
+    def test_read_verdict_nonloopback_no_token_denied(self):
+        v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", "", ["sekret"])
+        self.assertEqual(v, "deny", (v, r))
+
+    def test_read_verdict_nonloopback_token_match_allowed(self):
+        v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", "sekret", ["sekret"])
+        self.assertEqual(v, "allow", (v, r))
+        v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", "wrong", ["sekret"])
+        self.assertEqual(v, "deny", (v, r))
+
+    def test_read_verdict_no_secrets_is_misconfig_not_open(self):
+        v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", "", [])
+        self.assertEqual(v, "misconfig", (v, r))
+
+    def test_read_verdict_disabled_gate_always_allows(self):
+        old = writeauth.READ_TOKEN_DISABLED
+        writeauth.READ_TOKEN_DISABLED = True
+        try:
+            v, _ = writeauth.read_verdict("8.8.8.8", "/api/memory/search", "", [])
+            self.assertEqual(v, "allow")
+        finally:
+            writeauth.READ_TOKEN_DISABLED = old
+
+    def test_read_allow_prefixes_injected_like_csp_report(self):
+        # main 的注入模式：加前缀 → 放行；逐条写理由，测试钉住「注入即生效」
+        allow = writeauth._READ_TOKEN_ALLOW
+        allow.add("/api/settings/model/catalog")
+        try:
+            v, _ = writeauth.read_verdict("8.8.8.8", "/api/settings/model/catalog", "", ["sekret"])
+            self.assertEqual(v, "allow")
+            v, _ = writeauth.read_verdict("8.8.8.8", "/api/memory/search", "", ["sekret"])
+            self.assertEqual(v, "deny")
+        finally:
+            allow.discard("/api/settings/model/catalog")
+
+    def test_read_banner_state_shapes(self):
+        self.assertEqual(writeauth.read_banner_state("127.0.0.1", "/", "", ["k"])["state"], "ok")
+        self.assertEqual(writeauth.read_banner_state("8.8.8.8", "/", "", ["k"])["state"], "locked")
+        self.assertEqual(writeauth.read_banner_state("8.8.8.8", "/", "", [])["state"], "misconfig")
+
+    def test_read_gate_is_async_middleware(self):
+        self.assertTrue(asyncio.iscoroutinefunction(writeauth.read_gate))
+
+    def test_main_registers_read_gate_before_write_gate(self):
+        src = open(os.path.join(os.path.dirname(__file__), "..", "src", "main.py")).read()
+        i = src.index("writeauth.read_gate")
+        j = src.index('app.middleware("http")(write_gate)')
+        self.assertLess(i, j, "read_gate 必须先于 write_gate 注册（外层先放行/拒读，再轮到写门）")
+
+    def test_main_injects_disable_switch_and_allow_prefix(self):
+        src = open(os.path.join(os.path.dirname(__file__), "..", "src", "main.py")).read()
+        self.assertIn("HUB_READ_TOKENS", src)
+        self.assertIn("writeauth._READ_TOKEN_ALLOW.add", src)
+
+    def test_version_bumped(self):
+        import re
+        src = open(os.path.join(os.path.dirname(__file__), "..", "src", "main.py")).read()
+        m = re.search(r'VERSION = "(0\.13\.(\d+))"', src)
+        self.assertIsNotNone(m, "读令牌门要求的最低版本未达标")
+        self.assertGreaterEqual(int(m.group(2)), 192)
 
 
-def test_read_verdict_nonloopback_no_token_denied():
-    v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", "", ["sekret"])
-    assert v == "deny", (v, r)
-
-
-def test_read_verdict_nonloopback_token_match_allowed():
-    v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", "sekret", ["sekret"])
-    assert v == "allow", (v, r)
-    v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", "wrong", ["sekret"])
-    assert v == "deny", (v, r)
-
-
-def test_read_verdict_no_secrets_is_misconfig_not_open():
-    v, r = writeauth.read_verdict("192.168.5.9", "/api/agents", "", [])
-    assert v == "misconfig", (v, r)
-
-
-def test_read_verdict_disabled_gate_always_allows():
-    old = writeauth.READ_TOKEN_DISABLED
-    writeauth.READ_TOKEN_DISABLED = True
-    try:
-        v, _ = writeauth.read_verdict("8.8.8.8", "/api/memory/search", "", [])
-        assert v == "allow"
-    finally:
-        writeauth.READ_TOKEN_DISABLED = old
-
-
-def test_read_allow_prefixes_injected_like_csp_report():
-    # main 的注入模式：加前缀 → 放行；逐条写理由，测试钉住「注入即生效」
-    allow = writeauth._READ_TOKEN_ALLOW
-    allow.add("/api/settings/model/catalog")
-    try:
-        v, _ = writeauth.read_verdict("8.8.8.8", "/api/settings/model/catalog", "", ["sekret"])
-        assert v == "allow"
-        v, _ = writeauth.read_verdict("8.8.8.8", "/api/memory/search", "", ["sekret"])
-        assert v == "deny"
-    finally:
-        allow.discard("/api/settings/model/catalog")
-
-
-def test_read_banner_state_shapes():
-    assert writeauth.read_banner_state("127.0.0.1", "/", "", ["k"])["state"] == "ok"
-    assert writeauth.read_banner_state("8.8.8.8", "/", "", ["k"])["state"] == "locked"
-    assert writeauth.read_banner_state("8.8.8.8", "/", "", [])["state"] == "misconfig"
-
-
-def test_read_gate_is_async_middleware():
-    import asyncio
-    assert asyncio.iscoroutinefunction(writeauth.read_gate)
-
-
-def test_main_registers_read_gate_before_write_gate():
-    src = open(os.path.join(os.path.dirname(__file__), "..", "src", "main.py")).read()
-    i = src.index("writeauth.read_gate")
-    j = src.index("app.middleware(\"http\")(write_gate)")
-    assert i < j, "read_gate 必须先于 write_gate 注册（外层先放行/拒读，再轮到写门）"
-
-
-def test_main_injects_disable_switch_and_allow_prefix():
-    src = open(os.path.join(os.path.dirname(__file__), "..", "src", "main.py")).read()
-    assert "HUB_READ_TOKENS" in src
-    assert "writeauth._READ_TOKEN_ALLOW.add" in src
-
-
-def test_version_bumped():
-    src = open(os.path.join(os.path.dirname(__file__), "..", "src", "main.py")).read()
-    m = __import__("re").search(r'VERSION = "(0\.13\.(\d+))"', src)
-    assert m and int(m.group(2)) >= 192, "读令牌门要求的最低版本未达标"
+if __name__ == "__main__":
+    unittest.main()

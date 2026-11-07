@@ -190,6 +190,51 @@ CREATE TABLE IF NOT EXISTS term_rec_meta (
     k TEXT PRIMARY KEY,
     v INTEGER NOT NULL
 );
+-- v0.13.x 用户与按功能授权（2026-11-07 用户裁定新增）。此前全 hub 只有 .env 的
+-- 两把共享 token（TERM_TOKEN/HUB_PASSCODE），无「用户」概念。三张表：
+--   users            用户主档（username 唯一、is_admin）
+--   user_credentials 每用户多 token；**只存 sha256，绝不存明文/可逆**
+--   user_perms       每用户按「菜单节点 id」授权（module=NAV 节点；admin 绕过）
+-- 兼容期口径：.env 的旧 token 命中 = 全模块（users.resolve_token 返 compat=True），
+-- 保证零行为变化（军规「新能力不换旧默认」）。
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    display TEXT NOT NULL DEFAULT '',
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    pw_hash TEXT NOT NULL DEFAULT '',   -- 2026-11-07 密码登录：pbkdf2_sha256$salt$hash；空串=未设密码（只能走 token）
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS user_credentials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL,          -- sha256 hex；明文只在签发回包出现一次
+    name TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    revoked_at TEXT                    -- NULL=有效；非 NULL=已吊销（保留行供审计）
+);
+CREATE INDEX IF NOT EXISTS idx_usercred_hash ON user_credentials(token_hash);
+CREATE TABLE IF NOT EXISTS user_perms (
+    user_id INTEGER NOT NULL,
+    module TEXT NOT NULL,              -- 菜单节点 id（见 users.py MODULE_TOP/SYS/SET + agent.id）
+    PRIMARY KEY (user_id, module)
+);
+-- 2026-11-07 菜单配置表（借鉴 LangChat AigcMenu 的「菜单=实体」思想，但**不搬**其
+-- parentId 递归树/前端组件路径那套中后台路由机制——本机 hub 菜单是「叶子节点 +
+-- 固定四组」，不需要递归树）。作用：把「可授权的模块清单」从 users.py 硬编码
+-- （MODULE_TOP/SYS/SET + agent.id）升级为 DB 可维护：新增菜单页不用再改代码，
+-- 插一行即被授权面自动收录。表空时 users.py 回落硬编码（零行为变化）。
+CREATE TABLE IF NOT EXISTS menu_items (
+    module TEXT PRIMARY KEY,           -- 与 user_perms.module / 前端 NAV 节点 id 一致
+    label TEXT NOT NULL DEFAULT '',    -- 展示名（如「终端口令」）
+    icon TEXT NOT NULL DEFAULT '',     -- sprite id（如 'terminal'）
+    grp TEXT NOT NULL DEFAULT 'system',-- 组：top|agents|infra|system|settings
+    order_no INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,  -- 0=隐藏（不删除，可重新启用）
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS trg_termrec_ins AFTER INSERT ON term_recordings BEGIN
     INSERT INTO term_rec_meta(k, v) VALUES('total_bytes', NEW.bytes)
     ON CONFLICT(k) DO UPDATE SET v = v + NEW.bytes;
@@ -272,6 +317,9 @@ def init_db(path: Path) -> None:
                       "ON memories(layer, source, category, status)")
         _conn.execute("CREATE INDEX IF NOT EXISTS idx_mem_arch_hash "
                       "ON memories(layer, content_hash)")
+        # 2026-11-07 密码登录：存量 users 表补 pw_hash 列（旧库无此列时幂等补建；
+        # 旧行 pw_hash='' 表示「未设密码、只能走 token」——诚实表达，不回填假密码。
+        _add_column_if_missing(_conn, "users", "pw_hash", "TEXT NOT NULL DEFAULT ''")
         _conn.commit()
 
 
@@ -310,6 +358,17 @@ def execute(sql: str, params: tuple = ()) -> int:
         cur = _conn.execute(sql, params)
         _conn.commit()
         return cur.rowcount
+
+
+def execute_insert(sql: str, params: tuple = ()) -> int:
+    """INSERT 专用：返回 lastrowid。`execute()` 回的是 **rowcount**（INSERT 恒为 1），
+    拿它当新行 id 会把关联数据写到 id=1 名下。
+    判例（2026-11-07）：users.create_user 用 execute 的返回值建 user_perms，
+    实测新建用户的授权全落到 gztxt(id=1) —— 越权面。"""
+    with _lock:
+        cur = _conn.execute(sql, params)
+        _conn.commit()
+        return int(cur.lastrowid or 0)
 
 
 def checkpoint(mode: str = "PASSIVE") -> None:

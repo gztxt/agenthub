@@ -1120,13 +1120,137 @@ function termDetach() {
   termHealPending = false;
 }
 
-/* TERM_TOKEN 鉴权（后端强制校验）：首次用终端时 prompt 一次存 localStorage，之后 header+query 双带 */
+/* 登录 / 凭据鉴权（后端强制校验）。2026-11-07：原生 prompt() 换成模态框（浮层唯一性三条：
+   唯一入口 openLoginModal、导航即清、遮罩单出口+触屏可关）。无 token 时不阻塞调用方——
+   同步返回已存值，后台异步弹框收集；收集到后重试由 api() 的 401 分支负责。
+   弹窗带「用户名 + 密码」双输入（登录页形态），登录成功自动存会话 token 到 localStorage；
+   也可切「直接输 token」兼容旧 .env 口令入口。 */
+let _tokenModalPromise = null;
+function openLoginModal() {
+  if (document.querySelector('#tokenModal.on')) return _tokenModalPromise;
+  let m = $('tokenModal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'tokenModal';
+    m.className = 'modal-mask';
+    m.innerHTML =
+      '<div class="modal-box" role="dialog" aria-label="登录" style="max-width:340px">' +
+      '<div class="modal-hd"><b>登录 AgentHub</b><button class="modal-x" data-tokx aria-label="关闭">×</button></div>' +
+      '<div class="modal-bd">' +
+      '<div style="display:flex;gap:6px;margin-bottom:10px;border-bottom:1px solid var(--bd,#333)" id="loginTabs">' +
+      '<button class="btn xs on" id="loginTabPw" type="button">账号密码</button>' +
+      '<button class="btn xs" id="loginTabTok" type="button">直接用 Token</button></div>' +
+      '<div id="loginPanePw">' +
+      '<input id="loginUser" class="inp" placeholder="用户名（如 gztxt）" style="width:100%;margin-bottom:6px" autocomplete="username">' +
+      '<input id="loginPw" type="password" class="inp" placeholder="密码" style="width:100%" autocomplete="current-password"></div>' +
+      '<div id="loginPaneTok" style="display:none"><input id="tokIn" type="password" class="inp" placeholder="x-hub-token / 终端 TERM_TOKEN" style="width:100%" autocomplete="off"></div>' +
+      '<div id="loginErr" class="hint" style="color:#f88;margin-top:6px;min-height:14px"></div></div>' +
+      '<div class="modal-ft"><button class="btn ghost" data-tokcancel>取消</button>' +
+      '<button class="btn pri" data-tokok>登录</button></div></div>';
+    document.body.appendChild(m);
+    m.addEventListener('click', (e) => { if (e.target === m) _closeTokenModal(null); });
+    m.querySelector('[data-tokx]').addEventListener('click', () => _closeTokenModal(null));
+    m.querySelector('[data-tokcancel]').addEventListener('click', () => _closeTokenModal(null));
+    /* tab 切换（账号密码 / 直接用 Token）——不走 inline onclick，走委托 */
+    m.querySelector('#loginTabs').addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      const isPw = b.id === 'loginTabPw';
+      m.querySelector('#loginTabPw').classList.toggle('on', isPw);
+      m.querySelector('#loginTabTok').classList.toggle('on', !isPw);
+      m.querySelector('#loginPanePw').style.display = isPw ? '' : 'none';
+      m.querySelector('#loginPaneTok').style.display = isPw ? 'none' : '';
+      m.querySelector('#loginErr').textContent = '';
+    });
+    m.querySelector('[data-tokok]').addEventListener('click', () => {
+      const usingPw = m.querySelector('#loginPanePw').style.display !== 'none';
+      if (usingPw) {
+        const u = (m.querySelector('#loginUser').value || '').trim();
+        const p = m.querySelector('#loginPw').value || '';
+        if (!u || !p) { m.querySelector('#loginErr').textContent = '用户名和密码都要填'; return; }
+        m.querySelector('#loginErr').textContent = '登录中…';
+        m.querySelector('[data-tokok]').disabled = true;
+        _doLogin(u, p).then((ok) => {
+          m.querySelector('[data-tokok]').disabled = false;
+          if (!ok) m.querySelector('#loginErr').textContent = '登录失败：用户名或密码错误（或被限速）';
+        });
+      } else {
+        const v = (m.querySelector('#tokIn').value || '').trim();
+        _closeTokenModal(v || null);
+      }
+    });
+    m.querySelector('#loginPw').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') m.querySelector('[data-tokok]').click();
+      if (e.key === 'Escape') _closeTokenModal(null);
+    });
+    m.querySelector('#tokIn').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') m.querySelector('[data-tokok]').click();
+      if (e.key === 'Escape') _closeTokenModal(null);
+    });
+  }
+  m.classList.add('on');
+  m.querySelector('#loginUser').value = '';
+  m.querySelector('#loginPw').value = '';
+  m.querySelector('#loginErr').textContent = '';
+  setTimeout(() => m.querySelector('#loginUser').focus(), 30);
+  _tokenModalPromise = new Promise((res) => { _tokenModalResolve = res; });
+  return _tokenModalPromise;
+}
+/* 账号密码登录：POST /api/users/login 拿会话 token 存 localStorage（与旧口径同 key，
+   后续请求 x-hub-token 自动带上）。失败返回 false（弹窗留着让用户重试/切 tab）。 */
+async function _doLogin(u, p) {
+  try {
+    const r = await fetch('/api/users/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: u, password: p })
+    });
+    const d = await r.json();
+    if (r.ok && d.token) {
+      lsSet('hub.term.token', d.token);      // 会话 token 走同一个 storage key（旧口径）
+      lsSet('hub.login.user', u);            // 记住登录身份（右上角显示）
+      _closeTokenModal(d.token);
+      if (typeof applyAuthToNav === 'function') applyAuthToNav();
+      if (typeof renderAuthBox === 'function') renderAuthBox();   // 顶栏身份/退出即时刷新
+      return true;
+    }
+    return false;
+  } catch (e) { return false; }
+}
+/* 向后兼容：旧代码调 openTokenModal 的地方统一映射到 openLoginModal（2026-11-07 更名） */
+function openTokenModal() { return openLoginModal(); }
+let _tokenModalResolve = null;
+function _closeTokenModal(val) {
+  const m = $('tokenModal');
+  if (m) m.classList.remove('on');
+  if (_tokenModalResolve) { _tokenModalResolve(val); _tokenModalResolve = null; }
+  _tokenModalPromise = null;
+}
+/* 导航即清浮层：切页时若弹窗还开着，按取消收场（§4.2 浮层唯一性②） */
+if (typeof go !== 'undefined') {
+  const _go = go;
+  go = function (page) { _closeTokenModal(null); return _go(page); };
+}
 function termToken() {
   let t = lsGet('hub.term.token');
-  if (t) t = String(t).trim();          // 存量脏值自愈：带空白的 token 不再往下传
+  if (t) t = String(t).trim();          // trim① 读侧：存量脏值自愈
   if (!t) {
-    t = (prompt('请输入终端鉴权 TERM_TOKEN（也可在右上角「设置」查看后一键应用）') || '').trim();
-    if (t) lsSet('hub.term.token', t);
+    /* trim② 写侧：落盘前必 trim。优先走原生 prompt（node 测试桩/无 document 兜底），
+       浏览器有 document 时改走模态弹窗 openTokenModal（异步，_promptTokenAsync 收集）。 */
+    let got = '';
+    if (typeof document !== 'undefined' && document.body && typeof openTokenModal === 'function') {
+      /* 浏览器：异步弹窗；此刻同步返回 ''，401 后 api() 重试分支重新取 lsGet。 */
+      openTokenModal().then((v) => {
+        const clean = (v || '').trim();
+        if (clean) lsSet('hub.term.token', clean);
+      }).catch(() => {});
+    } else if (typeof prompt === 'function') {
+      /* node 测试桩 / 无模态框环境：同步 prompt，同旧口径（行为层测试钉住这条） */
+      got = (prompt('请输入终端鉴权 TERM_TOKEN（也可在右上角「设置」查看后一键应用）') || '');
+      got = got.trim();
+      if (got) lsSet('hub.term.token', got);
+    }
+    return got;
   }
   return t;
 }

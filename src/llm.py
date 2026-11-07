@@ -32,6 +32,7 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
+import time
 
 import mask
 import resilience
@@ -111,7 +112,7 @@ async def complete_free(system: str, user: str,
             out, _steps = await caller(
                 [{"role": "system", "content": system},
                  {"role": "user", "content": user}],
-                tools=[], max_rounds=1, model=m)
+                tools=[], max_rounds=1, model=m, scene="free")
         except Exception:  # noqa: BLE001 —— 免费档失败不可抛给用户
             continue
         if _usable_llm_text(out):
@@ -338,13 +339,22 @@ async def _create_message(system: Optional[str], messages: List[dict],
     mask_map: Dict[str, str] = {}
     if mask.enabled():
         body, mask_map = mask.mask_obj(body)
-    data = await resilience.instance.acall(
-        _llm_breaker_key(),
-        lambda: _post_once(body, request_id),
-        attempts=LLM_ATTEMPTS, sleep_budget_s=LLM_RETRY_BUDGET_S,
-        record=_record_attempt, call_id=resilience.new_call_id())
+    import modelcalls as _modelcalls  # 延迟导入：modelcalls 只依赖 db（底层），不引 llm ⇒ 不成环
+    _modelcalls.ensure_schema()   # 幂等建表（db.init_db 已跑过则 no-op；L0 独立调 llm 时兜底）
+    _llm_meter.start(request_id)
+    try:
+        data = await resilience.instance.acall(
+            _llm_breaker_key(),
+            lambda: _post_once(body, request_id),
+            attempts=LLM_ATTEMPTS, sleep_budget_s=LLM_RETRY_BUDGET_S,
+            record=_record_attempt, call_id=resilience.new_call_id())
+    except Exception as _e:
+        _llm_meter.record_error(body.get("model") or MODEL, request_id, str(_e)[:300])
+        raise
     if mask_map:
         data = mask.unmask_obj(data, mask_map)
+    _llm_meter.record_success(body.get("model") or MODEL, data.get("usage"),
+                               request_id)
     if usage_sink is not None:
         try:
             usage_sink.append({"model": body["model"], "request_id": request_id,
@@ -366,12 +376,65 @@ async def _post_once(body: Dict[str, Any], request_id: Optional[str]) -> Dict[st
             return await resp.json()
 
 
+class _LLMMeter:
+    """模型调用计量器（借鉴 LangChat ModelCallRecorder，收口在 _create_message 单点）。
+
+    设计纪律（与 llm.py 既有注释同口径）：
+      · 记账绝不打断真实调用——每个 record_* 整体 try，失败只 print 一行；
+      · 未启用（HUB_MODEL_CALLS=0 或 db 不可用）时零开销直接返回；
+      · 场景（scene）由调用方在 llm.chat_tools_loop / complete_free 层标注，
+        默认 'other'；本类只做「该记的记」，不判断语义。
+    """
+
+    def __init__(self):
+        self._enabled = os.getenv("HUB_MODEL_CALLS", "1") not in ("0", "false", "no")
+        self._timer: Dict[str, float] = {}   # request_id -> 开始时刻（单调钟）
+        self._scene_by_model: Dict[str, str] = {}
+
+    def start(self, request_id: Optional[str]) -> None:
+        if request_id:
+            self._timer[request_id] = time.monotonic()
+
+    def set_scene(self, model: str, scene: str) -> None:
+        import modelcalls as _mc
+        if scene in _mc.SCENES:
+            self._scene_by_model[model] = scene
+
+    def set_scene_direct(self, model: str, scene: str) -> None:
+        """L0 测试直通钩子（不过 SCENES 白名单——测试要验证非法场景落 other 的路径）"""
+        self._scene_by_model[model] = scene
+
+    def record_success(self, model: str, usage: Optional[dict],
+                       request_id: Optional[str]) -> None:
+        if not self._enabled:
+            return
+        t0 = self._timer.pop(request_id, None)
+        ms = int((time.monotonic() - t0) * 1000) if t0 else None
+        scene = self._scene_by_model.get(model, "other")
+        import modelcalls as _mc; _mc.record(model, usage, scene=scene, status="success",
+                          duration_ms=ms, request_id=request_id)
+
+    def record_error(self, model: str, request_id: Optional[str],
+                     error: str) -> None:
+        if not self._enabled:
+            return
+        t0 = self._timer.pop(request_id, None)
+        ms = int((time.monotonic() - t0) * 1000) if t0 else None
+        scene = self._scene_by_model.get(model, "other")
+        import modelcalls as _mc; _mc.record(model, None, scene=scene, status="error",
+                          duration_ms=ms, request_id=request_id, error=error)
+
+
+_llm_meter = _LLMMeter()
+
+
 async def chat_tools_loop(messages: List[dict], tools: List[dict],
                           dispatch_tool=None, max_rounds: int = 10,
                           model: Optional[str] = None,
                           on_step=None,
                           request_id: Optional[str] = None,
-                          usage_sink: Optional[List[dict]] = None) -> Tuple[str, List[dict]]:
+                          usage_sink: Optional[List[dict]] = None,
+                          scene: str = "chat") -> Tuple[str, List[dict]]:
     """使用指定 model（默认用全局 MODEL）
 
     多轮工具环（上游 mcp_agent.rs 收敛策略）：
@@ -447,6 +510,8 @@ async def chat_tools_loop(messages: List[dict], tools: List[dict],
         return f"{tool_name}:{err_type}:{field}:{first50}"
 
     for _ in range(max_rounds):
+        if active_model:
+            _llm_meter.set_scene(active_model, scene)   # 计量场景标注（过 SCENES 白名单；'chat'/'free' 已入表）
         data = await _create_message(system, convo, tools or None, model=active_model,
                                      request_id=request_id, usage_sink=usage_sink)
         content_blocks = data.get("content") or []
@@ -543,6 +608,7 @@ async def chat_tools_loop(messages: List[dict], tools: List[dict],
         convo.append({"role": "user", "content": tool_results})
 
     # 轮数耗尽：无 tools 强制收尾
+    _llm_meter.set_scene(active_model, scene)   # 收尾调用也要带场景（同上）
     data = await _create_message(system, convo, None, model=active_model,
                                  request_id=request_id, usage_sink=usage_sink)
     # 同样先剥 raw XML 再用

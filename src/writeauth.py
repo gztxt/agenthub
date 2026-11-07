@@ -47,6 +47,11 @@ EXEMPT_PREFIXES: Dict[str, str] = {
         "（错→401、未配→503）：地址与 key 只能从设置页改，再叠 token 门同样自锁死。"
         "它们写的是 hub 自己的 github_settings 表（+ 可选回写文件，落笔前备份），"
         "不碰 agent 配置。",
+    "/api/users/login":
+        "密码登录端点：自带密码校验（错→401）+ 进程内限速（连败 5 次锁 60s）。"
+        "若被 write_gate 当普通写端拦掉，未登录用户永远进不来＝自锁死（"
+        "同 /api/settings/term-token 的豁免纪律）。它只签发用户自己的会话 token，"
+        "不碰其他用户面；改密走 /api/users/{name}/password（需已登录，不豁免）。",
 }
 
 
@@ -182,9 +187,35 @@ async def read_gate(request, call_next):
         return await call_next(request)
     provided = provided_token(request.headers.raw, request.url.query)
     secrets = secrets_from_env()
-    verdict, reason = read_verdict(host, path, provided, secrets)
+    # 2026-11-07 修：用户会话 token（/api/users/login 签发）也是合法读凭据。
+    # 旧口径只认 .env 两把钥匙 ⇒ 局域网登录成功、请求仍全 401（用户报障形态）。
+    urow = None
+    uperms = None
+    try:
+        import users as _users_early
+        _r, _p, _compat = _users_early.resolve_token(provided)
+        if _r and not _compat:
+            urow, uperms = _r, _p
+    except Exception:  # noqa: BLE001 —— 用户库不可用不许把读面全打挂
+        pass
+    verdict, reason = ("allow", "用户会话 token") if urow else read_verdict(host, path, provided, secrets)
     if verdict == "allow":
         request.state.actor = "user:reader"
+        try:
+            if urow:
+                request.state.user = urow
+                request.state.user_perms = uperms
+            else:
+                import users as _users
+                urow, uperms, compat = _users.resolve_token(provided)
+                if compat and not urow:
+                    urow = {"id": 0, "username": "legacy", "display": "兼容旧令牌",
+                            "is_admin": True, "created_at": "", "updated_at": ""}
+                request.state.user = urow
+                request.state.user_perms = uperms
+        except Exception:
+            request.state.user = None
+            request.state.user_perms = None
         return await call_next(request)
     status = 503 if verdict == "misconfig" else 401
     print(f"[readgate] {status}：GET {path} 来源={host or '?'} —— {reason}")
@@ -217,11 +248,26 @@ async def write_gate(request, call_next):
     path = request.url.path
     provided = provided_token(request.headers.raw, request.url.query)
     secrets = secrets_from_env()
-    verdict, reason = decide(method, path, provided, secrets)
+    # 2026-11-07 修：用户会话 token 也是合法写凭据（per-user token 的本来用途）。
+    # 旧口径只认 .env 两把钥匙 ⇒ 登录成功后在用户授权页建用户/改密码仍 401。
+    ureq = None
+    uperms_req = None
+    if provided:
+        try:
+            import users as _users_w
+            _r, _p, _c = _users_w.resolve_token(provided)
+            if _r and not _c:
+                ureq, uperms_req = _r, _p
+        except Exception:  # noqa: BLE001
+            pass
+    if ureq is not None:
+        verdict, reason = "allow", "用户会话 token"
+    else:
+        verdict, reason = decide(method, path, provided, secrets)
     if verdict in ("allow", "exempt"):
         actor = ("user:exempt" if verdict == "exempt"
-                 else "user:" + credential_name(provided, secrets))
-        # ── P1-2：ALLOW/DENY 之外的第三态 ASK ──
+                 else ("user:" + ureq["username"] if ureq else "user:" + credential_name(provided, secrets)))
+        request.state.actor = actor
         if verdict == "allow":
             ask = approvals.ask_reason(path)
             if ask:
@@ -236,8 +282,25 @@ async def write_gate(request, call_next):
                     print(f"[writegate] 202：{method} {path} ASK（{why}）审批 id={rec['id']}")
                     return JSONResponse({"detail": ask, "requires_approval": True,
                                          "approval": rec, "why": why}, status_code=202)
-        # 审计身份：只记凭据**名**，绝不记值。starlette 的 Request.state 是可写属性袋。
-        request.state.actor = actor
+        # 2026-11-07 用户授权：解析「这个 token 属于哪个用户 + 可见模块」。
+        # 命中用户表 ⇒ state.user(行) + state.user_perms(set|None)；
+        # 回落 .env 兼容口令（含 exempt 面）⇒ 全模块（user_perms=None）保证零行为变化。
+        try:
+            if ureq is not None:
+                request.state.user = ureq
+                request.state.user_perms = uperms_req
+                return await call_next(request)
+            import users as _users
+            urow, uperms, compat = _users.resolve_token(provided) if verdict == "allow" else (None, None, True)
+            if compat or not urow:
+                urow = {"id": 0, "username": "legacy", "display": "兼容旧令牌",
+                        "is_admin": True, "created_at": "", "updated_at": ""}
+                uperms = None
+            request.state.user = urow
+            request.state.user_perms = uperms
+        except Exception:  # 审计面失败不得打断业务（与 actor_of 同口径）
+            request.state.user = None
+            request.state.user_perms = None
         return await call_next(request)
     status = 503 if verdict == "misconfig" else 401
     print(f"[writegate] {status}：{method} {path} 来源={request.client.host if request.client else '?'}"

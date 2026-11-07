@@ -140,8 +140,11 @@ class TestCompleteFree(unittest.TestCase):
     def _call(self, mapping):
         calls = []
 
-        async def fake(messages, tools, max_rounds, model):
+        async def fake(messages, tools, max_rounds, model, **kw):
             calls.append(model)
+            # 2026-11-07：complete_free 带 scene="free"（模型计量分桶），桩须同名接收；
+            # 顺带钉住它确实是 free 场景，否则计量表里免费调用会被记成会话。
+            assert kw.get("scene") == "free", kw
             r = mapping.get(model, "")
             if isinstance(r, Exception):
                 raise r

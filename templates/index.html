@@ -505,6 +505,9 @@
         #crumb b { color: var(--text-1); font-weight: 600; }
         #crumb .sep { color: var(--muted); }
         #opTabs { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+        /* 2026-11-07 登录入口：顶栏最右，窄屏也不换行 */
+        #authBox { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+        #authBox .who { font-size: var(--fs-xs); color: var(--text-2); max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         #opTabs .btn.on { background: var(--sel-bg); color: var(--text-1); border-color: var(--sel-border); font-weight: 600; }
         /* 顶栏无内容时整条收起（不占高不留分割线）：聊天页的模式 tab 已停用、实体名改由
            #chatEntName 显示，syncOpBar() 据此打 .void 标记 */
@@ -1723,6 +1726,9 @@
         <div id="opBar">
             <nav id="crumb" aria-label="位置"></nav>
             <div id="opTabs"></div>
+            <!-- 2026-11-07 登录入口：无 token 时常显「登录」（不依赖 401 触发），
+                 有 token 时显示身份 + 退出。由 01-core-boot.js renderAuthBox() 渲染。 -->
+            <div id="authBox"></div>
         </div>
         <!-- 首页：说明区（Agent / 基础设施已全部收拢至左侧手风琴） -->
         <section class="page on" id="page-classroom">
@@ -3244,6 +3250,58 @@
             </div>
         </section>
 
+        <!-- 设置 · 用户授权（2026-11-07）：用户 CRUD + 每用户 token 发/吊 + 按菜单节点授权。
+             形态同另几个设置页：正文出页、按钮一律 data-settings-act 走委托、无 inline onclick。 -->
+        <section class="page sys" id="page-settings-users">
+            <div class="sp">
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>用户与授权</h3>
+                        <div class="sp-r"><span class="hint">仅 admin 可写 · 普通用户只读自己</span></div>
+                    </div>
+                    <div class="sp-bd">
+                        <div class="hint" style="margin-bottom:10px">
+                            用户模块：按菜单节点（顶栏/AGENTS/基础设施/系统/设置叶子）授权。
+                            admin 全模块可见；普通用户按 user_perms 过滤菜单项。
+                            token 只存 sha256，明文只在签发回包出现一次。
+                        </div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+                            <button class="btn sm" type="button" data-settings-act="users-load">刷新用户列表</button>
+                            <button class="btn sm" type="button" data-settings-act="users-new">新建用户</button>
+                        </div>
+                        <div id="usersPanel" class="hint">加载中…</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+        <!-- 设置 · 模型计量（2026-11-07，借鉴 LangChat monitor）：只读报表，看哪个模型烧多少 token。
+             按钮走 settingsDelegates 委托，无 inline onclick。 -->
+        <section class="page sys" id="page-settings-modelcalls">
+            <div class="sp">
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>模型调用计量</h3>
+                        <div class="sp-r"><span class="hint">只读 · 数据来源 model_call_logs 表</span></div>
+                    </div>
+                    <div class="sp-bd">
+                        <div class="hint" style="margin-bottom:10px">
+                            记录每次模型调用的 token/耗时/场景（收口单点：llm._create_message）。
+                            HUB_MODEL_CALLS=0 可关计量（关闭后本表不再增长，历史数据保留）。
+                        </div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+                            <button class="btn sm" type="button" data-settings-act="mcl-load">刷新计量报表</button>
+                            <select id="mclWindow" aria-label="统计窗口" style="padding:4px 8px">
+                                <option value="7" selected>最近 7 天</option>
+                                <option value="30">最近 30 天</option>
+                                <option value="90">最近 90 天</option>
+                            </select>
+                        </div>
+                        <div id="mclPanel" class="hint">点「刷新计量报表」加载。</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
     </main>
     </div>
 
@@ -3479,6 +3537,6 @@
     <script src="/static/vendor/addon-clipboard.js?v=01270242"></script>
     <script src="/static/vendor/addon-web-links.js?v=629a69f5"></script>
     <script src="/static/vendor/fit.js?v=25f05100"></script>
-    <script src="/static/hub.js?v=41f17793"></script>
+    <script src="/static/hub.js?v=6e139e8f"></script>
 </body>
 </html>

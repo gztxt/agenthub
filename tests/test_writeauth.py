@@ -95,7 +95,11 @@ class BRouteInventory(unittest.TestCase):
         # HUB_PASSCODE（错→401、未配→503），且口令走 POST body 不进 URL。
         # 还原源只取自 model_writes 表里记载的备份路径，不接受客户端传路径
         # ⇒ 不构成任意文件写入口（tests/test_modelcfg.py:RUndo 逐条钉住）。
-        self.assertLessEqual(len(uncovered), 9,
+        # 9 → 10（2026-11-07）：/api/users/login 密码登录端点 —— 自带密码校验 +
+        # 进程内限速（连败 5 次锁 60s）；若不豁免，未登录用户永远进不来＝自锁死
+        # （同 /api/settings/term-token 的豁免纪律）。它只签发该用户自己的会话
+        # token，不碰其他用户面；改密走 /api/users/{name}/password（需已登录，不豁免）。
+        self.assertLessEqual(len(uncovered), 10,
                              f"豁免口子涨到 {len(uncovered)} 条了，每加一条都要在这里交代清楚")
 
     def test_no_dead_exempt_entry(self):

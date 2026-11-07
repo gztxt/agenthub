@@ -255,7 +255,91 @@ var ghStars = new Set(), ghHiddenSet = new Set();
 /* v0.13.6 P1-7：写端点服务端强制凭据。**只有写操作才索取 token** ——
    GET 也 prompt 的话，用户一打开页面就被口令框糊脸（读路径本来不需要）。 */
 const WRITE_METHODS = { POST: 1, PUT: 1, PATCH: 1, DELETE: 1 };
-function isWriteMethod(m) { return !!WRITE_METHODS[String(m || 'GET').toUpperCase()]; }
+/* 2026-11-07 弹窗令牌收集器（与 03 分片 openTokenModal 配套）：
+   同步取已存 token；无则异步等模态弹窗结果（上限 90s，超时视为取消）。 */
+async function _promptTokenAsync() {
+  let t = lsGet('hub.term.token');
+  if (t) return String(t).trim();
+  if (typeof openTokenModal !== 'function') return '';   // 03 分片未加载兜底
+  const p = openTokenModal();
+  const race = await Promise.race([
+    p.catch(() => ''),
+    new Promise(res => setTimeout(() => res(''), 90000))
+  ]);
+  if (race) lsSet('hub.term.token', race);
+  return race || '';
+}
+
+/* 2026-11-07 用户授权：启动时问后端 whoami，按 user_perms 隐藏无权限菜单项。
+   兼容旧令牌 / 回环匿名 ⇒ user_perms=null（全模块，零行为变化）。 */
+let AUTH_PERMS = null;   // null=全模块；set=可见模块；'loading'=还没问完
+async function loadAuthPerms() {
+  try {
+    const data = await api('/api/users/whoami');
+    AUTH_PERMS = (data && data.user_perms) ? new Set(data.user_perms) : null;
+  } catch (e) { AUTH_PERMS = null; }   // 拿不到 = 不隐藏（fail-open，同旧行为）
+  applyAuthToNav();
+  renderAuthBox();
+  maybeAutoLoginPrompt();
+}
+function _permOk(mod) { return AUTH_PERMS === null || AUTH_PERMS.has(mod); }
+/* 把权限套到顶栏 4 项 + 手风琴 4 组。无权限的节点不渲染（不是灰显——用户例子要的就是“不显示”）。 */
+function applyAuthToNav() {
+  /* 顶栏 4 项（HTML 直写，data-sys 即模块 id） */
+  const top = { classroom: 'btnNavHome', localprojects: 'btnNavProjects', github: 'btnNavGithub', resources: 'btnNavResources' };
+  Object.entries(top).forEach(([mod, id]) => {
+    const el = $(id); if (el) el.style.display = _permOk(mod) ? '' : 'none';
+  });
+  /* 手风琴组：renderNav 已渲染时直接隐藏对应行；未渲染则交给 renderNav 下次刷新 */
+  if (typeof renderNav === 'function') renderNav();
+}
+if (typeof window !== 'undefined') window.addEventListener('DOMContentLoaded', () => { loadAuthPerms(); });
+
+/* 2026-11-07 登录入口：顶栏常显，不依赖 401 触发。
+   之前只有读/写 401 才会弹 openLoginModal，而 LAN 访问走「兼容旧令牌」分支返回 200
+   ⇒ 永远不弹窗，用户看到的就是「只显示需要你处理、没有登录框」。
+   现在：无 token 常显「登录」；有 token 显示身份 + 退出。
+   非回环首次访问自动弹一次（sessionStorage 去重，避免每次刷新糊脸）。 */
+function _isLocalHost() {
+  const h = (location.hostname || '');
+  return h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '[::1]';
+}
+function renderAuthBox() {
+  const box = $('authBox');
+  if (!box) return;
+  const tok = String(lsGet('hub.term.token') || '').trim();
+  const user = String(lsGet('hub.login.user') || '').trim();
+  if (tok) {
+    box.innerHTML = '<span class="who" title="当前登录身份：' + escapeHtml(user || '已登录') + '">'
+      + escapeHtml(user || '已登录') + '</span>'
+      + '<button class="btn xs ghost" type="button" data-authact="logout">退出</button>';
+  } else {
+    box.innerHTML = '<button class="btn xs pri" type="button" data-authact="login">登录</button>';
+  }
+  if (!box.dataset.bound) {
+    box.dataset.bound = '1';
+    box.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-authact]');
+      if (!b) return;
+      if (b.dataset.authact === 'login') {
+        if (typeof openLoginModal === 'function') openLoginModal();
+      } else if (b.dataset.authact === 'logout') {
+        lsRemove('hub.term.token'); lsRemove('hub.login.user');
+        AUTH_PERMS = null; renderAuthBox(); applyAuthToNav();
+        toast('已退出登录', 'ok');
+      }
+    });
+  }
+}
+function maybeAutoLoginPrompt() {
+  if (_isLocalHost()) return;
+  if (String(lsGet('hub.term.token') || '').trim()) return;
+  try {
+    if (sessionStorage.getItem('hub.login.prompted')) return;
+    sessionStorage.setItem('hub.login.prompted', '1');
+  } catch (e) { /* 隐私模式：退化为显示按钮即可 */ }
+  setTimeout(() => { if (typeof openLoginModal === 'function') openLoginModal(); }, 600);
+}
 async function api(path, opt) {
   const o = opt || {};
   /* v0.13.44：noToken 的写端点（设置页几个只认 HUB_PASSCODE 的端点，已登记在
@@ -277,7 +361,9 @@ async function api(path, opt) {
     const needTok = isWriteMethod(o.method) || (body0 && body0.read_auth_required);
     if (needTok) {
       lsRemove('hub.term.token');
-      const again = termToken();   // 弹窗输入；用户取消 ⇒ 空串
+      /* 2026-11-07：改走模态弹窗（openTokenModal）；旧 prompt() 已替换。
+         弹窗是异步的 —— 等用户输入/取消（最多 60s 超时视为取消），拿到 token 再重试一次。 */
+      const again = await _promptTokenAsync();
       if (again) {
         o = Object.assign({}, o, { headers: Object.assign({}, o.headers, { 'x-hub-token': again }), __retried401: true });
         r = await fetch(path, o);
@@ -292,6 +378,7 @@ async function api(path, opt) {
         }
         return data1;
       }
+      /* 用户取消 ⇒ 不重试，走既有 401 抛出路径 */
     }
     const data = body0;
     if (!r.ok || !needTok) {
@@ -600,6 +687,10 @@ function go(page) {
   if (page === 'settings-model' && !setModelPageLoaded) { setModelPageLoaded = true; settingsModelsLoad(); }
   if (page === 'settings-github' && !setGithubPageLoaded) { setGithubPageLoaded = true; settingsGithubLoad(); }
   if (page === 'settings-logs' && !setLogsPageLoaded) { setLogsPageLoaded = true; settingsLogsLoad(); }
+  /* 2026-11-07 用户授权页：每次进页都重读（用户/token 可能随时被其他 admin 改） */
+  if (page === 'settings-users') { usersPanelLoad(); }
+  /* 2026-11-07 模型计量页：每次进页都重读（计量数据随调用实时增长） */
+  if (page === 'settings-modelcalls') { mclPanelLoad(); }
   /* 2026-10-25：settings-memory 页已并入「记忆中心」（#page-memory 的本机旧层折叠块），
      不再有独立的进页钩子 —— 折叠块展开时才由 mxLegacyToggle() 拉 L1/L2/L3。 */
   if (page === 'ports' && !portsLoaded) { portsLoaded = true; loadPorts(); }
@@ -1072,7 +1163,7 @@ const SET_WRITE_MODE = {
 };
 /* 设置页 id —— 委托与 go() 懒加载共用这一份清单，别再各处写字面量 */
 const SET_PAGE_IDS = ['page-settings-model', 'page-settings-github', 'page-settings-token',
-                      'page-settings-logs'];   // 2026-10-25：settings-memory 并入记忆中心
+                      'page-settings-logs', 'page-settings-users', 'page-settings-modelcalls'];   // 2026-11-07：用户授权页 + 模型计量页
 
 async function settingsModelsLoad(force) {
   const box = $('setAgentList');
@@ -1865,6 +1956,171 @@ function settingsLogsParams() {
   return p;
 }
 
+/* ── 用户授权面板（2026-11-07）──
+   读 /api/users 渲染；非 admin 只渲染自己的概览。写操作（建用户/发 token/吊 token/改 perms/删用户）
+   需 admin；普通用户调用会被后端 403，前端 toast 提示即可。 */
+let _usersCache = null;
+async function usersPanelLoad() {
+  const box = $('usersPanel');
+  if (!box) return;
+  try {
+    const d = await api('/api/users');
+    _usersCache = d;
+    usersPanelRender(d);
+  } catch (e) {
+    box.innerHTML = '<span class="hint">加载失败：' + escapeHtml(e.message) + '</span>';
+  }
+}
+function usersPanelRender(d) {
+  const box = $('usersPanel');
+  if (!box) return;
+  if (!d.rows || !d.rows.length) {
+    box.innerHTML = '<span class="hint">尚无用户。点「新建用户」创建（admin 才可操作）。</span>';
+    return;
+  }
+  const isAdmin = !!d.admin;
+  const meName = String(lsGet('hub.login.user') || '').trim();
+  const rows = d.rows.map(u => {
+    const tokBtns = isAdmin ?
+      '<button class="btn xs ghost" data-usetok="' + escapeHtml(u.username) + '">发 token</button>' +
+      '<button class="btn xs ghost" data-uservoke="' + escapeHtml(u.username) + '">吊所有</button>' +
+      '<button class="btn xs ghost" data-userm="' + escapeHtml(u.username) + '">改授权</button>' +
+      '<button class="btn xs ghost" data-udel="' + escapeHtml(u.username) + '">删除</button>' : '';
+    /* 2026-11-07 用户裁定：所有用户都能改自己的密码，超管也能改自己的/替别人改。 */
+    const pwBtn = (isAdmin || meName === u.username) ?
+      '<button class="btn xs ghost" data-upw="' + escapeHtml(u.username) + '">改密码</button>' : '';
+    return '<div class="sp-card" style="margin-bottom:10px">' +
+      '<div class="sp-hd"><b>' + escapeHtml(u.username) + (u.is_admin ? ' <span class="hint">(admin)</span>' : '') + '</b>' +
+      '<span class="hint">' + (u.live_tokens || 0) + ' 个活 token · ' + (u.perm_count || 0) + ' 项授权</span></div>' +
+      '<div class="sp-bd" style="display:flex;gap:6px;flex-wrap:wrap">' + pwBtn + tokBtns + '</div></div>';
+  }).join('');
+  box.innerHTML = rows;
+  box.querySelectorAll('[data-upw]').forEach(b => b.addEventListener('click', () => usersChangePw(b.dataset.upw)));
+  box.querySelectorAll('[data-usetok]').forEach(b => b.addEventListener('click', () => usersIssue(b.dataset.usetok)));
+  box.querySelectorAll('[data-uservoke]').forEach(b => b.addEventListener('click', () => usersRevoke(b.dataset.uservoke)));
+  box.querySelectorAll('[data-userm]').forEach(b => b.addEventListener('click', () => usersPerms(b.dataset.userm)));
+  box.querySelectorAll('[data-udel]').forEach(b => b.addEventListener('click', () => usersDel(b.dataset.udel)));
+}
+/* 改密码（2026-11-07 用户裁定：所有用户可改自己的，admin 可替别人改）。
+   自己改须带旧密码（首次未设过可留空）；admin 替别人改旧密码留空。 */
+async function usersChangePw(name) {
+  const meName = String(lsGet('hub.login.user') || '').trim();
+  const isSelf = meName === name;
+  let oldPw = '';
+  if (isSelf) {
+    oldPw = prompt('用户 ' + name + ' 的当前密码（首次设置可留空）：');
+    if (oldPw === null) return;
+  } else if (!confirm('替用户 ' + name + ' 设置新密码？')) return;
+  const np = prompt('新密码（至少 8 位）：');
+  if (!np) return;
+  if (String(np).length < 8) { toast('新密码至少 8 位', 'err'); return; }
+  try {
+    await api('/api/users/' + encodeURIComponent(name) + '/password', {
+      method: 'POST', body: JSON.stringify({ old_password: oldPw || '', new_password: np })
+    });
+    toast('密码已更新；该用户既有会话 token 已吊销', 'ok');
+    if (isSelf) { lsRemove('hub.term.token'); lsRemove('hub.login.user'); renderAuthBox(); }
+    usersPanelLoad();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function usersIssue(name) {  if (!confirm('给用户 ' + name + ' 签发新 token？（明文只显示一次）')) return;
+  try {
+    const d = await api('/api/users/' + encodeURIComponent(name) + '/credentials', { method: 'POST', body: '{}' });
+    if (d.token) {
+      prompt('新用户 token（只显示一次，请立即保存）：', d.token);
+    } else {
+      toast(d.detail || '签发失败', 'err');
+    }
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function usersRevoke(name) {
+  if (!confirm('吊销 ' + name + ' 的全部活 token？（吊销后旧 token 立即失效）')) return;
+  try {
+    const d = await api('/api/users/' + encodeURIComponent(name) + '/revoke', { method: 'POST', body: '{}' });
+    toast('已吊销 ' + (d.revoked || 0) + ' 个 token', 'ok');
+    usersPanelLoad();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function usersPerms(name) {
+  try {
+    const detail = await api('/api/users/' + encodeURIComponent(name));
+    const cur = detail.perms || [];
+    /* 2026-11-07 菜单配置表：可授权模块清单改从 /api/users 响应（DB 驱动）取，不再硬编码；
+       后端表空时自动回落硬编码（零行为变化），表里有数据时新菜单页自动出现在清单里。 */
+    const ld = await api('/api/users');
+    const allMods = ((ld.modules && (ld.modules.top || [])) .concat(ld.modules.system || [], ld.modules.settings || [])).slice();
+    if (ld.modules && ld.modules.agents && ld.modules.agents.length) allMods.push(...ld.modules.agents);
+    const choice = prompt('用户 ' + name + ' 可见模块（空格分隔，留空=全模块）：', cur.join(' '));
+    if (choice === null) return;
+    const mods = choice.split(/\s+/).filter(Boolean);
+    const d = await api('/api/users/' + encodeURIComponent(name) + '/perms', { method: 'PUT', body: JSON.stringify({ modules: mods }) });
+    toast('已更新 ' + name + ' 授权：' + (d.perms || []).join(', '), 'ok');
+    usersPanelLoad();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function usersDel(name) {
+  if (!confirm('删除用户 ' + name + '？（须先吊销全部活 token，否则后端 409）')) return;
+  try {
+    await api('/api/users/' + encodeURIComponent(name), { method: 'DELETE' });
+    toast('已删除', 'ok');
+    usersPanelLoad();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function usersPanelNew() {
+  const name = prompt('新用户名（小写字母/数字/-/_）：');
+  if (!name) return;
+  const display = prompt('显示名（可选）：') || name;
+  const isAdmin = confirm('设为 admin？（全模块可见）');
+  const mods = prompt('授权模块（空格分隔，admin 留空 = 全模块）：') || '';
+  try {
+    await api('/api/users', {
+      method: 'POST',
+      body: JSON.stringify({ username: name, display, is_admin: isAdmin, perms: mods.split(/\s+/).filter(Boolean) })
+    });
+    toast('已创建 ' + name, 'ok');
+    usersPanelLoad();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ── 模型调用计量面板（2026-11-07，借鉴 LangChat monitor）──
+   只读：拉 /api/monitor/model-calls/overview 渲染按模型/场景的 token 汇总。 */
+async function mclPanelLoad() {
+  const box = $('mclPanel');
+  if (!box) return;
+  box.textContent = '加载中…';
+  const win = ($('mclWindow') ? $('mclWindow').value : '7');
+  try {
+    const d = await api('/api/monitor/model-calls/overview?window_days=' + win);
+    mclRender(d);
+  } catch (e) {
+    box.innerHTML = '<span class="hint">加载失败：' + escapeHtml(e.message) + '</span>';
+  }
+}
+function mclRender(d) {
+  const box = $('mclPanel');
+  if (!box) return;
+  if (d.note) { box.innerHTML = '<span class="hint">' + escapeHtml(d.note) + '</span>'; return; }
+  if (!d.total_calls) { box.innerHTML = '<span class="hint">窗口内暂无计量记录（' + (d.window_days) + ' 天）。</span>'; return; }
+  let h = '<div class="hint" style="margin-bottom:8px">共 <b>' + d.total_calls +
+          '</b> 次调用 · <b>' + (d.total_tokens||0).toLocaleString() + '</b> tokens（窗口 ' +
+          d.window_days + ' 天，' + (d.as_of||'').slice(0,16).replace('T',' ') + ' UTC）</div>';
+  if (d.by_model && d.by_model.length) {
+    h += '<table class="tbl" style="width:100%;border-collapse:collapse;margin-bottom:10px">' +
+      '<tr><th style="text-align:left;padding:4px">模型</th><th style="text-align:left;padding:4px">场景分布</th>' +
+      '<th style="padding:4px">调用</th><th style="padding:4px">tokens</th><th style="padding:4px">均耗时ms</th></tr>';
+    d.by_model.forEach(m => {
+      h += '<tr><td style="padding:4px;font-family:monospace">' + escapeHtml(m.model) + '</td>' +
+           '<td style="padding:4px" class="hint">' + escapeHtml(Object.entries(d.by_scene||{}).map(([s,n])=>s+':'+n).join(' ')) + '</td>' +
+           '<td style="text-align:center;padding:4px">' + m.calls + '</td>' +
+           '<td style="text-align:center;padding:4px">' + (m.total_tokens||0).toLocaleString() + '</td>' +
+           '<td style="text-align:center;padding:4px">' + (m.avg_ms||0) + '</td></tr>';
+    });
+    h += '</table>';
+  }
+  h += '<div class="hint">场景计数：' + Object.entries(d.by_scene||{}).map(([s,n])=>s+'='+n).join(' · ') + '</div>';
+  box.innerHTML = h;
+}
+
 async function settingsLogsLoad() {
   const body = $('logBody');
   if (!body) return;
@@ -2056,6 +2312,11 @@ function settingsDelegates() {
       if (a === 'log-refresh') return settingsLogsLoad();
       if (a === 'log-copy') return settingsLogsCopy();
       if (a === 'log-export') return settingsLogsExport();
+      /* 用户授权页（2026-11-07） */
+      if (a === 'users-load') return usersPanelLoad();
+      if (a === 'users-new') return usersPanelNew();
+      /* 模型计量页（2026-11-07，借鉴 LangChat） */
+      if (a === 'mcl-load') return mclPanelLoad();
     }
     });
     /* 筛选下拉变了就重拉（关键字框要等敲完 ⇒ 走「刷新」按钮，不逐字符打后端）。
@@ -3871,13 +4132,137 @@ function termDetach() {
   termHealPending = false;
 }
 
-/* TERM_TOKEN 鉴权（后端强制校验）：首次用终端时 prompt 一次存 localStorage，之后 header+query 双带 */
+/* 登录 / 凭据鉴权（后端强制校验）。2026-11-07：原生 prompt() 换成模态框（浮层唯一性三条：
+   唯一入口 openLoginModal、导航即清、遮罩单出口+触屏可关）。无 token 时不阻塞调用方——
+   同步返回已存值，后台异步弹框收集；收集到后重试由 api() 的 401 分支负责。
+   弹窗带「用户名 + 密码」双输入（登录页形态），登录成功自动存会话 token 到 localStorage；
+   也可切「直接输 token」兼容旧 .env 口令入口。 */
+let _tokenModalPromise = null;
+function openLoginModal() {
+  if (document.querySelector('#tokenModal.on')) return _tokenModalPromise;
+  let m = $('tokenModal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'tokenModal';
+    m.className = 'modal-mask';
+    m.innerHTML =
+      '<div class="modal-box" role="dialog" aria-label="登录" style="max-width:340px">' +
+      '<div class="modal-hd"><b>登录 AgentHub</b><button class="modal-x" data-tokx aria-label="关闭">×</button></div>' +
+      '<div class="modal-bd">' +
+      '<div style="display:flex;gap:6px;margin-bottom:10px;border-bottom:1px solid var(--bd,#333)" id="loginTabs">' +
+      '<button class="btn xs on" id="loginTabPw" type="button">账号密码</button>' +
+      '<button class="btn xs" id="loginTabTok" type="button">直接用 Token</button></div>' +
+      '<div id="loginPanePw">' +
+      '<input id="loginUser" class="inp" placeholder="用户名（如 gztxt）" style="width:100%;margin-bottom:6px" autocomplete="username">' +
+      '<input id="loginPw" type="password" class="inp" placeholder="密码" style="width:100%" autocomplete="current-password"></div>' +
+      '<div id="loginPaneTok" style="display:none"><input id="tokIn" type="password" class="inp" placeholder="x-hub-token / 终端 TERM_TOKEN" style="width:100%" autocomplete="off"></div>' +
+      '<div id="loginErr" class="hint" style="color:#f88;margin-top:6px;min-height:14px"></div></div>' +
+      '<div class="modal-ft"><button class="btn ghost" data-tokcancel>取消</button>' +
+      '<button class="btn pri" data-tokok>登录</button></div></div>';
+    document.body.appendChild(m);
+    m.addEventListener('click', (e) => { if (e.target === m) _closeTokenModal(null); });
+    m.querySelector('[data-tokx]').addEventListener('click', () => _closeTokenModal(null));
+    m.querySelector('[data-tokcancel]').addEventListener('click', () => _closeTokenModal(null));
+    /* tab 切换（账号密码 / 直接用 Token）——不走 inline onclick，走委托 */
+    m.querySelector('#loginTabs').addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      const isPw = b.id === 'loginTabPw';
+      m.querySelector('#loginTabPw').classList.toggle('on', isPw);
+      m.querySelector('#loginTabTok').classList.toggle('on', !isPw);
+      m.querySelector('#loginPanePw').style.display = isPw ? '' : 'none';
+      m.querySelector('#loginPaneTok').style.display = isPw ? 'none' : '';
+      m.querySelector('#loginErr').textContent = '';
+    });
+    m.querySelector('[data-tokok]').addEventListener('click', () => {
+      const usingPw = m.querySelector('#loginPanePw').style.display !== 'none';
+      if (usingPw) {
+        const u = (m.querySelector('#loginUser').value || '').trim();
+        const p = m.querySelector('#loginPw').value || '';
+        if (!u || !p) { m.querySelector('#loginErr').textContent = '用户名和密码都要填'; return; }
+        m.querySelector('#loginErr').textContent = '登录中…';
+        m.querySelector('[data-tokok]').disabled = true;
+        _doLogin(u, p).then((ok) => {
+          m.querySelector('[data-tokok]').disabled = false;
+          if (!ok) m.querySelector('#loginErr').textContent = '登录失败：用户名或密码错误（或被限速）';
+        });
+      } else {
+        const v = (m.querySelector('#tokIn').value || '').trim();
+        _closeTokenModal(v || null);
+      }
+    });
+    m.querySelector('#loginPw').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') m.querySelector('[data-tokok]').click();
+      if (e.key === 'Escape') _closeTokenModal(null);
+    });
+    m.querySelector('#tokIn').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') m.querySelector('[data-tokok]').click();
+      if (e.key === 'Escape') _closeTokenModal(null);
+    });
+  }
+  m.classList.add('on');
+  m.querySelector('#loginUser').value = '';
+  m.querySelector('#loginPw').value = '';
+  m.querySelector('#loginErr').textContent = '';
+  setTimeout(() => m.querySelector('#loginUser').focus(), 30);
+  _tokenModalPromise = new Promise((res) => { _tokenModalResolve = res; });
+  return _tokenModalPromise;
+}
+/* 账号密码登录：POST /api/users/login 拿会话 token 存 localStorage（与旧口径同 key，
+   后续请求 x-hub-token 自动带上）。失败返回 false（弹窗留着让用户重试/切 tab）。 */
+async function _doLogin(u, p) {
+  try {
+    const r = await fetch('/api/users/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: u, password: p })
+    });
+    const d = await r.json();
+    if (r.ok && d.token) {
+      lsSet('hub.term.token', d.token);      // 会话 token 走同一个 storage key（旧口径）
+      lsSet('hub.login.user', u);            // 记住登录身份（右上角显示）
+      _closeTokenModal(d.token);
+      if (typeof applyAuthToNav === 'function') applyAuthToNav();
+      if (typeof renderAuthBox === 'function') renderAuthBox();   // 顶栏身份/退出即时刷新
+      return true;
+    }
+    return false;
+  } catch (e) { return false; }
+}
+/* 向后兼容：旧代码调 openTokenModal 的地方统一映射到 openLoginModal（2026-11-07 更名） */
+function openTokenModal() { return openLoginModal(); }
+let _tokenModalResolve = null;
+function _closeTokenModal(val) {
+  const m = $('tokenModal');
+  if (m) m.classList.remove('on');
+  if (_tokenModalResolve) { _tokenModalResolve(val); _tokenModalResolve = null; }
+  _tokenModalPromise = null;
+}
+/* 导航即清浮层：切页时若弹窗还开着，按取消收场（§4.2 浮层唯一性②） */
+if (typeof go !== 'undefined') {
+  const _go = go;
+  go = function (page) { _closeTokenModal(null); return _go(page); };
+}
 function termToken() {
   let t = lsGet('hub.term.token');
-  if (t) t = String(t).trim();          // 存量脏值自愈：带空白的 token 不再往下传
+  if (t) t = String(t).trim();          // trim① 读侧：存量脏值自愈
   if (!t) {
-    t = (prompt('请输入终端鉴权 TERM_TOKEN（也可在右上角「设置」查看后一键应用）') || '').trim();
-    if (t) lsSet('hub.term.token', t);
+    /* trim② 写侧：落盘前必 trim。优先走原生 prompt（node 测试桩/无 document 兜底），
+       浏览器有 document 时改走模态弹窗 openTokenModal（异步，_promptTokenAsync 收集）。 */
+    let got = '';
+    if (typeof document !== 'undefined' && document.body && typeof openTokenModal === 'function') {
+      /* 浏览器：异步弹窗；此刻同步返回 ''，401 后 api() 重试分支重新取 lsGet。 */
+      openTokenModal().then((v) => {
+        const clean = (v || '').trim();
+        if (clean) lsSet('hub.term.token', clean);
+      }).catch(() => {});
+    } else if (typeof prompt === 'function') {
+      /* node 测试桩 / 无模态框环境：同步 prompt，同旧口径（行为层测试钉住这条） */
+      got = (prompt('请输入终端鉴权 TERM_TOKEN（也可在右上角「设置」查看后一键应用）') || '');
+      got = got.trim();
+      if (got) lsSet('hub.term.token', got);
+    }
+    return got;
   }
   return t;
 }
@@ -8506,7 +8891,8 @@ const MODE_LABEL = { embed: '嵌入', term: '终端', chat: '对话', detail: '�
 /* v0.13.43 设置子菜单：与系统页同形态（data-sys → go(page) ⇒ 正文出页、窄屏自动收侧栏），
    只是单独成组挂在「系统」之下；这三项此前是右侧抽屉里的三个 tab。 */
 const SET_PAGES = [['settings-model', '模型', 'cpu'], ['settings-github', 'GitHub', 'globe'],
-                   ['settings-token', '终端口令', 'terminal'], ['settings-logs', '日志', 'activity']];
+                   ['settings-token', '终端口令', 'terminal'], ['settings-logs', '日志', 'activity'],
+                   ['settings-users', '用户授权', 'eye'], ['settings-modelcalls', '模型计量', 'radar']];
 /* 2026-10-25：「设置 · 记忆存储」并入「系统 · 记忆中心」（同一份本机记忆的读写入口
    不该分居两个菜单，设置组也不该为 4 条便签单占一个一级项）。 */
 const PAGE_LABELS = { classroom: '总览', chat: '统一对话', tasks: '协同', jobs: '定时',
@@ -8515,7 +8901,9 @@ const PAGE_LABELS = { classroom: '总览', chat: '统一对话', tasks: '协同'
                       botboy: 'Botboy',
                       'settings-model': '设置 · 模型', 'settings-github': '设置 · GitHub',
                       'settings-token': '设置 · 终端口令',
-                      'settings-logs': '设置 · 日志' };
+                      'settings-logs': '设置 · 日志',
+                      'settings-users': '设置 · 用户授权',
+                      'settings-modelcalls': '设置 · 模型计量' };
 const navOpenStored = lsGet('hub.nav.open');
 let navOpen = navOpenStored === null ? 'agents' : navOpenStored;   // 首屏默认展开 AGENTS；'' = 用户主动全收起
 let curPage = '';
@@ -8737,13 +9125,15 @@ function renderNav() {
   const box = $('navTree');
   if (!box) return;
   const q = ($('navSearch') ? $('navSearch').value.trim() : '').toLowerCase();
-  const all = AGENTS.filter(a => a.kind === 'agent');
-  const infra = AGENTS.filter(a => a.kind !== 'agent');
+  const all = AGENTS.filter(a => a.kind === 'agent').filter(a => (typeof _permOk !== 'function') || _permOk(a.id));
+  const infra = AGENTS.filter(a => a.kind !== 'agent').filter(a => (typeof _permOk !== 'function') || _permOk(a.id));
+  const _sysOk = SYS_PAGES.filter(([p]) => (typeof _permOk !== 'function') || _permOk(p));
+  const _setOk = SET_PAGES.filter(([p]) => (typeof _permOk !== 'function') || _permOk(p));
   const lists = {
     agents: q ? all.filter(a => navMatch(a, q)) : all.slice().sort((x, y) => navRank(x) - navRank(y) || String(x.name||'').localeCompare(String(y.name||''), 'zh')),
     infra: q ? infra.filter(a => navMatch(a, q)) : infra.slice().sort((x, y) => navRank(x) - navRank(y) || String(x.name||'').localeCompare(String(y.name||''), 'zh')),
-    system: q ? [] : SYS_PAGES,
-    settings: q ? [] : SET_PAGES,   // v0.13.43：设置组（模型 / GitHub / 终端口令）
+    system: q ? [] : _sysOk,
+    settings: q ? [] : _setOk,   // 2026-11-07 用户授权：叶子级按 user_perms 过滤
   };
   // 搜索结果计数
   let totalMatch = 0;
@@ -8807,6 +9197,13 @@ function renderNav() {
   }).join('');
   /* 内容没变就不重写 DOM —— loadAgents 每 30s 刷一次，重写会把 #navTree 的滚动位置弹回顶部 */
   if (html !== _navHtml) { box.innerHTML = html; _navHtml = html; }
+  /* 2026-11-07 用户授权：顶栏 4 项（HTML 直写，data-sys=模块 id）按 user_perms 显隐 */
+  if (typeof _permOk === 'function') {
+    const _top = { classroom: 'btnNavHome', localprojects: 'btnNavProjects', github: 'btnNavGithub', resources: 'btnNavResources' };
+    Object.entries(_top).forEach(([mod, id]) => {
+      const el = $(id); if (el) el.style.display = _permOk(mod) ? '' : 'none';
+    });
+  }
   // 搜索结果计数提示
   const countEl = $('navSearchCount');
   if (countEl) countEl.textContent = q ? ' 共 ' + totalMatch + ' 项' : '';

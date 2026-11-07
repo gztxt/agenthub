@@ -1126,8 +1126,10 @@ function termDetach() {
    弹窗带「用户名 + 密码」双输入（登录页形态），登录成功自动存会话 token 到 localStorage；
    也可切「直接输 token」兼容旧 .env 口令入口。 */
 let _tokenModalPromise = null;
-function openLoginModal() {
-  if (document.querySelector('#tokenModal.on')) return _tokenModalPromise;
+let _tokenAutoPrompted = false;  // 无 token 时自动弹窗只做一次（防 15s 轮询反复打断输入）
+let _tokenOpenedAt = 0;        // 幽灵点击守卫：打开后 400ms 内忽略遮罩点击
+function openLoginModal(opts) {
+  if (document.querySelector('#tokenModal.on')) return _tokenModalPromise || Promise.resolve('');
   let m = $('tokenModal');
   if (!m) {
     m = document.createElement('div');
@@ -1137,7 +1139,7 @@ function openLoginModal() {
       '<div class="modal-box" role="dialog" aria-label="登录" style="max-width:340px">' +
       '<div class="modal-hd"><b>登录 AgentHub</b><button class="modal-x" data-tokx aria-label="关闭">×</button></div>' +
       '<div class="modal-bd">' +
-      '<div style="display:flex;gap:6px;margin-bottom:10px;border-bottom:1px solid var(--bd,#333)" id="loginTabs">' +
+      '<div style="display:flex;gap:6px;margin-bottom:10px;border-bottom:1px solid var(--border)" id="loginTabs">' +
       '<button class="btn xs on" id="loginTabPw" type="button">账号密码</button>' +
       '<button class="btn xs" id="loginTabTok" type="button">直接用 Token</button></div>' +
       '<div id="loginPanePw">' +
@@ -1148,7 +1150,18 @@ function openLoginModal() {
       '<div class="modal-ft"><button class="btn ghost" data-tokcancel>取消</button>' +
       '<button class="btn pri" data-tokok>登录</button></div></div>';
     document.body.appendChild(m);
-    m.addEventListener('click', (e) => { if (e.target === m) _closeTokenModal(null); });
+    /* 遮罩单出口（AGENTS 4.2 ③）：点空白关。但**打开瞬间的幽灵点击必须挡掉** ——
+       自动弹窗来自 setTimeout/401 重试，触摸用户那一指还按在屏幕上，抬手合成的
+       click 会落在刚出现的遮罩上 ⇒ 弹窗「弹一下就没有了」（2026-11-07 用户报障）。
+       判据：pointerdown 必须落在遮罩本身，且距打开 ≥400ms。 */
+    let _maskDownOk = false;
+    m.addEventListener('pointerdown', (e) => { _maskDownOk = (e.target === m); });
+    m.addEventListener('click', (e) => {
+      if (e.target !== m || !_maskDownOk) return;
+      _maskDownOk = false;
+      if (Date.now() - _tokenOpenedAt < 400) return;
+      _closeTokenModal(null);
+    });
     m.querySelector('[data-tokx]').addEventListener('click', () => _closeTokenModal(null));
     m.querySelector('[data-tokcancel]').addEventListener('click', () => _closeTokenModal(null));
     /* tab 切换（账号密码 / 直接用 Token）——不走 inline onclick，走委托 */
@@ -1189,11 +1202,14 @@ function openLoginModal() {
     });
   }
   m.classList.add('on');
+  _tokenOpenedAt = Date.now();
   m.querySelector('#loginUser').value = '';
   m.querySelector('#loginPw').value = '';
   m.querySelector('#loginErr').textContent = '';
-  setTimeout(() => m.querySelector('#loginUser').focus(), 30);
-  _tokenModalPromise = new Promise((res) => { _tokenModalResolve = res; });
+  /* 只有用户主动点「登录」才抢焦点；自动弹（首访/401 重试）不抢 —— 手机上那一下
+     会立刻顶起软键盘、把弹窗挤得只剩上半截，用户观感就是「闪一下就没了」。 */
+  if (!(opts && opts.auto)) setTimeout(() => m.querySelector('#loginUser').focus(), 30);
+  if (!_tokenModalPromise) _tokenModalPromise = new Promise((res) => { _tokenModalResolve = res; });
   return _tokenModalPromise;
 }
 /* 账号密码登录：POST /api/users/login 拿会话 token 存 localStorage（与旧口径同 key，
@@ -1218,7 +1234,7 @@ async function _doLogin(u, p) {
   } catch (e) { return false; }
 }
 /* 向后兼容：旧代码调 openTokenModal 的地方统一映射到 openLoginModal（2026-11-07 更名） */
-function openTokenModal() { return openLoginModal(); }
+function openTokenModal(opts) { return openLoginModal(opts); }
 let _tokenModalResolve = null;
 function _closeTokenModal(val) {
   const m = $('tokenModal');
@@ -1231,7 +1247,9 @@ if (typeof go !== 'undefined') {
   const _go = go;
   go = function (page) { _closeTokenModal(null); return _go(page); };
 }
-function termToken() {
+/* force=true：用户主动点的入口（顶栏登录 / 工作台「输入令牌」/ 导出会话）才允许
+   在这一轮再弹一次口令框；后台请求（api()/termHeaders()）一律静默返回 ''。 */
+function termToken(force) {
   let t = lsGet('hub.term.token');
   if (t) t = String(t).trim();          // trim① 读侧：存量脏值自愈
   if (!t) {
@@ -1239,11 +1257,17 @@ function termToken() {
        浏览器有 document 时改走模态弹窗 openTokenModal（异步，_promptTokenAsync 收集）。 */
     let got = '';
     if (typeof document !== 'undefined' && document.body && typeof openTokenModal === 'function') {
-      /* 浏览器：异步弹窗；此刻同步返回 ''，401 后 api() 重试分支重新取 lsGet。 */
-      openTokenModal().then((v) => {
-        const clean = (v || '').trim();
-        if (clean) lsSet('hub.term.token', clean);
-      }).catch(() => {});
+      /* 浏览器：异步弹窗；此刻同步返回 ''，401 后 api() 重试分支重新取 lsGet。
+         只自动弹一次：api() 每个请求都会走 termToken()，pollHealth 15s 一轮 ⇒
+         旧写法每轮都重新弹，把用户正在输入的内容打断（2026-11-07）。后续 401
+         仍由 api() 的 _promptTokenAsync 兜底，不靠这里。 */
+      if (force || !_tokenAutoPrompted) {
+        _tokenAutoPrompted = true;
+        openTokenModal({ auto: true }).then((v) => {
+          const clean = (v || '').trim();
+          if (clean) lsSet('hub.term.token', clean);
+        }).catch(() => {});
+      }
     } else if (typeof prompt === 'function') {
       /* node 测试桩 / 无模态框环境：同步 prompt，同旧口径（行为层测试钉住这条） */
       got = (prompt('请输入终端鉴权 TERM_TOKEN（也可在右上角「设置」查看后一键应用）') || '');

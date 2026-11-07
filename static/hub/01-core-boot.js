@@ -261,7 +261,10 @@ async function _promptTokenAsync() {
   let t = lsGet('hub.term.token');
   if (t) return String(t).trim();
   if (typeof openTokenModal !== 'function') return '';   // 03 分片未加载兜底
-  const p = openTokenModal();
+  /* 与 maybeAutoLoginPrompt 共用同一个「已弹过」标记：用户在这里点了取消，
+     600ms 后的首访自动弹窗就不该再糊他一次（2026-11-07）。 */
+  try { sessionStorage.setItem('hub.login.prompted', '1'); } catch (e) {}
+  const p = openTokenModal({ auto: true });
   const race = await Promise.race([
     p.catch(() => ''),
     new Promise(res => setTimeout(() => res(''), 90000))
@@ -325,6 +328,7 @@ function renderAuthBox() {
         if (typeof openLoginModal === 'function') openLoginModal();
       } else if (b.dataset.authact === 'logout') {
         lsRemove('hub.term.token'); lsRemove('hub.login.user');
+        _tokenAutoPrompted = false;   // 退出后允许下一轮无 token 请求再自动弹一次
         AUTH_PERMS = null; renderAuthBox(); applyAuthToNav();
         toast('已退出登录', 'ok');
       }
@@ -338,7 +342,7 @@ function maybeAutoLoginPrompt() {
     if (sessionStorage.getItem('hub.login.prompted')) return;
     sessionStorage.setItem('hub.login.prompted', '1');
   } catch (e) { /* 隐私模式：退化为显示按钮即可 */ }
-  setTimeout(() => { if (typeof openLoginModal === 'function') openLoginModal(); }, 600);
+  setTimeout(() => { if (typeof openLoginModal === 'function') openLoginModal({ auto: true }); }, 600);
 }
 async function api(path, opt) {
   const o = opt || {};

@@ -104,7 +104,7 @@ document.addEventListener('click', function (e) {
   if (act === 'token') {
     /* 读令牌门横幅的「输入令牌」：走 03 分片既有的 termToken()（prompt 一次存 localStorage），
        存好后下一次读请求自动带 header，横幅随 /health.read_auth 变 ok 消失。 */
-    if (typeof termToken === 'function') { termToken(); loadWbTasks(); }
+    if (typeof termToken === 'function') { termToken(true); loadWbTasks(); }
     return;
   }
   if (act === 'open' && b.dataset.agent) {

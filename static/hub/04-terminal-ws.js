@@ -4031,7 +4031,7 @@ function exportStateText(state, count, extra) {
 }
 
 async function chatSessExport() {
-  const tk = termToken();
+  const tk = termToken(true);   // 用户主动点导出 ⇒ 允许弹口令框（后台请求一律静默）
   if (!tk) { toast(exportStateText('need-token', -1, {}), 'err'); return; }
   const p = new URLSearchParams({ format: 'json', limit: '1000',
                                   with_messages: '1', redact: '1' });

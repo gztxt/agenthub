@@ -42,6 +42,13 @@ function renderWorkbench() {
   const el = $('wbAttention');
   if (!el) return;
   const rows = [];
+  /* 0. 读令牌门横幅（v0.13.195）：非本机打开且 /health.read_auth.state!=ok
+     ⇒ 红色横幅 + 「输入令牌」按钮（走 termToken() 既有弹窗入口）。 */
+  const ra = (HUB_HEALTH && HUB_HEALTH.read_auth) || null;
+  if (ra && ra.state !== 'ok' && !(location.hostname === '127.0.0.1' || location.hostname === 'localhost')) {
+    rows.push({ rank: 0, html: '<span class="wb-ico !">🔒</span> 读接口需凭据：当前访问非本机，已存令牌无效或未存'
+      + '<button class="btn ghost sm" data-wbact="token">输入令牌</button>' });
+  }
   /* 1. 自证行（C code_stale 或异常） */
   const stale = wbStaleLine();
   if (stale && /需重启|已改未重启/.test(stale))
@@ -94,6 +101,12 @@ document.addEventListener('click', function (e) {
   const b = e.target.closest('[data-wbact]');
   if (!b) return;
   const act = b.dataset.wbact;
+  if (act === 'token') {
+    /* 读令牌门横幅的「输入令牌」：走 03 分片既有的 termToken()（prompt 一次存 localStorage），
+       存好后下一次读请求自动带 header，横幅随 /health.read_auth 变 ok 消失。 */
+    if (typeof termToken === 'function') { termToken(); loadWbTasks(); }
+    return;
+  }
   if (act === 'open' && b.dataset.agent) {
     /* openAgent 不存在时落到既有入口 gotoChat（02-nav-and-poll.js），不另开新接口 */
     if (typeof gotoChat === 'function') gotoChat(b.dataset.agent, 'term');

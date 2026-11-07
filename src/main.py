@@ -124,7 +124,15 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.194"
+VERSION = "0.13.195"
+
+# v0.13.195（2026-11-07）：读令牌门前端闭环——「报 token 错误却无弹窗可输」的根因与修法：
+#   P0 的 read_gate 只拦服务端，前端 api() 的 401 重试分支原本只对写方法生效，
+#   读 401 直接抛错且无人调 termToken() 弹窗 ⇒ 非本机访问满屏 401 且无路可输令牌。
+#   ① api()：读/写 401 统一先注入已存 token，仍 401 且（写 或 401 体带 read_auth_required）
+#      才清掉重问一次（只重试一次不循环）；
+#   ② 15-workbench 横幅：/health.read_auth.state!=ok 且当前 host 非本机 ⇒ 顶行红条
+#      +「输入令牌」按钮（复用 03 分片 termToken() prompt），输入后随下次 /health 消失。
 
 # v0.13.194（2026-11-07）：方案 AgentHub优化设计方案.md P0/P1/P2/P3 四连：
 #   P0 读端点令牌门（writeauth.read_gate：非回环 GET 须凭据，回环匿名一版本；HUB_READ_TOKENS=0 可回滚）；

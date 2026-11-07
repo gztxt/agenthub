@@ -261,19 +261,55 @@ async function api(path, opt) {
   /* v0.13.44：noToken 的写端点（设置页几个只认 HUB_PASSCODE 的端点，已登记在
      writeauth.EXEMPT_PREFIXES）不再向 termToken() 索 TERM_TOKEN —— 那会先弹一个
      "请输入终端鉴权 TERM_TOKEN" 的窗，跟保存模型毫无关系，用户只会以为保存卡住了。 */
-  if (isWriteMethod(o.method) && !o.noToken) {
-    const tk = termToken();
-    if (tk) o.headers = Object.assign({}, o.headers, { 'x-hub-token': tk });
+  /* v0.13.195：读门 401 同口径 —— 写请求与「带 read_auth_required 的读 401」都先注入
+     已存 token；仍 401 才清掉重问一次（只重试一次，不循环）。
+     判据：服务端 401 体带 read_auth_required 字段（read_gate 拒绝面），或写方法既有分支。 */
+  const isReadLocked = (o.method || 'GET') !== 'POST' && !isWriteMethod(o.method);
+  const haveTok = termToken();
+  if ((isWriteMethod(o.method) && !o.noToken) || (isReadLocked && haveTok)) {
+    if (haveTok) o.headers = Object.assign({}, o.headers, { 'x-hub-token': haveTok });
   }
   let r = await fetch(path, o);
-  if (r.status === 401 && isWriteMethod(o.method)) {
-    // 存量口令失效（比如刚在设置里换过 token）：清掉再问一次，只重试一次，不循环
-    lsRemove('hub.term.token');
-    const again = termToken();
-    if (again) {
-      o.headers = Object.assign({}, o.headers, { 'x-hub-token': again });
-      r = await fetch(path, o);
+  if (r.status === 401 && !o.__retried401) {
+    const text0 = await r.text();
+    let body0 = null;
+    try { body0 = JSON.parse(text0); } catch (e0) { /* 非 JSON 401：原样抛 */ }
+    const needTok = isWriteMethod(o.method) || (body0 && body0.read_auth_required);
+    if (needTok) {
+      lsRemove('hub.term.token');
+      const again = termToken();   // 弹窗输入；用户取消 ⇒ 空串
+      if (again) {
+        o = Object.assign({}, o, { headers: Object.assign({}, o.headers, { 'x-hub-token': again }), __retried401: true });
+        r = await fetch(path, o);
+        const text1 = await r.text();
+        let data1;
+        try { data1 = JSON.parse(text1); } catch (e1) { data1 = { raw: text1 }; }
+        if (!r.ok) {
+          const msg1 = (data1 && data1.detail && (data1.detail.error || (Array.isArray(data1.detail) ? data1.detail.map(d => d.msg).join(';') : data1.detail))) || ('HTTP ' + r.status);
+          const err1 = new Error(typeof msg1 === 'string' ? msg1 : JSON.stringify(msg1));
+          err1.http = r.status; err1.payload = data1;
+          throw err1;
+        }
+        return data1;
+      }
     }
+    const data = body0;
+    if (!r.ok || !needTok) {
+      const msg = (data && data.detail && (data.detail.error || (Array.isArray(data.detail) ? data.detail.map(d => d.msg).join(';') : data.detail))) || ('HTTP ' + r.status);
+      const err = new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+      err.http = r.status; err.payload = data;
+      throw err;
+    }
+    return data;
+  }
+  if (r.status === 401 && o.__retried401) {
+    const text2 = await r.text();
+    let data2;
+    try { data2 = JSON.parse(text2); } catch (e2) { data2 = { raw: text2 }; }
+    const msg2 = (data2 && data2.detail) || ('HTTP 401');
+    const err2 = new Error(typeof msg2 === 'string' ? msg2 : JSON.stringify(msg2));
+    err2.http = 401; err2.payload = data2;
+    throw err2;
   }
   const text = await r.text();
   let data;
@@ -281,9 +317,6 @@ async function api(path, opt) {
   if (!r.ok) {
     const msg = (data && data.detail && (data.detail.error || (Array.isArray(data.detail) ? data.detail.map(d => d.msg).join(';') : data.detail))) || ('HTTP ' + r.status);
     const err = new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
-    /* v0.13.27 additive：把 HTTP 状态码与响应体挂到错误对象上（既有调用方只读
-       .message 不受影响）。日志页靠 http===401/503 区分「鉴权态」与「故障态」；
-       技能正文 409 靠 detail.candidates 渲染路候选——不再靠正则猜文案。 */
     err.http = r.status;
     err.payload = data;
     throw err;

@@ -29,6 +29,10 @@ fail-closed：账本缺失 / 打不开 / 聚合异常一律 `{"ok": False, "erro
 2026-11-07：`summary()` 的 rows 增加 `avg_ms`（AVG(duration_ms)），供设置页
 「模型计量」报表显示均耗时；新增 `recent()` 只读取最近 N 条明细。两者都只扩展
 只读面，不改 `/api/runlog/cost` 的既有行为。
+
+2026-11-08：新增 `daily()` —— 按 **UTC 日 × client × model** 聚合，供「模型计量」
+改成「一行 = 天 × agent × 模型」的可排序明细表。仍只读、仍 fail-closed，
+且**不设 LIMIT**（分组键有限，截断等于静默少报）。`summary()` / `recent()` 不动。
 """
 from __future__ import annotations
 
@@ -196,6 +200,70 @@ def summary(group_by: Sequence[str] = ("client", "model"),
         conn.close()
 
     return {**base, "ok": True, "rows": rows, "count": len(rows), "total": total}
+
+
+def daily(since: Optional[str] = None, until: Optional[str] = None,
+          path: Optional[str] = None) -> Dict[str, Any]:
+    """按 **UTC 日 × client × model** 聚合（「模型计量」可排序明细表的数据源）。
+
+    与 `summary()` 的差别只在多一个时间维度：`GROUP BY substr(created_at,1,10),
+    client, model`。`created_at` 是 `…T…Z` 的 UTC 串 ⇒ 前 10 位即 UTC 日，
+    与模块口径「时间轴按 UTC 日切」一致；**不用** `date()` / `strftime()`
+    （那会引入本地时区，把日界切错）。
+
+    **不设 LIMIT**：分组键是「日期 × 调用来源 × 模型」的有限组合，行数天然有界；
+    截断会让窗口内数据不全（等价于静默少报，违反 fail-closed 口径）。
+
+    每行字段：`date, client, model, requests, input_tokens, output_tokens,
+    cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, avg_ms,
+    total_ms, null_cost`。`avg_ms` = 该组 AVG(duration_ms)，`total_ms` =
+    SUM(duration_ms)（前端换算成秒显示总耗时）。
+
+    fail-closed 同 `summary()`：账本缺失 / 打不开 / 查询异常一律
+    `{"ok":False,"error":…,"rows":[]}`，**不回空 rows 当成功**。
+    """
+    p = path or db_path()
+    base: Dict[str, Any] = {"db": p, "mode": "ro", "since": since, "until": until}
+    if not os.path.exists(p):
+        return {**base, "ok": False, "error": f"usage ledger not found: {p}",
+                "rows": [], "count": 0}
+    conds: List[str] = []
+    params: List[Any] = []
+    if since:
+        conds.append("created_at>=?")
+        params.append(str(since))
+    if until:
+        conds.append("created_at<?")
+        params.append(str(until))
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    try:
+        conn = _connect_ro(p)
+    except sqlite3.Error as e:  # noqa: BLE001
+        return {**base, "ok": False, "error": f"cannot open usage ledger (ro): {e}",
+                "rows": [], "count": 0}
+    try:
+        sql = (
+            "SELECT substr(created_at,1,10) AS date, client, model,"
+            " COUNT(*) AS requests,"
+            " COALESCE(SUM(input_tokens),0) AS input_tokens,"
+            " COALESCE(SUM(output_tokens),0) AS output_tokens,"
+            " COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,"
+            " COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens,"
+            " COALESCE(SUM(total_tokens),0) AS total_tokens,"
+            " COALESCE(SUM(cost_usd),0) AS cost_usd,"
+            " COALESCE(AVG(duration_ms),0) AS avg_ms,"
+            " COALESCE(SUM(duration_ms),0) AS total_ms,"
+            " SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS null_cost"
+            f" FROM usage_events{where}"
+            " GROUP BY substr(created_at,1,10), client, model"
+            " ORDER BY date DESC, total_tokens DESC")
+        rows = [dict(r) for r in conn.execute(sql, params)]
+    except sqlite3.Error as e:  # noqa: BLE001
+        return {**base, "ok": False, "error": f"usage ledger query failed: {e}",
+                "rows": [], "count": 0}
+    finally:
+        conn.close()
+    return {**base, "ok": True, "rows": rows, "count": len(rows)}
 
 
 def recent(limit: int = 50, client: Optional[str] = None,

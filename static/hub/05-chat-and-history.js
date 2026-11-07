@@ -344,7 +344,7 @@ const MODE_LABEL = { embed: '嵌入', term: '终端', chat: '对话', detail: '�
 /* v0.13.43 设置子菜单：与系统页同形态（data-sys → go(page) ⇒ 正文出页、窄屏自动收侧栏），
    只是单独成组挂在「系统」之下；这三项此前是右侧抽屉里的三个 tab。 */
 const SET_PAGES = [['settings-model', '模型', 'cpu'], ['settings-github', 'GitHub', 'globe'],
-                   ['settings-token', '认证状态', 'terminal'], ['settings-logs', '日志', 'activity'],
+                   ['settings-logs', '日志', 'activity'],
                    ['settings-users', '用户授权', 'eye'], ['settings-modelcalls', '模型计量', 'radar']];
 /* 2026-10-25：「设置 · 记忆存储」并入「系统 · 记忆中心」（同一份本机记忆的读写入口
    不该分居两个菜单，设置组也不该为 4 条便签单占一个一级项）。 */
@@ -401,10 +401,9 @@ function navItemHtml(a, child) {
   // 子项（画像 parent 指向本组父行，如 xray/openrung 挂在 proxy-panel 下）：
   // 只加一个缩进类，交互语义与普通行完全相同。
   const cls = 'nav-item' + (child ? ' is-child' : '') + on;
-  // 窄栏里名称会截断，title 里给全量信息（名称 · 状态 · 端口 · 描述）
-  const tip = a.name + ' · ' + seatLabelOf(a) + (a.port ? ' · :' + a.port : '') +
-    (a.verdict_reason ? '\n' + a.verdict_reason : '') +
-    (a.description ? '\n' + a.description : '');
+  // 悬停只给「状态 · 功能」：窄栏名称截断时补回全名；
+  // 端口 / 判定理由 / 描述全文不再进 title（用户 2026-11-08）。
+  const tip = seatLabelOf(a) + ' · ' + (a.name || a.id);
   // 搜索高亮：名称用 hlMatch，ID 和端口保持原样
   const nameHtml = hlMatch(a.name || a.id, ($('navSearch') ? $('navSearch').value.trim() : ''));
   // 操作按钮：按 entries 类型渲染（最多3个）
@@ -503,8 +502,7 @@ function histHtml(aid) {
   const rows = (h.items || []).map(it => {
     /* 悬停补齐被列宽挤掉的信息：完整时间、条数、完整 cwd。
        顺序与行内一致（摘要 → 目录 → 时间），读起来不用二次对位。 */
-    const tip = [it.title, hhDir(it.cwd, h.home), hhFull(it.ts),
-                 (it.msgs ? it.msgs + ' 条' : ''), (it.cwd || '')].filter(Boolean).join(' ｜ ');
+    const tip = it.title + (it.msgs ? ' · ' + it.msgs + ' 条' : '');
     return '<div class="hh-row" data-agent="' + escapeHtml(aid) + '" data-sid="' + escapeHtml(it.id) + '"' +
       ' title="' + escapeHtml(tip) + '">' +
       '<span class="hh-t">' + escapeHtml(it.title) + '</span>' +

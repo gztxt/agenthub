@@ -185,6 +185,73 @@ class TestUsageLedger(unittest.TestCase):
         d = usage_ledger.by_request(["r1"])
         self.assertFalse(d["ok"])
 
+    # ⑤ daily()：按 UTC 日 × client × model（2026-11-08 可排序明细表数据源）----
+    def _insert_extra(self, rows):
+        conn = sqlite3.connect(str(self.db))
+        conn.executemany(
+            "INSERT INTO usage_events(created_at,request_id,client,model,provider,"
+            "method,path,duration_ms,total_tokens,cost_usd,cost_source)"
+            " VALUES(?,?,?,?,?,'POST','/v1/messages',?,?,?,?)", rows)
+        conn.commit()
+        conn.close()
+
+    def test_daily_groups_by_date_client_model(self):
+        d = usage_ledger.daily()
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(d["count"], 3)
+        self.assertEqual({r["date"] for r in d["rows"]}, {"2026-10-14"})
+        keys = {(r["date"], r["client"], r["model"]) for r in d["rows"]}
+        self.assertEqual(keys, {
+            ("2026-10-14", "API Key 1", "deepseek-v4.1-flash"),
+            ("2026-10-14", "API Key 1", "nvidia/nemotron:free"),
+            ("2026-10-14", "Local Gateway", "deepseek-v4.1-flash"),
+        })
+        row = next(r for r in d["rows"]
+                   if r["client"] == "API Key 1" and r["model"] == "deepseek-v4.1-flash")
+        self.assertEqual(row["requests"], 2)
+        self.assertEqual(row["total_tokens"], 400)
+        for k in ("avg_ms", "total_ms", "cost_usd", "null_cost",
+                  "input_tokens", "output_tokens", "cache_read_tokens"):
+            self.assertIn(k, row, f"daily 行缺字段 {k}")
+
+    def test_daily_carries_duration_and_splits_days(self):
+        self._insert_extra([
+            ("2026-10-15T01:00:00.000Z", "r5", "pi", "m/x", "p", 1000, 10, 0.1, "x"),
+            ("2026-10-15T02:00:00.000Z", "r6", "pi", "m/x", "p", 3000, 20, 0.2, "x"),
+        ])
+        d = usage_ledger.daily()
+        self.assertTrue(d["ok"], d)
+        self.assertEqual({r["date"] for r in d["rows"]},
+                         {"2026-10-14", "2026-10-15"})
+        row = next(r for r in d["rows"] if r["date"] == "2026-10-15")
+        self.assertEqual(row["requests"], 2)
+        self.assertEqual(row["total_tokens"], 30)
+        self.assertEqual(row["avg_ms"], 2000)
+        self.assertEqual(row["total_ms"], 4000)
+        d2 = usage_ledger.daily(since="2026-10-15T00:00:00.000Z",
+                                until="2026-10-16T00:00:00.000Z")
+        self.assertEqual(d2["count"], 1)
+        self.assertEqual({r["date"] for r in d2["rows"]}, {"2026-10-15"})
+
+    def test_daily_not_truncated_by_max_limit(self):
+        """分组行数可超过 summary 的 MAX_LIMIT；daily 不设 LIMIT，不许静默少报。"""
+        n = usage_ledger.MAX_LIMIT + 20
+        self._insert_extra([
+            ("2026-10-14T12:00:00.000Z", "rx%d" % i, "client-%d" % i,
+             "m/x", "p", 0, 1, None, "") for i in range(n)
+        ])
+        d = usage_ledger.daily()
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(d["count"], 3 + n)
+        self.assertGreater(d["count"], usage_ledger.MAX_LIMIT)
+
+    def test_daily_fail_closed_when_missing(self):
+        os.environ["CCR_USAGE_DB"] = str(self.tmp / "nope.sqlite")
+        d = usage_ledger.daily()
+        self.assertFalse(d["ok"])
+        self.assertEqual(d["rows"], [])
+        self.assertIn("not found", d["error"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

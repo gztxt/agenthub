@@ -226,6 +226,45 @@ class ModelCallsL0(unittest.TestCase):
         self.assertEqual(data["rows"][0]["scene"], "Profile: Codex")
         self.assertEqual(data["rows"][0]["status"], "success")
 
+    # ── C 组：2026-11-08 overview 增 rows（按天 × agent × 模型的可排序明细）──
+
+    def test_13_overview_rows_are_daily_x_client_x_model(self):
+        """rows 一行 = UTC 日 × client × model；旧字段仍由 summary 汇总、不回归。
+
+        前 3 行刻意用同一个 age_min ⇒ 时间戳完全相同、必然同一天（避免
+        「正好跨 00:00」让用例 flaky）；第 4 行 48 小时前 ⇒ 必然另一个 UTC 日。
+        """
+        self._use_ledger([
+            ("m/x", "pi", 10, 5, 1000, 1),
+            ("m/x", "pi", 20, 5, 3000, 1),
+            ("m/x", "codex", 30, 5, 500, 1),
+            ("m/y", "pi", 40, 5, 700, 48 * 60),
+        ])
+        ov = modelcalls.overview(7)
+        self.assertTrue(ov["rows_ok"])
+        self.assertIsNone(ov["rows_note"])
+        rows = ov["rows"]
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(len({r["date"] for r in rows}), 2, "跨日必须拆成不同行")
+        r = next(x for x in rows if x["client"] == "pi" and x["model"] == "m/x")
+        self.assertEqual(r["requests"], 2)
+        self.assertEqual(r["total_tokens"], 40)
+        self.assertEqual(r["avg_ms"], 2000)
+        self.assertEqual(r["total_ms"], 4000)
+        # 旧契约不回归
+        self.assertEqual(ov["total_calls"], 4)
+        self.assertEqual(ov["total_tokens"], 10 + 5 + 20 + 5 + 30 + 5 + 40 + 5)
+        self.assertEqual(len(ov["by_model"]), 2)
+        self.assertEqual(ov["source"], "ccr_usage_events")
+
+    def test_14_overview_fail_closed_exposes_rows_state(self):
+        os.environ["CCR_USAGE_DB"] = "/nonexistent/dir/no-usage.sqlite"
+        ov = modelcalls.overview(7)
+        self.assertIn("note", ov)
+        self.assertEqual(ov["rows"], [])
+        self.assertFalse(ov["rows_ok"])
+        self.assertIsNotNone(ov["rows_note"])
+
 
 if __name__ == "__main__":
     unittest.main()

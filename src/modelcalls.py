@@ -17,8 +17,11 @@
     append-only 明细（status / error / request_id），仍由 `llm._create_message()` 埋点写入，
     保留不删：它是「调用质量排错」口径，职责与全 agent 计量报表不同，**不是报表数据源**。
 
-返回结构保持与前端 `mclRender()` 的契约兼容（total_calls / total_tokens /
-by_model[] / by_scene / window_days / as_of），故前端渲染逻辑零改动。
+返回结构**保留**旧契约（total_calls / total_tokens / by_model[] / by_scene /
+window_days / as_of），另增 `rows`（2026-11-08）：一行 = UTC 日 × client × model，
+供前端渲染「Agent / 模型 / 日期 / 调用 / 用量 / 耗时」可排序明细表。
+旧字段仍由 `summary()` 汇总（total 不受 limit 截断），`rows` 由 `daily()` 单独取，
+两者同窗口同源、职责不重叠；前端在 rows 缺失时可退化成旧的按模型视图。
 `by_scene` 沿用旧键名，内容改为 **client 分布**（各 agent 来源的调用数）。
 
 fail-closed：CCR 账本缺失 / 打不开 ⇒ `overview()` 回 `note` 让前端显示原因，
@@ -121,7 +124,8 @@ def overview(window_days: int = 7) -> Dict[str, Any]:
     （avg_ms 按调用数加权）、按 client 聚合 `by_scene`，总计取自 `total`（不受 limit 截断）。
 
     返回结构兼容前端 `mclRender()`：total_calls / total_tokens / by_model[] /
-    by_scene / window_days / as_of，另加 source / attribution / cost_usd。
+    by_scene / window_days / as_of，另加 source / attribution / cost_usd，以及
+    2026-11-08 新增的 rows / rows_ok / rows_note（按天 × client × model 明细）。
     账本不可用 ⇒ 带 `note` 的零值结构（前端显示原因），不静默伪装成「没调用」。
     """
     import datetime as _dt
@@ -130,11 +134,18 @@ def overview(window_days: int = 7) -> Dict[str, Any]:
     data = usage_ledger.summary(group_by=("client", "model"),
                                 since=since, until=until,
                                 limit=usage_ledger.MAX_LIMIT)
+    # 表格行单独取：与 summary 同窗口同账本，但维度是「日 × client × model」。
+    # daily() 不设 LIMIT ⇒ 行数即真实分组数，不会静默少报。
+    daily = usage_ledger.daily(since=since, until=until)
+    rows = daily["rows"] if daily.get("ok") else []
+    rows_ok = bool(daily.get("ok"))
+    rows_note = None if rows_ok else "按天明细不可用：" + str(daily.get("error") or "unknown")
     as_of = _dt.datetime.now(_dt.timezone.utc).isoformat()
     if not data.get("ok"):
         return {"window_days": days, "total_calls": 0, "total_tokens": 0,
                 "by_model": [], "by_scene": {}, "as_of": as_of,
                 "source": "ccr_usage_events",
+                "rows": rows, "rows_ok": rows_ok, "rows_note": rows_note,
                 "note": "CCR 用量账本不可用：" + str(data.get("error") or "unknown")}
     total = data.get("total") or {}
     by_model: Dict[str, Dict[str, Any]] = {}
@@ -163,6 +174,7 @@ def overview(window_days: int = 7) -> Dict[str, Any]:
         "source": "ccr_usage_events",
         "attribution": data.get("attribution"),
         "cost_usd": total.get("cost_usd"),
+        "rows": rows, "rows_ok": rows_ok, "rows_note": rows_note,
     }
 
 

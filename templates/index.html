@@ -1755,13 +1755,13 @@
              （data-sys 点击即 go()，选中态由 go() 的 side-item[data-sys] 同步行接管），
              页面四件套：本按钮 + #page-localprojects + PAGE_LABELS + go() 懒加载钩子。 -->
         <button class="side-item side-top" id="btnNavProjects" data-sys="localprojects" role="tab" aria-selected="false"
-                aria-label="本机项目" title="本机项目 · 自动检索本机全部项目，点项目选 Agent 直接开会话"><svg class="i" aria-hidden="true"><use href="#i-folder"/></svg><span class="lbl">本机项目</span></button>
+                aria-label="本机项目" title="本机项目 · 自动检索本机项目"><svg class="i" aria-hidden="true"><use href="#i-folder"/></svg><span class="lbl">本机项目</span></button>
         <!-- v0.13.31 GitHub 项目：本机项目的远端半程（总览→本机项目→GitHub 项目→AGENTS）。 -->
         <button class="side-item side-top" id="btnNavGithub" data-sys="github" role="tab" aria-selected="false"
-                aria-label="GitHub 项目" title="GitHub 项目 · 远端仓库清单，本地没有的即时克隆后开会话"><svg class="i" aria-hidden="true"><use href="#i-globe"/></svg><span class="lbl">GitHub 项目</span></button>
+                aria-label="GitHub 项目" title="GitHub 项目 · 远端仓库清单"><svg class="i" aria-hidden="true"><use href="#i-globe"/></svg><span class="lbl">GitHub 项目</span></button>
         <!-- v0.13.52 资源监控：系统菜单新增资源子菜单，列出所有 Agent 进程资源占用，支持一键结束。 -->
         <button class="side-item side-top" id="btnNavResources" data-sys="resources" role="tab" aria-selected="false"
-                aria-label="资源监控" title="资源监控 · 查看所有 Agent 进程 CPU/内存占用，可一键结束占用资源的进程"><svg class="i" aria-hidden="true"><use href="#i-monitor"/></svg><span class="lbl">资源</span></button>
+                aria-label="资源监控" title="资源监控 · 进程资源占用"><svg class="i" aria-hidden="true"><use href="#i-monitor"/></svg><span class="lbl">资源</span></button>
         <!-- AGENTS / 基础设施 / 系统 三组手风琴由 renderNav() 渲染 -->
         <div id="navTree"></div>
         <!-- v0.13.43：设置从「右侧抽屉」改成手风琴第四组（模型 / GitHub / 认证状态），
@@ -3312,8 +3312,9 @@
                     </div>
                     <div class="sp-bd">
                         <div class="hint" style="margin-bottom:10px">
-                            汇总所有经 CCR 3456 的 agent 调用（按模型 / 调用来源，含 token 与均耗时）。
-                            数据由 CCR 账本实时落库；「场景分布」列即各调用来源(client)，非 agenthub 内部场景。
+                            汇总所有经 CCR 3456 的 agent 调用：<b>一行 = 日期 × Agent × 模型</b>，
+                            列含调用次数、用量(tokens)、均耗时与总耗时；<b>点击表头可按该列排序</b>（再点一次反向）。
+                            Agent = CCR 账本的 client（调用来源），日期按 UTC 日切，数据由 CCR 账本实时落库、只读。
                             agenthub 自身 LLM 调用的细粒度明细另存 model_call_logs，不参与本报表。
                         </div>
                         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
@@ -3570,7 +3571,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=e5eaaf04';
+      var HUB_SRC = '/static/hub.js?v=af19b350';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

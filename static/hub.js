@@ -1973,8 +1973,22 @@ async function usersPanelNew() {
   } catch (e) { toast(e.message, 'err'); }
 }
 
-/* ── 模型调用计量面板（2026-11-07，借鉴 LangChat monitor）──
-   只读：拉 /api/monitor/model-calls/overview 渲染按模型/场景的 token 汇总。 */
+/* ── 模型调用计量面板（2026-11-07 上线，2026-11-08 改为行级明细 + 各列排序）──
+   表格一行 = UTC 日 × agent(client) × model，列：Agent / 模型 / 日期 / 调用 /
+   用量(tokens) / 均耗时 / 总耗时。排序纯前端内存排序，一次取数，不重复请求。
+   数据源 = /api/monitor/model-calls/overview（CCR usage_events 只读聚合）。 */
+let mclRows = [];
+let mclSort = { key: 'total_tokens', dir: -1 };
+const MCL_COLS = [
+  { key: 'client',       label: 'Agent',        type: 'str' },
+  { key: 'model',        label: '模型',          type: 'str' },
+  { key: 'date',         label: '日期 (UTC)',    type: 'str' },
+  { key: 'requests',     label: '调用',          type: 'num' },
+  { key: 'total_tokens', label: '用量 (tokens)', type: 'num' },
+  { key: 'avg_ms',       label: '均耗时 (ms)',   type: 'num' },
+  { key: 'total_ms',     label: '总耗时 (s)',    type: 'num' },
+];
+
 async function mclPanelLoad() {
   const box = $('mclPanel');
   if (!box) return;
@@ -1987,29 +2001,94 @@ async function mclPanelLoad() {
     box.innerHTML = '<span class="hint">加载失败：' + escapeHtml(e.message) + '</span>';
   }
 }
+/* 稳定排序：数值列做减法、字符串列 localeCompare；相等时按 日期→模型→Agent
+   做确定性 tiebreak，避免同分行每次点击顺序漂移。 */
+function mclSorted(rows, sort) {
+  const col = MCL_COLS.find(c => c.key === sort.key) || MCL_COLS[4];
+  const dir = sort.dir || -1;
+  return rows.slice().sort((a, b) => {
+    let c;
+    if (col.type === 'num') c = Number(a[col.key] || 0) - Number(b[col.key] || 0);
+    else c = String(a[col.key] || '').localeCompare(String(b[col.key] || ''), 'zh');
+    if (c === 0) c = String(a.date || '').localeCompare(String(b.date || '')) ||
+                    String(a.model || '').localeCompare(String(b.model || '')) ||
+                    String(a.client || '').localeCompare(String(b.client || ''));
+    return c * dir;
+  });
+}
+function mclSortKey(key) {
+  const col = MCL_COLS.find(c => c.key === key);
+  if (!col) return;
+  if (mclSort.key === key) mclSort = { key: key, dir: -mclSort.dir };
+  else mclSort = { key: key, dir: col.type === 'num' ? -1 : 1 };
+  mclRenderTable();
+}
+function mclNum(v) { return Number(v || 0).toLocaleString(); }
+/* 耗时列固定 1 位小数 + 千分位：不能 `mclNum(x.toFixed(1))`——那会把字符串
+   再 Number() 一次，27.0 又变回 27，列内小数位不齐。 */
+function mclFixed1(v) {
+  return Number(v || 0).toLocaleString(undefined,
+    { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+}
+function mclRenderTable() {
+  const t = $('mclTable');
+  if (!t) return;
+  const rows = mclSorted(mclRows, mclSort);
+  const th = MCL_COLS.map(c => {
+    const on = c.key === mclSort.key;
+    const arrow = on ? (mclSort.dir < 0 ? ' ▼' : ' ▲') : '';
+    return '<th data-mcl-sort="' + c.key + '" style="text-align:' +
+           (c.type === 'str' ? 'left' : 'right') +
+           ';padding:5px 6px;cursor:pointer;white-space:nowrap;user-select:none" ' +
+           'title="点击按此列排序">' + escapeHtml(c.label) + arrow + '</th>';
+  }).join('');
+  let body = '';
+  rows.forEach(r => {
+    const secs = Number(r.total_ms || 0) / 1000;
+    body += '<tr>' +
+      '<td style="padding:4px 6px">' + escapeHtml(r.client || '—') + '</td>' +
+      '<td style="padding:4px 6px;font-family:monospace">' + escapeHtml(r.model || '—') + '</td>' +
+      '<td style="padding:4px 6px;white-space:nowrap">' + escapeHtml(r.date || '—') + '</td>' +
+      '<td style="padding:4px 6px;text-align:right">' + mclNum(r.requests) + '</td>' +
+      '<td style="padding:4px 6px;text-align:right">' + mclNum(r.total_tokens) + '</td>' +
+      '<td style="padding:4px 6px;text-align:right">' + mclFixed1(r.avg_ms) + '</td>' +
+      '<td style="padding:4px 6px;text-align:right">' + mclFixed1(secs) + '</td>' +
+      '</tr>';
+  });
+  t.innerHTML = '<table class="tbl" style="width:100%;border-collapse:collapse">' +
+    '<thead><tr style="border-bottom:1px solid var(--line,#ddd)">' + th + '</tr></thead>' +
+    '<tbody>' + (body || '<tr><td colspan="' + MCL_COLS.length +
+      '" class="hint" style="padding:8px">窗口内无明细行。</td></tr>') + '</tbody></table>';
+}
 function mclRender(d) {
   const box = $('mclPanel');
   if (!box) return;
   if (d.note) { box.innerHTML = '<span class="hint">' + escapeHtml(d.note) + '</span>'; return; }
   if (!d.total_calls) { box.innerHTML = '<span class="hint">窗口内暂无计量记录（' + (d.window_days) + ' 天）。</span>'; return; }
+  const hasRows = Array.isArray(d.rows) && d.rows.length > 0;
+  /* 旧后端（代码已落盘但未重启）没有 rows：用 by_model 退化成「无日期维度」的行。
+     排序照样生效，日期/总耗时显 —，并在表上方点明原因，不假装数据完整。 */
+  mclRows = hasRows ? d.rows : (d.by_model || []).map(m => ({
+    client: '—', model: m.model, date: '—', requests: m.calls,
+    total_tokens: m.total_tokens, avg_ms: m.avg_ms, total_ms: 0
+  }));
   let h = '<div class="hint" style="margin-bottom:8px">共 <b>' + d.total_calls +
-          '</b> 次调用 · <b>' + (d.total_tokens||0).toLocaleString() + '</b> tokens（窗口 ' +
-          d.window_days + ' 天，' + (d.as_of||'').slice(0,16).replace('T',' ') + ' UTC）</div>';
-  if (d.by_model && d.by_model.length) {
-    h += '<table class="tbl" style="width:100%;border-collapse:collapse;margin-bottom:10px">' +
-      '<tr><th style="text-align:left;padding:4px">模型</th><th style="text-align:left;padding:4px">场景分布</th>' +
-      '<th style="padding:4px">调用</th><th style="padding:4px">tokens</th><th style="padding:4px">均耗时ms</th></tr>';
-    d.by_model.forEach(m => {
-      h += '<tr><td style="padding:4px;font-family:monospace">' + escapeHtml(m.model) + '</td>' +
-           '<td style="padding:4px" class="hint">' + escapeHtml(Object.entries(d.by_scene||{}).map(([s,n])=>s+':'+n).join(' ')) + '</td>' +
-           '<td style="text-align:center;padding:4px">' + m.calls + '</td>' +
-           '<td style="text-align:center;padding:4px">' + (m.total_tokens||0).toLocaleString() + '</td>' +
-           '<td style="text-align:center;padding:4px">' + (m.avg_ms||0) + '</td></tr>';
-    });
-    h += '</table>';
+          '</b> 次调用 · <b>' + (d.total_tokens || 0).toLocaleString() + '</b> tokens（窗口 ' +
+          d.window_days + ' 天，' + (d.as_of || '').slice(0, 16).replace('T', ' ') + ' UTC）· ' +
+          mclRows.length + ' 行明细</div>';
+  if (!hasRows) {
+    h += '<div class="hint" style="margin-bottom:8px">当前后端未提供按天明细（需重启 agenthub 生效）；' +
+         '下表暂按「模型」聚合，日期与总耗时不可用，但各列排序已生效。</div>';
   }
-  h += '<div class="hint">场景计数：' + Object.entries(d.by_scene||{}).map(([s,n])=>s+'='+n).join(' · ') + '</div>';
+  h += '<div id="mclTable"></div>';
+  h += '<div class="hint" style="margin-top:8px">点击表头按该列排序（再点一次反向）。' +
+       '用量 = total_tokens；均耗时 = 该组 AVG(duration_ms)；总耗时 = SUM(duration_ms)。</div>';
+  if (d.by_scene && Object.keys(d.by_scene).length) {
+    h += '<div class="hint" style="margin-top:6px">调用来源分布：' +
+         Object.entries(d.by_scene).map(([s, n]) => escapeHtml(s) + '=' + n).join(' · ') + '</div>';
+  }
   box.innerHTML = h;
+  mclRenderTable();
 }
 
 async function settingsLogsLoad() {
@@ -2170,6 +2249,9 @@ function settingsDelegates() {
     const page = document.getElementById(id);
     if (!page) return;
     page.addEventListener('click', e => {
+    /* 模型计量：表头排序走同一委托出口，禁 inline onclick */
+    const mth = e.target.closest('[data-mcl-sort]');
+    if (mth) return mclSortKey(mth.dataset.mclSort);
     const ag = e.target.closest('[data-settings-agent]');
     if (ag) {
       if (ag.getAttribute('aria-disabled') === 'true') {
@@ -8737,7 +8819,7 @@ const MODE_LABEL = { embed: '嵌入', term: '终端', chat: '对话', detail: '�
 /* v0.13.43 设置子菜单：与系统页同形态（data-sys → go(page) ⇒ 正文出页、窄屏自动收侧栏），
    只是单独成组挂在「系统」之下；这三项此前是右侧抽屉里的三个 tab。 */
 const SET_PAGES = [['settings-model', '模型', 'cpu'], ['settings-github', 'GitHub', 'globe'],
-                   ['settings-token', '认证状态', 'terminal'], ['settings-logs', '日志', 'activity'],
+                   ['settings-logs', '日志', 'activity'],
                    ['settings-users', '用户授权', 'eye'], ['settings-modelcalls', '模型计量', 'radar']];
 /* 2026-10-25：「设置 · 记忆存储」并入「系统 · 记忆中心」（同一份本机记忆的读写入口
    不该分居两个菜单，设置组也不该为 4 条便签单占一个一级项）。 */
@@ -8794,10 +8876,9 @@ function navItemHtml(a, child) {
   // 子项（画像 parent 指向本组父行，如 xray/openrung 挂在 proxy-panel 下）：
   // 只加一个缩进类，交互语义与普通行完全相同。
   const cls = 'nav-item' + (child ? ' is-child' : '') + on;
-  // 窄栏里名称会截断，title 里给全量信息（名称 · 状态 · 端口 · 描述）
-  const tip = a.name + ' · ' + seatLabelOf(a) + (a.port ? ' · :' + a.port : '') +
-    (a.verdict_reason ? '\n' + a.verdict_reason : '') +
-    (a.description ? '\n' + a.description : '');
+  // 悬停只给「状态 · 功能」：窄栏名称截断时补回全名；
+  // 端口 / 判定理由 / 描述全文不再进 title（用户 2026-11-08）。
+  const tip = seatLabelOf(a) + ' · ' + (a.name || a.id);
   // 搜索高亮：名称用 hlMatch，ID 和端口保持原样
   const nameHtml = hlMatch(a.name || a.id, ($('navSearch') ? $('navSearch').value.trim() : ''));
   // 操作按钮：按 entries 类型渲染（最多3个）
@@ -8896,8 +8977,7 @@ function histHtml(aid) {
   const rows = (h.items || []).map(it => {
     /* 悬停补齐被列宽挤掉的信息：完整时间、条数、完整 cwd。
        顺序与行内一致（摘要 → 目录 → 时间），读起来不用二次对位。 */
-    const tip = [it.title, hhDir(it.cwd, h.home), hhFull(it.ts),
-                 (it.msgs ? it.msgs + ' 条' : ''), (it.cwd || '')].filter(Boolean).join(' ｜ ');
+    const tip = it.title + (it.msgs ? ' · ' + it.msgs + ' 条' : '');
     return '<div class="hh-row" data-agent="' + escapeHtml(aid) + '" data-sid="' + escapeHtml(it.id) + '"' +
       ' title="' + escapeHtml(tip) + '">' +
       '<span class="hh-t">' + escapeHtml(it.title) + '</span>' +

@@ -372,7 +372,8 @@ class TestFrontendWiring(unittest.TestCase):
         self.assertIn("var GH_GROUPS = []", self.js)
         self.assertIn("gh-grp", self.js, "分组容器缺失 ⇒ 仍旧平铺")
         i = self.js.find("function ghRenderList(")
-        body = self.js[i:i + 2200]
+        # v0.13.198：函数里先建 tab 条再出三段，窗口从 2200 放宽到 3000（过窄=假红）
+        body = self.js[i:i + 3000]
         for token in ("自建", "fork", "star", "counts"):
             self.assertIn(token, body, f"分组渲染缺少 {token} 段")
 
@@ -420,3 +421,57 @@ class TestSelfVsOtherVisibility(_Base):
     def test_login_probe_failure_falls_back_to_public(self):
         calls = self._calls("acme", "")
         self.assertIn("/users/acme/repos", calls[0], "探不到身份按公开面处理，不猜")
+
+
+class TestTabbedGroups(unittest.TestCase):
+    """v0.13.198：用户要求「设置 github 和 github 项目都要是标签页分组，tab 名＝仓库名 gztxt」。
+
+    判据三件（少一件就是「还是竖排清单」）：
+      ① 两处都有 tab 条容器（设置 #ghSrcTabs / 项目页 tabstrip 渲染进 #ghList）；
+      ② tab 名取归属账号（owner → label → host → 默认），两处同一口径；
+      ③ 点击走既有事件委托（设置 data-settings-act=gh-src-tab，项目页 data-gh-tab），
+         不许 inline onclick；也不许把当前 tab 写进 localStorage（偏好不改交互分支）。
+    """
+
+    def setUp(self):
+        self.html = (_REPO / "templates" / "index.html").read_text(encoding="utf-8")
+        self.js = (_REPO / "static" / "hub.js").read_text(encoding="utf-8")
+
+    def test_css_and_settings_container(self):
+        self.assertIn(".tabstrip", self.html, "缺 tab 条样式 ⇒ 两个 tab 会挤成一坨")
+        self.assertIn('id="ghSrcTabs"', self.html, "设置页缺 tab 条宿主")
+        i = self.html.find('id="ghSrcTabs"')
+        self.assertIn("tabstrip", self.html[i:i + 80], "tab 条宿主必须带 tabstrip 类")
+
+    def test_tab_name_is_owner_first(self):
+        for fn in ("function ghGroupTabName(", "function ghSourceTabName("):
+            self.assertIn(fn, self.js, fn + " 缺失 ⇒ tab 名无从取名")
+        i = self.js.find("function ghGroupTabName(")
+        body = self.js[i:i + 200]
+        self.assertIn("owner", body)
+        self.assertLess(body.find("owner"), body.find("label"), "owner 必须优先于 label")
+
+    def test_both_pages_render_tabstrip(self):
+        i = self.js.find("function ghRenderList(")
+        body = self.js[i:i + 1600]
+        self.assertIn("tabstrip", body, "项目页没渲染 tab 条 ⇒ 仍是一屏堆所有源")
+        self.assertIn("ghGroupTab", body)
+        self.assertIn("data-gh-tab", body)
+        j = self.js.find("function ghRenderSources(")
+        sbody = self.js[j:j + 1800]
+        self.assertIn("ghSrcTabs", sbody, "设置页没渲染 tab 条")
+        self.assertIn("gh-src-tab", sbody)
+
+    def test_tab_click_goes_through_delegate(self):
+        self.assertIn("ds.ghTab != null", self.js, "项目页 tab 点击没有委托分支 ⇒ 点了没反应")
+        self.assertIn("'gh-src-tab'", self.js, "设置页 tab 点击没有委托分支")
+        # tab 条本身不许出现 inline onclick（委托是唯一出口）
+        for anchor in ("function ghRenderList(", "function ghRenderSources("):
+            k = self.js.find(anchor)
+            seg = self.js[k:k + 1800]
+            self.assertNotIn("onclick=", seg, anchor + " 内出现 inline onclick")
+
+    def test_active_tab_not_persisted(self):
+        for key in ("hub.gh.tab", "hub.ghsrc.tab", "ghGroupTab", "ghSrcTab"):
+            self.assertNotIn("lsSet('" + key, self.js)
+            self.assertNotIn("lsGet('" + key, self.js)

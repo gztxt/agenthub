@@ -1733,6 +1733,9 @@ function settingsGithubStatus(note) {
 
 /* ── 仓库源列表（v0.13.197）：设置页维护，项目页按源分组 ──────────────── */
 var GH_SOURCES = [];
+/* v0.13.198：源以标签页并列（tab 名＝归属账号，如 gztxt），点一个看一个；
+   状态只存内存（偏好不改交互分支，见 AGENTS.md 4.1 ⑤）。 */
+var ghSrcTab = '';
 
 async function settingsGithubSources() {
   try {
@@ -1744,15 +1747,37 @@ async function settingsGithubSources() {
   ghRenderSources();
 }
 
+function ghSourceTabName(s) {
+  return (s && (s.owner || s.label || s.git_host)) || '默认';
+}
+
+function settingsGithubSourceTab(sid) {
+  ghSrcTab = sid || '';
+  ghRenderSources();
+}
+
 function ghRenderSources() {
+  const tabs = $('ghSrcTabs');
   const box = $('ghSrcList');
   if (!box) return;
   if (!GH_SOURCES.length) {
+    if (tabs) { tabs.innerHTML = ''; tabs.style.display = 'none'; }
     box.innerHTML = '<div class="v">（还没有仓库源：上面添加一条，或保存「远程 / 归属」后会自动生成一条默认源）</div>';
     box.style.display = '';
     return;
   }
-  box.innerHTML = GH_SOURCES.map(s => '<div class="set-diff-row">' +
+  if (!ghSrcTab || !GH_SOURCES.some(s => s.id === ghSrcTab)) ghSrcTab = GH_SOURCES[0].id;
+  if (tabs) {
+    tabs.innerHTML = GH_SOURCES.map(s =>
+      '<button type="button" class="tab" role="tab" data-settings-act="gh-src-tab" data-sid="' +
+      escapeHtml(s.id) + '" aria-selected="' + (s.id === ghSrcTab ? 'true' : 'false') + '">' +
+      escapeHtml(ghSourceTabName(s)) +
+      '<span class="n">' + (s.repo_count || 0) + '</span>' +
+      (s.enabled ? '' : '<span class="n">停用</span>') + '</button>').join('');
+    tabs.style.display = '';
+  }
+  const s = GH_SOURCES.filter(x => x.id === ghSrcTab)[0] || GH_SOURCES[0];
+  box.innerHTML = '<div class="set-diff-row">' +
     '<div class="k">' + escapeHtml(s.label || s.owner || s.git_host || '') + '</div>' +
     '<div class="v">' + escapeHtml(s.api_base || '') +
     (s.owner ? ' · ' + escapeHtml(s.owner) : ' · 当前 key 可见全部') +
@@ -1762,7 +1787,7 @@ function ghRenderSources() {
     '<button class="btn ghost sm" data-settings-act="gh-src-toggle" data-sid="' +
     escapeHtml(s.id) + '">' + (s.enabled ? '停用' : '启用') + '</button>' +
     '<button class="btn ghost sm" data-settings-act="gh-src-del" data-sid="' +
-    escapeHtml(s.id) + '">删除</button></div>').join('');
+    escapeHtml(s.id) + '">删除</button></div>';
   box.style.display = '';
 }
 
@@ -2574,6 +2599,7 @@ function settingsDelegates() {
       if (a === 'gh-clear') return settingsGithubClear();
       if (a === 'gh-refresh') return settingsGithubRefresh();
       if (a === 'gh-src-add') return settingsGithubSourceAdd();
+      if (a === 'gh-src-tab') return settingsGithubSourceTab(act.dataset.sid);
       if (a === 'gh-src-toggle') return settingsGithubSourceToggle(
         act.dataset.sid, (act.textContent || '').trim() === '启用');
       if (a === 'gh-src-del') return settingsGithubSourceDel(act.dataset.sid);
@@ -10846,6 +10872,14 @@ function ghQDebounced() {
   if (ghQTimer) clearTimeout(ghQTimer);
   ghQTimer = setTimeout(ghRenderList, 300);
 }
+/* v0.13.198：项目页按仓库源分页 —— tab 名＝归属账号（如 gztxt），一次只看一个源。
+   只用内存状态（不改交互分支的持久偏好）。 */
+var ghGroupTab = '';
+
+function ghGroupTabName(g) {
+  return (g && (g.owner || g.label || g.git_host)) || '默认';
+}
+
 function ghRenderList() {
   const box = $('ghList');
   if (!box) return;
@@ -10863,27 +10897,39 @@ function ghRenderList() {
   const groups = GH_GROUPS.length ? GH_GROUPS
     : [{ id: '', label: '默认', git_host: '', owner: '', ok: true, repos: GH,
          counts: {}, errors: [] }];
-  let html = '';
-  groups.forEach(g => {
-    const rows = pairs.filter(([r]) => !g.id || r.source_id === g.id).map(([r]) => r);
-    if (!rows.length && !((g.errors || []).length)) return;
+  if (!ghGroupTab && groups.length) ghGroupTab = groups[0].id || '';
+  if (ghGroupTab && !groups.some(g => (g.id || '') === ghGroupTab)) {
+    ghGroupTab = groups[0].id || '';
+  }
+  const tabs = '<div class="tabstrip" role="tablist">' + groups.map(g => {
     const c = g.counts || {};
-    html += '<div class="gh-grp" style="border-top:1px solid var(--border);margin-top:4px">' +
-      '<div class="gh-grp-hd" style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;' +
-      'padding:7px 10px 3px">' +
-      '<b>' + escapeHtml(g.label || g.owner || g.git_host || '默认') + '</b>' +
-      '<span class="hint">' + escapeHtml(g.git_host || '') +
-      (g.owner ? ' · ' + escapeHtml(g.owner) : ' · 当前 key 可见全部') +
-      ' · 自建 ' + (c.own || 0) + ' · fork ' + (c.fork || 0) + ' · star ' + (c.star || 0) +
-      (g.cached ? ' · 缓存' : '') + '</span>' +
-      ((g.errors || []).length ? '<span class="hint" style="color:var(--danger,#c33)">⚠ ' +
-        escapeHtml(g.errors.join('；')) + '</span>' : '') + '</div>' +
-      sec('自建', rows.filter(r => r.bucket === 'own' || !r.bucket)) +
-      sec('fork', rows.filter(r => r.bucket === 'fork')) +
-      sec('star', rows.filter(r => r.bucket === 'star')) + '</div>';
-  });
-  box.innerHTML = html || ('<div class="hint" style="padding:10px">' +
-    (q ? '无匹配仓库 <button class="btn ghost sm" onclick="ghClearFilter()">清除筛选</button>' : '无仓库') + '</div>');
+    const bad = (g.errors || []).length ? ' ⚠' : '';
+    return '<button type="button" class="tab" role="tab" data-gh-tab="' +
+      escapeHtml(g.id || '') + '" aria-selected="' +
+      ((g.id || '') === ghGroupTab ? 'true' : 'false') + '">' +
+      escapeHtml(ghGroupTabName(g)) +
+      '<span class="n">' + (c.total || 0) + bad + '</span></button>';
+  }).join('') + '</div>';
+  const g = groups.filter(x => (x.id || '') === ghGroupTab)[0] || groups[0];
+  const rows = pairs.filter(([r]) => !g.id || r.source_id === g.id).map(([r]) => r);
+  const c = g.counts || {};
+  const empty = rows.length ? '' : ('<div class="hint" style="padding:10px">' +
+    (q ? '无匹配仓库 <button class="btn ghost sm" onclick="ghClearFilter()">清除筛选</button>'
+       : '这个源没有仓库') + '</div>');
+  let html = tabs + '<div class="gh-grp">' +
+    '<div class="gh-grp-hd" style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;' +
+    'padding:7px 10px 3px">' +
+    '<b>' + escapeHtml(g.label || g.owner || g.git_host || '默认') + '</b>' +
+    '<span class="hint">' + escapeHtml(g.git_host || '') +
+    (g.owner ? ' · ' + escapeHtml(g.owner) : ' · 当前 key 可见全部') +
+    ' · 自建 ' + (c.own || 0) + ' · fork ' + (c.fork || 0) + ' · star ' + (c.star || 0) +
+    (g.cached ? ' · 缓存' : '') + '</span>' +
+    ((g.errors || []).length ? '<span class="hint" style="color:var(--danger,#c33)">⚠ ' +
+      escapeHtml(g.errors.join('；')) + '</span>' : '') + '</div>' +
+    sec('自建', rows.filter(r => r.bucket === 'own' || !r.bucket)) +
+    sec('fork', rows.filter(r => r.bucket === 'fork')) +
+    sec('star', rows.filter(r => r.bucket === 'star')) + empty + '</div>';
+  box.innerHTML = html;
   const hint = $('ghHint');
   if (hint) hint.textContent = '显示 ' + pairs.length + ' / ' + GH.length + ' 个仓库 · ' +
     groups.length + ' 个源' + ghCountsText();
@@ -10999,6 +11045,7 @@ async function ghStart() {
       var ds = t.dataset || {};
       if (ds.ghStar != null) { ev.stopPropagation(); ghToggleStar(Number(ds.ghStar)); return; }
       if (ds.ghHide != null) { ev.stopPropagation(); ghToggleHide(Number(ds.ghHide)); return; }
+      if (ds.ghTab != null)  { ev.stopPropagation(); ghGroupTab = ds.ghTab; ghRenderList(); return; }
       if (ds.ghRow != null)  { ghSelect(Number(ds.ghRow)); return; }
       t = t.parentNode;
     }

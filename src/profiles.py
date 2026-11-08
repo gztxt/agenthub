@@ -36,6 +36,10 @@ EMBED_KEYS = os.getenv("EMBED_KEYS", "1") == "1"
 EMBED_KEYS_BASE = int(os.getenv("EMBED_KEYS_BASE", "3200"))
 EMBED_PROXY_MAP: Dict[str, str] = {}
 
+# pi-web 的单口令文件（0600，内容即 PI_WEB_PASSWORD）。桥以 username=pi 代填 Basic
+# （pi-web 的 middleware 硬编码只认 "pi"）。文件不存在 ⇒ 不注入（上游回 401）。
+PI_WEB_SECRET_FILE = os.getenv("PI_WEB_SECRET_FILE", "/home/gztxt/.config/pi-web.secret")
+
 
 def embed_proxy_targets() -> List[Dict[str, object]]:
     """列出需要 ⌘K 桥代注入的 embed 上游（id / host / port）。
@@ -72,7 +76,13 @@ def embed_proxy_targets() -> List[Dict[str, object]]:
                     "host": sp.hostname or "127.0.0.1", "port": port,
                     "start": ui_start_for(p["id"]),
                     # Basic 面板：桥拿到口令文件才肯出 embed（桥自己当门，见 embed_proxy）
-                    "secret": p.get("bridge_secret") or "",
+                    # pi-web 走同一机制，但用户名固定 "pi" 且口令文件是本机生成的。
+                    "secret": p.get("bridge_secret")
+                              or (PI_WEB_SECRET_FILE if p["id"] == "pi" else ""),
+                    "basic_user": "pi" if p["id"] == "pi" else "hub",
+                    # pi-web 的文档页不认 Basic（middleware 只对 /api 取 Authorization），
+                    # 必须补一枚服务端算出的会话 Cookie，否则 "/" 恒跳 /login。
+                    "session_cookie": "pi_web_session" if p["id"] == "pi" else "",
                     # 按 Host 判来源的上游（dsh 的 /api 围栏只认 loopback / 绑定地址 /
                     # --trusted-host）。别的宿主用 Host 拼绝对跳转地址，跟着改写会把
                     # 浏览器送到上游内网地址 ⇒ 只点名 dsh，不做成默认。

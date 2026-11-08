@@ -277,6 +277,106 @@ class TestBridgeHubGate(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.up.seen, [], "无效会话不得穿透到上游")
 
 
+class TestBridgePermissionGate(unittest.IsolatedAsyncioTestCase):
+    """2026-11-08：登录门之上再加 agent 级授权（gztxt1 未授权 pi 仍能进 :3201）。
+
+    ④ 管理员(perms=None) → 放行；
+    ⑤ 普通用户含该模块 → 放行；
+    ⑥ 普通用户不含该模块 → 403，且不碰上上游；
+    ⑦ 未登录 → 仍 302（登录门优先，不能先泄漏「有无权限」）。
+    """
+
+    def _as(self, ok, perms):
+        embed_proxy._hub_session_ok = lambda header: (ok, perms)
+
+    async def _req(self, raw: bytes) -> bytes:
+        r, w = await asyncio.open_connection("127.0.0.1", self.port)
+        w.write(raw)
+        await w.drain()
+        data = await asyncio.wait_for(r.read(65536), 3)
+        w.close()
+        return data
+
+    _DOC = (b"GET / HTTP/1.1\r\nHost: 192.168.5.102:3201\r\n"
+            b"Cookie: hub_session=x\r\nAccept: text/html\r\n\r\n")
+    _XHR = (b"GET /api/sessions HTTP/1.1\r\nHost: 192.168.5.102:3201\r\n"
+            b"Cookie: hub_session=x\r\nAccept: application/json\r\n\r\n")
+
+    async def asyncSetUp(self):
+        self._orig = embed_proxy._hub_session_ok
+        self.up = _Recorder()
+        self.up_srv = await asyncio.start_server(self.up, "127.0.0.1", 0)
+        up_port = self.up_srv.sockets[0].getsockname()[1]
+        self.px = embed_proxy.EmbedProxy(
+            "权限桥", "127.0.0.1", up_port, listen_host="127.0.0.1",
+            listen_port=0, keys=False, hub_auth=True, hub_port=3102, perm="pi")
+        self.assertTrue(await self.px.start())
+        self.port = self.px.server.sockets[0].getsockname()[1]
+
+    async def asyncTearDown(self):
+        embed_proxy._hub_session_ok = self._orig
+        await self.px.stop()
+        self.up_srv.close()
+
+    async def test_admin_passes(self):
+        self._as(True, None)
+        data = await self._req(self._DOC)
+        self.assertIn(b"200", data.split(b"\r\n", 1)[0])
+        self.assertEqual(len(self.up.seen), 1)
+
+    async def test_user_with_perm_passes(self):
+        self._as(True, {"pi", "codebuddy"})
+        data = await self._req(self._DOC)
+        self.assertIn(b"200", data.split(b"\r\n", 1)[0])
+        self.assertEqual(len(self.up.seen), 1)
+
+    async def test_user_without_perm_is_403(self):
+        self._as(True, {"codebuddy"})
+        data = await self._req(self._DOC)
+        self.assertIn(b"403", data.split(b"\r\n", 1)[0])
+        self.assertIn("没有访问权限".encode(), data)
+        self.assertEqual(self.up.seen, [], "未授权的请求绝不能落到上游")
+
+    async def test_user_without_perm_xhr_is_403_json(self):
+        self._as(True, {"codebuddy"})
+        data = await self._req(self._XHR)
+        self.assertIn(b"403", data.split(b"\r\n", 1)[0])
+        self.assertIn(b'"forbidden"', data)
+        self.assertEqual(self.up.seen, [])
+
+    async def test_anonymous_still_302(self):
+        self._as(False, None)
+        data = await self._req(self._DOC)
+        self.assertIn(b"302", data.split(b"\r\n", 1)[0])
+        self.assertEqual(self.up.seen, [])
+
+
+class TestUpstreamCookie(unittest.TestCase):
+    """pi-web 的文档页不认 Basic，桥必须自铸 `pi_web_session`（算法与 .next 逐字一致）。"""
+
+    def test_pi_cookie_format_and_hmac(self):
+        import hashlib
+        import hmac
+        import os
+        import re as _re
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            secret = os.path.join(d, "s")
+            with open(secret, "w", encoding="utf-8") as fh:
+                fh.write("pw-123")
+            px = embed_proxy.EmbedProxy(
+                "t", "127.0.0.1", 1, auth_secret=secret,
+                basic_user="pi", session_cookie="pi_web_session")
+            got = px._upstream_cookie().decode()
+        self.assertRegex(got, r"^pi_web_session=v1\.\d{10}\.[a-f0-9]{32}\.[a-f0-9]{64}$")
+        val = got.split("=", 1)[1]
+        base, tag = val.rsplit(".", 1)
+        want = hmac.new(b"pw-123", ("pi-web-session:" + base).encode(),
+                        hashlib.sha256).hexdigest()
+        self.assertEqual(tag, want)
+
+
 class TestTargets(unittest.TestCase):
     def test_only_dsh_asks_for_rewrite(self):
         flags = {t["id"]: t.get("rewrite_host") for t in profiles.embed_proxy_targets()}

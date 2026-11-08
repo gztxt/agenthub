@@ -1480,7 +1480,7 @@ async def startup():
                     listen_host=os.getenv("EMBED_PROXY_HOST", config.host),
                     listen_port=profiles_mod.EMBED_PROXY_PORT,
                     hub_auth=(os.getenv("EMBED_HUB_AUTH", "1") == "1"),
-                    hub_port=config.port)
+                    hub_port=config.port, perm="qwenpaw")
                 await _embed_proxy.start()
         except Exception as e:
             log.warning(f"[Agent Hub] 注入代理启动失败（不影响其他功能）：{type(e).__name__}: {e}")
@@ -1507,10 +1507,14 @@ async def startup():
                         start=t.get("start")),
                     listen_port=port, keys=True,
                     auth_secret=str(t.get("secret") or ""),
+                    basic_user=str(t.get("basic_user") or "hub"),
+                    session_cookie=str(t.get("session_cookie") or ""),
                     title=str(t.get("name") or t["id"]),
                     rewrite_authority=bool(t.get("rewrite_host")),
                     hub_auth=(os.getenv("EMBED_HUB_AUTH", "1") == "1"),
-                    hub_port=config.port)
+                    hub_port=config.port,
+                    # agent 级授权：普通用户必须被勾选该模块，否则 403（管理员放行）。
+                    perm=str(t["id"]))
                 if await px.start():
                     _embed_bridges.append(px)
                     profiles_mod.EMBED_PROXY_MAP[str(t["id"])] = "http://127.0.0.1:%d" % port

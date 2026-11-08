@@ -36,6 +36,7 @@ import hmac
 import logging
 import os
 import re
+import time
 import urllib.parse
 
 log = logging.getLogger("agent-hub.embed-proxy")
@@ -127,6 +128,22 @@ def _login_page(title: str, err: str = "") -> bytes:
             .replace("__ERR__", msg)).encode()
 
 
+def _forbidden_page(title: str, module: str) -> bytes:
+    """已登录但未被授权该模块：明确 403，不回落上游、不给半截页面。"""
+    import html as _html
+    t, m = _html.escape(title), _html.escape(module)
+    return ("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>403 · 没有访问权限</title></head>"
+            "<body style=\"margin:0;padding:40px 24px;font:14px/1.7 system-ui,sans-serif;"
+            "background:#14161a;color:#e6e6e6\">"
+            "<h1 style=\"font-size:18px;margin:0 0 12px\">没有访问权限</h1>"
+            f"<p style=\"margin:0 0 8px\">当前账号未被授权使用 <b>{t}</b>"
+            f"（模块 <code style=\"background:#24262c;padding:1px 5px;border-radius:4px\">{m}</code>）。</p>"
+            "<p style=\"margin:0;color:#9aa0a6\">请让管理员在 agenthub「设置 → 用户授权」里勾选该项后重试。</p>"
+            "</body></html>").encode()
+
+
 def _req_line(header: bytes) -> tuple[bytes, bytes]:
     """(method, path) —— 只取请求行，路径去掉 query。"""
     parts = header.split(b"\r\n", 1)[0].split(b" ")
@@ -148,8 +165,13 @@ def _cookie_has(header: bytes, name: str, token: str) -> bool:
 
 
 
-def _hub_session_ok(header: bytes) -> bool:
+def _hub_session_ok(header: bytes):
     """请求是否带着**有效的 hub 登录 Cookie**（`hub_session`）。
+
+    返回 `(ok, perms)`：
+      - `(False, None)` 未登录 / 用户库不可用（fail-closed）；
+      - `(True, None)` 管理员（perms=None ⇒ 全放行）；
+      - `(True, set)` 普通用户，set 是其在 agenthub「用户授权」里勾选的模块。
 
     为什么桥不自己再要一次口令（2026-11-07 用户裁定「在 agenthub 打开无需再登录，
     浏览器直接打开才要验证」）：Cookie 是 host-only、**不按端口隔离**，所以 hub
@@ -158,6 +180,10 @@ def _hub_session_ok(header: bytes) -> bool:
     Cookie（没在 hub 登录过），于是会被送回 hub 登录页。
     校验复用 users.resolve_token（同一张 user_credentials 表，sha256 比对），
     桥自己不签发、不缓存、不落任何凭据。
+
+    ⚠ 2026-11-08：此前 `_perms` 被直接丢弃 ⇒ 任何登录用户都能用全部 agent
+    （gztxt1 未授权 pi 仍能打开 :3201）。现在 perms 原样交给 `_serve` 做
+    agent 级判定，别再把它丢掉。
     """
     for ln in header.split(b"\r\n"):
         if not ln.lower().startswith(b"cookie:"):
@@ -168,14 +194,16 @@ def _hub_session_ok(header: bytes) -> bool:
                 continue
             tok = v.decode(errors="replace")
             if not tok:
-                return False
+                return False, None
             try:
                 import users as _users
-                row, _perms, compat = _users.resolve_token(tok)
-                return bool(row and not compat)
+                row, perms, compat = _users.resolve_token(tok)
+                if not (row and not compat):
+                    return False, None
+                return True, perms
             except Exception:  # noqa: BLE001 —— 用户库不可用一律当未登录（fail-closed）
-                return False
-    return False
+                return False, None
+    return False, None
 
 
 def _host_of(header: bytes) -> str:
@@ -518,7 +546,7 @@ def _rewrite_authority(header: bytes, authority: bytes) -> bytes:
 async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                   upstream: tuple[str, int], extra: bytes = b"",
                   pre_header: bytes | None = None, auth: bytes = b"",
-                  rewrite_authority: bool = False) -> None:
+                  rewrite_authority: bool = False, cookie: bytes = b"") -> None:
     if pre_header is None:
         try:
             header = await reader.readuntil(_END)
@@ -534,6 +562,15 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     # 浏览器在跨源 iframe 里拿不到表单，也弹不出上游的认证框，只能由桥代持。
     if auth and not re.search(rb"^authorization:", rest, re.I | re.M):
         rest = rest + b"\r\nAuthorization: Basic " + auth
+        header = head_line + b"\r\n" + rest + _END
+    # 上游只认文档级 Cookie 时（pi-web：Basic 仅对 /api 生效，"/" 仍跳 /login），
+    # 由桥补一枚服务端算出的会话 Cookie；客户端已有 Cookie 就追加，不覆盖。
+    if cookie:
+        m = re.search(rb"^cookie:[ \t]*(.*?)\r?$", rest, re.I | re.M)
+        if m:
+            rest = rest[:m.start(1)] + m.group(1) + b"; " + cookie + rest[m.end(1):]
+        else:
+            rest = rest + b"\r\nCookie: " + cookie
         header = head_line + b"\r\n" + rest + _END
     # 若客户端在同一连接上已带正文（PUT/POST 的 body 紧跟头），已读到的部分要一起转发
     pre_body = parts[1] if len(parts) > 1 else b""
@@ -736,7 +773,8 @@ class EmbedProxy:
                  css: str = "", keys: bool = True,
                  auth_secret: str = "", title: str = "",
                  rewrite_authority: bool = False,
-                 hub_auth: bool = True, hub_port: int = 3102):
+                 hub_auth: bool = True, hub_port: int = 3102,
+                 perm: str = "", basic_user: str = "hub", session_cookie: str = ""):
         self.name = name
         self.upstream = (upstream_host, int(upstream_port))
         self.listen = (listen_host, int(listen_port))
@@ -745,6 +783,13 @@ class EmbedProxy:
         # 非空 ⇒ 这个桥代持上游 Basic（面板口令文件）。**不再**拿它当用户口令：
         # 用户只要在 hub 登录过，桥就自动补上（2026-11-07 用户裁定）。
         self.auth_secret = (auth_secret or "").strip()
+        # Basic 的用户名由上游决定：面板/CCR 用 hub，pi-web 的代码里硬编码只认 "pi"。
+        self.basic_user = (basic_user or "hub").strip() or "hub"
+        # 非空 ⇒ 桥按该 Cookie 名自行铸造上游会话（pi-web：文档页只认 Cookie）。
+        self.session_cookie = (session_cookie or "").strip()
+        # 非空 ⇒ 这个桥要求登录用户在 agenthub 里被授权该模块（agent 级鉴权）。
+        # 管理员 perms=None 直接放行；普通用户 perms 不含该键 ⇒ 403（2026-11-08）。
+        self.perm = (perm or "").strip()
         self.title = title or name
         # 按 Host 判来源的上游（首指 dsh）：请求出桥前把 Host 换成上游 authority，
         # 并摘 Origin —— 详见 _rewrite_authority 的报障记录。
@@ -781,7 +826,21 @@ class EmbedProxy:
 
     def _auth_header(self) -> bytes:
         s = self._secret()
-        return base64.b64encode(("hub:" + s).encode()) if s else b""
+        return base64.b64encode(("%s:%s" % (self.basic_user, s)).encode()) if s else b""
+
+    def _upstream_cookie(self) -> bytes:
+        """pi-web 会话 Cookie：`v1.<exp>.<rand>.<HMAC(password, "pi-web-session:"+前缀)>`。
+
+        与 .next 里 `p(a,b)` / `web-auth/route` 的算法逐字一致（30 天有效）。
+        只在 `session_cookie` 非空时生成；口令缺失则不发，宁失败也不放行。
+        """
+        name, s = self.session_cookie, self._secret()
+        if not name or not s:
+            return b""
+        base = "v1.%d.%s" % (int(time.time()) + 2592_000, os.urandom(16).hex())
+        mac = hmac.new(s.encode(), ("pi-web-session:" + base).encode(),
+                       hashlib.sha256).hexdigest()
+        return ("%s=%s.%s" % (name, base, mac)).encode()
 
     async def _serve(self, reader: asyncio.StreamReader,
                      writer: asyncio.StreamWriter) -> None:
@@ -797,11 +856,22 @@ class EmbedProxy:
             return
         method, path = _req_line(header)
         if self.hub_auth:
-            if not _hub_session_ok(header):
+            _ok, _perms = _hub_session_ok(header)
+            doc_like = (method == b"GET" and (b"text/html" in header.lower()
+                                              or path == b"/" or bool(_HTML_PATH.search(path))))
+            # agent 级授权：管理员 perms=None 放行；普通用户必须被勾选了该模块。
+            # 未授权一律 403（页面/接口都不给半截），别回落到上游（2026-11-08）。
+            if _ok and self.perm and _perms is not None and self.perm not in _perms:
+                log.info("[%s] 403 未授权模块 %s（listen :%d）", self.name, self.perm, self.listen[1])
+                if doc_like and not _is_upgrade(header):
+                    await self._send(writer, 403, _forbidden_page(self.title, self.perm))
+                else:
+                    await self._send(writer, 403, b'{"error":"forbidden","module":"'
+                                     + self.perm.encode() + b'"}')
+                return
+            if not _ok:
                 # 未登录：文档/顶层导航送回 hub 登录页（登录后浏览器带着 Cookie 回来），
                 # 其余（XHR/静态/WS）一律 401 —— 不给半截页面，也不偷偷放行数据面。
-                doc_like = (method == b"GET" and (b"text/html" in header.lower()
-                                                  or path == b"/" or bool(_HTML_PATH.search(path))))
                 if doc_like and not _is_upgrade(header):
                     host = _host_of(header) or "127.0.0.1"
                     nxt = urllib.parse.quote("http://%s:%d%s" % (host, self.listen[1],
@@ -816,7 +886,8 @@ class EmbedProxy:
                 return
             await _handle(reader, writer, self.upstream, self.extra,
                           pre_header=header, auth=self._auth_header(),
-                          rewrite_authority=self.rewrite_authority)
+                          rewrite_authority=self.rewrite_authority,
+                          cookie=self._upstream_cookie())
             return
         # 旧形态（EMBED_HUB_AUTH=0 排障用）：桥自己出口令表单
         token = self._cookie_token()
@@ -826,7 +897,8 @@ class EmbedProxy:
         if token and _cookie_has(header, self._cookie_name(), token):
             await _handle(reader, writer, self.upstream, self.extra,
                           pre_header=header, auth=self._auth_header(),
-                          rewrite_authority=self.rewrite_authority)
+                          rewrite_authority=self.rewrite_authority,
+                          cookie=self._upstream_cookie())
             return
         # 未登录：文档请求给表单；其余（XHR/静态资源）一律 401，别把半截页面喂给前端。
         # 文档判据与 _is_document 同向（GET + .html 或 Accept 含 text/html），另加「无扩展名
@@ -860,9 +932,11 @@ class EmbedProxy:
         await self._send(writer, 401, _login_page(self.title + " 需要登录", "口令不正确"))
 
     async def _send(self, writer: asyncio.StreamWriter, code: int, body: bytes) -> None:
+        _reason = {200: "OK", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
+                   429: "Too Many Requests"}.get(code, "Error")
         head = ("HTTP/1.1 %d %s\r\nContent-Type: text/html; charset=utf-8\r\n"
                 "Content-Length: %d\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
-                % (code, "OK" if code == 200 else "Unauthorized", len(body))).encode()
+                % (code, _reason, len(body))).encode()
         await self._write(writer, head + body)
 
     async def _write(self, writer: asyncio.StreamWriter, data: bytes) -> None:

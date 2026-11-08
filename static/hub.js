@@ -547,7 +547,7 @@ var CENTER_HEALTH = { memory: '', skills: '', kb: '' };
       手机上没有 ESC 键，点空白是唯一逃生路径。 */
 // v0.13.165：skillCatalogDrawer（L1 目录）也是浮层 ⇒ 必须登记，否则
 // 抽屉唯一性 / 导航清收 / Esc / inert 四条红线对它全部失效。
-const OVERLAY_IDS = ['detailDrawer', 'skillDocDrawer', 'skillCatalogDrawer'];   // v0.13.43：设置抽屉已拆，改走正文页
+const OVERLAY_IDS = ['detailDrawer', 'skillDocDrawer', 'skillCatalogDrawer', 'usersModal'];   // v0.13.43：设置抽屉已拆；v0.13.196：用户授权模态登记（复用唯一入口/ESC/inert/遮罩）
 const overlayOpen = id => { const el = $(id); return !!(el && el.classList.contains('on')); };
 window.overlayAnyOpen = () => OVERLAY_IDS.some(overlayOpen);
 
@@ -669,6 +669,7 @@ function go(page) {
     page = 'classroom';
   }
   curPage = page;
+  if (window.closeUserModal) closeUserModal();   // 导航即清用户授权模态（抽屉那条只管窄屏，模态无条件清）
   // ② 导航即清浮层（只在窄屏强制：桌面上抽屉是右侧常驻面板，收掉反而影响操作）
   if (window.isNarrow && window.closeDrawers && isNarrow() && overlayAnyOpen()) closeDrawers();
   document.querySelectorAll('.sidebar button[data-page], .sidebar .side-item[data-sys]').forEach(b => {
@@ -1847,130 +1848,312 @@ function settingsLogsParams() {
   return p;
 }
 
-/* ── 用户授权面板（2026-11-07）──
-   读 /api/users 渲染；非 admin 只渲染自己的概览。写操作（建用户/发 token/吊 token/改 perms/删用户）
-   需 admin；普通用户调用会被后端 403，前端 toast 提示即可。 */
+/* ── 用户授权面板（2026-11-07；2026-11-08 UI 收口）──
+   读 /api/users 渲染；非 admin 只渲染自己的概览。写操作需 admin，被后端 403 时
+   由模态内错误位说明原因。
+   浮层：登记进 OVERLAY_IDS，复用 openOverlay/closeOverlay 唯一入口（§4.2 三条）；
+   本页所有弹窗走 openUserModal 一个出口，不再用原生 prompt/confirm。 */
+const USERS_MODAL_ID = 'usersModal';
 let _usersCache = null;
+let _usersModalCfg = null;
+let _usersModalOpenedAt = 0;
+
+/* 本页唯一浮层出口：表单 / 确认 / 结果三种形态共用一个壳。
+   cfg = { title, fields?, text?, confirmText?, danger?, onSubmit? }
+     fields: [{id,label,type?,placeholder?,value?,required?,min?,help?,autocomplete?}]
+     onSubmit(vals, m, setErr) → Promise；resolve 即关闭，抛错则把 message 写进错误位；
+       返回 false 表示调用方已自行接管（例如切到结果态），不自动关闭。
+     confirmText 为空且无 onSubmit ⇒ 结果态（只留「关闭」）。 */
+function openUserModal(cfg) {
+  let m = $(USERS_MODAL_ID);
+  if (!m) {
+    m = document.createElement('div');
+    m.id = USERS_MODAL_ID;
+    m.className = 'modal-mask';
+    m.style.zIndex = '95';        // 高于抽屉(60)，与 #tokenModal 同档
+    m.innerHTML =
+      '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="usersModalTitle">' +
+      '<h3 id="usersModalTitle"></h3>' +
+      '<div id="usersModalBd"></div>' +
+      '<div id="usersModalErr" class="hint" role="status" style="color:var(--danger-text);min-height:16px;margin:4px 0"></div>' +
+      '<div class="row" style="justify-content:flex-end;margin-top:10px">' +
+      '<button class="btn ghost" data-ux-close>取消</button>' +
+      '<button class="btn" data-ux-ok></button></div></div>';
+    document.body.appendChild(m);
+    let downOnMask = false;
+    m.addEventListener('pointerdown', e => { downOnMask = (e.target === m); });
+    m.addEventListener('click', e => {
+      if (e.target !== m || !downOnMask) return;
+      downOnMask = false;
+      if (Date.now() - _usersModalOpenedAt < 400) return;   // 幽灵点击守卫（照 03:1157）
+      closeUserModal();
+    });
+    m.querySelector('[data-ux-close]').addEventListener('click', () => closeUserModal());
+    m.querySelector('[data-ux-ok]').addEventListener('click', () => _usersModalSubmit());
+    m.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { e.stopPropagation(); closeUserModal(); }
+      else if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); _usersModalSubmit(); }
+    });
+  }
+  const bd = m.querySelector('#usersModalBd');
+  const fields = cfg.fields || [];
+  m.querySelector('#usersModalTitle').textContent = cfg.title || '';
+  m.querySelector('#usersModalErr').textContent = '';
+  bd.innerHTML = (cfg.text || '') + fields.map(f =>
+    '<div class="row" style="align-items:center">' +
+    '<label for="uf-' + f.id + '" style="min-width:100px;font-size:var(--fs-sm);color:var(--text-2)">' + escapeHtml(f.label) + '</label>' +
+    /* input 作为 flex item 默认 min-width:auto，会顶住固有宽度把窄屏 .modal 撑出边
+       （375 实测 input 右缘 364 > 模态 360）；min-width:0 才让 .row input{flex:1} 真收缩。 */
+    '<input id="uf-' + f.id + '" type="' + (f.type || 'text') + '"' +
+    (f.type === 'checkbox' ? ' style="flex:0 0 auto;width:auto"' : ' style="min-width:0"') + '></div>' +
+    (f.help ? '<div class="hint" style="margin:-4px 0 8px 108px">' + escapeHtml(f.help) + '</div>' : '')
+  ).join('');
+  fields.forEach(f => {
+    const el = bd.querySelector('#uf-' + f.id);
+    if (!el) return;
+    if (f.placeholder) el.placeholder = f.placeholder;
+    if (f.value != null) el.value = f.value;
+    if (f.autocomplete) el.autocomplete = f.autocomplete;
+  });
+  const ok = m.querySelector('[data-ux-ok]');
+  const cancel = m.querySelector('[data-ux-close]');
+  const result = !cfg.onSubmit;
+  ok.style.display = result ? 'none' : '';
+  ok.disabled = false;
+  ok.textContent = cfg.confirmText || '确认';
+  ok.className = 'btn' + (cfg.danger ? ' danger' : '');
+  cancel.textContent = result ? '关闭' : '取消';
+  _usersModalCfg = cfg;
+  _usersModalOpenedAt = Date.now();
+  openOverlay(USERS_MODAL_ID);      // 唯一入口：清其它浮层 + inert + 焦点 + 遮罩
+  if (!result) setTimeout(() => { const f = bd.querySelector('input'); if (f) f.focus(); }, 30);
+}
+function closeUserModal() {
+  closeOverlay(USERS_MODAL_ID);
+  _usersModalCfg = null;
+}
+async function _usersModalSubmit() {
+  const cfg = _usersModalCfg;
+  if (!cfg || !cfg.onSubmit) return;
+  const m = $(USERS_MODAL_ID);
+  if (!m) return;
+  const err = m.querySelector('#usersModalErr');
+  const ok = m.querySelector('[data-ux-ok]');
+  const vals = {};
+  (cfg.fields || []).forEach(f => {
+    const el = m.querySelector('#uf-' + f.id);
+    vals[f.id] = el ? (el.value || '').trim() : '';
+  });
+  for (const f of (cfg.fields || [])) {
+    if (f.required && !vals[f.id]) { err.textContent = '请填写「' + f.label + '」'; return; }
+    if (f.min && vals[f.id].length < f.min) { err.textContent = '「' + f.label + '」至少 ' + f.min + ' 位'; return; }
+  }
+  ok.disabled = true;
+  err.textContent = '处理中…';
+  try {
+    const r = await cfg.onSubmit(vals, m, s => { err.textContent = s; });
+    if (r === false) return;      // 调用方已切到结果态，别把新弹窗关掉
+    closeUserModal();
+  } catch (e) {
+    err.textContent = (e && e.message) || '操作失败，请重试';
+    ok.disabled = false;
+  }
+}
+
 async function usersPanelLoad() {
   const box = $('usersPanel');
   if (!box) return;
+  if (!boxBusy('usersPanel', '正在加载用户')) return;
   try {
     const d = await api('/api/users');
     _usersCache = d;
     usersPanelRender(d);
   } catch (e) {
-    box.innerHTML = '<span class="hint">加载失败：' + escapeHtml(e.message) + '</span>';
+    box.innerHTML = '<div class="hint" style="color:var(--danger-text)">加载失败：' +
+      escapeHtml(e.message) + '。请检查网络后重试。' +
+      ' <button class="btn sm" data-settings-act="users-load">重试</button></div>';
   }
 }
 function usersPanelRender(d) {
   const box = $('usersPanel');
   if (!box) return;
   if (!d.rows || !d.rows.length) {
-    box.innerHTML = '<span class="hint">尚无用户。点「新建用户」创建（admin 才可操作）。</span>';
+    box.innerHTML = '<div class="hint">还没有用户。点「新建用户」创建第一个（仅管理员可操作）。</div>';
     return;
   }
   const isAdmin = !!d.admin;
   const meName = String(lsGet('hub.login.user') || '').trim();
-  const rows = d.rows.map(u => {
-    const tokBtns = isAdmin ?
-      '<button class="btn xs ghost" data-usetok="' + escapeHtml(u.username) + '">发 token</button>' +
-      '<button class="btn xs ghost" data-uservoke="' + escapeHtml(u.username) + '">吊所有</button>' +
-      '<button class="btn xs ghost" data-userm="' + escapeHtml(u.username) + '">改授权</button>' +
-      '<button class="btn xs ghost" data-udel="' + escapeHtml(u.username) + '">删除</button>' : '';
+  const btn = (act, name, label, cls) =>
+    '<button class="btn xs ghost' + (cls ? ' ' + cls : '') + '" data-uact="' + act + '" data-uname="' +
+    escapeHtml(name) + '" aria-label="' + escapeHtml(label + '：' + name) + '" title="' +
+    escapeHtml(label + '：' + name) + '">' + escapeHtml(label) + '</button>';
+  box.innerHTML = d.rows.map(u => {
+    const name = u.username;
+    const ops = isAdmin
+      ? btn('token', name, '签发令牌') + btn('revoke', name, '吊销令牌') +
+        btn('perms', name, '编辑授权') + btn('del', name, '删除', 'danger')
+      : '';
     /* 2026-11-07 用户裁定：所有用户都能改自己的密码，超管也能改自己的/替别人改。 */
-    const pwBtn = (isAdmin || meName === u.username) ?
-      '<button class="btn xs ghost" data-upw="' + escapeHtml(u.username) + '">改密码</button>' : '';
+    const pw = (isAdmin || meName === name) ? btn('pw', name, '修改密码') : '';
     return '<div class="sp-card" style="margin-bottom:10px">' +
-      '<div class="sp-hd"><b>' + escapeHtml(u.username) + (u.is_admin ? ' <span class="hint">(admin)</span>' : '') + '</b>' +
-      '<span class="hint">' + (u.live_tokens || 0) + ' 个活 token · ' + (u.perm_count || 0) + ' 项授权</span></div>' +
-      '<div class="sp-bd" style="display:flex;gap:6px;flex-wrap:wrap">' + pwBtn + tokBtns + '</div></div>';
+      '<div class="sp-hd"><b>' + escapeHtml(name) +
+      (u.is_admin ? ' <span class="hint">（管理员）</span>' : '') + '</b>' +
+      '<span class="hint">' + (u.live_tokens || 0) + ' 个有效令牌 · ' +
+      (u.perm_count || 0) + ' 项授权</span></div>' +
+      '<div class="sp-bd" style="display:flex;gap:6px;flex-wrap:wrap">' + pw + ops + '</div></div>';
   }).join('');
-  box.innerHTML = rows;
-  box.querySelectorAll('[data-upw]').forEach(b => b.addEventListener('click', () => usersChangePw(b.dataset.upw)));
-  box.querySelectorAll('[data-usetok]').forEach(b => b.addEventListener('click', () => usersIssue(b.dataset.usetok)));
-  box.querySelectorAll('[data-uservoke]').forEach(b => b.addEventListener('click', () => usersRevoke(b.dataset.uservoke)));
-  box.querySelectorAll('[data-userm]').forEach(b => b.addEventListener('click', () => usersPerms(b.dataset.userm)));
-  box.querySelectorAll('[data-udel]').forEach(b => b.addEventListener('click', () => usersDel(b.dataset.udel)));
+  /* 卡片按钮不再逐元素绑定：统一由 settingsDelegates 的 data-* 出口接管（§4.2）。 */
 }
-/* 改密码（2026-11-07 用户裁定：所有用户可改自己的，admin 可替别人改）。
-   自己改须带旧密码（首次未设过可留空）；admin 替别人改旧密码留空。 */
+/* 改密码：所有用户可改自己的，admin 可替别人改（2026-11-07 裁定）。
+   自己改须带旧密码；改完后端会吊销该用户全部会话 ⇒ 必须明确引导重新登录，
+   不让 toast 在 location.reload() 前一闪而过。 */
 async function usersChangePw(name) {
   const meName = String(lsGet('hub.login.user') || '').trim();
   const isSelf = meName === name;
-  let oldPw = '';
-  if (isSelf) {
-    oldPw = prompt('用户 ' + name + ' 的当前密码（首次设置可留空）：');
-    if (oldPw === null) return;
-  } else if (!confirm('替用户 ' + name + ' 设置新密码？')) return;
-  const np = prompt('新密码（至少 8 位）：');
-  if (!np) return;
-  if (String(np).length < 8) { toast('新密码至少 8 位', 'err'); return; }
-  try {
-    await api('/api/users/' + encodeURIComponent(name) + '/password', {
-      method: 'POST', body: JSON.stringify({ old_password: oldPw || '', new_password: np })
-    });
-    toast('密码已更新；该用户既有会话已吊销', 'ok');
-    if (isSelf) { lsRemove('hub.login.user'); lsRemove('hub.term.token'); location.reload(); }
-    usersPanelLoad();
-  } catch (e) { toast(e.message, 'err'); }
-}
-async function usersIssue(name) {  if (!confirm('给用户 ' + name + ' 签发新 token？（明文只显示一次）')) return;
-  try {
-    const d = await api('/api/users/' + encodeURIComponent(name) + '/credentials', { method: 'POST', body: '{}' });
-    if (d.token) {
-      prompt('新用户 token（只显示一次，请立即保存）：', d.token);
-    } else {
-      toast(d.detail || '签发失败', 'err');
+  const fields = [];
+  if (isSelf) fields.push({ id: 'old', label: '当前密码', type: 'password',
+    autocomplete: 'current-password', help: '首次设置可留空。' });
+  fields.push({ id: 'np', label: '新密码', type: 'password', required: true, min: 8,
+    autocomplete: 'new-password', help: '至少 8 位。' });
+  fields.push({ id: 'np2', label: '确认新密码', type: 'password', required: true,
+    autocomplete: 'new-password' });
+  const text = isSelf ? '' :
+    '<div class="hint" style="margin-bottom:10px">正在为「' + escapeHtml(name) +
+    '」设置新密码，无需其原密码。</div>';
+  openUserModal({
+    title: isSelf ? '修改我的密码' : '设置 ' + name + ' 的密码',
+    text, fields, confirmText: '保存新密码',
+    onSubmit: async (v, m) => {
+      if (v.np !== v.np2) throw new Error('两次输入的新密码不一致，请重新输入');
+      await api('/api/users/' + encodeURIComponent(name) + '/password', {
+        method: 'POST', body: JSON.stringify({ old_password: v.old || '', new_password: v.np })
+      });
+      if (isSelf) {
+        openUserModal({
+          title: '密码已更新',
+          text: '<div class="hint" style="line-height:1.7">你的登录会话已失效，请用<b>新密码</b>重新登录。<br>点「重新登录」会刷新页面并清除本地登录态。</div>',
+          confirmText: '重新登录',
+          onSubmit: async () => {
+            lsRemove('hub.login.user'); lsRemove('hub.term.token');
+            location.reload();
+          }
+        });
+        return false;             // 已切到结果态，别把新弹窗关掉
+      }
+      toast('已更新 ' + name + ' 的密码', 'ok');
+      usersPanelLoad();
     }
-  } catch (e) { toast(e.message, 'err'); }
+  });
+}
+async function usersIssue(name) {
+  openUserModal({
+    title: '签发令牌：' + name,
+    text: '<div class="hint" style="line-height:1.7">将签发一枚新的访问令牌。<b>明文只显示这一次</b>，请立即复制保存。</div>',
+    confirmText: '签发',
+    onSubmit: async (v, m) => {
+      const d = await api('/api/users/' + encodeURIComponent(name) + '/credentials',
+        { method: 'POST', body: '{}' });
+      if (!d.token) throw new Error(d.detail || '签发失败，请重试');
+      openUserModal({
+        title: '令牌已签发',
+        text: '<div class="token-box" id="usersNewToken">' + escapeHtml(d.token) + '</div>' +
+              '<div class="hint">请立即复制保存，关闭后不再显示。</div>',
+        confirmText: '复制令牌',
+        onSubmit: async () => {
+          try { await navigator.clipboard.writeText(d.token); toast('已复制令牌', 'ok'); }
+          catch (e) { throw new Error('浏览器未给剪贴板权限，请长按选中上面的令牌手动复制'); }
+        }
+      });
+      return false;
+    }
+  });
 }
 async function usersRevoke(name) {
-  if (!confirm('吊销 ' + name + ' 的全部活 token？（吊销后旧 token 立即失效）')) return;
-  try {
-    const d = await api('/api/users/' + encodeURIComponent(name) + '/revoke', { method: 'POST', body: '{}' });
-    toast('已吊销 ' + (d.revoked || 0) + ' 个 token', 'ok');
-    usersPanelLoad();
-  } catch (e) { toast(e.message, 'err'); }
+  openUserModal({
+    title: '吊销令牌：' + name,
+    text: '<div class="hint" style="line-height:1.7">将吊销「' + escapeHtml(name) +
+      '」的全部有效令牌，旧令牌立即失效，使用该令牌的客户端需重新登录。</div>',
+    confirmText: '吊销', danger: true,
+    onSubmit: async () => {
+      const d = await api('/api/users/' + encodeURIComponent(name) + '/revoke',
+        { method: 'POST', body: '{}' });
+      toast('已吊销 ' + (d.revoked || 0) + ' 个令牌', 'ok');
+      usersPanelLoad();
+    }
+  });
 }
 async function usersPerms(name) {
+  let detail, ld;
   try {
-    const detail = await api('/api/users/' + encodeURIComponent(name));
-    const cur = detail.perms || [];
-    /* 2026-11-07 菜单配置表：可授权模块清单改从 /api/users 响应（DB 驱动）取，不再硬编码；
-       后端表空时自动回落硬编码（零行为变化），表里有数据时新菜单页自动出现在清单里。 */
-    const ld = await api('/api/users');
-    const allMods = ((ld.modules && (ld.modules.top || [])) .concat(ld.modules.system || [], ld.modules.settings || [])).slice();
-    if (ld.modules && ld.modules.agents && ld.modules.agents.length) allMods.push(...ld.modules.agents);
-    const choice = prompt('用户 ' + name + ' 可见模块（空格分隔，留空=全模块）：', cur.join(' '));
-    if (choice === null) return;
-    const mods = choice.split(/\s+/).filter(Boolean);
-    const d = await api('/api/users/' + encodeURIComponent(name) + '/perms', { method: 'PUT', body: JSON.stringify({ modules: mods }) });
-    toast('已更新 ' + name + ' 授权：' + (d.perms || []).join(', '), 'ok');
-    usersPanelLoad();
-  } catch (e) { toast(e.message, 'err'); }
+    detail = await api('/api/users/' + encodeURIComponent(name));
+    ld = await api('/api/users');
+  } catch (e) { toast('读取授权失败：' + e.message, 'err'); return; }
+  const cur = detail.perms || [];
+  /* 模块清单仍从 /api/users 响应（DB 驱动）取；表空时后端回落硬编码，零行为变化。 */
+  const mods = [].concat(
+    (ld.modules && ld.modules.top) || [],
+    (ld.modules && ld.modules.system) || [],
+    (ld.modules && ld.modules.settings) || [],
+    (ld.modules && ld.modules.agents) || []);
+  const boxes = mods.map(x => {
+    const id = String(typeof x === 'string' ? x : (x.id || x.key || ''));
+    const label = typeof x === 'string' ? x : (x.label || x.title || id);
+    return '<label style="display:flex;align-items:center;gap:6px;font-size:var(--fs-sm);padding:3px 0">' +
+      '<input type="checkbox" data-umod="' + escapeHtml(id) + '"' +
+      (cur.indexOf(id) >= 0 ? ' checked' : '') + '> ' + escapeHtml(label) +
+      ' <span class="hint">' + escapeHtml(id) + '</span></label>';
+  }).join('');
+  openUserModal({
+    title: '编辑授权：' + name,
+    text: '<div class="hint" style="margin-bottom:8px">勾选该用户可见的模块；管理员默认可见全部，无需逐项勾选。</div>' +
+          (boxes || '<div class="hint">暂无可选模块。</div>'),
+    confirmText: '保存修改',
+    onSubmit: async (v, m) => {
+      const picked = Array.from(m.querySelectorAll('[data-umod]:checked')).map(n => n.dataset.umod);
+      await api('/api/users/' + encodeURIComponent(name) + '/perms',
+        { method: 'PUT', body: JSON.stringify({ modules: picked }) });
+      toast('已保存 ' + name + ' 的授权', 'ok');
+      usersPanelLoad();
+    }
+  });
 }
 async function usersDel(name) {
-  if (!confirm('删除用户 ' + name + '？（须先吊销全部活 token，否则后端 409）')) return;
-  try {
-    await api('/api/users/' + encodeURIComponent(name), { method: 'DELETE' });
-    toast('已删除', 'ok');
-    usersPanelLoad();
-  } catch (e) { toast(e.message, 'err'); }
+  openUserModal({
+    title: '删除用户：' + name,
+    text: '<div class="hint" style="line-height:1.7">将永久删除「' + escapeHtml(name) +
+      '」及其授权。<br>若仍有有效令牌，后端会拒绝删除 —— 请先「吊销令牌」。</div>',
+    confirmText: '删除', danger: true,
+    onSubmit: async () => {
+      await api('/api/users/' + encodeURIComponent(name), { method: 'DELETE' });
+      toast('已删除 ' + name, 'ok');
+      usersPanelLoad();
+    }
+  });
 }
 async function usersPanelNew() {
-  const name = prompt('新用户名（小写字母/数字/-/_）：');
-  if (!name) return;
-  const display = prompt('显示名（可选）：') || name;
-  const isAdmin = confirm('设为 admin？（全模块可见）');
-  const mods = prompt('授权模块（空格分隔，admin 留空 = 全模块）：') || '';
-  try {
-    await api('/api/users', {
-      method: 'POST',
-      body: JSON.stringify({ username: name, display, is_admin: isAdmin, perms: mods.split(/\s+/).filter(Boolean) })
-    });
-    toast('已创建 ' + name, 'ok');
-    usersPanelLoad();
-  } catch (e) { toast(e.message, 'err'); }
+  openUserModal({
+    title: '新建用户',
+    fields: [
+      { id: 'name', label: '用户名', required: true, placeholder: '小写字母 / 数字 / - / _',
+        help: '创建后不可修改。' },
+      { id: 'display', label: '显示名', placeholder: '可留空，默认同用户名' },
+      { id: 'admin', label: '管理员', type: 'checkbox',
+        help: '管理员可见全部模块，无需逐项授权。' },
+      { id: 'mods', label: '授权模块', placeholder: '空格分隔；管理员留空 = 全部',
+        help: '留空表示全部模块。' }
+    ],
+    confirmText: '创建',
+    onSubmit: async (v, m) => {
+      const ad = m.querySelector('#uf-admin');
+      await api('/api/users', {
+        method: 'POST',
+        body: JSON.stringify({ username: v.name, display: v.display || v.name,
+          is_admin: !!(ad && ad.checked), perms: v.mods.split(/\s+/).filter(Boolean) })
+      });
+      toast('已创建 ' + v.name, 'ok');
+      usersPanelLoad();
+    }
+  });
 }
 
 /* ── 模型调用计量面板（2026-11-07 上线，2026-11-08 改为行级明细 + 各列排序）──
@@ -2280,6 +2463,21 @@ function settingsDelegates() {
       if (a === 'users-new') return usersPanelNew();
       /* 模型计量页（2026-11-07，借鉴 LangChat） */
       if (a === 'mcl-load') return mclPanelLoad();
+    }
+    /* 用户授权页：卡片按钮统一走 data-uact 委托（禁 inline onclick，§4.2）。
+       刻意放在既有分支之后：test_ghsettings.py 用固定 1400 字符窗口截本函数开头查 gh-，
+       插在开头会把 gh-test 挤出窗口 ⇒ L0 假红。窗口缺陷属报请项，不顺手改测试。 */
+    const ua = e.target.closest('[data-uact]');
+    if (ua) {
+      const n = ua.dataset.uname || '';
+      switch (ua.dataset.uact) {
+        case 'pw': return usersChangePw(n);
+        case 'token': return usersIssue(n);
+        case 'revoke': return usersRevoke(n);
+        case 'perms': return usersPerms(n);
+        case 'del': return usersDel(n);
+      }
+      return;
     }
     });
     /* 筛选下拉变了就重拉（关键字框要等敲完 ⇒ 走「刷新」按钮，不逐字符打后端）。

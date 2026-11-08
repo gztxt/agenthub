@@ -2183,7 +2183,7 @@ async function usersPanelNew() {
 let mclRows = [];
 let mclSort = { key: 'total_tokens', dir: -1 };
 const MCL_COLS = [
-  { key: 'client',       label: 'Agent',        type: 'str' },
+  { key: 'agent_name',   label: 'Agent',        type: 'str' },
   { key: 'model',        label: '模型',          type: 'str' },
   { key: 'date',         label: '日期 (UTC)',    type: 'str' },
   { key: 'requests',     label: '调用',          type: 'num' },
@@ -2215,7 +2215,8 @@ function mclSorted(rows, sort) {
     else c = String(a[col.key] || '').localeCompare(String(b[col.key] || ''), 'zh');
     if (c === 0) c = String(a.date || '').localeCompare(String(b.date || '')) ||
                     String(a.model || '').localeCompare(String(b.model || '')) ||
-                    String(a.client || '').localeCompare(String(b.client || ''));
+                    String(a.agent_name || a.client || '').localeCompare(
+                      String(b.agent_name || b.client || ''));
     return c * dir;
   });
 }
@@ -2248,8 +2249,21 @@ function mclRenderTable() {
   let body = '';
   rows.forEach(r => {
     const secs = Number(r.total_ms || 0) / 1000;
+    /* Agent 列显示 **agents 清单里的名字**（后端按 profiles 映射）。
+       未匹配的行显示「未归属」，原始凭据名进 title —— 旧后端（没有 agent_name）
+       退回显示 client，不假装已归因。 */
+    const known = typeof r.agent_name === 'string';
+    const an = known ? r.agent_name : (r.client || '—');
+    const raw = r.client_raw || r.client || '';
+    const at = !known ? ('CCR 来源：' + raw)
+      : (r.agent_id ? ('CCR 凭据：' + raw)
+                    : ('该凭据未匹配 agents 清单（原始来源：' + raw + '）'));
     body += '<tr>' +
-      '<td style="padding:4px 6px">' + escapeHtml(r.client || '—') + '</td>' +
+      '<td style="padding:4px 6px" title="' + escapeHtml(at) + '">' +
+        escapeHtml(an) +
+        (known && !r.agent_id && raw
+          ? ' <span class="hint" style="opacity:.7">(' + escapeHtml(raw) + ')</span>' : '') +
+        '</td>' +
       '<td style="padding:4px 6px;font-family:monospace">' + escapeHtml(r.model || '—') + '</td>' +
       '<td style="padding:4px 6px;white-space:nowrap">' + escapeHtml(r.date || '—') + '</td>' +
       '<td style="padding:4px 6px;text-align:right">' + mclNum(r.requests) + '</td>' +
@@ -2286,8 +2300,18 @@ function mclRender(d) {
   h += '<div id="mclTable"></div>';
   h += '<div class="hint" style="margin-top:8px">点击表头按该列排序（再点一次反向）。' +
        '用量 = total_tokens；均耗时 = 该组 AVG(duration_ms)；总耗时 = SUM(duration_ms)。</div>';
+  /* 归因口径必须写在页面上：Agent 列的名取自 agents 清单（profiles 注册表），
+     而 CCR 账本只记**凭据名**。同一把 key 被多个 agent 共用时账本层面分不出，
+     这些行会显示「未归属」并保留原始凭据名 —— 不能让读的人以为是某某个 agent。 */
+  h += '<div class="hint" style="margin-top:4px">Agent 列取自 agents 清单；' +
+       '「未归属」= CCR 凭据名无法对应到任何 agent（悬停行首列可看原始凭据名）。' +
+       '每种 agent 用独立 CCR 凭据时才能逐 agent 精确归因。</div>';
+  if (d.by_agent && Object.keys(d.by_agent).length) {
+    h += '<div class="hint" style="margin-top:6px">Agent 调用分布：' +
+         Object.entries(d.by_agent).map(([s, n]) => escapeHtml(s) + '=' + n).join(' · ') + '</div>';
+  }
   if (d.by_scene && Object.keys(d.by_scene).length) {
-    h += '<div class="hint" style="margin-top:6px">调用来源分布：' +
+    h += '<div class="hint" style="margin-top:6px">CCR 凭据分布（非 agent）：' +
          Object.entries(d.by_scene).map(([s, n]) => escapeHtml(s) + '=' + n).join(' · ') + '</div>';
   }
   box.innerHTML = h;

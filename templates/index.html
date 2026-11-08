@@ -1230,6 +1230,20 @@
         .term-status.st-off .dot { background: var(--muted); }
         .term-status #termReconnect { display: none; }
         .term-status.st-off #termReconnect, .term-status.st-rc #termReconnect { display: inline-block; }
+        /* 移动端虚拟键栏（2026-11-08，借鉴 pi-web）：只在触摸设备上由 JS 建 DOM。
+           横向可滚、不换行；高度固定 28px，属于 .term-body 的 flex 子项，
+           只压缩 #termEl 的高度，不碰 FitAddon 的内容盒口径（见上方铁律）。 */
+        .term-keys { display: flex; gap: 6px; align-items: center; padding: 5px 8px;
+            border-top: 1px solid var(--border); background: var(--bg);
+            overflow-x: auto; overflow-y: hidden; white-space: nowrap;
+            -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+        .term-keys::-webkit-scrollbar { display: none; }
+        .term-keys .tk { flex: 0 0 auto; height: 28px; min-width: 38px; padding: 0 9px;
+            font: inherit; font-size: 12px; font-family: var(--font-mono); line-height: 1;
+            color: var(--text-2); background: var(--bg); border: 1px solid var(--border);
+            border-radius: 6px; cursor: pointer; user-select: none; -webkit-user-select: none; }
+        .term-keys .tk:active { background: var(--sel-bg); color: var(--text-1); }
+        .term-keys .tk.on { color: var(--text-1); border-color: var(--text-1); background: var(--sel-bg); }
         /* 终端内查找条：absolute 浮层，不参与 flex 布局 ⇒ 不影响 #termEl 内容盒尺寸 */
         .term-find { position: absolute; top: 6px; right: 10px; z-index: 30; display: none;
             align-items: center; gap: 5px; padding: 4px 5px; border-radius: 6px;
@@ -3581,7 +3595,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=de15bcf5';
+      var HUB_SRC = '/static/hub.js?v=f5e595eb';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

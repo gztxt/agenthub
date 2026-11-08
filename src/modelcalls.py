@@ -23,6 +23,10 @@ window_days / as_of），另增 `rows`（2026-11-08）：一行 = UTC 日 × cli
 旧字段仍由 `summary()` 汇总（total 不受 limit 截断），`rows` 由 `daily()` 单独取，
 两者同窗口同源、职责不重叠；前端在 rows 缺失时可退化成旧的按模型视图。
 `by_scene` 沿用旧键名，内容改为 **client 分布**（各 agent 来源的调用数）。
+2026-11-08 再改判：CCR 的 `client` 是**凭据名不是 agent 名**（实测全机 12 个
+agent 共用同一把 key）⇒ `rows` 增补 `agent_id/agent_name/agent_known`，
+`by_agent` 给按 agent 的调用数；判不出的一律标「未归属」并保留原始凭据名
+（`client` / `client_raw`）。详见 `agent_of()` 上方注释。
 
 fail-closed：CCR 账本缺失 / 打不开 ⇒ `overview()` 回 `note` 让前端显示原因，
 **绝不返回 0 冒充「没调用」**（usage_ledger 口径：静默 0 = 谎报）。
@@ -78,6 +82,93 @@ def _split_provider(model: str) -> str:
     """`alibaba/qwen3.8-flash` → `alibaba`；无 "/" → 空串（provider 不可判时不编造）。"""
     m = model or ""
     return m.split("/", 1)[0] if "/" in m else ""
+
+
+# ── Agent 归因（2026-11-08）─────────────────────────────────────────────────
+# CCR 账本的 `client` 列**不是 agent 名**，是 `api_keys.name`（凭据名）：
+# 2026-11-08 实测 7 天分布 = aoto 5218 / Local Gateway (rotated 10-18) 1201 /
+# provider-connectivity-check 25，而本机 12 个 agent 全部共用同一把 key
+# （`sk-Blds7…`，api_keys 里就叫 `aoto`）⇒ 账本层面**原理上分不出** agent。
+# 能判定的只有名字自带线索的那几种（`Profile: Claude Code` / `pi` …），
+# 因此本模块的纪律是：
+#   ① 能映射的映射成 profiles 里的 agent 名（用户口径：agents 里叫什么就显示什么）；
+#   ② 判不出的**显式标「未归属」并回带原始凭据名**，绝不把凭据名冒充 agent 名；
+#   ③ 不猜时间窗、不按路径猜 —— 近似归因会让人拿错数字做决策（比没有更糟）。
+_AGENT_ALIAS: Optional[Dict[str, tuple]] = None
+
+#: 名称裁剪后缀：`Codex CLI`→`codex`、`Claude Code`→`claude`、`Pi Agent`→`pi`
+_NAME_SUFFIXES = (" cli", " code", " agent")
+
+
+def _norm_agent(s: str) -> str:
+    """把 CCR client / profile 名归一成可比较的短名。
+
+    `Profile: Claude Code` → `claude`；`Pi Agent` → `pi`；`oh-my-pi (omp)` → `oh-my-pi`。
+    """
+    t = (s or "").strip().lower()
+    if t.startswith("profile:"):
+        t = t[len("profile:"):].strip()
+    t = t.split("(", 1)[0].strip()      # 去掉括注（版本/别名）
+    for suf in _NAME_SUFFIXES:
+        if t.endswith(suf) and len(t) > len(suf):
+            t = t[: -len(suf)].strip()
+            break
+    return " ".join(t.split())
+
+
+def _agent_alias_map() -> Dict[str, tuple]:
+    """`归一短名 → (agent_id, agent_name)`，只收 kind=agent 的画像。
+
+    直接读 `profiles.PROFILES` 静态表，**不调 all_profiles()**——后者会跑 /proc、
+    systemd、docker 三路探测，计量端点不该有这种副作用。动态发现的 CLI 卡
+    （kimi/cursor 之类）若不在静态表里就落「未归属」，这是可接受的保守失败。
+    """
+    global _AGENT_ALIAS
+    if _AGENT_ALIAS is not None:
+        return _AGENT_ALIAS
+    m: Dict[str, tuple] = {}
+    try:
+        import profiles
+        for p in getattr(profiles, "PROFILES", []) or []:
+            if (p.get("kind") or "") != "agent":
+                continue
+            pid = (p.get("id") or "").strip()
+            name = (p.get("name") or "").strip() or pid
+            if not pid:
+                continue
+            cands = {_norm_agent(pid), _norm_agent(name)}
+            first = _norm_agent(name).split(" ")[0]
+            if first:
+                cands.add(first)            # Claude Code → claude / Codex CLI → codex
+            for a in cands:
+                if a and a not in m:
+                    m[a] = (pid, name)
+    except Exception as e:  # noqa: BLE001
+        print(f"[modelcalls] agent 别名表构建失败（按未归属处理）：{type(e).__name__}: {e}")
+    _AGENT_ALIAS = m
+    return m
+
+
+def agent_of(client: str):
+    """CCR client（凭据名）→ `(agent_id, agent_name)`；判不出返回 `(None, None)`。"""
+    return _agent_alias_map().get(_norm_agent(client), (None, None))
+
+
+def attribute_rows(rows) -> list:
+    """给按天明细行补 `agent_id` / `agent_name` / `client_raw` / `agent_known`。
+
+    原地改并返回同一列表（rows 是 sqlite 行转出来的 dict，不共享引用）。
+    未匹配时 `agent_name` = `"未归属"`，原始凭据名仍在 `client` / `client_raw` 里，
+    前端用 title 显示——**信息不丢，只是不与 agent 混淆**。
+    """
+    for r in rows or []:
+        c = (r.get("client") or "").strip()
+        aid, aname = agent_of(c)
+        r["client_raw"] = c
+        r["agent_id"] = aid
+        r["agent_name"] = aname or "未归属"
+        r["agent_known"] = bool(aid)
+    return rows
 
 
 def record(model: str, usage: Optional[dict], scene: str = "other",
@@ -137,15 +228,21 @@ def overview(window_days: int = 7) -> Dict[str, Any]:
     # 表格行单独取：与 summary 同窗口同账本，但维度是「日 × client × model」。
     # daily() 不设 LIMIT ⇒ 行数即真实分组数，不会静默少报。
     daily = usage_ledger.daily(since=since, until=until)
-    rows = daily["rows"] if daily.get("ok") else []
+    rows = attribute_rows(daily["rows"]) if daily.get("ok") else []
     rows_ok = bool(daily.get("ok"))
     rows_note = None if rows_ok else "按天明细不可用：" + str(daily.get("error") or "unknown")
+    # 按 agent 汇总调用数（供页头一句「谁在调」）；未归属合成一条，不静默丢。
+    by_agent: Dict[str, int] = {}
+    for r in rows:
+        k = r.get("agent_name") or "未归属"
+        by_agent[k] = by_agent.get(k, 0) + int(r.get("requests") or 0)
     as_of = _dt.datetime.now(_dt.timezone.utc).isoformat()
     if not data.get("ok"):
         return {"window_days": days, "total_calls": 0, "total_tokens": 0,
                 "by_model": [], "by_scene": {}, "as_of": as_of,
                 "source": "ccr_usage_events",
                 "rows": rows, "rows_ok": rows_ok, "rows_note": rows_note,
+                "by_agent": by_agent,
                 "note": "CCR 用量账本不可用：" + str(data.get("error") or "unknown")}
     total = data.get("total") or {}
     by_model: Dict[str, Dict[str, Any]] = {}
@@ -175,6 +272,7 @@ def overview(window_days: int = 7) -> Dict[str, Any]:
         "attribution": data.get("attribution"),
         "cost_usd": total.get("cost_usd"),
         "rows": rows, "rows_ok": rows_ok, "rows_note": rows_note,
+        "by_agent": by_agent,
     }
 
 

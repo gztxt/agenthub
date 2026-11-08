@@ -296,6 +296,11 @@ function termTouchBind() {
     cancelLP(); pinch = null; ttState = null;
     try { el.classList.remove('tterm-pinch'); } catch (err) {}
   }, { passive: true });
+
+  /* 键栏只给"主指针是手指"的设备。ttIsTouch 还会认 maxTouchPoints（触屏笔记本也真），
+     那类机器有实体键盘 ⇒ 建条键栏只是占高度；pi-web 同样用 pointer:coarse 判定。 */
+  try { if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) termKeysBind(); }
+  catch (e) { /* 无 matchMedia：不建键栏 */ }
 }
 
 /* 换绑/离开时清手势态。
@@ -304,4 +309,151 @@ function termTouchBind() {
    反过来"解绑"才会踩坑：清了 dataset 但监听器还在 ⇒ 下次 ensureTerm 重新绑 ⇒ 两套手势。 */
 function termTouchReset() {
   ttState = null;
+  termKeysReset();   // 键栏的粘滞修饰键与连发定时器同属"会话态"，换会话一并复位
 }
+
+/* ── 移动端虚拟键栏（2026-11-08，借鉴 @agegr/pi-web 0.15.0 的终端键栏，MIT）────
+ *
+ * 为什么需要：手机软键盘只有字符键，**ESC / TAB / 方向键 / Ctrl-C 一个都发不出去**。
+ * 触摸层已经解决了滚动、长按选区、捏合字号（上面那套），但「连得上、却进不了 TUI
+ * 菜单」的缺口一直留着：claude / codex 的对话框、vim 的模式切换全要 ESC。
+ *
+ * 三条约束：
+ *  ① **桌面零开销**：只在 `ttIsTouch()` 为真的路径里建 DOM（调用点在 termTouchBind
+ *     末尾），桌面端页面上根本不存在这条键栏，也不注册任何监听器。
+ *  ② **不另造发送栈**：一律走 `term.input(seq)` —— 它的下游就是 onData → termSend，
+ *     与真实按键同一条路（焦点策略、鼠标上报过滤、未连接告警全部自动继承）。
+ *  ③ **不占 FitAddon 的口径**：键栏是 .term-body 的 flex 子项（和状态条同级），
+ *     只压缩 #termEl 的高度；绝不给 #termEl / .term-body 加 padding/inset。
+ *
+ * 与 pi-web 的差异（不是照抄）：pi-web 的键栏固定发 CSI，本实现按 xterm 的
+ * 应用光标键模式（DECCKM）在 CSI/SS3 之间切换 —— vi/vim 认为方向键的基态是
+ * `ESC O X`，只发 CSI 会被当成字面字符。判据取 xterm 自己维护的 modes，
+ * 不靠扫屏输出猜（那是第二份会漂的真相）。
+ * 粘滞 CTRL/ALT 为一次性：发完一个键即复位，避免「以为松开了其实还按着」。
+ */
+var TT_KEY_REPEAT_DELAY = 400;   // 长按多久开始连发
+var TT_KEY_REPEAT_EVERY = 50;    // 连发间隔
+var ttKeyMods = { ctrl: false, alt: false };
+var ttKeyTimer = null, ttKeyRepeat = null;
+
+/* 键表：seq = 基态序列；arrow = 方向键字母（A/B/C/D，修饰键/模式在此之上算）；
+   mod = 粘滞修饰键，按下只切状态、不发序列。 */
+var TT_KEYS = [
+  { id: 'esc',   label: 'ESC',  seq: '\x1b' },
+  { id: 'tab',   label: 'TAB',  seq: '\t' },
+  { id: 'int',   label: '^C',   seq: '\x03' },
+  { id: 'ctrl',  label: 'CTRL', mod: 'ctrl' },
+  { id: 'alt',   label: 'ALT',  mod: 'alt' },
+  { id: 'left',  label: '←',    arrow: 'D', repeat: 1 },
+  { id: 'down',  label: '↓',    arrow: 'B', repeat: 1 },
+  { id: 'up',    label: '↑',    arrow: 'A', repeat: 1 },
+  { id: 'right', label: '→',    arrow: 'C', repeat: 1 },
+  { id: 'home',  label: 'HOME', seq: '\x1b[H', repeat: 1 },
+  { id: 'end',   label: 'END',  seq: '\x1b[F', repeat: 1 },
+  { id: 'pgup',  label: 'PGUP', seq: '\x1b[5~', repeat: 1 },
+  { id: 'pgdn',  label: 'PGDN', seq: '\x1b[6~', repeat: 1 }
+];
+
+/* 应用光标键模式：xterm 6.0 的 term.modes 是公开 getter（proposed API 之外）；
+   老版本可能没有 ⇒ 整段 try，取不到按 CSI 处理（绝大多数 TUI 两档都收）。 */
+function ttAppCursor() {
+  try { return !!(term && term.modes && term.modes.applicationCursorKeysMode); }
+  catch (e) { return false; }
+}
+
+/* 键 → 实际字节序列（唯一换算点，符号只在这里定一次）。 */
+function ttKeySeq(k) {
+  if (!k) return '';
+  if (k.mod) return '';
+  if (k.arrow) {
+    /* ALT+方向 = readline 的按词移动（ESC b/f/p/n，与 pi-web 同款）；
+       CTRL+方向 = CSI 1;5X（xterm 的 ctrl 修饰档）。 */
+    if (ttKeyMods.alt) return '\x1b' + ({ A: 'p', B: 'n', C: 'f', D: 'b' })[k.arrow];
+    if (ttKeyMods.ctrl) return '\x1b[1;5' + k.arrow;
+    return (ttAppCursor() ? '\x1bO' : '\x1b[') + k.arrow;
+  }
+  if (k.id === 'home' || k.id === 'end') {
+    /* 应用光标键模式（DECCKM）只管**方向键**；Home/End 在两种模式下都是 CSI H/F，
+       给它们套 SS3 会把键送成字面字符（实测过，别"顺手"改）。 */
+    var c = k.id === 'home' ? 'H' : 'F';
+    if (ttKeyMods.ctrl) return '\x1b[1;5' + c;
+    if (ttKeyMods.alt) return '\x1b' + (k.id === 'home' ? '<' : '>');
+    return '\x1b[' + c;
+  }
+  return k.seq || '';
+}
+
+function ttKeySync() {
+  var bar = document.getElementById('termKeys');
+  if (!bar) return;
+  bar.querySelectorAll('.tk[data-mod]').forEach(function (b) {
+    b.classList.toggle('on', !!ttKeyMods[b.dataset.mod]);
+    b.setAttribute('aria-pressed', ttKeyMods[b.dataset.mod] ? 'true' : 'false');
+  });
+}
+
+function ttKeyFire(k) {
+  if (!k) return;
+  if (k.mod) {                       // 粘滞修饰键：只切状态
+    ttKeyMods[k.mod] = !ttKeyMods[k.mod];
+    ttKeySync();
+    return;
+  }
+  var seq = ttKeySeq(k);
+  /* 修饰键一次性生效：先复位再发送，避免重复触发时状态粘住。 */
+  ttKeyMods.ctrl = false; ttKeyMods.alt = false;
+  ttKeySync();
+  if (!seq || !term) return;
+  try { term.input(seq); } catch (e) { /* 终端已 dispose */ }
+}
+
+function ttKeyStop() {
+  if (ttKeyTimer) { clearTimeout(ttKeyTimer); ttKeyTimer = null; }
+  if (ttKeyRepeat) { clearInterval(ttKeyRepeat); ttKeyRepeat = null; }
+}
+
+/* 建键栏。挂在 .term-body 里（flex 列），位置在状态条之前 —— 视觉上贴着软键盘，
+   且 #termEl 仍是唯一的 flex:1 子项，尺寸口径不变。 */
+function termKeysBind() {
+  var body = document.querySelector('#termPane .term-body');
+  if (!body || document.getElementById('termKeys')) return;
+  var bar = document.createElement('div');
+  bar.id = 'termKeys';
+  bar.className = 'term-keys';
+  bar.setAttribute('role', 'toolbar');
+  bar.setAttribute('aria-label', '终端快捷键');
+  TT_KEYS.forEach(function (k) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'tk';
+    b.textContent = k.label;
+    b.title = k.mod ? '粘滞修饰键（作用于下一个键）' : ('发送 ' + k.label);
+    b.setAttribute('aria-label', b.title);
+    if (k.mod) { b.dataset.mod = k.mod; b.setAttribute('aria-pressed', 'false'); }
+    else { b.dataset.tk = k.id; }
+    /* 长按连发：只给可重复的键；按下即发一次（即时反馈），松手/移出即停。
+       pointerdown 里 preventDefault 是必需的 —— 否则按钮抢焦点、软键盘被收起，
+       用户点一次键就得重新点输入位。 */
+    b.addEventListener('pointerdown', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      ttKeyStop();
+      ttKeyFire(k);
+      if (!k.repeat) return;
+      ttKeyTimer = setTimeout(function () {
+        ttKeyRepeat = setInterval(function () { ttKeyFire(k); }, TT_KEY_REPEAT_EVERY);
+      }, TT_KEY_REPEAT_DELAY);
+    });
+    b.addEventListener('pointerup', ttKeyStop);
+    b.addEventListener('pointercancel', ttKeyStop);
+    b.addEventListener('pointerleave', ttKeyStop);
+    /* 安卓长按会弹「选择/打开链接」菜单，这条把它按掉（键栏是工具条，不是文本）。 */
+    b.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    bar.appendChild(b);
+  });
+  var st = body.querySelector('.term-status');
+  body.insertBefore(bar, st || null);
+}
+
+/* 换会话 / 断线时清掉修饰键残留态（视觉与语义必须同时复位）。 */
+function termKeysReset() { ttKeyStop(); ttKeyMods.ctrl = false; ttKeyMods.alt = false; ttKeySync(); }

@@ -265,6 +265,44 @@ class ModelCallsL0(unittest.TestCase):
         self.assertFalse(ov["rows_ok"])
         self.assertIsNotNone(ov["rows_note"])
 
+    # ── D 组：Agent 归因（2026-11-08）──
+    # CCR 账本的 client 是**凭据名**不是 agent 名（实测全机共用一把 key `aoto`）。
+    # 这里钉住两条纪律：能映射的映射成 agents 清单里的名字；判不出的显式「未归属」
+    # 且保留原始凭据名，**不把凭据名冒充成 agent**。
+
+    def test_15_agent_of_maps_known_clients_only(self):
+        self.assertEqual(modelcalls.agent_of("Profile: Claude Code"), ("claude", "Claude Code"))
+        self.assertEqual(modelcalls.agent_of("pi"), ("pi", "Pi Agent"))
+        self.assertEqual(modelcalls.agent_of("Profile: Codex"), ("codex", "Codex CLI"))
+        self.assertEqual(modelcalls.agent_of("Profile: Grok CLI"), ("grok", "Grok CLI"))
+        # 凭据名 / 未知值一律不认（宁可未归属，不可冒名）
+        self.assertEqual(modelcalls.agent_of("aoto"), (None, None))
+        self.assertEqual(modelcalls.agent_of("Local Gateway (rotated 10-18)"), (None, None))
+        self.assertEqual(modelcalls.agent_of(""), (None, None))
+
+    def test_16_overview_rows_carry_agent_and_raw_client(self):
+        _fresh_db()
+        self._use_ledger([
+            ("m/x", "Profile: Claude Code", 10, 5, 100, 1),
+            ("m/x", "aoto", 20, 5, 200, 1),
+        ])
+        ov = modelcalls.overview(7)
+        self.assertTrue(ov["rows_ok"])
+        r_claude = next(r for r in ov["rows"] if r["client"] == "Profile: Claude Code")
+        self.assertEqual(r_claude["agent_id"], "claude")
+        self.assertEqual(r_claude["agent_name"], "Claude Code")
+        self.assertTrue(r_claude["agent_known"])
+        self.assertEqual(r_claude["client_raw"], "Profile: Claude Code")
+        # 共享凭据：不冒充 agent，但原始来源必须留在行里
+        r_shared = next(r for r in ov["rows"] if r["client"] == "aoto")
+        self.assertIsNone(r_shared["agent_id"])
+        self.assertEqual(r_shared["agent_name"], "未归属")
+        self.assertFalse(r_shared["agent_known"])
+        self.assertEqual(r_shared["client_raw"], "aoto")
+        # by_agent 供页头展示，未归属合成一条而不是丢掉
+        self.assertEqual(ov["by_agent"].get("Claude Code"), 1)
+        self.assertEqual(ov["by_agent"].get("未归属"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

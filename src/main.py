@@ -125,7 +125,16 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.195"
+VERSION = "0.13.196"
+
+# v0.13.196（2026-11-08）：两件用户报障——
+#   ① 嵌入式终端对标 pi-web：手机没有 ESC/TAB/方向键 ⇒ 连上 TUI 也进不了菜单。
+#      13-term-touch.js 增移动端键栏（ESC/TAB/^C/粘滞 CTRL·ALT/方向键/HOME/END/PGUP/PGDN），
+#      长按连发、按 xterm 的 DECCKM 在 CSI/SS3 间切换；只在 pointer:coarse 建 DOM。
+#   ② 设置·模型计量 Agent 列显示的是 CCR 凭据名（aoto / Local Gateway…），不是 agent 名。
+#      CCR 的 client = 显式 x-ccr-client 头 > 凭据名 > UA 猜测，而全机共用一把 key
+#      ⇒ 账本层面分不出 agent。现按 profiles 映射成 agents 清单名，判不出的显式
+#      「未归属」并回带原始凭据名；要逐 agent 精确归因须给每个 agent 配 x-ccr-client 头。
 
 # v0.13.195（2026-11-07）：读令牌门前端闭环——「报 token 错误却无弹窗可输」的根因与修法：
 #   P0 的 read_gate 只拦服务端，前端 api() 的 401 重试分支原本只对写方法生效，

@@ -1,3 +1,34 @@
+## v0.13.196 — 终端对标 pi-web 补移动键栏 + 模型计量按 agents 清单归因（2026-11-08）
+
+> 用户报障：①「嵌入式终端窗口对比一下 pi web 的终端窗口，借鉴融合优化」
+> ②「模型计量 agent 名称不对，应该是 agents 里面的 agent 名称」。
+
+- **终端键栏（借鉴 @agegr/pi-web 0.15.0，MIT，独立实现）**：手机软键盘只有字符键，
+  ESC / TAB / 方向键 / Ctrl-C 发不出去 ⇒ 连上 TUI 也进不了菜单。`13-term-touch.js`
+  新增 `termKeysBind()`：ESC/TAB/^C/粘滞 CTRL·ALT/←↓↑→/HOME/END/PGUP/PGDN，
+  长按 400ms 后 50ms 连发；按 xterm 的 `modes.applicationCursorKeysMode` 在
+  CSI(`ESC[`) / SS3(`ESC O`) 间切换（vi 的基态）；CAPPLY 与真实按键同一条
+  `term.input → onData → termSend` 通路。**只在 `(pointer: coarse)` 建 DOM**，
+  桌面与触屏笔记本零开销；键栏是 `.term-body` 的 flex 子项，不改 `#termEl`
+  内容盒（FitAddon 行数口径不变）。
+  对比结论：hub 已有 WebGL 渲染、Unicode11、查找、右键菜单、长按选区、惯性滚动、
+  捏合字号、DECCKM 屏蔽、鼠标看门狗；pi-web 独有的可借鉴项是**移动键栏**
+  （含粘滞修饰键与长按连发）。反向不借鉴：pi-web 无 DECCKM 切换、无 alt-screen 屏蔽。
+- **模型计量 Agent 列**：CCR 账本的 `client` 是 `api_keys.name`（凭据名）不是 agent 名
+  —— CCR 的取值顺序是 `x-ccr-client` 头 > 凭据名 > UA 猜测（dist 里 `RA()` 实证），
+  而本机 12 个 agent 共用同一把 key（`aoto`）⇒ 账本层面**分不出 agent**。
+  现按 `profiles.PROFILES`（kind=agent）映射成 agents 清单里的名字
+  （`Profile: Claude Code`→Claude Code / `pi`→Pi Agent / `Profile: Codex`→Codex CLI…），
+  判不出的一律显式「未归属（原始凭据名）」，**不把凭据名冒充 agent 名**；
+  `rows` 增 `agent_id/agent_name/agent_known/client_raw`，另给 `by_agent`。
+- 取证：键栏用无头 Chromium 桩环境实测 13 个按钮与 9 条序列（CSI/SS3/ctrl/alt 修饰、
+  粘滞复位均正确）；`tests/test_modelcalls.py` 新增 D 组 2 条（映射只认已知画像、
+  未归属保留原始来源）。全量 `pytest` 修复后仅余 **2 条既有红**
+  （`test_export_button` 的 2026-11-07 认证收口未同步、jcode 会话无标题，
+  与上一批记录同源，本次未触碰）。
+- **需重启生效**：后端 `modelcalls` 是常驻进程代码；当前 `term_sessions=1`，
+  按「有活会话严禁 restart」停手，未动生产进程。
+
 ## 未发版 — 总览回归修复 + 顶栏身份/注销 + 会话按用户隔离（2026-11-08）
 
 > 用户报障：①「总览内容怎么变了」②「右上角显示当前用户，点击可以注销」

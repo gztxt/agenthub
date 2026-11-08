@@ -37,6 +37,7 @@ import re
 import shutil
 import time
 import urllib.error
+import uuid
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,7 +49,7 @@ import outbound    # P2 C5：出站地址准入（与 mcpgw 共用同一份判�
 import resilience
 import tdai_client
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 router = APIRouter(tags=["ghsettings"])
 
@@ -136,6 +137,25 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
 def _ensure_table() -> None:
     db.execute("CREATE TABLE IF NOT EXISTS github_settings ("
                "key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)")
+
+
+#: 仓库源（v0.13.197）：设置页可维护多条「GitHub 地址 + 归属」，项目页按源分组。
+#: 一行只描述**一个账号视角**：api_base（api.github.com 或 GHES /api/v3）+
+#: git_host（克隆/本地匹配用）+ owner（留空 = 当前 key 可见的全部）。
+#: key 仍是全局一份（用户 2026-11-09 裁定 A）；多 GHES 各用各的 key 是后置项。
+_SOURCES_DDL = (
+    "CREATE TABLE IF NOT EXISTS github_sources ("
+    "id TEXT PRIMARY KEY, label TEXT NOT NULL, api_base TEXT NOT NULL, "
+    "git_host TEXT NOT NULL, owner TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, "
+    "sort INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, synced_at TEXT, "
+    "repo_count INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '')")
+
+
+def _ensure_sources() -> None:
+    db.execute(_SOURCES_DDL)
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS github_sources_uniq "
+               "ON github_sources(api_base, owner)")
+
 
 
 def _get(key: str) -> str:
@@ -238,6 +258,171 @@ def token_view() -> Dict[str, Any]:
     return {"set": bool(val), "source": src or None, "mask": mask(val),
             "len": len(val) if val else 0, "type": token_type(val) if val else "",
             "file": str(token_file())}
+
+
+# ── 仓库源（设置页可维护多条；项目页按源分组）─────────────────────────────
+# 用户 2026-11-09 裁定：A 分组单位 = 地址 + owner；A star 口径 = 该 owner 的公开
+# star（/users/<owner>/starred）；A key = 全源共用一个。
+def parse_source(value: str) -> Tuple[Dict[str, str], str]:
+    """把一个粘贴值归一化成 {api_base, git_host, owner}；第二返回值是提示语。
+
+    接受四种写法（用户原话「添加和维护仓库地址或者 api」）：
+      gztxt                                  → 当前 API 基址 + 归属 gztxt
+      https://github.com/gztxt               → api.github.com + gztxt
+      https://github.com/gztxt/agenthub      → 同上（按账号归组，仓库明细在项目页）
+      https://git.example.com/api/v3         → 自建 GHES（归属留空 = key 可见全部）
+    """
+    raw = (value or "").strip()
+    if not raw:
+        raise GhSettingsError(400, "仓库源不能为空")
+    if raw.lower().startswith("starred:"):
+        owner = _check_owner(raw.split(":", 1)[1].strip())
+        if not owner:
+            raise GhSettingsError(400, "starred: 后面要跟账号名，如 starred:gztxt")
+        eff = effective()
+        return {"api_base": eff["api_base"], "git_host": eff["git_host"],
+                "owner": owner}, "starred: 形式按账号归组"
+    if "://" not in raw:
+        if "/" in raw:
+            raise GhSettingsError(
+                400, "只填账号（如 gztxt）或完整 URL；owner/name 请填账号部分")
+        eff = effective()
+        return {"api_base": eff["api_base"], "git_host": eff["git_host"],
+                "owner": _check_owner(raw)}, ""
+    u = urlsplit(raw)
+    if u.scheme != "https":
+        raise GhSettingsError(400, "仓库源地址必须 https")
+    if u.username or u.password:
+        raise GhSettingsError(400, "地址里不能带用户名/密码（key 请在 Key 一栏填）")
+    if u.query or u.fragment:
+        raise GhSettingsError(400, "地址不要带 ?query 或 #fragment")
+    host = (u.hostname or "").lower()
+    if not host:
+        raise GhSettingsError(400, "地址解析不出主机名")
+    parts = [p for p in (u.path or "").split("/") if p]
+    if host in ("github.com", "www.github.com", "api.github.com"):
+        note = ""
+        if len(parts) >= 2:
+            note = f"已按账号归组（{parts[0]}），仓库明细在项目页里看"
+        return {"api_base": DEFAULT_API_BASE, "git_host": DEFAULT_GIT_HOST,
+                "owner": _check_owner(parts[0] if parts and parts[0].lower() != "api"
+                                      else "")}, note
+    if "api" in [p.lower() for p in parts]:
+        return {"api_base": _check_api_base(raw), "git_host": _check_git_host(host),
+                "owner": ""}, "按 API 基址归组；归属留空 = 当前 key 可见的全部"
+    return {"api_base": _check_api_base(f"https://{host}/api/v3"),
+            "git_host": _check_git_host(host),
+            "owner": _check_owner(parts[0]) if parts else ""}, \
+        "非 github.com 主机按 GHES 处理，API 基址取 https://<host>/api/v3"
+
+
+def sources_all() -> List[Dict[str, Any]]:
+    """全部源（含禁用）；存储异常返回空表（项目页退回单源兜底）。"""
+    try:
+        _ensure_sources()
+        return [dict(r) for r in db.query(
+            "SELECT * FROM github_sources ORDER BY sort, created_at")]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def source_get(sid: str) -> Optional[Dict[str, Any]]:
+    for r in sources_all():
+        if r["id"] == sid:
+            return r
+    return None
+
+
+def sources_enabled() -> List[Dict[str, Any]]:
+    """拉取用：只启用项；一条都没有 ⇒ 用现有全局设置合成一条（零迁移成本）。"""
+    rows = ensure_default()
+    return [r for r in rows if int(r.get("enabled") or 0) == 1]
+
+
+def ensure_default() -> List[Dict[str, Any]]:
+    """空表时把「设置 → GitHub」的现值物化成第一条源（幂等，只写一次）。
+
+    用户此前只配过一套全局值；这里不改变其行为，只是让它成为「源 #1」。
+    """
+    rows = sources_all()
+    if rows:
+        return rows
+    eff = effective()
+    try:
+        _ensure_sources()
+        db.execute(
+            "INSERT INTO github_sources(id,label,api_base,git_host,owner,enabled,"
+            "sort,created_at,synced_at,repo_count,last_error) "
+            "VALUES(?,?,?,?,?,1,0,?,NULL,0,'')",
+            ("default", (eff["owner"] or "默认（当前 key）"), eff["api_base"],
+             eff["git_host"] or derive_git_host(eff["api_base"]), eff["owner"], _now()))
+    except Exception:  # noqa: BLE001 —— 并发下唯一索引会撞，撞了就再读一次
+        pass
+    return sources_all()
+
+
+def source_add(value: str, label: str = "") -> Dict[str, Any]:
+    """添加一条源；同 (api_base, owner) 视为重复，返回既有行（deduped=true）。"""
+    fields, note = parse_source(value)
+    for r in sources_all():
+        if (str(r["api_base"]).lower() == fields["api_base"].lower()
+                and str(r["owner"] or "").lower() == fields["owner"].lower()):
+            return {"deduped": True, "id": r["id"], "note": note,
+                    "source": source_view(r)}
+    sid = uuid.uuid4().hex[:10]
+    rows = sources_all()
+    sort = (max(int(r.get("sort") or 0) for r in rows) + 1) if rows else 0
+    _ensure_sources()
+    db.execute(
+        "INSERT INTO github_sources(id,label,api_base,git_host,owner,enabled,sort,"
+        "created_at,synced_at,repo_count,last_error) VALUES(?,?,?,?,?,1,?,?,NULL,0,'')",
+        (sid, (label or "").strip()[:60] or fields["owner"] or fields["git_host"] or "源",
+         fields["api_base"], fields["git_host"], fields["owner"], sort, _now()))
+    invalidate_cache()
+    return {"deduped": False, "id": sid, "note": note,
+            "source": source_view(source_get(sid) or {})}
+
+
+def source_patch(sid: str, label: Optional[str] = None,
+                 enabled: Optional[bool] = None) -> Dict[str, Any]:
+    if not source_get(sid):
+        raise GhSettingsError(404, "仓库源不存在")
+    if label is not None:
+        db.execute("UPDATE github_sources SET label=? WHERE id=?",
+                   ((label or "").strip()[:60] or "源", sid))
+    if enabled is not None:
+        db.execute("UPDATE github_sources SET enabled=? WHERE id=?",
+                   (1 if enabled else 0, sid))
+    invalidate_cache()
+    return {"id": sid, "source": source_view(source_get(sid) or {})}
+
+
+def source_delete(sid: str) -> Dict[str, Any]:
+    if not source_get(sid):
+        raise GhSettingsError(404, "仓库源不存在")
+    db.execute("DELETE FROM github_sources WHERE id=?", (sid,))
+    invalidate_cache()
+    return {"deleted": sid}
+
+
+def touch_source(sid: str, count: int, err: str = "") -> None:
+    """拉取回执写回源卡片（失败不抛：回执是附加价值，不是准入条件）。"""
+    try:
+        db.execute("UPDATE github_sources SET synced_at=?, repo_count=?, last_error=? "
+                   "WHERE id=?", (_now(), int(count), (err or "")[:200], sid))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def source_view(r: Dict[str, Any]) -> Dict[str, Any]:
+    return {"id": r.get("id"), "label": r.get("label"),
+            "api_base": r.get("api_base"), "git_host": r.get("git_host"),
+            "owner": r.get("owner") or "", "enabled": int(r.get("enabled") or 0) == 1,
+            "synced_at": r.get("synced_at"),
+            "repo_count": int(r.get("repo_count") or 0),
+            "last_error": r.get("last_error") or "",
+            "virtual": r.get("id") == "default" and r.get("created_at") is None}
+
 
 
 # ── 校验层 ────────────────────────────────────────────────────────────────
@@ -471,6 +656,7 @@ def diff(fields: Dict[str, str], write_files: bool = False) -> Dict[str, Any]:
 
 def apply(fields: Dict[str, str], write_files: bool = False) -> Dict[str, Any]:
     """落库（+ 可选回写文件）。返回 diff 与备份路径清单（落笔证据）。"""
+    prev = effective()               # 迁移前值：判断「默认源」是否只是全局设置的镜像
     out = diff(fields, write_files=write_files)
     backups: List[str] = []
     files_written: List[Dict[str, Any]] = []
@@ -490,12 +676,37 @@ def apply(fields: Dict[str, str], write_files: bool = False) -> Dict[str, Any]:
             _set(k, fields[k])
     if fields.get("token"):
         _set("token", fields["token"])
+    _sync_default_source(prev)
     out["backups"] = backups
     out["files_written"] = files_written
     out["applied"] = sorted(list(fields.keys()))
     log.info(f"[settings] GitHub 设置落笔：{','.join(sorted(fields))}"
              f"（回写文件 {len(files_written)} 个）")
     return out
+
+
+def _sync_default_source(prev: Dict[str, str]) -> None:
+    """「默认源」如果还只是全局设置的镜像（三值未被人为改过），跟着全局改。
+
+    为什么需要：v0.13.197 之前只有一套全局值，老用户的习惯是改这里就生效；
+    引入多源后若不同步，改「归属」不会影响项目页（源里还存着旧值）——那是
+    「改了没生效」的复现。用户已在源列表里单独改过的源不动（不是镜像）。
+    """
+    try:
+        row = next((r for r in sources_all() if r["id"] == "default"), None)
+        if not row:
+            return
+        if (str(row["api_base"]) != prev["api_base"]
+                or str(row["git_host"]) != prev["git_host"]
+                or str(row["owner"] or "") != prev["owner"]):
+            return
+        eff = effective()
+        host = eff["git_host"] or derive_git_host(eff["api_base"])
+        db.execute("UPDATE github_sources SET api_base=?, git_host=?, owner=? "
+                   "WHERE id='default'", (eff["api_base"], host, eff["owner"]))
+        invalidate_cache()
+    except Exception:  # noqa: BLE001 —— 同步失败不许打挂保存动作
+        pass
 
 
 def clear() -> Dict[str, Any]:
@@ -511,11 +722,14 @@ def clear() -> Dict[str, Any]:
 
 
 def invalidate_cache() -> None:
-    """清 GitHub 列表缓存（改地址/归属后旧清单立即失效）。延迟导入免循环。"""
+    """清 GitHub 列表缓存（改地址/归属/源列表后旧清单立即失效）。延迟导入免循环。"""
     try:
         import githubprojects as gp
         gp._cache["repos"] = None
         gp._cache["at"] = 0.0
+        by = gp._cache.get("by")
+        if isinstance(by, dict):
+            by.clear()
     except Exception:  # noqa: BLE001 —— 没挂 githubprojects 时只是少一步
         pass
 
@@ -542,6 +756,7 @@ def view() -> Dict[str, Any]:
         "clone_base": cb,
         "clone_base_exists": os.path.isdir(cb),
         "sources": sources(),
+        "repo_sources": [source_view(r) for r in ensure_default()],
         "token": token_view(),
         "list": list_status(),
         "defaults": {"api_base": DEFAULT_API_BASE, "git_host": DEFAULT_GIT_HOST,
@@ -717,9 +932,54 @@ async def settings_github_refresh(body: GhIn):
     invalidate_cache()
     try:
         import githubprojects as gp
-        d = gp._list_repos(force=True)
+        d = await gp.list_repos_async(force=True)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"重拉失败：{type(e).__name__}") from e
     return {"ok": True, "count": d.get("count", 0), "cached": False,
-            "errors": d.get("errors") or [], "token": d.get("token"),
-            "took_ms": d.get("took_ms"), "view": view()}
+            "groups": d.get("groups") or [], "errors": d.get("errors") or [],
+            "token": d.get("token"), "took_ms": d.get("took_ms"), "view": view()}
+
+
+# ── 端点：仓库源（设置页）─────────────────────────────────────────────────
+class SourceIn(BaseModel):
+    value: str = Field(min_length=1, max_length=300,
+                       description="gztxt / https://github.com/gztxt / GHES API 基址")
+    label: str = ""
+
+
+class SourcePatchIn(BaseModel):
+    label: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+@router.get("/api/settings/github/sources")
+async def sources_view():
+    """源列表（空表自动物化一条「默认」；不改动任何既有全局设置）。"""
+    rows = ensure_default()
+    return {"ok": True, "count": len(rows),
+            "sources": [source_view(r) for r in rows]}
+
+
+@router.post("/api/settings/github/sources")
+async def sources_add(body: SourceIn):
+    try:
+        return source_add(body.value, body.label)
+    except GhSettingsError as e:
+        raise _guard(e) from e
+
+
+@router.patch("/api/settings/github/sources/{sid}")
+async def sources_patch(sid: str, body: SourcePatchIn):
+    try:
+        return source_patch(sid, label=body.label, enabled=body.enabled)
+    except GhSettingsError as e:
+        raise _guard(e) from e
+
+
+@router.delete("/api/settings/github/sources/{sid}")
+async def sources_delete(sid: str):
+    try:
+        return source_delete(sid)
+    except GhSettingsError as e:
+        raise _guard(e) from e
+

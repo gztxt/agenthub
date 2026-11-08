@@ -125,7 +125,16 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.196"
+VERSION = "0.13.197"
+
+# v0.13.197（2026-11-09）：设置维护多仓库源 → 项目页按源分组（含 fork / star）。三处口径 A/A/A：
+#   ① 分组单位 = api_base + owner；② star = 该 owner 的公开 star（/users/<owner>/starred）；
+#   ③ 全源共用一个 token（零新增凭据）。两个真坑：
+#   ① **公开仓 ≠ 私有仓**：/users/<name>/repos 只回公开仓（实测 own 9 而非 40），自有账号须走
+#      /user/repos?affiliation=owner 才拿得到私有仓；判据是 token 的 /user.login 是否等于 owner。
+#   ② **同 URL 并发会 IncompleteRead**：两源并行打同一份 starred 列表，一路 199 一路 99 并报错；
+#      修法是单飞锁 + 单次拉取内 memo（按 URL+token 指纹），不是重试。
+#   关键词锚（版本钉 test_term_scroll_sensitivity 用）：多仓库源 / 公开仓 / IncompleteRead / 单飞 / 私有仓
 
 # v0.13.196（2026-11-08）：两件用户报障——
 #   ① 嵌入式终端对标 pi-web：手机没有 ESC/TAB/方向键 ⇒ 连上 TUI 也进不了菜单。

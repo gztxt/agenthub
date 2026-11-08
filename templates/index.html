@@ -3199,6 +3199,20 @@
                                    placeholder="ghp_… / github_pat_…" aria-label="GitHub key">
                             <button class="btn ghost sm" type="button" onclick="passEye(this,'ghToken')">显示</button>
                         </label>
+                        <div class="set-sub">仓库源（项目页按源分组：自建 / fork / star）</div>
+                        <div class="hint" style="margin-bottom:6px">粘贴
+                            <code>gztxt</code>、<code>https://github.com/gztxt</code>、
+                            <code>https://github.com/gztxt/agenthub</code> 或 GHES
+                            <code>https://host/api/v3</code> 均可；同地址同账号只留一条。
+                            star 取该账号的公开星标（key 自己的 star 只在归属留空时算）。</div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+                            <input id="ghSrcInput" type="text" autocomplete="off" spellcheck="false"
+                                   style="flex:1;min-width:220px"
+                                   placeholder="gztxt 或 https://github.com/gztxt"
+                                   aria-label="添加仓库源">
+                            <button class="btn sm" type="button" data-settings-act="gh-src-add">添加仓库源</button>
+                        </div>
+                        <div id="ghSrcList" class="set-status" style="display:none"></div>
                         <div class="set-sub">本地</div>
                         <label class="set-field">克隆落点<span class="set-src" id="ghCloneBaseSrc"></span>
                             <input id="ghCloneBase" type="text" autocomplete="off" spellcheck="false"
@@ -3595,7 +3609,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=f5e595eb';
+      var HUB_SRC = '/static/hub.js?v=1bc048b6';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

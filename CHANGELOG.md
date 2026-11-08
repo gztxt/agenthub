@@ -1,3 +1,30 @@
+## v0.13.197 — 多仓库源：设置里维护源 → 拉数据 → 项目页按源分组（自建 / fork / star）（2026-11-09）
+
+> 用户需求：「设置里维护仓库（添加和维护仓库地址或者api）→ 拉数据 → 项目页按仓库地址
+> 分组显示该地址所有仓库和 fork 以及 star 的仓库」。三处口径按推荐执行（A/A/A）：
+> 分组单位 = 地址 + owner；star = 该 owner 的公开 star；key 全源共用一个。
+
+- **设置 → GitHub 新增「仓库源」**：输入框接受 `gztxt` / `https://github.com/gztxt` /
+  `https://github.com/gztxt/agenthub` / GHES `https://host/api/v3` 四种写法，
+  归一化成 `(api_base, git_host, owner)`；同地址同账号自动去重；可启停、可删除。
+  空表时把现有「远程 / 归属」物化成一条默认源（零迁移），改全局值时默认源继续镜像同步
+  （用户单独改过的源不覆盖）。
+- **拉取按源并行**：每源两路并发（仓库 / star），同 URL 单飞去重（两个源都是「我自己」时
+  `/user/repos`、`/user/starred` 完全同 URL，不去重会白打一倍页数并触发 `IncompleteRead`）。
+  自有账号走 `/user/*`（含私有仓），他人/组织走 `/users|orgs/<name>/*`（公开面），
+  探不到 token 身份按公开面处理、不猜。首次两源实测 ~22s（307 个 star = 4 页），
+  之后缓存 0.4s；`force=1` 是唯一重拉入口。
+- **项目页分组**：每个源一个组头（git 主机 · owner · 自建/fork/star 计数 · 错误），
+  组内三段渲染；star 段与自建/fork 去重（自己的仓只出现一次，并在原行标 ★）；
+  搜索跨组命中，收藏/隐藏仍按 full_name 全局生效。
+- **克隆/核对带源**：`POST /api/github/clone` 增 `source_id`，clone URL 用该源的 git_host；
+  `GET /api/github/sync` 增 `source` 参数，本地匹配按 host 分账（两个 host 同名仓不串账）。
+- **兼容**：`/api/github/repos` 仍返回扁平 `repos`（带 `source_id` / `bucket` / `idx`），
+  新增 `groups` / `counts`；`_fetch_all` 与零参 `_remote_slugs()` 保留为既有 L0 接缝。
+- 测试：新增 `tests/test_ghsources_l0.py`（29 例：归一化拒绝面、默认源镜射、分组计数与
+  star 去重、按 host 本地匹配、单源缓存/强制重拉、token 缺失降级、克隆按源取 host、
+  自有 vs 他人端点选择、前端接线）。
+
 ## v0.13.196 — 终端对标 pi-web 补移动键栏 + 模型计量按 agents 清单归因（2026-11-08）
 
 > 用户报障：①「嵌入式终端窗口对比一下 pi web 的终端窗口，借鉴融合优化」

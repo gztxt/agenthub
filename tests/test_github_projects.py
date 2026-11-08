@@ -109,6 +109,13 @@ class TestSlugParsing(unittest.TestCase):
 
 
 class TestToken(unittest.TestCase):
+    def setUp(self):
+        # v0.13.197：一个源 = 两路请求（仓库 / star）。star 一路在老的
+        # 「只 mock _fetch_all」用例里没有接缝 ⇒ 会打真网络。统一在此关掉。
+        p = mock.patch.object(gp, "_fetch_starred", lambda base, own, tok: ([], None))
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_env_wins_over_file(self):
         tmp = _mktmp("ghtok-")
         f = tmp / "github.txt"
@@ -146,6 +153,10 @@ class TestListEnvelope(unittest.TestCase):
         self.tmp = _mktmp("ghlist-")
         self.root = self.tmp / "root"
         self.root.mkdir()
+        # v0.13.197：star 一路没有旧接缝（老用例只 mock _fetch_all），统一关掉
+        p = mock.patch.object(gp, "_fetch_starred", lambda base, own, tok: ([], None))
+        p.start()
+        self.addCleanup(p.stop)
         # 同仓异名命中 + 无 remote 仓不匹配 + 非 github remote 不匹配
         _mkrepo(self.root, "scripts", "https://github.com/gztxt/techdocs-scripts.git")
         _mkrepo(self.root, "lonely", "https://example.com/other.git")
@@ -283,16 +294,28 @@ class TestCloneGuard(unittest.TestCase):
         self.tmp = _mktmp("ghclone-")
         self.base = self.tmp / "clones"
         self.base.mkdir()
-        self._saved = (gp.CLONE_BASE, lp.ROOTS, gp._cache["repos"], gp._cache["at"])
+        self._saved = (gp.CLONE_BASE, lp.ROOTS, gp._cache["repos"], gp._cache["at"],
+                       dict(gp._cache.get("by") or {}))
         gp.CLONE_BASE = str(self.base)
         lp.ROOTS = []
+        # v0.13.197：白名单来自「该源的远端清单」。固定一个源 + 预置该源缓存，
+        # 让克隆闸门的用例仍然零网络、零 DB 依赖。
+        p = mock.patch.object(gp, "_source_rows", lambda: [
+            {"id": "default", "label": "默认", "api_base": "https://api.github.com",
+             "git_host": "github.com", "owner": ""}])
+        p.start()
+        self.addCleanup(p.stop)
         gp._cache["repos"] = [{"full_name": "gztxt/wantrepo", "name": "wantrepo"}]
         gp._cache["at"] = 1e12                       # 缓存永不过期
+        gp._cache["by"] = {"default": {"at": 1e12, "star": [], "errors": [],
+                                       "own": [{"full_name": "gztxt/wantrepo",
+                                                "name": "wantrepo"}]}}
         self.addCleanup(self._restore)
 
     def _restore(self):
-        gp.CLONE_BASE, lp.ROOTS, c_repos, c_at = self._saved
+        gp.CLONE_BASE, lp.ROOTS, c_repos, c_at, c_by = self._saved
         gp._cache["repos"], gp._cache["at"] = c_repos, c_at
+        gp._cache["by"] = c_by
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _env(self, term="good", passcode=""):
@@ -402,7 +425,7 @@ class TestCloneDiscipline(unittest.TestCase):
     """argv 形态 + 全仓无 shell=True + 环境变量。"""
 
     def test_argv_shape(self):
-        argv = gp._clone_argv("gztxt/agent-hub", "/tmp/dest")
+        argv = gp._clone_argv("gztxt/agent-hub", "/tmp/dest", "github.com")
         self.assertIsInstance(argv, list)
         self.assertTrue(all(isinstance(x, str) for x in argv))
         self.assertEqual(argv[0], "git")

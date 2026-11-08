@@ -241,8 +241,9 @@ class TestResolutionChain(_Base):
         # 落点改了 ⇒ 克隆目标必须跟着走（containment 用生效落点，不是老常量）
         _n, dest = gp._resolve_dest("acme/tool")
         self.assertTrue(dest.startswith(str(base) + os.sep))
-        # 主机改了 ⇒ 克隆 URL 与远端匹配都按新主机
-        self.assertIn("https://git.example.com/acme/tool.git", gp._clone_argv("acme/tool", dest))
+        # 主机改了 ⇒ 克隆 URL 与远端匹配都按新主机（v0.13.197：host 由源决定）
+        self.assertIn("https://git.example.com/acme/tool.git",
+                      gp._clone_argv("acme/tool", dest, gp.git_host()))
         self.assertEqual(gp._remote_slug("https://git.example.com/acme/tool.git"), "acme/tool")
         self.assertIsNone(gp._remote_slug("https://github.com/acme/tool"),
                           "换了主机后 github.com 的 remote 不该再匹配")
@@ -315,7 +316,9 @@ class TestEndpointsGate(_Base):
     def test_apply_ok_and_refresh_invalidates_cache(self):
         gp._cache["repos"] = [{"full_name": "a/b"}]
         gp._cache["at"] = 1e12
-        with mock.patch.object(gp, "_fetch_all", lambda tok: {"ok": True, "repos": []}):
+        with mock.patch.object(gp, "_fetch_all", lambda tok: {"ok": True, "repos": []}), \
+                mock.patch.object(gp, "_fetch_starred",
+                                  lambda base, own, tok: ([], None)):
             out = self._run(gs.settings_github_apply(
                 gs.GhIn(api_base="https://api.github.com")))
             self.assertTrue(out["applied"])

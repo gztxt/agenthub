@@ -22,7 +22,8 @@
  * 同步走到本分片函数体，let 的 TDZ 静态序风险会被 test_tdz_order 判红——
  * 08/09 分片同教训。localStorage 一律走 lsGet/lsSet 守卫（test_ls_guard R1）。 */
 
-var GH = [];          // 全量远端仓库（过滤前缓存）
+var GH = [];          // 全量远端仓库（过滤前缓存；扁平，跨源）
+var GH_GROUPS = [];   // v0.13.197：按仓库源分组（自建 / fork / star）
 var ghSel = null;     // 当前选中索引（null = 未选）
 var ghSelName = '';
 /* ghLoaded 的声明在 01-core-boot.js（**只此一处**）：理由同 09 分片的 lpLoaded ——
@@ -218,7 +219,8 @@ async function ghSyncCheck(r) {
   const meta = $('ghMeta');
   const orig = meta ? meta.textContent : '';
   try {
-    const d = await api('/api/github/sync?repo=' + encodeURIComponent(r.full_name));
+    const d = await api('/api/github/sync?repo=' + encodeURIComponent(r.full_name) +
+      '&source=' + encodeURIComponent(r.source_id || ''));
     if (meta && d && d.note) {
       const mark = d.state === 'synced' ? '✓ ' : (d.state === 'behind' ? '⚠ ' : '');
       meta.textContent = mark + d.note + (orig ? ' ｜ ' + orig : '');
@@ -246,16 +248,43 @@ function ghRenderList() {
   const box = $('ghList');
   if (!box) return;
   const q = ($('ghQ') ? $('ghQ').value.trim() : '').toLowerCase();
-  /* 顺序：收藏置顶（保持原相对序）→ 未收藏。 */
-  const pairs = ghFilter();
-  const ordered = pairs.filter(([r]) => ghStars.has(r.full_name))
-    .concat(pairs.filter(([r]) => !ghStars.has(r.full_name)));
-  const idx = ordered.filter(([r]) =>
+  const pairs = ghFilter().filter(([r]) =>
     !q || fuzzyMatch([[r.name, 3], [r.full_name, 1]], q) > 0);
-  box.innerHTML = idx.map(([r, i]) => ghRowHtml(r, i)).join('') ||
-    '<div class="hint" style="padding:10px">' + (q ? '无匹配仓库 <button class="btn ghost sm" onclick="ghClearFilter()">清除筛选</button>' : '无仓库') + '</div>';
+  /* 收藏置顶：每组每一段各自分流（保持原相对序）——ghStars.has + concat 是
+     v0.13.32 的行为契约，L0 用固定窗口盯这两个符号，别挪走。 */
+  const ord = (rows) => rows.filter(r => ghStars.has(r.full_name))
+    .concat(rows.filter(r => !ghStars.has(r.full_name)));
+  const sec = (title, rows) => rows.length ? (
+    '<div class="gh-sec-hd" style="padding:6px 10px 2px;font-size:var(--fs-xs);' +
+    'color:var(--fg-dim);letter-spacing:.04em">' + title + ' · ' + rows.length + '</div>' +
+    ord(rows).map(r => ghRowHtml(r, r.idx)).join('')) : '';
+  const groups = GH_GROUPS.length ? GH_GROUPS
+    : [{ id: '', label: '默认', git_host: '', owner: '', ok: true, repos: GH,
+         counts: {}, errors: [] }];
+  let html = '';
+  groups.forEach(g => {
+    const rows = pairs.filter(([r]) => !g.id || r.source_id === g.id).map(([r]) => r);
+    if (!rows.length && !((g.errors || []).length)) return;
+    const c = g.counts || {};
+    html += '<div class="gh-grp" style="border-top:1px solid var(--border);margin-top:4px">' +
+      '<div class="gh-grp-hd" style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;' +
+      'padding:7px 10px 3px">' +
+      '<b>' + escapeHtml(g.label || g.owner || g.git_host || '默认') + '</b>' +
+      '<span class="hint">' + escapeHtml(g.git_host || '') +
+      (g.owner ? ' · ' + escapeHtml(g.owner) : ' · 当前 key 可见全部') +
+      ' · 自建 ' + (c.own || 0) + ' · fork ' + (c.fork || 0) + ' · star ' + (c.star || 0) +
+      (g.cached ? ' · 缓存' : '') + '</span>' +
+      ((g.errors || []).length ? '<span class="hint" style="color:var(--danger,#c33)">⚠ ' +
+        escapeHtml(g.errors.join('；')) + '</span>' : '') + '</div>' +
+      sec('自建', rows.filter(r => r.bucket === 'own' || !r.bucket)) +
+      sec('fork', rows.filter(r => r.bucket === 'fork')) +
+      sec('star', rows.filter(r => r.bucket === 'star')) + '</div>';
+  });
+  box.innerHTML = html || ('<div class="hint" style="padding:10px">' +
+    (q ? '无匹配仓库 <button class="btn ghost sm" onclick="ghClearFilter()">清除筛选</button>' : '无仓库') + '</div>');
   const hint = $('ghHint');
-  if (hint) hint.textContent = '显示 ' + idx.length + ' / ' + GH.length + ' 个仓库' + ghCountsText();
+  if (hint) hint.textContent = '显示 ' + pairs.length + ' / ' + GH.length + ' 个仓库 · ' +
+    groups.length + ' 个源' + ghCountsText();
 }
 
 function ghClearFilter() {
@@ -288,11 +317,14 @@ async function loadGithubRepos(force) {
   try {
     const d = await api('/api/github/repos' + (force ? '?force=1' : ''));
     GH = d.repos || [];
+    GH.forEach((r, i) => { if (r.idx == null) r.idx = i; });
+    GH_GROUPS = (d.groups && d.groups.length) ? d.groups : [];
     ghSel = null;                     // 重拉后旧选中索引失效
     ghRenderList();
     ghRenderAgents();
     if (hint) hint.textContent = (d.token === false ? 'token 不可用 · ' : '') +
-      (d.count || 0) + ' 个仓库 · 本地已有 ' + (d.local_total || 0) + ' 个' + ghCountsText();
+      (d.count || 0) + ' 个仓库 · ' + (GH_GROUPS.length || 1) + ' 个源 · 本地已有 ' +
+      (d.local_total || 0) + ' 个' + ghCountsText();
     ghSyncPrefs();
     const meta = $('ghMeta');
     /* v0.13.33 用户裁定「拉取一次后本地缓存，每次拉取就是浪费资源」：
@@ -332,7 +364,7 @@ async function ghStart() {
       const d = await api('/api/github/clone', {
         method: 'POST',
         headers: termHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ repo: r.full_name })
+        body: JSON.stringify({ repo: r.full_name, source_id: r.source_id || '' })
       });
       cwd = d.path;
       if (d.existed) toast('目录已存在（同仓），直接开会话', 'ok');

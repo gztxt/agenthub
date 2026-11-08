@@ -1049,6 +1049,15 @@
         /* v0.13.43：子页 tab 随抽屉一起拆除（改走左侧手风琴 → 正文出页），
            这两条规则已无宿主，留着只会让人以为还有第二个浮层。 */
         .set-sub { font-size: var(--fs-sm); font-weight: 600; color: var(--text-2); margin: 12px 0 6px; }
+        /* v0.13.198：标签页分段（设置·仓库源 / 项目页按源分页）。
+           只引用既有色 token，不新增 @media；横向可滚，窄屏不挤压。 */
+        .tabstrip { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--border); margin: 2px 0 8px; }
+        .tabstrip .tab { flex: none; border: 1px solid transparent; border-bottom: 0; background: transparent;
+            color: var(--text-2); font-size: var(--fs-sm); padding: 6px 10px; border-radius: 8px 8px 0 0; cursor: pointer; }
+        .tabstrip .tab:hover { background: var(--surface-2); }
+        .tabstrip .tab[aria-selected="true"] { background: var(--surface-2); border-color: var(--border);
+            color: var(--text); font-weight: 600; }
+        .tabstrip .tab .n { color: var(--muted); font-size: var(--fs-xs); margin-left: 4px; }
         .set-agents { display: flex; flex-wrap: wrap; gap: 6px; }
         .set-agents .btn.on { font-weight: 600; }
         .set-agents .btn[aria-disabled="true"] { opacity: .5; }
@@ -3212,6 +3221,7 @@
                                    aria-label="添加仓库源">
                             <button class="btn sm" type="button" data-settings-act="gh-src-add">添加仓库源</button>
                         </div>
+                        <div id="ghSrcTabs" class="tabstrip" role="tablist" style="display:none"></div>
                         <div id="ghSrcList" class="set-status" style="display:none"></div>
                         <div class="set-sub">本地</div>
                         <label class="set-field">克隆落点<span class="set-src" id="ghCloneBaseSrc"></span>
@@ -3609,7 +3619,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=1bc048b6';
+      var HUB_SRC = '/static/hub.js?v=67511620';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

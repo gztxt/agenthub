@@ -125,7 +125,15 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.197"
+VERSION = "0.13.198"
+
+# v0.13.198（2026-11-09）：仓库源改「标签页」呈现（用户：设置 github 和 github 项目都要是标签页分组，
+#   例如仓库名 gztxt 作为标签页名）。两处同源改动：
+#   ① 设置·GitHub 的「仓库源」由竖排清单改为 tab 条 + 单源详情面板（tab 名＝归属账号）；
+#   ② 项目页由「多组上下堆叠」改为同一 tab 条 + 只渲染当前源（自建/fork/star 三段不变）。
+#   两条口径：tab 名取 owner（空则 label / host，再空写「默认」）；当前 tab 只存内存，
+#   不落 localStorage（偏好不得改变交互分支，见 AGENTS.md 4.1 ⑤）。
+#   关键词锚（版本钉 test_term_scroll_sensitivity 用）：标签页 / 归属账号 / 仓库源 / 分页
 
 # v0.13.197（2026-11-09）：设置维护多仓库源 → 项目页按源分组（含 fork / star）。三处口径 A/A/A：
 #   ① 分组单位 = api_base + owner；② star = 该 owner 的公开 star（/users/<owner>/starred）；

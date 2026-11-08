@@ -1733,6 +1733,9 @@ function settingsGithubStatus(note) {
 
 /* ── 仓库源列表（v0.13.197）：设置页维护，项目页按源分组 ──────────────── */
 var GH_SOURCES = [];
+/* v0.13.198：源以标签页并列（tab 名＝归属账号，如 gztxt），点一个看一个；
+   状态只存内存（偏好不改交互分支，见 AGENTS.md 4.1 ⑤）。 */
+var ghSrcTab = '';
 
 async function settingsGithubSources() {
   try {
@@ -1744,15 +1747,37 @@ async function settingsGithubSources() {
   ghRenderSources();
 }
 
+function ghSourceTabName(s) {
+  return (s && (s.owner || s.label || s.git_host)) || '默认';
+}
+
+function settingsGithubSourceTab(sid) {
+  ghSrcTab = sid || '';
+  ghRenderSources();
+}
+
 function ghRenderSources() {
+  const tabs = $('ghSrcTabs');
   const box = $('ghSrcList');
   if (!box) return;
   if (!GH_SOURCES.length) {
+    if (tabs) { tabs.innerHTML = ''; tabs.style.display = 'none'; }
     box.innerHTML = '<div class="v">（还没有仓库源：上面添加一条，或保存「远程 / 归属」后会自动生成一条默认源）</div>';
     box.style.display = '';
     return;
   }
-  box.innerHTML = GH_SOURCES.map(s => '<div class="set-diff-row">' +
+  if (!ghSrcTab || !GH_SOURCES.some(s => s.id === ghSrcTab)) ghSrcTab = GH_SOURCES[0].id;
+  if (tabs) {
+    tabs.innerHTML = GH_SOURCES.map(s =>
+      '<button type="button" class="tab" role="tab" data-settings-act="gh-src-tab" data-sid="' +
+      escapeHtml(s.id) + '" aria-selected="' + (s.id === ghSrcTab ? 'true' : 'false') + '">' +
+      escapeHtml(ghSourceTabName(s)) +
+      '<span class="n">' + (s.repo_count || 0) + '</span>' +
+      (s.enabled ? '' : '<span class="n">停用</span>') + '</button>').join('');
+    tabs.style.display = '';
+  }
+  const s = GH_SOURCES.filter(x => x.id === ghSrcTab)[0] || GH_SOURCES[0];
+  box.innerHTML = '<div class="set-diff-row">' +
     '<div class="k">' + escapeHtml(s.label || s.owner || s.git_host || '') + '</div>' +
     '<div class="v">' + escapeHtml(s.api_base || '') +
     (s.owner ? ' · ' + escapeHtml(s.owner) : ' · 当前 key 可见全部') +
@@ -1762,7 +1787,7 @@ function ghRenderSources() {
     '<button class="btn ghost sm" data-settings-act="gh-src-toggle" data-sid="' +
     escapeHtml(s.id) + '">' + (s.enabled ? '停用' : '启用') + '</button>' +
     '<button class="btn ghost sm" data-settings-act="gh-src-del" data-sid="' +
-    escapeHtml(s.id) + '">删除</button></div>').join('');
+    escapeHtml(s.id) + '">删除</button></div>';
   box.style.display = '';
 }
 
@@ -2574,6 +2599,7 @@ function settingsDelegates() {
       if (a === 'gh-clear') return settingsGithubClear();
       if (a === 'gh-refresh') return settingsGithubRefresh();
       if (a === 'gh-src-add') return settingsGithubSourceAdd();
+      if (a === 'gh-src-tab') return settingsGithubSourceTab(act.dataset.sid);
       if (a === 'gh-src-toggle') return settingsGithubSourceToggle(
         act.dataset.sid, (act.textContent || '').trim() === '启用');
       if (a === 'gh-src-del') return settingsGithubSourceDel(act.dataset.sid);

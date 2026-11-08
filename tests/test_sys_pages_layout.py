@@ -252,31 +252,29 @@ class TestSysPagesLayout(unittest.TestCase):
 
 
 class TestAuthBarAndOverview(unittest.TestCase):
-    """2026-11-08 用户报障两条的回归闸门（只读源码文本，同本文件口径）。
+    """2026-11-08 用户报障的回归闸门（只读源码文本，同本文件口径）。
 
-    ①「右上角不显示当前用户」：系统页无 crumb/opTabs ⇒ 旧 syncOpBar 把整条
-      #opBar 判 void，连带 display:none 掉里面的 #authBox。身份区必须独立于页标题。
+    ①「右上角显示当前用户，跟在跑·会话同一行」：身份区必须在 .header 的
+      .hstats 内、且位于 #hBusy 之后；不能再放回 #opBar（系统页会整条收起）。
     ②「总览内容怎么变了」：工作台把 rank 5（运行中/可启动）也列进「需要你处理」，
       正常态也恒定展示全部 Agent ⇒ 总览品牌/统计被压出首屏。只允许 3=异常/4=等待。
+    ③「每个用户的 agent 会话必须独有」：终端会话带 owner，列表/WS/销毁按 owner 过滤。
     """
 
     @classmethod
     def setUpClass(cls):
         cls.html = TPL.read_text(encoding="utf-8")
-        cls.s01 =  (_REPO / "static" / "hub" / "01-core-boot.js").read_text(encoding="utf-8")
-        cls.s06 = SHARD06.read_text(encoding="utf-8")
         cls.s15 = SHARD15.read_text(encoding="utf-8")
+        cls.term = (_REPO / "src" / "term.py").read_text(encoding="utf-8")
 
-    def test_opbar_keeps_auth_box_visible(self):
-        m = re.search(r"function syncOpBar\(.*?\n\}", strip_comments(self.s06), re.S)
-        self.assertTrue(m, "syncOpBar 缺失")
-        body = m.group(0)
-        self.assertIn("authBox", body, "syncOpBar 必须把身份区算进收起判据")
-        self.assertIn("authonly", body, "只有身份区时应打 .authonly（右对齐、去分割线）")
-        self.assertIn("#opBar.authonly", self.html, "缺 .authonly 的样式")
-        self.assertNotIn("#opBar.authonly { display: none", self.html,
-                         ".authonly 不能把身份区一起藏掉")
-        self.assertIn("syncOpBar()", self.s01, "renderAuthBox 写完后必须重算 opBar 收起态")
+    def test_auth_box_sits_in_header_after_busy(self):
+        self.assertEqual(self.html.count('id="authBox"'), 1, "authBox 只能有一个挂载点")
+        i_auth = self.html.index('id="authBox"')
+        i_busy = self.html.index('id="hBusy"')
+        i_opbar = self.html.index('id="opBar"')
+        self.assertGreater(i_auth, i_busy, "用户名必须在「在跑 N · 会话 M」之后")
+        self.assertLess(i_auth, i_opbar, "用户名必须留在 .header 的 .hstats 内，不放回 #opBar")
+        self.assertNotIn("authonly", self.html, ".authonly 方案已废弃（身份区移入顶栏）")
 
     def test_workbench_only_lists_actionable_agents(self):
         m = re.search(r"function renderWorkbench\(.*?\n\}", strip_comments(self.s15), re.S)
@@ -286,6 +284,12 @@ class TestAuthBarAndOverview(unittest.TestCase):
         self.assertNotIn("[3, 4, 5]", body, "rank 5（运行中/可启动）不许再进需要你处理")
         self.assertIn("wbPanel", body, "无待办项时必须收起整块 #wbPanel，恢复总览原布局")
         self.assertIn('id="wbPanel"', self.html)
+
+    def test_terminal_sessions_are_owner_scoped(self):
+        self.assertIn("self.owner", self.term, "Session 必须记录 owner")
+        self.assertRegex(self.term, r"owner\s*=\s*_owner_of\(request\)")
+        self.assertRegex(self.term, r'getattr\(s, "owner", ""\) != owner')
+        self.assertRegex(self.term, r'getattr\(sess, "owner", ""\) != ws_user')
 
 
 if __name__ == "__main__":

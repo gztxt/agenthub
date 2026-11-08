@@ -505,7 +505,7 @@
         #crumb b { color: var(--text-1); font-weight: 600; }
         #crumb .sep { color: var(--muted); }
         #opTabs { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
-        /* 2026-11-07 登录入口：顶栏最右，窄屏也不换行 */
+        /* 2026-11-08：身份区移入顶栏 .hstats（「在跑 N · 会话 M」之后、同一行） */
         #authBox { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
         #authBox .who { font-size: var(--fs-xs); color: var(--text-2); max-width: 12em; overflow: hidden;
                         text-overflow: ellipsis; white-space: nowrap; background: none;
@@ -517,11 +517,6 @@
         /* 顶栏无内容时整条收起（不占高不留分割线）：聊天页的模式 tab 已停用、实体名改由
            #chatEntName 显示，syncOpBar() 据此打 .void 标记 */
         #opBar.void { display: none; }
-        /* 2026-11-08：系统页（含总览）无 crumb/opTabs，但身份区必须常驻。
-           只留右侧身份、去掉标题区的下边距与分割线，避免像一条空标题栏。 */
-        #opBar.authonly { justify-content: flex-end; margin-bottom: 0; padding-bottom: 0; border-bottom: 0; }
-        #opBar.authonly #crumb, #opBar.authonly #opTabs { display: none; }
-        #opBar.authonly #authBox { margin-left: auto; }
         #sideMask { display: none; }
 
         /* ── 首页：说明区（v0.10.0 起移除指挥官对话区块，回到单列概览页） ── */
@@ -1380,6 +1375,11 @@
                2026-10-08：#hAgents 与「Hub 在岗」两块挂载点都已摘除，这条现在直接
                兜住仅剩的三块（需重启 / 在跑·会话 / 异常），机制不变。 */
             .hstats { flex: 1 1 auto; min-width: 0; overflow: hidden; }
+            /* 2026-11-08：身份区可收缩但保底可点（不能因 .hstats overflow:hidden 被整块裁掉） */
+            #authBox { flex: 0 1 auto; min-width: 3.6em; }
+            #authBox .who { max-width: 5.5em; padding: 1px 6px; }
+            /* 窄屏只留用户名，省掉「· 退出」；点击用户名依旧是注销入口（title 已写明）。 */
+            #authBox .who-sep, #authBox .who-out { display: none; }
             .hstats > span { flex: 0 1 auto; min-width: 0; overflow: hidden;
                              text-overflow: ellipsis; white-space: nowrap; }
             .header h1 { flex: 0 0 auto; min-width: 0; }
@@ -1744,6 +1744,9 @@
                  「在跑 N · 会话 M」（N=有活会话的 Agent 数，M=活会话总条数），
                  数据源换成免 token 的只读聚合端点 /api/term/activity。 -->
             <span id="hBusy"></span>
+            <!-- 2026-11-08 用户裁定：当前用户放在「在跑 N · 会话 M」后面、同一行。
+                 数据由 01-core-boot.js renderAuthBox() 渲染（用户名即注销入口）。 -->
+            <div id="authBox"></div>
             <span id="hErrors"></span>
         </div>
     </div>
@@ -1786,9 +1789,6 @@
         <div id="opBar">
             <nav id="crumb" aria-label="位置"></nav>
             <div id="opTabs"></div>
-            <!-- 2026-11-07 登录入口：无 token 时常显「登录」（不依赖 401 触发），
-                 有 token 时显示身份 + 退出。由 01-core-boot.js renderAuthBox() 渲染。 -->
-            <div id="authBox"></div>
         </div>
         <!-- 首页：说明区（Agent / 基础设施已全部收拢至左侧手风琴） -->
         <section class="page on" id="page-classroom">
@@ -3581,7 +3581,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=930e9053';
+      var HUB_SRC = '/static/hub.js?v=de15bcf5';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

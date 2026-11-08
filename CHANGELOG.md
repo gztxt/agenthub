@@ -1,18 +1,26 @@
-## 未发版 — 总览回归修复 + 右上角常驻身份/注销（2026-11-08）
+## 未发版 — 总览回归修复 + 顶栏身份/注销 + 会话按用户隔离（2026-11-08）
 
-> 用户报障两条：①「总览内容怎么变了」②「右上角显示当前用户，点击可以注销」。
+> 用户报障：①「总览内容怎么变了」②「右上角显示当前用户，点击可以注销」
+> ③「用户名应在右上角、跟在跑·会话同一行」④「每个用户的 agent 会话必须独有」。
 
 - **总览**：`15-workbench` 的「需要你处理」旧实现把 rank 5（运行中/可启动）也列进去
   ⇒ 正常态也恒定展示全部 15 个 Agent，品牌与统计被压到首屏之外。现只保留真正需介入的
   rank 3（异常）/ 4（终端等待）；rows 为空时整块 `#wbPanel` 收起，总览恢复原布局。
-- **身份/注销**：`#authBox` 原在 `#opBar` 内，而系统页（含总览）无 crumb/opTabs ⇒
-  `syncOpBar` 判 void 把整条 opBar 隐藏，身份区跟着消失。现 `syncOpBar` 把 authBox
-  纳入判据，只有身份区时打 `.authonly`（右对齐、去分割线）；用户名本身即注销按钮
+- **顶栏身份/注销**：`#authBox` 从 `#opBar` 移入 `.header > .hstats`，紧跟
+  `#hBusy`（「在跑 N · 会话 M」）之后、同一行；用户名本身即注销按钮
   （`data-authact=logout`，点击 POST `/api/users/logout` 后回登录闸门）。
-- 验证：影子实例（3211，隔离 DATA_DIR）实测登录后总览无「需要你处理」列表、
-  右上角显示 `gztxt · 退出`、点击后登录闸门重现；新增 L0 回归
-  `test_sys_pages_layout.TestAuthBarAndOverview`；全量 `pytest` 4073 passed，
-  仅 2 条既有环境红（`test_export_button` 的 2026-11-07 认证收口未同步、jcode 会话无标题）。
+  窄屏只留用户名、隐藏「· 退出」，点击行为不变。
+- **会话隔离**：`term.Session` 新增 `owner`（创建者用户名）。`create_session` 落 owner；
+  `GET /api/term/sessions`、`/api/term/activity` 只回自己的会话；`DELETE` 跨用户 403；
+  `WS /ws/term/{sid}` 跨用户关闭码 4403（前端停止重连并提示）；活会话录制同样校验。
+  ⇒ 两个用户打开同一 agent 不再自动接到同一条 pty。
+- 验证：影子实例（3211，隔离 DATA_DIR）建 gztxt / gztxt1 双用户实测——admin 建
+  `shell` 会话后，gztxt1 列表为空、activity 计数 0、DELETE 403、WS 关闭码 4403；
+  admin 自己列表可见并可销毁。无头浏览器 1440/390 实测顶栏顺序为
+  `v0.13.195 → 在跑 1 · 会话 1 → gztxt`，窄屏 `gztxt` 完整可见。
+  新增 L0 回归 `test_sys_pages_layout.TestAuthBarAndOverview`；终端相关 84 passed。
+- 全量 `pytest` 4073 passed，仅 2 条既有环境红（`test_export_button` 的 2026-11-07
+  认证收口未同步、jcode 会话无标题）。
 
 ## 未发版 — 用户授权改为「左侧菜单树显隐」，平铺授权名单删除（2026-11-08）
 

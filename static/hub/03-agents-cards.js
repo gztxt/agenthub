@@ -1357,6 +1357,14 @@ function termConnect(sid, agent, opts) {
       termDetach(); termRefreshList();
       return;
     }
+    if (code === 4403) {                     // 2026-11-08：会话归属隔离，别人的 pty 不接管
+      termWantCachePut(termSid, null);
+      termMouseWantReset();
+      termNotice('[无权访问：该终端会话属于其他用户]');
+      termToast('该终端会话属于其他用户，已停止重连', 'err');
+      termDetach(); termRefreshList();
+      return;
+    }
     if (code === 4401) {                     // 未鉴权：同一个错口令重连只会一直被拒，停手指路
       termNotice('[鉴权失败（4401）——在「设置」里重新应用 TERM_TOKEN 后再打开终端]');
       termToast('终端鉴权失败（TERM_TOKEN 不符），已停止重连', 'err');

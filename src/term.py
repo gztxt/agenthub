@@ -409,19 +409,40 @@ def describe_exit(status: Optional[int], hub_killed: bool = False) -> str:
     return ""
 
 
-def _check_term_auth(request, source: str) -> None:
+def _check_term_auth(request, source: str):
     """终端控制面鉴权（2026-11-07 用户裁定：只有 Cookie 会话 / HTTP Basic）。
     共享 token 兼容面已删除 —— 任何残留调用点都不会被接受（一律 401）。
-    拒绝理由绝不回显凭据值。"""
+    拒绝理由绝不回显凭据值。返回已认证的用户行（供会话 owner 归属）。"""
     try:
         import users as _users
         u, _p, _how = _users.identity_of(request)
         if u:
-            return
+            return u
     except Exception:  # noqa: BLE001 —— 用户库不可用不阻断其它路径
         pass
     log.warning(f"[term] 拒绝：未登录（{source}）")
     raise HTTPException(status_code=401, detail="login required")
+
+
+def _identity_user(request):
+    """读接口身份：read_gate 已注入 state.user 时直接用，否则自己解析一次。
+    2026-11-08 会话隔离：不能用 state.user 单源 —— 只读端点与活动端点
+    的注入路径不同，缺一条就会把「查不到身份」误当成「所有人」。"""
+    u = getattr(getattr(request, "state", None), "user", None)
+    if u:
+        return u
+    try:
+        import users as _users
+        u, _p, _how = _users.identity_of(request)
+        return u
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _owner_of(request) -> str:
+    """会话归属键：登录用户名；取不到身份时为空串（仅系统内部路径）。"""
+    u = _identity_user(request)
+    return (u.get("username") if u else "") or ""
 
 
 def _ensure_settings_table() -> None:
@@ -481,11 +502,14 @@ INITIAL_COLS = 80
 
 
 class Session:
-    def __init__(self, sid: str, agent_id: str, cmd: List[str], cwd: str):
+    def __init__(self, sid: str, agent_id: str, cmd: List[str], cwd: str, owner: str = ""):
         self.id = sid
         self.agent_id = agent_id
         self.cmd = cmd
         self.cwd = cwd
+        # 2026-11-08 用户裁定：每个用户的 agent 会话必须独有。
+        # owner = 创建者用户名；列表/WS/销毁全部按它过滤，禁止跨用户接管同一 pty。
+        self.owner = owner
         self.pid, self.fd = pty.fork()
         if self.pid == 0:  # 子进程：替换为终端程序
             try:
@@ -866,6 +890,7 @@ def _cwd_or_none(raw: Optional[str]) -> Optional[str]:
 @router.post("/api/term/sessions")
 async def create_session(body: CreateIn, request: Request):
     _check_term_auth(request, "POST /api/term/sessions")
+    owner = _owner_of(request)
     prof = profiles.get_profile(body.agent_id)
     if not prof or not prof.get("terminal"):
         raise HTTPException(400, f"{body.agent_id} 无终端入口（仅画像白名单可拉起）")
@@ -918,7 +943,7 @@ async def create_session(body: CreateIn, request: Request):
     # 不动 resume 的位置参数；白名单外的 agent 一律返回 []，绝不猜 flag。
     cmd += modelcfg.terminal_argv(prof["id"], modelcfg.hub_model(prof["id"]))
     sid = uuid.uuid4().hex[:10]
-    sess = Session(sid, prof["id"], cmd, cwd)
+    sess = Session(sid, prof["id"], cmd, cwd, owner=owner)
     sess.resume_of = body.session_id or ""
     _sessions[sid] = sess
     _attach_reader(sess)
@@ -948,7 +973,8 @@ async def term_activity(request: Request):
     不另算一套：两处口径分叉会让顶栏和终端栏互相打脸（P1-20 的老教训）。
     """
     _reap()   # 读路径顺手回收：与 list_sessions 同款（顶栏 8s 轮询就是最稳的回收心跳）
-    live = [s for s in _sessions.values() if s.alive]
+    owner = _owner_of(request)
+    live = [s for s in _sessions.values() if s.alive and (not owner or getattr(s, "owner", "") == owner)]
     # 按 agent 聚合（侧栏忙碌点要用到），但**只给 id 与条数** ——
     # agent_id 本来就是导航里公开可见的标识，不是凭据；sid 才是可操作句柄，一律不给。
     per: Dict[str, Dict[str, float]] = {}
@@ -975,11 +1001,15 @@ async def list_sessions(request: Request):
     # 可以「列 → 拿 sid → 杀」接力杀掉别人正在跑的会话。只堵 DELETE 不堵 GET 等于没堵。
     _check_term_auth(request, "GET /api/term/sessions")
     _reap()
+    owner = _owner_of(request)
     # 只展示活会话：已退出记录不再以"僵尸条目"出现（历史改由 /api/term/history 从磁盘直读）
     titles: Dict[str, Dict[int, str]] = {}
     out = []
     for s in _sessions.values():
         if not s.alive:
+            continue
+        # 2026-11-08：会话按创建者隔离 —— 同一 agent 下别的用户的 pty 不列出、不暴露 sid。
+        if not owner or getattr(s, "owner", "") != owner:
             continue
         if s.agent_id not in titles:
             # P0-8：同上，走线程池 + 指纹缓存，别把列表轮询变成阻塞源。
@@ -1014,6 +1044,10 @@ async def term_recording_status(sid: str, request: Request):
     """本会话录了多少、有没有触顶停录、上限是多少。界面据此明示，不能静默丢帧。"""
     _check_term_auth(request, "GET /api/term/recording")
     sess = _sessions.get(sid)
+    # 活会话按 owner 隔离；已退出会话的录制在 term_record 落盘里没有 owner 字段，
+    # 只能依赖「sid 随机 + 列表不泄露」二道防线（见 frames 端点同注）。
+    if sess is not None and getattr(sess, "owner", "") != _owner_of(request):
+        raise HTTPException(403, "只能查看自己的会话录制")
     # 活会话报内存真值（含 capped 一等状态）；已退出的从盘上重建（进程重启后 Recorder
     # 已不在，capped 真值无从恢复 —— 那种情形 term_record.status只给 at_limit 推断值）。
     if sess is not None:
@@ -1037,6 +1071,9 @@ async def term_recording_frames(sid: str, request: Request,
     也不会拿到一个永远取不到新帧的游标而空转轮询。
     """
     _check_term_auth(request, "GET /api/term/recording/frames")
+    sess = _sessions.get(sid)
+    if sess is not None and getattr(sess, "owner", "") != _owner_of(request):
+        raise HTTPException(403, "只能查看自己的会话录制")
     if not term_record.enabled():
         raise HTTPException(404, "recording 未启用")
     page = await asyncio.to_thread(term_record.frames_page, sid, limit, after_seq)
@@ -1050,6 +1087,14 @@ async def kill_session(sid: str, request: Request):
     # P1-7：杀掉别的会话 = 服务打断，与“建会话”同级危险（建已经被闸了）。
     # 前端六个调用点本来就带 termHeaders()，故此处只补服务端，不会造成界面断流。
     _check_term_auth(request, "DELETE /api/term/sessions/{sid}")
+    # 2026-11-08：只能结束自己的会话。sid 是随机句柄，但列表已隔离，这里是第二道闸。
+    owner = _owner_of(request)
+    cur = _sessions.get(sid)
+    if not cur:
+        raise HTTPException(404, "session not found")
+    if getattr(cur, "owner", "") != owner:
+        log.warning(f"[term] 拒绝跨用户销毁 sid={sid}（owner={getattr(cur, 'owner', '')!r}）")
+        raise HTTPException(403, "只能结束自己的会话")
     # 先摘出登记表 → 列表/新 WS 立即看不到（❌ 即时生效）；进程灭杀与资源回收走 kill→_force_kill→_cleanup
     sess = _sessions.pop(sid, None)
     if not sess:
@@ -1354,12 +1399,14 @@ def _attach_reader(sess: Session):
 async def term_ws(ws: WebSocket, sid: str):
     # 2026-11-07：只认 Cookie 会话（WS 握手自动带 Cookie）。共享 token 兼容面已删除。
     ws_ok = False
+    ws_user = ""
     try:
         import users as _users
         _ct = _users.cookie_session_token(ws)
         if _ct:
             _r, _p, _c = _users.resolve_token(_ct)
             ws_ok = bool(_r and not _c)
+            ws_user = (_r["username"] if ws_ok else "")
     except Exception:  # noqa: BLE001
         ws_ok = False
     if not ws_ok:
@@ -1374,6 +1421,9 @@ async def term_ws(ws: WebSocket, sid: str):
     elif not sess.alive:
         # 死会话不再服务：避免"回放旧画面+输入无效"的假加载（4410=已结束）
         reject = 4410
+    elif getattr(sess, "owner", "") != ws_user:
+        # 2026-11-08：会话归属隔离。别人的 pty 连画面都不给（4403=禁止）。
+        reject = 4403
     if reject is not None:
         # 业务码必须在 accept() **之后** close。早先是在 accept 前 close：
         # Starlette 此时只会回一个 HTTP 403 拒掉握手 ⇒ 浏览器侧看到的是 1006

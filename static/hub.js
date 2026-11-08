@@ -325,12 +325,11 @@ function renderAuthBox() {
     /* 2026-11-08 用户要求：「右上角显示当前用户，点击可以注销」。
        身份本身即注销入口（不再依赖旁边的小按钮）；title 写明动作。 */
     box.innerHTML = '<button class="who" type="button" data-authact="logout" title="当前用户：'
-      + escapeHtml(user) + ' · 点击退出登录">' + escapeHtml(user) + '<span class="who-sep">·</span>退出</button>';
+      + escapeHtml(user) + ' · 点击退出登录">' + escapeHtml(user) + '<span class="who-sep">·</span>'
+      + '<span class="who-out">退出</span></button>';
   } else {
     box.innerHTML = '<button class="btn xs pri" type="button" data-authact="login">登录</button>';
   }
-  /* 身份区内容变化后重算 #opBar 的收起态：系统页无 crumb/tabs 时也要留出身份区。 */
-  if (typeof syncOpBar === 'function') syncOpBar();
   if (!box.dataset.bound) {
     box.dataset.bound = '1';
     box.addEventListener('click', (e) => {
@@ -4548,6 +4547,14 @@ function termConnect(sid, agent, opts) {
       termMouseWantReset();
       termNotice('[该会话已结束或不存在——点行1 芯片重连，或按「新会话」]');
       termToast('终端会话已结束，请重新打开', 'err');
+      termDetach(); termRefreshList();
+      return;
+    }
+    if (code === 4403) {                     // 2026-11-08：会话归属隔离，别人的 pty 不接管
+      termWantCachePut(termSid, null);
+      termMouseWantReset();
+      termNotice('[无权访问：该终端会话属于其他用户]');
+      termToast('该终端会话属于其他用户，已停止重连', 'err');
       termDetach(); termRefreshList();
       return;
     }
@@ -9532,17 +9539,10 @@ function mountPicks(selId) {
 
 /* v0.10.1：#opBar 无标题也无 tab 时整条收起，窄屏省 37px，宽屏也不留空带 */
 function syncOpBar() {
-  const ob = $('opBar'), c = $('crumb'), t = $('opTabs'), a = $('authBox');
+  const ob = $('opBar'), c = $('crumb'), t = $('opTabs');
   if (!ob) return;
-  /* 2026-11-08 用户报「右上角不显示当前用户」：旧判据只看 crumb/opTabs，
-     系统页（含总览）两者皆空 ⇒ 整条 #opBar 被 .void 收起，连带把里面的
-     #authBox（身份 + 退出）一起 display:none。身份区是常驻内容，不随页标题存亡。
-     现在：三者皆空才收起；只有身份区有内容时打 .authonly（右对齐、去分割线）。 */
-  const hasCrumb = !!(c && c.textContent.trim());
-  const hasTabs = !!(t && t.textContent.trim());
-  const hasAuth = !!(a && a.textContent.trim());
-  ob.classList.toggle('void', !hasCrumb && !hasTabs && !hasAuth);
-  ob.classList.toggle('authonly', !hasCrumb && !hasTabs && hasAuth);
+  const empty = !((c && c.textContent.trim()) || (t && t.textContent.trim()));
+  ob.classList.toggle('void', empty);
 }
 /* 模式 tab 点击：embed/term/chat 走既有 switchMode，open/detail 各自直行 */
 function navMode(m) {

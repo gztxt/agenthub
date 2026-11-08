@@ -322,12 +322,15 @@ function renderAuthBox() {
   if (!box) return;
   const user = String(AUTH_USER || lsGet('hub.login.user') || '').trim();
   if (user) {
-    box.innerHTML = '<span class="who" title="当前登录身份：' + escapeHtml(user) + '">'
-      + escapeHtml(user) + '</span>'
-      + '<button class="btn xs ghost" type="button" data-authact="logout">退出</button>';
+    /* 2026-11-08 用户要求：「右上角显示当前用户，点击可以注销」。
+       身份本身即注销入口（不再依赖旁边的小按钮）；title 写明动作。 */
+    box.innerHTML = '<button class="who" type="button" data-authact="logout" title="当前用户：'
+      + escapeHtml(user) + ' · 点击退出登录">' + escapeHtml(user) + '<span class="who-sep">·</span>退出</button>';
   } else {
     box.innerHTML = '<button class="btn xs pri" type="button" data-authact="login">登录</button>';
   }
+  /* 身份区内容变化后重算 #opBar 的收起态：系统页无 crumb/tabs 时也要留出身份区。 */
+  if (typeof syncOpBar === 'function') syncOpBar();
   if (!box.dataset.bound) {
     box.dataset.bound = '1';
     box.addEventListener('click', (e) => {

@@ -62,7 +62,11 @@ function renderWorkbench() {
     const c = wbClassify(a);
     (byRank[c.rank] = byRank[c.rank] || []).push({ a, c });
   });
-  [3, 4, 5].forEach(r => {
+  /* 2026-11-08 用户报「总览内容怎么变了」：旧实现把 rank 5（运行中/可启动）也塞进
+     「需要你处理」⇒ 面板恒定列出全部 Agent，把品牌与统计压到首屏之外，且与面板标题
+     的语义相反。这里只留真正需要人工介入的档位：3=异常 / 4=终端等待。
+     正常态 rows 为空 ⇒ 下面把整块 #wbPanel 收起，总览恢复原布局。 */
+  [3, 4].forEach(r => {
     (byRank[r] || []).forEach(x => {
       rows.push({
         rank: r,
@@ -72,6 +76,14 @@ function renderWorkbench() {
       });
     });
   });
+  const panel = $('wbPanel');
+  if (panel) panel.style.display = rows.length ? '' : 'none';
+  if (!rows.length) {
+    el.innerHTML = '';
+    const stopEl = $('wbStopped');
+    if (stopEl) stopEl.innerHTML = '';
+    return;
+  }
   /* 4. 已停止折叠组 */
   const stopped = (byRank[6] || []).map(x => x.a);
   const stoppedEl = $('wbStopped');

@@ -37,6 +37,7 @@ SHARD04 = _REPO / "static" / "hub" / "04-terminal-ws.js"
 SHARD05 = _REPO / "static" / "hub" / "05-chat-and-history.js"
 SHARD06 = _REPO / "static" / "hub" / "06-manager-tasks.js"
 SHARD07 = _REPO / "static" / "hub" / "07-asset-panel.js"
+SHARD15 = _REPO / "static" / "hub" / "15-workbench.js"
 
 #: 系统菜单（左栏「系统」手风琴）下的全部子菜单页 —— 本次重排的对象
 SYS_PAGES = ("ports", "telemetry", "memory", "skills", "kb",
@@ -248,6 +249,43 @@ class TestSysPagesLayout(unittest.TestCase):
             self.assertTrue(m, "%s 缺失" % fn)
             self.assertNotIn("'%s').style.display = 'block'" % el, m.group(0),
                              "%s 里出现了 display:block（应为 ''，让 .sp-card 保持 flex）" % fn)
+
+
+class TestAuthBarAndOverview(unittest.TestCase):
+    """2026-11-08 用户报障两条的回归闸门（只读源码文本，同本文件口径）。
+
+    ①「右上角不显示当前用户」：系统页无 crumb/opTabs ⇒ 旧 syncOpBar 把整条
+      #opBar 判 void，连带 display:none 掉里面的 #authBox。身份区必须独立于页标题。
+    ②「总览内容怎么变了」：工作台把 rank 5（运行中/可启动）也列进「需要你处理」，
+      正常态也恒定展示全部 Agent ⇒ 总览品牌/统计被压出首屏。只允许 3=异常/4=等待。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.html = TPL.read_text(encoding="utf-8")
+        cls.s01 =  (_REPO / "static" / "hub" / "01-core-boot.js").read_text(encoding="utf-8")
+        cls.s06 = SHARD06.read_text(encoding="utf-8")
+        cls.s15 = SHARD15.read_text(encoding="utf-8")
+
+    def test_opbar_keeps_auth_box_visible(self):
+        m = re.search(r"function syncOpBar\(.*?\n\}", strip_comments(self.s06), re.S)
+        self.assertTrue(m, "syncOpBar 缺失")
+        body = m.group(0)
+        self.assertIn("authBox", body, "syncOpBar 必须把身份区算进收起判据")
+        self.assertIn("authonly", body, "只有身份区时应打 .authonly（右对齐、去分割线）")
+        self.assertIn("#opBar.authonly", self.html, "缺 .authonly 的样式")
+        self.assertNotIn("#opBar.authonly { display: none", self.html,
+                         ".authonly 不能把身份区一起藏掉")
+        self.assertIn("syncOpBar()", self.s01, "renderAuthBox 写完后必须重算 opBar 收起态")
+
+    def test_workbench_only_lists_actionable_agents(self):
+        m = re.search(r"function renderWorkbench\(.*?\n\}", strip_comments(self.s15), re.S)
+        self.assertTrue(m, "renderWorkbench 缺失")
+        body = m.group(0)
+        self.assertIn("[3, 4].forEach", body, "「需要你处理」只许列异常(3)/等待(4)")
+        self.assertNotIn("[3, 4, 5]", body, "rank 5（运行中/可启动）不许再进需要你处理")
+        self.assertIn("wbPanel", body, "无待办项时必须收起整块 #wbPanel，恢复总览原布局")
+        self.assertIn('id="wbPanel"', self.html)
 
 
 if __name__ == "__main__":

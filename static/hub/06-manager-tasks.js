@@ -100,10 +100,17 @@ function mountPicks(selId) {
 
 /* v0.10.1：#opBar 无标题也无 tab 时整条收起，窄屏省 37px，宽屏也不留空带 */
 function syncOpBar() {
-  const ob = $('opBar'), c = $('crumb'), t = $('opTabs');
+  const ob = $('opBar'), c = $('crumb'), t = $('opTabs'), a = $('authBox');
   if (!ob) return;
-  const empty = !((c && c.textContent.trim()) || (t && t.textContent.trim()));
-  ob.classList.toggle('void', empty);
+  /* 2026-11-08 用户报「右上角不显示当前用户」：旧判据只看 crumb/opTabs，
+     系统页（含总览）两者皆空 ⇒ 整条 #opBar 被 .void 收起，连带把里面的
+     #authBox（身份 + 退出）一起 display:none。身份区是常驻内容，不随页标题存亡。
+     现在：三者皆空才收起；只有身份区有内容时打 .authonly（右对齐、去分割线）。 */
+  const hasCrumb = !!(c && c.textContent.trim());
+  const hasTabs = !!(t && t.textContent.trim());
+  const hasAuth = !!(a && a.textContent.trim());
+  ob.classList.toggle('void', !hasCrumb && !hasTabs && !hasAuth);
+  ob.classList.toggle('authonly', !hasCrumb && !hasTabs && hasAuth);
 }
 /* 模式 tab 点击：embed/term/chat 走既有 switchMode，open/detail 各自直行 */
 function navMode(m) {

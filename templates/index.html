@@ -507,11 +507,21 @@
         #opTabs { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
         /* 2026-11-07 登录入口：顶栏最右，窄屏也不换行 */
         #authBox { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
-        #authBox .who { font-size: var(--fs-xs); color: var(--text-2); max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #authBox .who { font-size: var(--fs-xs); color: var(--text-2); max-width: 12em; overflow: hidden;
+                        text-overflow: ellipsis; white-space: nowrap; background: none;
+                        border: 1px solid var(--border); padding: 2px 8px; border-radius: 999px;
+                        cursor: pointer; font-family: inherit; line-height: 1.6; }
+        #authBox .who:hover { color: var(--text-1); border-color: var(--accent-2); background: var(--sel-bg-hover); }
+        #authBox .who-sep { opacity: .55; margin: 0 4px; }
         #opTabs .btn.on { background: var(--sel-bg); color: var(--text-1); border-color: var(--sel-border); font-weight: 600; }
         /* 顶栏无内容时整条收起（不占高不留分割线）：聊天页的模式 tab 已停用、实体名改由
            #chatEntName 显示，syncOpBar() 据此打 .void 标记 */
         #opBar.void { display: none; }
+        /* 2026-11-08：系统页（含总览）无 crumb/opTabs，但身份区必须常驻。
+           只留右侧身份、去掉标题区的下边距与分割线，避免像一条空标题栏。 */
+        #opBar.authonly { justify-content: flex-end; margin-bottom: 0; padding-bottom: 0; border-bottom: 0; }
+        #opBar.authonly #crumb, #opBar.authonly #opTabs { display: none; }
+        #opBar.authonly #authBox { margin-left: auto; }
         #sideMask { display: none; }
 
         /* ── 首页：说明区（v0.10.0 起移除指挥官对话区块，回到单列概览页） ── */
@@ -3571,7 +3581,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=d403b485';
+      var HUB_SRC = '/static/hub.js?v=930e9053';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

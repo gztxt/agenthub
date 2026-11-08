@@ -322,12 +322,15 @@ function renderAuthBox() {
   if (!box) return;
   const user = String(AUTH_USER || lsGet('hub.login.user') || '').trim();
   if (user) {
-    box.innerHTML = '<span class="who" title="当前登录身份：' + escapeHtml(user) + '">'
-      + escapeHtml(user) + '</span>'
-      + '<button class="btn xs ghost" type="button" data-authact="logout">退出</button>';
+    /* 2026-11-08 用户要求：「右上角显示当前用户，点击可以注销」。
+       身份本身即注销入口（不再依赖旁边的小按钮）；title 写明动作。 */
+    box.innerHTML = '<button class="who" type="button" data-authact="logout" title="当前用户：'
+      + escapeHtml(user) + ' · 点击退出登录">' + escapeHtml(user) + '<span class="who-sep">·</span>退出</button>';
   } else {
     box.innerHTML = '<button class="btn xs pri" type="button" data-authact="login">登录</button>';
   }
+  /* 身份区内容变化后重算 #opBar 的收起态：系统页无 crumb/tabs 时也要留出身份区。 */
+  if (typeof syncOpBar === 'function') syncOpBar();
   if (!box.dataset.bound) {
     box.dataset.bound = '1';
     box.addEventListener('click', (e) => {
@@ -9529,10 +9532,17 @@ function mountPicks(selId) {
 
 /* v0.10.1：#opBar 无标题也无 tab 时整条收起，窄屏省 37px，宽屏也不留空带 */
 function syncOpBar() {
-  const ob = $('opBar'), c = $('crumb'), t = $('opTabs');
+  const ob = $('opBar'), c = $('crumb'), t = $('opTabs'), a = $('authBox');
   if (!ob) return;
-  const empty = !((c && c.textContent.trim()) || (t && t.textContent.trim()));
-  ob.classList.toggle('void', empty);
+  /* 2026-11-08 用户报「右上角不显示当前用户」：旧判据只看 crumb/opTabs，
+     系统页（含总览）两者皆空 ⇒ 整条 #opBar 被 .void 收起，连带把里面的
+     #authBox（身份 + 退出）一起 display:none。身份区是常驻内容，不随页标题存亡。
+     现在：三者皆空才收起；只有身份区有内容时打 .authonly（右对齐、去分割线）。 */
+  const hasCrumb = !!(c && c.textContent.trim());
+  const hasTabs = !!(t && t.textContent.trim());
+  const hasAuth = !!(a && a.textContent.trim());
+  ob.classList.toggle('void', !hasCrumb && !hasTabs && !hasAuth);
+  ob.classList.toggle('authonly', !hasCrumb && !hasTabs && hasAuth);
 }
 /* 模式 tab 点击：embed/term/chat 走既有 switchMode，open/detail 各自直行 */
 function navMode(m) {
@@ -11843,7 +11853,11 @@ function renderWorkbench() {
     const c = wbClassify(a);
     (byRank[c.rank] = byRank[c.rank] || []).push({ a, c });
   });
-  [3, 4, 5].forEach(r => {
+  /* 2026-11-08 用户报「总览内容怎么变了」：旧实现把 rank 5（运行中/可启动）也塞进
+     「需要你处理」⇒ 面板恒定列出全部 Agent，把品牌与统计压到首屏之外，且与面板标题
+     的语义相反。这里只留真正需要人工介入的档位：3=异常 / 4=终端等待。
+     正常态 rows 为空 ⇒ 下面把整块 #wbPanel 收起，总览恢复原布局。 */
+  [3, 4].forEach(r => {
     (byRank[r] || []).forEach(x => {
       rows.push({
         rank: r,
@@ -11853,6 +11867,14 @@ function renderWorkbench() {
       });
     });
   });
+  const panel = $('wbPanel');
+  if (panel) panel.style.display = rows.length ? '' : 'none';
+  if (!rows.length) {
+    el.innerHTML = '';
+    const stopEl = $('wbStopped');
+    if (stopEl) stopEl.innerHTML = '';
+    return;
+  }
   /* 4. 已停止折叠组 */
   const stopped = (byRank[6] || []).map(x => x.a);
   const stoppedEl = $('wbStopped');

@@ -16,12 +16,17 @@
 - perms 注入 request.state（actor 保持既有「凭据名」口径不变，另加 state.user /
   state.user_perms，**绝不回显 token 值**）。
 
-模块清单（授权粒度 = 菜单叶子节点，用户例子里的「显示/不显示某菜单」= 勾/不勾）：
-  顶栏: classroom / localprojects / github / resources
+模块清单（授权粒度 = 左侧菜单树，2026-11-08 用户裁定：授权页直接呈现菜单树、
+含子菜单，勾选即「显示」、取消即「整项不显示」）：
+  顶栏: classroom / localprojects / github / resources（4 个叶子）
+  分组: group:agents / group:infra / group:system / group:settings（组头本身也可授权）
   AGENTS: 每个 agent（kind=agent）动态一条（module = agent.id）
-  基础设施: 每 agent 的 service 页
+  基础设施: 每个非 agent 实体一条（module = 实体 id，含 parent 子项）
   系统: SYS_PAGES 10 项
-  设置: SET_PAGES 4 项
+  设置: SET_PAGES 6 项
+前端菜单树由 05-chat-and-history.js 的 authMenuTreeHtml() 从**实时菜单源**
+（AGENTS / SYS_PAGES / SET_PAGES / NAV_*）生成，保证与真实侧栏逐项一致；
+后端只负责白名单校验，不再维护一份平行的「授权名单」清单。
 
 admin 用户：绕过 perms 过滤（全模块可见）；普通用户按 user_perms。
 路由面（全部走 write_gate，无豁免）：
@@ -57,6 +62,9 @@ MODULE_SYS = ["ports", "telemetry", "memory", "skills", "kb", "mcp", "jobs", "ta
               "assets", "botboy"]
 MODULE_SET = ["settings-model", "settings-github", "settings-token", "settings-logs",
               "settings-users", "settings-modelcalls"]   # 2026-11-07：与前端 SET_PAGES 六项对齐
+#: 2026-11-08：左侧手风琴的分组本身也可授权（勾组头 = 整组可见）。
+#: 前缀 `group:` 与菜单叶子 id 不会撞（叶子 id 均无冒号）。
+MODULE_GROUPS = ["group:agents", "group:infra", "group:system", "group:settings"]
 # ── 2026-11-07 menu_items seed 常量（与前端 05-chat-and-history.js 的 SYS_PAGES/SET_PAGES
 #    逐条对齐，图标取已验证存在过的 sprite id）──
 TOP_ICONS = {"classroom": "school", "localprojects": "folder", "github": "globe", "resources": "boxes"}
@@ -351,30 +359,25 @@ async def clear_password(name: str, request: Request):
     return {"ok": True, "username": name, "note": "该用户现在只能走 token 登录"}
 
 
-def _validate_perms(perms: List[str], agents: List[str]) -> List[str]:
-    """白名单过滤：未知模块静默丢弃（防前端漂移打出假节点）；agent 动态模块保留在册者。
-    2026-11-07：已知模块优先读 menu_items 表（DB 可维护），表空时回落硬编码（零行为变化）。"""
+def _validate_perms(perms: List[str], entity_ids: List[str]) -> List[str]:
+    """白名单过滤：未知模块静默丢弃（防前端漂移打出假节点）。
+    entity_ids = 在册实体 id（agent + 基础设施），2026-11-08 起两者都可授权——
+    此前只收 kind='agent'，基础设施永远无法授权，普通用户侧栏里那一组恒为空。"""
     db_modules = _menu_modules()
-    known = set(MODULE_TOP + MODULE_SYS + MODULE_SET + agents + db_modules)
+    known = set(MODULE_TOP + MODULE_SYS + MODULE_SET + MODULE_GROUPS + entity_ids + db_modules)
     return [m for m in perms if m in known]
 
 
-def _menu_modules_by_group() -> Dict[str, List[str]]:
-    """menu_items 按 group 分列；表空时回落硬编码（零行为变化）。
-    agents 动态模块不进此表（它是 agent.id，前端另有动态源，授权面在 _validate_perms
-    里单独并集，避免把「在册 agent」也搬进 DB）。"""
-    import db as _db
+def _entity_ids() -> List[str]:
+    """可授权的实体节点 = 侧栏全部实体（内置画像 + 注册表），与 /api/agents 同源。
+    ⚠️ 不能用 custom_agents 表：内置 agent（claude/pi/dsh…）与基础设施不在该表里，
+    拿它当白名单会把它们整组挡掉（2026-11-08 实测：只授 group:agents+claude 时
+    perms 回包里 claude 被静默丢弃）。"""
     try:
-        rows = _db.query("SELECT module, grp FROM menu_items WHERE enabled=1 ORDER BY order_no, module")
-    except Exception:  # 表不存在
-        rows = []
-    out: Dict[str, List[str]] = {"top": [], "agents": [], "infra": [], "system": [], "settings": []}
-    for r in rows:
-        out.setdefault(r["grp"], []).append(r["module"])
-    if not rows:  # 表空 ⇒ 全部回落硬编码
-        out = {"top": list(MODULE_TOP), "agents": [], "infra": [],
-               "system": list(MODULE_SYS), "settings": list(MODULE_SET)}
-    return out
+        import profiles as _profiles
+        return [p["id"] for p in _profiles.all_profiles(include_blocked=True) if p.get("id")]
+    except Exception:  # 极早期/画像不可读
+        return []
 
 
 def seed_menu_items() -> int:
@@ -409,15 +412,14 @@ def _menu_modules() -> List[str]:
 
 @router.get("/api/users")
 async def list_users(request: Request):
-    """admin 见全量；普通用户见自己的概览（不含别人的 token）。"""
-    mods = _menu_modules_by_group()
+    """admin 见全量；普通用户见自己的概览（不含别人的 token）。
+    2026-11-08：不再回 `modules` 平铺清单 —— 授权页改为直接渲染左侧菜单树
+    （前端 authMenuTreeHtml 从实时菜单源生成），后端只做白名单校验。"""
     u = getattr(request.state, "user", None)
     if u and not u["is_admin"]:
         mine = [r for r in _user_rows() if r["username"] == u["username"]]
-        return {"rows": mine, "self": u["username"], "admin": False,
-                "modules": {"top": mods["top"], "system": mods["system"], "settings": mods["settings"]}}
-    return {"rows": _user_rows(), "admin": True,
-            "modules": {"top": mods["top"], "system": mods["system"], "settings": mods["settings"]}}
+        return {"rows": mine, "self": u["username"], "admin": False}
+    return {"rows": _user_rows(), "admin": True}
 
 
 @router.post("/api/users")
@@ -425,7 +427,7 @@ async def create_user(request: Request, body: UserIn):
     me = _require_admin(request)
     if db.query("SELECT 1 FROM users WHERE username=?", (body.username,)):
         raise HTTPException(409, f"用户名 {body.username} 已存在")
-    agents = [r["id"] for r in db.query("SELECT id FROM custom_agents WHERE kind='agent'")]
+    agents = _entity_ids()
     perms = _validate_perms(body.perms, agents)
     rid = db.execute_insert(
         "INSERT INTO users(username, display, is_admin, created_at, updated_at) VALUES(?,?,?,?,?)",
@@ -509,7 +511,7 @@ async def set_perms(name: str, request: Request, body: PermsIn):
     rows = [r for r in _user_rows() if r["username"] == name]
     if not rows:
         raise HTTPException(404, "用户不存在")
-    agents = [r["id"] for r in db.query("SELECT id FROM custom_agents WHERE kind='agent'")]
+    agents = _entity_ids()
     perms = _validate_perms(body.modules, agents)
     db.execute("DELETE FROM user_perms WHERE user_id=?", (rows[0]["id"],))
     if perms:

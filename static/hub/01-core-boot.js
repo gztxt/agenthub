@@ -1894,6 +1894,8 @@ function openUserModal(cfg) {
       if (e.key === 'Escape') { e.stopPropagation(); closeUserModal(); }
       else if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); _usersModalSubmit(); }
     });
+    /* 菜单授权树的组头/叶子联动：整个弹窗只此一个 change 监听点。 */
+    m.querySelector('#usersModalBd').addEventListener('change', _usersTreeCascade);
   }
   const bd = m.querySelector('#usersModalBd');
   const fields = cfg.fields || [];
@@ -2083,39 +2085,56 @@ async function usersRevoke(name) {
   });
 }
 async function usersPerms(name) {
-  let detail, ld;
+  let detail;
   try {
     detail = await api('/api/users/' + encodeURIComponent(name));
-    ld = await api('/api/users');
   } catch (e) { toast('读取授权失败：' + e.message, 'err'); return; }
   const cur = detail.perms || [];
-  /* 模块清单仍从 /api/users 响应（DB 驱动）取；表空时后端回落硬编码，零行为变化。 */
-  const mods = [].concat(
-    (ld.modules && ld.modules.top) || [],
-    (ld.modules && ld.modules.system) || [],
-    (ld.modules && ld.modules.settings) || [],
-    (ld.modules && ld.modules.agents) || []);
-  const boxes = mods.map(x => {
-    const id = String(typeof x === 'string' ? x : (x.id || x.key || ''));
-    const label = typeof x === 'string' ? x : (x.label || x.title || id);
-    return '<label style="display:flex;align-items:center;gap:6px;font-size:var(--fs-sm);padding:3px 0">' +
-      '<input type="checkbox" data-umod="' + escapeHtml(id) + '"' +
-      (cur.indexOf(id) >= 0 ? ' checked' : '') + '> ' + escapeHtml(label) +
-      ' <span class="hint">' + escapeHtml(id) + '</span></label>';
-  }).join('');
+  /* 2026-11-08 用户裁定：授权 = 左侧菜单栏（含子菜单）的显示/隐藏。
+     旧「平铺模块名单」已删除 —— 名字与 id 对不上真实侧栏，用户看不懂。
+     现在直接渲染菜单树，数据源与 renderNav 同源（AGENTS/SYS_PAGES/SET_PAGES/NAV_*）。 */
+  const tree = (typeof authMenuTreeHtml === 'function')
+    ? authMenuTreeHtml(cur)
+    : '<div class="hint">菜单树不可用：前端菜单分片未加载。</div>';
   openUserModal({
     title: '编辑授权：' + name,
-    text: '<div class="hint" style="margin-bottom:8px">勾选该用户可见的模块；管理员默认可见全部，无需逐项勾选。</div>' +
-          (boxes || '<div class="hint">暂无可选模块。</div>'),
+    text: '<div class="hint" style="margin-bottom:4px">勾选 = 该用户左侧菜单<b>显示</b>此项；取消 = <b>不显示</b>。' +
+          '勾组头 = 整组同开同关；组内只勾部分项时组头显示为半选。管理员默认可见全部，无需逐项勾选。</div>' +
+          tree,
     confirmText: '保存修改',
     onSubmit: async (v, m) => {
-      const picked = Array.from(m.querySelectorAll('[data-umod]:checked')).map(n => n.dataset.umod);
+      /* 叶子 + 整组（组头勾满时才存 group:xxx，避免「有授权但整组空白」） */
+      const picked = [];
+      m.querySelectorAll('[data-umod]:checked').forEach(n => picked.push(n.dataset.umod));
+      m.querySelectorAll('[data-ugroup]:checked').forEach(n => picked.push(n.dataset.ugroup));
       await api('/api/users/' + encodeURIComponent(name) + '/perms',
         { method: 'PUT', body: JSON.stringify({ modules: picked }) });
-      toast('已保存 ' + name + ' 的授权', 'ok');
+      toast('已保存 ' + name + ' 的菜单授权', 'ok');
       usersPanelLoad();
     }
   });
+  if (typeof syncAuthTreeGroups === 'function') syncAuthTreeGroups($(USERS_MODAL_ID));
+}
+/* 组头三态联动：组头 ⇒ 整组同开同关；叶子 ⇒ 回写组头 checked/indeterminate。
+   绑在弹窗正文的 change 上（唯一监听点，禁 inline onclick，§4.2）。 */
+function _usersTreeCascade(e) {
+  const bd = e.currentTarget, t = e.target;
+  if (!bd || !t || t.type !== 'checkbox') return;
+  if (t.dataset.ugroup) {
+    const sel = '[data-umod][data-ugrp="' + t.dataset.ugroup + '"]';
+    bd.querySelectorAll(sel).forEach(n => { n.checked = t.checked; });
+    t.indeterminate = false;
+    return;
+  }
+  if (t.dataset.umod && t.dataset.ugrp) {
+    const g = bd.querySelector('[data-ugroup="' + t.dataset.ugrp + '"]');
+    if (!g) return;
+    const kids = Array.from(bd.querySelectorAll(
+      '[data-umod][data-ugrp="' + t.dataset.ugrp + '"]'));
+    const on = kids.filter(n => n.checked).length;
+    g.checked = kids.length > 0 && on === kids.length;
+    g.indeterminate = on > 0 && on < kids.length;
+  }
 }
 async function usersDel(name) {
   openUserModal({
@@ -2133,14 +2152,13 @@ async function usersDel(name) {
 async function usersPanelNew() {
   openUserModal({
     title: '新建用户',
+    text: '<div class="hint" style="margin-bottom:8px">创建后在列表里点「编辑授权」，按左侧菜单树勾选可见项。</div>',
     fields: [
       { id: 'name', label: '用户名', required: true, placeholder: '小写字母 / 数字 / - / _',
         help: '创建后不可修改。' },
       { id: 'display', label: '显示名', placeholder: '可留空，默认同用户名' },
       { id: 'admin', label: '管理员', type: 'checkbox',
-        help: '管理员可见全部模块，无需逐项授权。' },
-      { id: 'mods', label: '授权模块', placeholder: '空格分隔；管理员留空 = 全部',
-        help: '留空表示全部模块。' }
+        help: '管理员可见全部菜单，无需逐项授权。' }
     ],
     confirmText: '创建',
     onSubmit: async (v, m) => {
@@ -2148,7 +2166,7 @@ async function usersPanelNew() {
       await api('/api/users', {
         method: 'POST',
         body: JSON.stringify({ username: v.name, display: v.display || v.name,
-          is_admin: !!(ad && ad.checked), perms: v.mods.split(/\s+/).filter(Boolean) })
+          is_admin: !!(ad && ad.checked), perms: [] })
       });
       toast('已创建 ' + v.name, 'ok');
       usersPanelLoad();

@@ -3287,9 +3287,9 @@
                     </div>
                     <div class="sp-bd">
                         <div class="hint" style="margin-bottom:10px">
-                            用户模块：按菜单节点（顶栏/AGENTS/基础设施/系统/设置叶子）授权。
-                            admin 全模块可见；普通用户按 user_perms 过滤菜单项。
-                            token 只存 sha256，明文只在签发回包出现一次。
+                            用户授权 = 左侧菜单栏（含子菜单）的显示 / 隐藏：点某用户的「编辑授权」，
+                            按菜单树勾选即可。admin 全菜单可见；普通用户按勾选结果显示。
+                            登录凭据走会话 Cookie / Basic，页面不持有明文 token。
                         </div>
                         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
                             <button class="btn sm" type="button" data-settings-act="users-load">刷新用户列表</button>
@@ -3571,7 +3571,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=8469af28';
+      var HUB_SRC = '/static/hub.js?v=d403b485';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

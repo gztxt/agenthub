@@ -1,3 +1,27 @@
+## 未发版 — 用户授权改为「左侧菜单树显隐」，平铺授权名单删除（2026-11-08）
+
+> 用户裁定：**用户授权 = 把左边菜单栏（包括子菜单）显示 / 隐藏**；现有「授权名单」不清晰，删除。
+> 状态：代码 + 前后端复验完成，**待重启**（`term_sessions=1`，按「有活会话严禁 restart」停手）。
+
+- 前端：`05-chat-and-history.js` 新增 `authMenuTreeHtml()` / `syncAuthTreeGroups()`，
+  从与 `renderNav` 同源的数据（AGENTS / SYS_PAGES / SET_PAGES / NAV_SUB_KINDS / parent）
+  生成菜单树：顶栏 4 项 + AGENTS + 基础设施（按 kind 分子组、按 parent 缩进）+ 系统 + 设置，
+  共 56 个叶子；组头勾选 = 整组同开同关，部分勾选为半选态。
+- 前端：「编辑授权」弹窗改渲染该树；删除旧平铺名单（只给 id、与真实侧栏对不上）。
+  「新建用户」删除「授权模块」手填框（创建后点「编辑授权」勾选）。
+- 前端：`renderNav` 支持 `group:<g>` 授权；组头无权限且组内无可见叶子 ⇒ **整组不渲染**
+  （此前会留一个空手风琴头）。`AUTH_PERMS` 限定时整组过滤为空也整组隐藏。
+- 后端：`users.MODULE_GROUPS` 四组可授权；`_validate_perms` 的实体白名单改为
+  `profiles.all_profiles(include_blocked=True)`（与 `/api/agents` 同源）——
+  原用 `custom_agents` 表会把内置 agent（claude/pi/dsh…）与基础设施整组挡掉
+  （实测：只授 `group:agents`+`claude` 时 `claude` 被静默丢弃）。
+  `/api/users` 不再回 `modules` 平铺清单（前端唯一消费方已改为菜单树）。
+- 已验证：L0 hermetic 3994 全绿；`test_users` 12 passed（新增 `test_05b` 钉组头/基础设施可授权）；
+  无头浏览器实测：4 组 / 56 叶子 / 组头三态 / 375px 不越界；
+  注入 `AUTH_PERMS` 模拟普通用户 —— 限授时只见 AGENTS(claude)+系统(端口)+顶栏(总览)，
+  空授权全隐藏，恢复后全显示。
+- 保留未动：`menu_items` 表与 `seed_menu_items()`（后端白名单兜底，UI 不再展示平铺名单）。
+
 ## 未发版 — 认证收口 C 档：共享口令全废弃（2026-11-07）
 
 > 用户裁定：设置菜单「终端口令」在已有用户名授权后已冗余，执行 C 档收口为单一认证面。

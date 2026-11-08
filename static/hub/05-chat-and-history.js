@@ -586,6 +586,10 @@ function renderNav() {
     system: q ? [] : _sysOk,
     settings: q ? [] : _setOk,   // 2026-11-07 用户授权：叶子级按 user_perms 过滤
   };
+  /* 2026-11-08：分组本身也可授权（group:<g>）。组头无权限且组内无可见叶子
+     ⇒ 整组不渲染（此前会留一个空手风琴头，用户看到的就是「点了没东西」）。 */
+  const _authLimited = (typeof AUTH_PERMS !== 'undefined') && AUTH_PERMS !== null;
+  const _grpOk = g => (typeof _permOk !== 'function') || _permOk('group:' + g) || lists[g].length > 0;
   // 搜索结果计数
   let totalMatch = 0;
   if (q) {
@@ -593,6 +597,7 @@ function renderNav() {
   }
   const html = NAV_ORDER.map(g => {
     const list = lists[g];
+    if (!q && !_grpOk(g)) return '';
     if (q && !list.length) return '';
     const open = q ? true : navOpen === g;
     let body = '';
@@ -635,7 +640,11 @@ function renderNav() {
     } else {
       body = list.map(navRow).join('');
     }
-    if (!body) body = '<div class="nav-empty">' + (AGENTS.length ? '无匹配' : '加载中…') + '</div>';
+    if (!body) {
+      /* 授权过滤后无可见项：整组不渲染（真实菜单还在加载时仍给「加载中…」） */
+      if (_authLimited && !q && AGENTS.length) return '';
+      body = '<div class="nav-empty">' + (AGENTS.length ? '无匹配' : '加载中…') + '</div>';
+    }
     return '<div class="nav-acc' + (open ? ' open' : '') + '">' +
       // v0.13.74：同上，收起态下手风琴头也只有图标，补 title/aria-label。
       '<button class="nav-acc-head" data-group="' + g + '" role="button" aria-expanded="' + (open ? 'true' : 'false') + '"' +
@@ -658,4 +667,72 @@ function renderNav() {
   // 搜索结果计数提示
   const countEl = $('navSearchCount');
   if (countEl) countEl.textContent = q ? ' 共 ' + totalMatch + ' 项' : '';
+}
+
+/* ── 2026-11-08 用户授权：左侧菜单树（含子菜单）─────────────────────────
+   用户裁定「用户授权就是把左边菜单栏（包括子菜单）显示/隐藏」，旧的平铺
+   模块名单因只给 id、与真实侧栏对不上而删除。这里从与 renderNav 同源的
+   数据建树：顶栏 4 项 / AGENTS / 基础设施（按 kind 分子组、按 parent 缩进）
+   / 系统 / 设置。勾选值 = 节点 id，组头 = group:<g>；id 只进 title 不再外露。
+   注意：本函数只产 HTML，组头三态由 syncAuthTreeGroups() 在插入 DOM 后回填。 */
+function authMenuTreeHtml(cur) {
+  const has = id => cur.indexOf(id) >= 0;
+  const leaf = (id, label, gid, depth) => {
+    const on = has(id) || (gid ? has(gid) : false);
+    return '<label style="display:flex;align-items:center;gap:6px;padding:2px 0 2px ' +
+      (14 + (depth || 0) * 14) + 'px;font-size:var(--fs-sm)" title="' + escapeHtml(id) + '">' +
+      '<input type="checkbox" data-umod="' + escapeHtml(id) + '"' +
+      (gid ? ' data-ugrp="' + escapeHtml(gid) + '"' : '') + (on ? ' checked' : '') + '>' +
+      escapeHtml(label) + '</label>';
+  };
+  const head = (gid, label) =>
+    '<label style="display:flex;align-items:center;gap:6px;margin-top:12px;font-weight:600;font-size:var(--fs-sm)">' +
+    '<input type="checkbox" data-ugroup="' + gid + '">' + escapeHtml(label) + '</label>';
+  const sub = label => '<div class="hint" style="padding:6px 0 0 24px">' + escapeHtml(label) + '</div>';
+  const sorter = (x, y) => (typeof navRank === 'function' ? navRank(x) - navRank(y) : 0) ||
+    String(x.name || '').localeCompare(String(y.name || ''), 'zh');
+  const ags = (typeof AGENTS !== 'undefined' && AGENTS) ? AGENTS : [];
+  let h = '<div style="margin-top:12px;font-weight:600;font-size:var(--fs-sm)">顶栏</div>' +
+    ['classroom', 'localprojects', 'github', 'resources']
+      .map(id => leaf(id, (PAGE_LABELS[id] || id), null, 0)).join('');
+
+  const asAgents = ags.filter(a => a.kind === 'agent').sort(sorter);
+  h += head('group:agents', NAV_GROUPS.agents) +
+    (asAgents.length ? asAgents.map(a => leaf(a.id, a.name || a.id, 'group:agents', 1)).join('')
+                     : '<div class="hint" style="padding:3px 0 3px 24px">Agent 列表尚未加载</div>');
+
+  const asInfra = ags.filter(a => a.kind !== 'agent');
+  const byId = new Map(asInfra.map(a => [a.id, a]));
+  const isKid = a => !!(a.parent && byId.has(a.parent));
+  const kidsOf = {};
+  asInfra.forEach(a => { if (isKid(a)) (kidsOf[a.parent] = kidsOf[a.parent] || []).push(a); });
+  const rowFor = a => leaf(a.id, a.name || a.id, 'group:infra', 1) +
+    (kidsOf[a.id] || []).sort(sorter).map(c => leaf(c.id, c.name || c.id, 'group:infra', 2)).join('');
+  let infraBody = '';
+  NAV_SUB_KINDS.forEach(([k, label]) => {
+    const list = asInfra.filter(a => a.kind === k && !isKid(a)).sort(sorter);
+    if (list.length) infraBody += sub(label) + list.map(rowFor).join('');
+  });
+  const rest = asInfra.filter(a => !NAV_SUB_KINDS.some(([k]) => k === a.kind) && !isKid(a)).sort(sorter);
+  if (rest.length) infraBody += sub('其他') + rest.map(rowFor).join('');
+  h += head('group:infra', NAV_GROUPS.infra) +
+    (infraBody || '<div class="hint" style="padding:3px 0 3px 24px">基础设施列表尚未加载</div>');
+
+  h += head('group:system', NAV_GROUPS.system) +
+    SYS_PAGES.map(([id, label]) => leaf(id, label, 'group:system', 1)).join('');
+  h += head('group:settings', NAV_GROUPS.settings) +
+    SET_PAGES.map(([id, label]) => leaf(id, label, 'group:settings', 1)).join('');
+  return '<div style="max-height:52vh;overflow:auto;padding-right:4px">' + h + '</div>';
+}
+
+/* 组头三态：全勾=checked、部分=indeterminate、全空=不勾。插入 DOM 后调用一次。 */
+function syncAuthTreeGroups(m) {
+  if (!m) return;
+  m.querySelectorAll('[data-ugroup]').forEach(g => {
+    const kids = Array.from(m.querySelectorAll(
+      '[data-umod][data-ugrp="' + g.dataset.ugroup + '"]'));
+    const on = kids.filter(n => n.checked).length;
+    g.checked = kids.length > 0 && on === kids.length;
+    g.indeterminate = on > 0 && on < kids.length;
+  });
 }

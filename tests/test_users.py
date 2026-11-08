@@ -76,11 +76,19 @@ class UsersL0(unittest.TestCase):
         row, perms, compat = users.resolve_token("")
         self.assertTrue(compat)
 
-    def test_05_validate_perms_drops_unknown_keeps_agents(self):
-        out = users._validate_perms(["github", "bogus-node", "claude"], agents=["claude", "pi"])
+    def test_05_validate_perms_drops_unknown_keeps_entities(self):
+        out = users._validate_perms(["github", "bogus-node", "claude"], entity_ids=["claude", "pi"])
         self.assertIn("github", out)
         self.assertIn("claude", out)
         self.assertNotIn("bogus-node", out)
+
+    def test_05b_group_and_infra_nodes_are_grantable(self):
+        """2026-11-08：授权改菜单树后，组头（group:<g>）与基础设施实体
+        （kind != agent，如 proxy-panel）都必须可授权 —— 此前只收 kind='agent'
+        ⇒ 普通用户的基础设施组恒为空，勾了也存不进去。"""
+        want = users.MODULE_GROUPS + ["proxy-panel"]
+        out = users._validate_perms(want, ["proxy-panel"])
+        self.assertEqual(sorted(out), sorted(want))
 
     def test_06_delete_refused_while_live_token_exists(self):
         rid = _mkuser("bob", perms=["kb"])

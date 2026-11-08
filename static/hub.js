@@ -1894,6 +1894,8 @@ function openUserModal(cfg) {
       if (e.key === 'Escape') { e.stopPropagation(); closeUserModal(); }
       else if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); _usersModalSubmit(); }
     });
+    /* 菜单授权树的组头/叶子联动：整个弹窗只此一个 change 监听点。 */
+    m.querySelector('#usersModalBd').addEventListener('change', _usersTreeCascade);
   }
   const bd = m.querySelector('#usersModalBd');
   const fields = cfg.fields || [];
@@ -2083,39 +2085,56 @@ async function usersRevoke(name) {
   });
 }
 async function usersPerms(name) {
-  let detail, ld;
+  let detail;
   try {
     detail = await api('/api/users/' + encodeURIComponent(name));
-    ld = await api('/api/users');
   } catch (e) { toast('读取授权失败：' + e.message, 'err'); return; }
   const cur = detail.perms || [];
-  /* 模块清单仍从 /api/users 响应（DB 驱动）取；表空时后端回落硬编码，零行为变化。 */
-  const mods = [].concat(
-    (ld.modules && ld.modules.top) || [],
-    (ld.modules && ld.modules.system) || [],
-    (ld.modules && ld.modules.settings) || [],
-    (ld.modules && ld.modules.agents) || []);
-  const boxes = mods.map(x => {
-    const id = String(typeof x === 'string' ? x : (x.id || x.key || ''));
-    const label = typeof x === 'string' ? x : (x.label || x.title || id);
-    return '<label style="display:flex;align-items:center;gap:6px;font-size:var(--fs-sm);padding:3px 0">' +
-      '<input type="checkbox" data-umod="' + escapeHtml(id) + '"' +
-      (cur.indexOf(id) >= 0 ? ' checked' : '') + '> ' + escapeHtml(label) +
-      ' <span class="hint">' + escapeHtml(id) + '</span></label>';
-  }).join('');
+  /* 2026-11-08 用户裁定：授权 = 左侧菜单栏（含子菜单）的显示/隐藏。
+     旧「平铺模块名单」已删除 —— 名字与 id 对不上真实侧栏，用户看不懂。
+     现在直接渲染菜单树，数据源与 renderNav 同源（AGENTS/SYS_PAGES/SET_PAGES/NAV_*）。 */
+  const tree = (typeof authMenuTreeHtml === 'function')
+    ? authMenuTreeHtml(cur)
+    : '<div class="hint">菜单树不可用：前端菜单分片未加载。</div>';
   openUserModal({
     title: '编辑授权：' + name,
-    text: '<div class="hint" style="margin-bottom:8px">勾选该用户可见的模块；管理员默认可见全部，无需逐项勾选。</div>' +
-          (boxes || '<div class="hint">暂无可选模块。</div>'),
+    text: '<div class="hint" style="margin-bottom:4px">勾选 = 该用户左侧菜单<b>显示</b>此项；取消 = <b>不显示</b>。' +
+          '勾组头 = 整组同开同关；组内只勾部分项时组头显示为半选。管理员默认可见全部，无需逐项勾选。</div>' +
+          tree,
     confirmText: '保存修改',
     onSubmit: async (v, m) => {
-      const picked = Array.from(m.querySelectorAll('[data-umod]:checked')).map(n => n.dataset.umod);
+      /* 叶子 + 整组（组头勾满时才存 group:xxx，避免「有授权但整组空白」） */
+      const picked = [];
+      m.querySelectorAll('[data-umod]:checked').forEach(n => picked.push(n.dataset.umod));
+      m.querySelectorAll('[data-ugroup]:checked').forEach(n => picked.push(n.dataset.ugroup));
       await api('/api/users/' + encodeURIComponent(name) + '/perms',
         { method: 'PUT', body: JSON.stringify({ modules: picked }) });
-      toast('已保存 ' + name + ' 的授权', 'ok');
+      toast('已保存 ' + name + ' 的菜单授权', 'ok');
       usersPanelLoad();
     }
   });
+  if (typeof syncAuthTreeGroups === 'function') syncAuthTreeGroups($(USERS_MODAL_ID));
+}
+/* 组头三态联动：组头 ⇒ 整组同开同关；叶子 ⇒ 回写组头 checked/indeterminate。
+   绑在弹窗正文的 change 上（唯一监听点，禁 inline onclick，§4.2）。 */
+function _usersTreeCascade(e) {
+  const bd = e.currentTarget, t = e.target;
+  if (!bd || !t || t.type !== 'checkbox') return;
+  if (t.dataset.ugroup) {
+    const sel = '[data-umod][data-ugrp="' + t.dataset.ugroup + '"]';
+    bd.querySelectorAll(sel).forEach(n => { n.checked = t.checked; });
+    t.indeterminate = false;
+    return;
+  }
+  if (t.dataset.umod && t.dataset.ugrp) {
+    const g = bd.querySelector('[data-ugroup="' + t.dataset.ugrp + '"]');
+    if (!g) return;
+    const kids = Array.from(bd.querySelectorAll(
+      '[data-umod][data-ugrp="' + t.dataset.ugrp + '"]'));
+    const on = kids.filter(n => n.checked).length;
+    g.checked = kids.length > 0 && on === kids.length;
+    g.indeterminate = on > 0 && on < kids.length;
+  }
 }
 async function usersDel(name) {
   openUserModal({
@@ -2133,14 +2152,13 @@ async function usersDel(name) {
 async function usersPanelNew() {
   openUserModal({
     title: '新建用户',
+    text: '<div class="hint" style="margin-bottom:8px">创建后在列表里点「编辑授权」，按左侧菜单树勾选可见项。</div>',
     fields: [
       { id: 'name', label: '用户名', required: true, placeholder: '小写字母 / 数字 / - / _',
         help: '创建后不可修改。' },
       { id: 'display', label: '显示名', placeholder: '可留空，默认同用户名' },
       { id: 'admin', label: '管理员', type: 'checkbox',
-        help: '管理员可见全部模块，无需逐项授权。' },
-      { id: 'mods', label: '授权模块', placeholder: '空格分隔；管理员留空 = 全部',
-        help: '留空表示全部模块。' }
+        help: '管理员可见全部菜单，无需逐项授权。' }
     ],
     confirmText: '创建',
     onSubmit: async (v, m) => {
@@ -2148,7 +2166,7 @@ async function usersPanelNew() {
       await api('/api/users', {
         method: 'POST',
         body: JSON.stringify({ username: v.name, display: v.display || v.name,
-          is_admin: !!(ad && ad.checked), perms: v.mods.split(/\s+/).filter(Boolean) })
+          is_admin: !!(ad && ad.checked), perms: [] })
       });
       toast('已创建 ' + v.name, 'ok');
       usersPanelLoad();
@@ -9259,6 +9277,10 @@ function renderNav() {
     system: q ? [] : _sysOk,
     settings: q ? [] : _setOk,   // 2026-11-07 用户授权：叶子级按 user_perms 过滤
   };
+  /* 2026-11-08：分组本身也可授权（group:<g>）。组头无权限且组内无可见叶子
+     ⇒ 整组不渲染（此前会留一个空手风琴头，用户看到的就是「点了没东西」）。 */
+  const _authLimited = (typeof AUTH_PERMS !== 'undefined') && AUTH_PERMS !== null;
+  const _grpOk = g => (typeof _permOk !== 'function') || _permOk('group:' + g) || lists[g].length > 0;
   // 搜索结果计数
   let totalMatch = 0;
   if (q) {
@@ -9266,6 +9288,7 @@ function renderNav() {
   }
   const html = NAV_ORDER.map(g => {
     const list = lists[g];
+    if (!q && !_grpOk(g)) return '';
     if (q && !list.length) return '';
     const open = q ? true : navOpen === g;
     let body = '';
@@ -9308,7 +9331,11 @@ function renderNav() {
     } else {
       body = list.map(navRow).join('');
     }
-    if (!body) body = '<div class="nav-empty">' + (AGENTS.length ? '无匹配' : '加载中…') + '</div>';
+    if (!body) {
+      /* 授权过滤后无可见项：整组不渲染（真实菜单还在加载时仍给「加载中…」） */
+      if (_authLimited && !q && AGENTS.length) return '';
+      body = '<div class="nav-empty">' + (AGENTS.length ? '无匹配' : '加载中…') + '</div>';
+    }
     return '<div class="nav-acc' + (open ? ' open' : '') + '">' +
       // v0.13.74：同上，收起态下手风琴头也只有图标，补 title/aria-label。
       '<button class="nav-acc-head" data-group="' + g + '" role="button" aria-expanded="' + (open ? 'true' : 'false') + '"' +
@@ -9331,6 +9358,74 @@ function renderNav() {
   // 搜索结果计数提示
   const countEl = $('navSearchCount');
   if (countEl) countEl.textContent = q ? ' 共 ' + totalMatch + ' 项' : '';
+}
+
+/* ── 2026-11-08 用户授权：左侧菜单树（含子菜单）─────────────────────────
+   用户裁定「用户授权就是把左边菜单栏（包括子菜单）显示/隐藏」，旧的平铺
+   模块名单因只给 id、与真实侧栏对不上而删除。这里从与 renderNav 同源的
+   数据建树：顶栏 4 项 / AGENTS / 基础设施（按 kind 分子组、按 parent 缩进）
+   / 系统 / 设置。勾选值 = 节点 id，组头 = group:<g>；id 只进 title 不再外露。
+   注意：本函数只产 HTML，组头三态由 syncAuthTreeGroups() 在插入 DOM 后回填。 */
+function authMenuTreeHtml(cur) {
+  const has = id => cur.indexOf(id) >= 0;
+  const leaf = (id, label, gid, depth) => {
+    const on = has(id) || (gid ? has(gid) : false);
+    return '<label style="display:flex;align-items:center;gap:6px;padding:2px 0 2px ' +
+      (14 + (depth || 0) * 14) + 'px;font-size:var(--fs-sm)" title="' + escapeHtml(id) + '">' +
+      '<input type="checkbox" data-umod="' + escapeHtml(id) + '"' +
+      (gid ? ' data-ugrp="' + escapeHtml(gid) + '"' : '') + (on ? ' checked' : '') + '>' +
+      escapeHtml(label) + '</label>';
+  };
+  const head = (gid, label) =>
+    '<label style="display:flex;align-items:center;gap:6px;margin-top:12px;font-weight:600;font-size:var(--fs-sm)">' +
+    '<input type="checkbox" data-ugroup="' + gid + '">' + escapeHtml(label) + '</label>';
+  const sub = label => '<div class="hint" style="padding:6px 0 0 24px">' + escapeHtml(label) + '</div>';
+  const sorter = (x, y) => (typeof navRank === 'function' ? navRank(x) - navRank(y) : 0) ||
+    String(x.name || '').localeCompare(String(y.name || ''), 'zh');
+  const ags = (typeof AGENTS !== 'undefined' && AGENTS) ? AGENTS : [];
+  let h = '<div style="margin-top:12px;font-weight:600;font-size:var(--fs-sm)">顶栏</div>' +
+    ['classroom', 'localprojects', 'github', 'resources']
+      .map(id => leaf(id, (PAGE_LABELS[id] || id), null, 0)).join('');
+
+  const asAgents = ags.filter(a => a.kind === 'agent').sort(sorter);
+  h += head('group:agents', NAV_GROUPS.agents) +
+    (asAgents.length ? asAgents.map(a => leaf(a.id, a.name || a.id, 'group:agents', 1)).join('')
+                     : '<div class="hint" style="padding:3px 0 3px 24px">Agent 列表尚未加载</div>');
+
+  const asInfra = ags.filter(a => a.kind !== 'agent');
+  const byId = new Map(asInfra.map(a => [a.id, a]));
+  const isKid = a => !!(a.parent && byId.has(a.parent));
+  const kidsOf = {};
+  asInfra.forEach(a => { if (isKid(a)) (kidsOf[a.parent] = kidsOf[a.parent] || []).push(a); });
+  const rowFor = a => leaf(a.id, a.name || a.id, 'group:infra', 1) +
+    (kidsOf[a.id] || []).sort(sorter).map(c => leaf(c.id, c.name || c.id, 'group:infra', 2)).join('');
+  let infraBody = '';
+  NAV_SUB_KINDS.forEach(([k, label]) => {
+    const list = asInfra.filter(a => a.kind === k && !isKid(a)).sort(sorter);
+    if (list.length) infraBody += sub(label) + list.map(rowFor).join('');
+  });
+  const rest = asInfra.filter(a => !NAV_SUB_KINDS.some(([k]) => k === a.kind) && !isKid(a)).sort(sorter);
+  if (rest.length) infraBody += sub('其他') + rest.map(rowFor).join('');
+  h += head('group:infra', NAV_GROUPS.infra) +
+    (infraBody || '<div class="hint" style="padding:3px 0 3px 24px">基础设施列表尚未加载</div>');
+
+  h += head('group:system', NAV_GROUPS.system) +
+    SYS_PAGES.map(([id, label]) => leaf(id, label, 'group:system', 1)).join('');
+  h += head('group:settings', NAV_GROUPS.settings) +
+    SET_PAGES.map(([id, label]) => leaf(id, label, 'group:settings', 1)).join('');
+  return '<div style="max-height:52vh;overflow:auto;padding-right:4px">' + h + '</div>';
+}
+
+/* 组头三态：全勾=checked、部分=indeterminate、全空=不勾。插入 DOM 后调用一次。 */
+function syncAuthTreeGroups(m) {
+  if (!m) return;
+  m.querySelectorAll('[data-ugroup]').forEach(g => {
+    const kids = Array.from(m.querySelectorAll(
+      '[data-umod][data-ugrp="' + g.dataset.ugroup + '"]'));
+    const on = kids.filter(n => n.checked).length;
+    g.checked = kids.length > 0 && on === kids.length;
+    g.indeterminate = on > 0 && on < kids.length;
+  });
 }
 function toggleGroup(g) {
   navOpen = (navOpen === g) ? '' : g;   // 单开：展开一个自动收起其他

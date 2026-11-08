@@ -43,15 +43,18 @@ clone_base()/owner()` 每次现读 ⇒ 改设置即时生效，不用重启。
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -110,7 +113,9 @@ _SSH_RE = re.compile(
     re.I)
 
 #: 列表内存缓存（值 + 拉取时刻；模块级单例。token 值绝不入缓存）
-_cache: Dict[str, Any] = {"at": 0.0, "repos": None}
+#: v0.13.197 多源：`by[sid]` = 该源的原始仓库/star 响应（本地匹配每次现算，
+#: 「本地已有」不会因为缓存而定格）；`repos` 保持扁平并集（旧前端/状态页兼容）。
+_cache: Dict[str, Any] = {"at": 0.0, "repos": None, "by": {}}
 
 
 # ── v0.13.42：地址/key/落点不再硬编码，改读「设置 → GitHub」────────────────
@@ -178,12 +183,13 @@ def _read_token() -> str:
         return ""
 
 
-def _remote_slug(url: str) -> Optional[str]:
+def _remote_slug(url: str, host: Optional[str] = None) -> Optional[str]:
     """解析 git remote URL → "owner/name"（小写 host 由正则 re.I 保证）。
-    只认**当前配置的 git 主机**（v0.13.42 起可配，默认 github.com）：
+    只认**指定/当前配置的 git 主机**（v0.13.42 起可配，默认 github.com；
+    v0.13.197 起多源 ⇒ 按源自己的 host 解析）：
     https://evil.com/github.com/x 一类 URL 在任何配置下都解析失败。"""
     u = (url or "").strip()
-    m = _host_regex(git_host()).match(u)
+    m = _host_regex(host or git_host()).match(u)
     if not m:
         return None
     return m.group(1).lower()
@@ -222,8 +228,8 @@ def _repo_config(p: str) -> Optional[Path]:
     return None
 
 
-def _remote_slugs() -> Dict[str, List[str]]:
-    """本机各 git 仓的 remote slug → 本地路径列表。
+def _remote_slugs(host: Optional[str] = None) -> Dict[str, List[str]]:
+    """本机各 git 仓的 remote slug → 本地路径列表（按 host 分账，多源不串）。
     复用 localprojects._scan_roots 的仓库集（含 v0.13.31 精度收紧后的结果），
     逐仓读 .git/config 找全部 url = 行——strict remote 匹配的证据源。
     根自身是仓库的（技术文档=gztxt/technical-docs）也计入——它不在本机项目
@@ -248,10 +254,18 @@ def _remote_slugs() -> Dict[str, List[str]]:
         except OSError:
             continue
         for m in re.finditer(r"^\s*url\s*=\s*(\S+)", txt, re.M):
-            slug = _remote_slug(m.group(1))
+            slug = _remote_slug(m.group(1), host)
             if slug:
                 out.setdefault(slug, []).append(path)
     return out
+
+
+def _slugs(host: str) -> Dict[str, List[str]]:
+    """按 host 取本地匹配表；与全局 host 相同时走零参 `_remote_slugs()`，
+    保留 v0.13.31 起的 L0 patch 接缝（单测里唯一替换本地扫描的点）。"""
+    if not host or host == git_host():
+        return _remote_slugs()
+    return _remote_slugs(host)
 
 
 def _fetch_page(url: str, tok: str) -> List[Dict[str, Any]]:
@@ -266,122 +280,319 @@ def _fetch_page(url: str, tok: str) -> List[Dict[str, Any]]:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _fetch_all(tok: str) -> Dict[str, Any]:
-    """拉全部仓库（分页到空页）。失败返回 {ok:False, error}——降级不抛。
+#: 同一次拉取内的请求去重（多源常共享同一 endpoint：两个源都是「我自己」时
+#: /user/repos 与 /user/starred 完全同 URL ⇒ 不去重就是白打一倍页数）。
+#: 每次 list_repos(force=...) 开始前清空，**不跨请求存活**，force 语义不受影响。
+_REQ_MEMO: Dict[str, List[Dict[str, Any]]] = {}
+#: 单飞锁：两个源并发打同一 URL 会各发一遍（实测触发 GitHub 连接中断
+#: `IncompleteRead`，star 列表一源 199 一源 99）。按 URL 串行，第二个直接吃结果。
+_REQ_LOCKS: Dict[str, Any] = {}
+
+
+def _memo_key(url: str, tok: str) -> str:
+    return url + "|" + hashlib.sha256(tok.encode()).hexdigest()[:12]
+
+
+def _lock_for(mk: str):
+    lk = _REQ_LOCKS.get(mk)
+    if lk is None:
+        lk = _REQ_LOCKS.setdefault(mk, threading.Lock())
+    return lk
+
+
+def _gh_pages(url: str, tok: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """分页拉全量（每页 100，最多 10 页）；返回 (items, error)。
 
     退避口径（PT-20260927-12 A 档）：**这里是真该退避的地方** ——
-    用户在等这一页，且GitHub API 限额 5000/h、次级限流是本机 recurring failure
-    （实测 `vitals.RATE_RE` 就在为429 兜底）。给 3 次尝试、总退避上限 4 秒：
+    用户在等这一页，且 GitHub API 限额 5000/h、次级限流是本机 recurring failure
+    （实测 `vitals.RATE_RE` 就在为 429 兜底）。给 3 次尝试、总退避上限 4 秒：
     `Retry-After` 若说等 60 秒，超过预算就**如实放弃**并把 429 报给用户，
     而不是让页面转圈 60 秒。
     """
-    base = api_base()
-    own = owner()
-    repos: List[Dict[str, Any]] = []
-    page = 1
-    while page <= 10:
-        # 归属（owner）可配：留空 = 当前账号可见的全部；填了 = 只看该归属的公开/可见仓
-        url = ((f"{base}/users/{own}/repos?per_page=100&sort=pushed&page={page}")
-               if own else
-               (f"{base}/user/repos?per_page=100&sort=pushed"
-                f"&affiliation=owner,collaborator,organization_member&page={page}"))
+    mk = _memo_key(url, tok)
+    if mk in _REQ_MEMO:
+        return list(_REQ_MEMO[mk]), None
+    with _lock_for(mk):
+        if mk in _REQ_MEMO:                     # 等锁期间别人已经拉完
+            return list(_REQ_MEMO[mk]), None
+        return _gh_pages_locked(url, tok, mk)
+
+
+def _gh_pages_locked(url: str, tok: str,
+                     mk: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    items: List[Dict[str, Any]] = []
+    for page in range(1, 11):
+        u = f"{url}{'&' if '?' in url else '?'}per_page=100&page={page}"
         try:
             batch = resilience.instance.call(
-                resilience.breaker_key(url, "gh_repos"),
-                lambda u=url: _fetch_page(u, tok),
+                resilience.breaker_key(u, "gh_repos"),
+                lambda uu=u: _fetch_page(uu, tok),
                 attempts=GH_ATTEMPTS, sleep_budget_s=GH_SLEEP_BUDGET_S,
             )
         except resilience.BreakerOpen:
-            return {"ok": False,
-                    "error": f"GitHub API 熔断中（{resilience.RECOVERY_TIMEOUT_S:.0f}s 冷却）"
-                             "——上一轮连续失败，先看网络/凭据再刷新"}
+            return [], (f"GitHub API 熔断中（{resilience.RECOVERY_TIMEOUT_S:.0f}s 冷却）"
+                           "——上一轮连续失败，先看网络/凭据再刷新")
         except urllib.error.HTTPError as e:
             body = ""
             try:
                 body = e.read().decode("utf-8", "replace")
             except Exception:  # noqa: BLE001
                 pass
-            return {"ok": False,
-                    "error": f"GitHub API HTTP {e.code}: "
-                             + tdai_client.scrub(body, tok)[:200]}
+            return [], f"HTTP {e.code}: " + tdai_client.scrub(body, tok)[:200]
         except Exception as e:  # noqa: BLE001 —— URLError/超时/解析失败
-            return {"ok": False, "error": f"GitHub API 不可达: {type(e).__name__}"}
-        if not batch:
+            return [], f"GitHub API 不可达: {type(e).__name__}"
+        if not isinstance(batch, list):
             break
-        repos.extend(batch)
+        items.extend(batch)
         if len(batch) < 100:
             break
-        page += 1
-    return {"ok": True, "repos": repos}
+    _REQ_MEMO[mk] = list(items)
+    return items, None
 
 
-def _list_repos(force: bool = False) -> Dict[str, Any]:
-    """信封：{ok, count, repos, cached, age_s, errors, token, local_total, took_ms}。
-    无 token ⇒ ok:True + 空表 + errors 点名（「查不了」≠「没有」）。
-    repo 字段刻意不含 clone_url/html_url/ssh_url——克隆 URL 服务端从 slug 现场重构。"""
-    t0 = time.monotonic()
-    errors: List[str] = []
-    tok = _read_token()
-    repos: List[Dict[str, Any]] = []
-    cached = False
-    if _cache.get("repos") is not None and not force:
-        repos = _cache["repos"]
-        cached = True
-    elif not tok:
-        errors.append("GitHub token 不可用（env GITHUB_TOKEN 或 "
-                      f"{TOKEN_FILE} 读不到）——远端列表降级")
-    else:
+#: token 身份缓存（key = 基址 + token 指纹；不存 token 本身）
+_LOGIN_CACHE: Dict[str, str] = {}
+
+
+def _token_login(base: str, tok: str) -> str:
+    """token 所属 login（小写）；取不到返回 ''。用于判断「这个 owner 是不是我自己」：
+    只有自己才走 /user/repos、/user/starred —— /users/<name> 只回**公开**仓，
+    拿它当「我自己的全部仓库」会静默漏掉私有仓（实测 40 vs 9）。"""
+    key = base + "|" + hashlib.sha256(tok.encode()).hexdigest()[:12]
+    if key in _LOGIN_CACHE:
+        return _LOGIN_CACHE[key]
+    try:
+        code, me, _h = ghsettings._gh_get(base + "/user", tok)
+        login = str(me.get("login") or "").lower() if code == 200 and isinstance(me, dict) else ""
+    except Exception:  # noqa: BLE001 —— 身份探针失败只影响「私有仓看不看得到」
+        login = ""
+    if login:
+        _LOGIN_CACHE[key] = login
+    return login
+
+
+def _own_url(base: str, own: str) -> str:
+    if own:
+        return f"{base}/users/{own}/repos?sort=pushed"
+    return (f"{base}/user/repos?sort=pushed"
+            "&affiliation=owner,collaborator,organization_member")
+
+
+def _fetch_own(base: str, own: str, tok: str,
+               direct: bool = False) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """一个源的「自建 + fork」仓库（同一响应里带 fork 标记）。
+    owner 留空 = 当前 key 可见的全部（原 v0.13.31 行为）。
+
+    `direct=False` 且正好是全局设置那一组时走 `_fetch_all` —— 那是 v0.13.31
+    起的既有 L0/探针接缝（单仓拉取 mock 的唯一点），保留以免测试与外部脚本失效。
+    """
+    if not direct and base.rstrip("/") == api_base().rstrip("/") and own == owner():
         d = _fetch_all(tok)
-        if not d.get("ok"):
-            errors.append(str(d.get("error") or "GitHub API 失败"))
-        else:
-            repos = d.get("repos") or []
-            _cache["repos"] = repos
-            _cache["at"] = time.time()
-    # 本地匹配：strict remote slug 对账（同仓异名命中；同名异仓不误配）
-    slugs: Dict[str, List[str]] = _remote_slugs()
-    local_total = 0
+        return ((d.get("repos") or [], None) if d.get("ok")
+                else ([], str(d.get("error") or "拉取失败")))
+    if own and _token_login(base, tok) == own.lower():
+        # 自己的账号：/users/<name> 只列公开仓 ⇒ 换 /user/repos（含私有）
+        return _gh_pages(f"{base}/user/repos?sort=pushed&affiliation=owner", tok)
+    items, err = _gh_pages(_own_url(base, own), tok)
+    if err and own and err.startswith("HTTP 404"):   # 组织账号：/users 404 才回落 /orgs
+        items, err = _gh_pages(f"{base}/orgs/{own}/repos?type=all&sort=pushed", tok)
+    return items, err
+
+
+def _fetch_all(tok: str) -> Dict[str, Any]:
+    """全局设置这一组的仓库（兼容接缝，v0.13.31~）；多源内部走 direct 路径。"""
+    items, err = _fetch_own(api_base(), owner(), tok, direct=True)
+    if err:
+        return {"ok": False, "error": err}
+    return {"ok": True, "repos": items}
+
+
+def _fetch_starred(base: str, own: str,
+                   tok: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """star 口径（用户 2026-11-09 裁定 A）：该 owner 的**公开** star。
+    owner 留空 = 当前 key 自己的 star（含私有）。"""
+    if own and _token_login(base, tok) != own.lower():
+        return _gh_pages(f"{base}/users/{own}/starred?sort=updated&direction=desc", tok)
+    # 自己（或归属留空）⇒ /user/starred，私有仓的 star 也在内
+    return _gh_pages(f"{base}/user/starred?sort=updated&direction=desc", tok)
+
+
+def _repo_item(r: Dict[str, Any], row: Dict[str, Any], starred: bool, bucket: str,
+               slug_map: Dict[str, List[str]]) -> Dict[str, Any]:
+    """远端 API 原始条目 → 前端条目。刻意不含 clone_url/html_url/ssh_url——
+    克隆 URL 由服务端从 slug 现场重构（客户端永不接触）。"""
+    fn = (r.get("full_name") or "").lower()
+    paths = slug_map.get(fn) or []
+    return {
+        "full_name": r.get("full_name"),
+        "name": r.get("name"),
+        "owner": (r.get("owner") or {}).get("login"),
+        "fork": bool(r.get("fork")),
+        "private": bool(r.get("private")),
+        "archived": bool(r.get("archived")),
+        "default_branch": r.get("default_branch"),
+        "language": r.get("language"),
+        "description": (r.get("description") or "")[:120] or None,
+        "pushed_at": (r.get("pushed_at") or "")[:10] or None,
+        "local": {"found": bool(paths), "path": (paths[0] if paths else None)},
+        "local_paths": paths,
+        # v0.13.197：源与分桶（own / fork / star）
+        "source_id": row.get("id"),
+        "source_label": row.get("label"),
+        "git_host": row.get("git_host"),
+        "bucket": bucket,
+        "starred": starred,
+    }
+
+
+def _list_one(row: Dict[str, Any], tok: str, force: bool = False) -> Dict[str, Any]:
+    """一个源 → 一个分组（自建 / fork / star 三段，star 与自建去重）。"""
+    t0 = time.monotonic()
+    sid = str(row.get("id") or "default")
+    base = str(row.get("api_base") or api_base()).rstrip("/")
+    host = str(row.get("git_host") or ghsettings.derive_git_host(base) or git_host())
+    own = str(row.get("owner") or "")
+    label = str(row.get("label") or own or host)
+    meta = {"id": sid, "label": label, "api_base": base, "git_host": host,
+            "owner": own, "errors": [], "cached": False, "age_s": 0}
+    if not tok:
+        meta.update({"ok": False, "repos": [], "counts": _zero_counts(),
+                     "errors": ["GitHub token 不可用（设置 → GitHub 的 Key / env "
+                                "GITHUB_TOKEN / github.txt 读不到）"]})
+        return meta
+    memo = (_cache.get("by") or {}).get(sid)
+    if memo and not force:
+        raw_own, raw_star = memo["own"], memo["star"]
+        meta["errors"] = list(memo.get("errors") or [])
+        meta["cached"] = True
+        meta["age_s"] = round(time.time() - float(memo.get("at") or 0))
+    else:
+        # 一个源的两路互不依赖 ⇒ 并行；串行时实测两源首次拉取 25s
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_own = ex.submit(_fetch_own, base, own, tok)
+            f_star = ex.submit(_fetch_starred, base, own, tok)
+            raw_own, e1 = f_own.result()
+            raw_star, e2 = f_star.result()
+        if e1:
+            meta["errors"].append(f"仓库：{e1}")
+        if e2:
+            meta["errors"].append(f"star：{e2}")
+        if not e1 and not e2:
+            _cache.setdefault("by", {})[sid] = {
+                "at": time.time(), "own": raw_own, "star": raw_star,
+                "errors": meta["errors"]}
+    slug_map = _slugs(host)
+    star_keys = {(r.get("full_name") or "").lower() for r in raw_star}
     items: List[Dict[str, Any]] = []
-    for r in repos:
+    seen = set()
+    for r in raw_own:
         fn = (r.get("full_name") or "").lower()
-        paths = slugs.get(fn) or []
-        if paths:
-            local_total += 1
-        items.append({
-            "full_name": r.get("full_name"),
-            "name": r.get("name"),
-            "owner": (r.get("owner") or {}).get("login"),
-            "fork": bool(r.get("fork")),
-            "private": bool(r.get("private")),
-            "archived": bool(r.get("archived")),
-            "default_branch": r.get("default_branch"),
-            "language": r.get("language"),
-            "description": (r.get("description") or "")[:120] or None,
-            "pushed_at": (r.get("pushed_at") or "")[:10] or None,
-            "local": {"found": bool(paths),
-                      "path": (paths[0] if paths else None)},
-            "local_paths": paths,
-        })
-    items.sort(key=lambda x: (x.get("pushed_at") or "", str(x.get("name") or "")),
-               reverse=True)
+        if not fn or fn in seen:
+            continue
+        seen.add(fn)
+        items.append(_repo_item(r, row, fn in star_keys,
+                                "fork" if r.get("fork") else "own", slug_map))
+    star_items: List[Dict[str, Any]] = []
+    for r in raw_star:
+        fn = (r.get("full_name") or "").lower()
+        if not fn or fn in seen:          # 自己的仓 / 自己的 fork 不在 star 段重复出现
+            continue
+        seen.add(fn)
+        star_items.append(_repo_item(r, row, True, "star", slug_map))
+    key = lambda x: (x.get("pushed_at") or "", str(x.get("name") or ""))
+    items.sort(key=key, reverse=True)
+    star_items.sort(key=key, reverse=True)
+    counts = {"own": sum(1 for x in items if x["bucket"] == "own"),
+              "fork": sum(1 for x in items if x["bucket"] == "fork"),
+              "star": len(star_items), "starred_total": len(raw_star),
+              "total": len(items) + len(star_items)}
+    meta.update({"ok": not meta["errors"], "repos": items + star_items,
+                 "counts": counts, "took_ms": round((time.monotonic() - t0) * 1000, 1)})
+    return meta
+
+
+def _zero_counts() -> Dict[str, int]:
+    return {"own": 0, "fork": 0, "star": 0, "starred_total": 0, "total": 0}
+
+
+def _source_rows() -> List[Dict[str, Any]]:
+    """拉取用源列表；存储层不可用时退回「全局设置合成一条」，绝不返回空。"""
+    try:
+        rows = ghsettings.sources_enabled()
+    except Exception:  # noqa: BLE001
+        rows = []
+    if rows:
+        return rows
+    return [{"id": "default", "label": owner() or "默认（当前 key）",
+             "api_base": api_base(), "git_host": git_host(), "owner": owner()}]
+
+
+def _assemble(groups: List[Dict[str, Any]], tok: bool, t0: float) -> Dict[str, Any]:
+    flat: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    local_total = 0
+    counts = _zero_counts()
+    cached_any = False
+    for g in groups:
+        if g.get("cached"):
+            cached_any = True
+        for k in counts:
+            counts[k] += int((g.get("counts") or {}).get(k) or 0)
+        for it in g.get("repos") or []:
+            it["idx"] = len(flat)
+            flat.append(it)
+            if (it.get("local") or {}).get("found"):
+                local_total += 1
+        errors.extend(g.get("errors") or [])
+    _cache["repos"] = flat
+    _cache["at"] = time.time()
     return {
         "ok": True,
-        "count": len(items),
-        "repos": items,
-        "cached": cached,
-        "age_s": (round(time.time() - _cache["at"]) if cached else 0),
+        "count": len(flat),
+        "repos": flat,
+        "groups": groups,
+        "counts": counts,
+        "cached": cached_any,
+        "age_s": (round(time.time() - float(_cache["at"])) if cached_any else 0),
         "errors": errors,
-        "token": bool(tok),
+        "token": tok,
         "local_total": local_total,
         "took_ms": round((time.monotonic() - t0) * 1000, 1),
     }
 
 
+def _list_repos(force: bool = False) -> Dict[str, Any]:
+    """信封：{ok, count, repos(扁平), groups(按源), counts, cached, errors, token,
+    local_total, took_ms}。无 token ⇒ ok:True + 空表 + errors 点名（「查不了」≠「没有」）。"""
+    t0 = time.monotonic()
+    tok = _read_token()
+    if force:
+        _REQ_MEMO.clear()
+        _REQ_LOCKS.clear()
+    groups = [_list_one(r, tok, force) for r in _source_rows()]
+    return _assemble(groups, bool(tok), t0)
+
+
+async def list_repos_async(force: bool = False) -> Dict[str, Any]:
+    """异步入口：多源并行（每个源一次 to_thread），不阻塞事件循环。"""
+    t0 = time.monotonic()
+    tok = _read_token()
+    if force:
+        _REQ_MEMO.clear()
+        _REQ_LOCKS.clear()
+    rows = _source_rows()
+    groups = await asyncio.gather(
+        *[asyncio.to_thread(_list_one, r, tok, force) for r in rows])
+    return _assemble(list(groups), bool(tok), t0)
+
+
+
 @router.get("/api/github/repos")
 async def github_repos(force: int = 0):
     """GitHub 远端仓库清单（含本地匹配；只读不鉴权不埋点）。
-    v0.13.33：内存缓存永久有效（拉一次）；force=1 = 页面「刷新」按钮强拉。"""
-    return _list_repos(force=bool(force))
+    v0.13.33：内存缓存永久有效（拉一次）；force=1 = 页面「刷新」按钮强拉。
+    v0.13.197：按源分组（groups），repos 仍是扁平并集（旧调用方/状态页兼容）。"""
+    return await list_repos_async(force=bool(force))
 
 
 def _gh_head(url: str, tok: str) -> Optional[str]:
@@ -417,19 +628,31 @@ def _local_head(path: str) -> Optional[str]:
     return head or None
 
 
+def _resolve_source(sid: str = "") -> Optional[Dict[str, Any]]:
+    """按 id 取源；未指定取第一条启用源（旧调用方零改动）。"""
+    rows = _source_rows()
+    if sid:
+        return next((r for r in rows if str(r.get("id")) == sid), None)
+    return rows[0] if rows else None
+
+
 @router.get("/api/github/sync")
-async def github_sync(repo: str, request: Request):
+async def github_sync(repo: str, request: Request, source: str = ""):
     """单仓核对（v0.13.33「选中进入编辑前才同步」的后端半程）：
     比对本地 HEAD 与远端 HEAD——SHA 一致 = 已同步；远端新 = behind；
     本地无 = 需克隆。只读，不鉴权（与清单同口径），单仓 1 次 git ls-remote，
-    绝不整表重拉。"""
+    绝不整表重拉。v0.13.197：source=源 id（决定 git 主机）。"""
     slug = (repo or "").strip()
     if not REPO_RE.fullmatch(slug):
         raise HTTPException(400, f"repo 形状非法: {slug!r}")
-    slugs = _remote_slugs()
+    row = _resolve_source(source)
+    if not row:
+        raise HTTPException(404, f"仓库源不存在: {source!r}")
+    host = str(row.get("git_host") or git_host())
+    slugs = _slugs(host)
     paths = slugs.get(slug.lower()) or []
     tok = _read_token()
-    remote_head = _gh_head(f"https://{git_host()}/{slug.lower()}.git", tok)
+    remote_head = _gh_head(f"https://{host}/{slug.lower()}.git", tok)
     if not paths:
         return {"ok": True, "repo": slug, "state": "absent",
                 "local_head": None, "remote_head": remote_head,
@@ -452,14 +675,16 @@ async def github_sync(repo: str, request: Request):
 class CloneIn(BaseModel):
     repo: str = Field(min_length=3, max_length=200,
                       description="owner/name（须在服务端远端清单内）")
+    source_id: str = Field(default="", max_length=64,
+                           description="仓库源 id（决定 git 主机；留空取第一条）")
 
 
-def _clone_argv(slug: str, dest: str) -> List[str]:
+def _clone_argv(slug: str, dest: str, host: str) -> List[str]:
     """argv 列表（无 shell）：浅克隆 + 关凭据助手。URL 从校验过的 slug 与
-    **当前配置的 git 主机**现场重构（客户端永不接触 clone URL）。"""
+    **该源配置的 git 主机**现场重构（客户端永不接触 clone URL）。"""
     return ["git", "-c", "credential.helper=", "clone", "--depth", "1",
             "--single-branch", "--no-tags",
-            f"https://{git_host()}/{slug}.git", dest]
+            f"https://{host}/{slug}.git", dest]
 
 
 def _resolve_dest(slug: str) -> Tuple[str, str]:
@@ -482,7 +707,7 @@ def _is_git_dir_path(p: str) -> bool:
     return g.is_dir() or g.is_file()
 
 
-def _origin_slug_of(dest: str) -> Optional[str]:
+def _origin_slug_of(dest: str, host: Optional[str] = None) -> Optional[str]:
     """克隆完成后校验：dest/.git/config 里首个 remote 的 slug 必须与请求一致。"""
     cfg = _repo_config(dest)
     if not cfg:
@@ -492,7 +717,7 @@ def _origin_slug_of(dest: str) -> Optional[str]:
     except OSError:
         return None
     for m in re.finditer(r"^\s*url\s*=\s*(\S+)", txt, re.M):
-        slug = _remote_slug(m.group(1))
+        slug = _remote_slug(m.group(1), host)
         if slug:
             return slug
     return None
@@ -533,12 +758,16 @@ async def github_clone(request: Request, body: CloneIn):
     slug = (body.repo or "").strip()
     if not REPO_RE.fullmatch(slug):
         raise HTTPException(400, f"repo 形状非法: {slug!r}")
-    d = _list_repos()
-    known = {str(r.get("full_name") or "").lower() for r in (d.get("repos") or [])}
+    row = _resolve_source((body.source_id or "").strip())
+    if not row:
+        raise HTTPException(404, f"仓库源不存在: {body.source_id!r}")
+    host = str(row.get("git_host") or git_host())
+    g = _list_one(row, _read_token(), False)
+    known = {str(r.get("full_name") or "").lower() for r in (g.get("repos") or [])}
     if not known:
-        raise HTTPException(503, "远端仓库清单不可用（token/网络），稍后再试")
+        raise HTTPException(503, f"远端仓库清单不可用（{g.get('errors') or 'token/网络'}），稍后再试")
     if slug.lower() not in known:
-        raise HTTPException(400, f"仓库 {slug} 不在 GitHub 清单中")
+        raise HTTPException(400, f"仓库 {slug} 不在源「{row.get('label')}」的清单中")
 
     # ④ 目标路径：containment + 占位防御
     try:
@@ -553,17 +782,17 @@ async def github_clone(request: Request, body: CloneIn):
         if not os.path.isdir(dest):
             raise HTTPException(409, f"目标已存在且不是目录: {dest}")
         if _is_git_dir_path(dest):
-            have = _origin_slug_of(dest)
+            have = _origin_slug_of(dest, host)
             if have == slug.lower():
-                return {"ok": True, "path": dest, "repo": slug,
-                        "existed": True, "took_ms": 0}
+                return {"ok": True, "path": dest, "repo": slug, "existed": True,
+                        "source_id": row.get("id"), "took_ms": 0}
             raise HTTPException(409, f"同名目录已是其它仓库（{have}），拒绝覆盖")
         raise HTTPException(409, f"同名目录已存在且非 git 仓库: {dest}")
 
     # ⑥ 克隆
     t0 = time.monotonic()
     Path(clone_base()).mkdir(parents=True, exist_ok=True)
-    argv = _clone_argv(slug.lower(), dest)
+    argv = _clone_argv(slug.lower(), dest, host)
     rc, out, err = await _spawn_clone(argv)
     if rc != 0:
         # 只清理「本次创建且带 .git」的半成品——normpath 对账防误删既有目录
@@ -575,7 +804,7 @@ async def github_clone(request: Request, body: CloneIn):
                  + tdai_client.scrub((err or out)[-400:], _read_token())[:300])
 
     # ⑦ 克隆后校验（schema 惊讶：如实报错，不删用户可见状态）
-    got = _origin_slug_of(dest)
+    got = _origin_slug_of(dest, host)
     if got != slug.lower():
         raise HTTPException(502, f"克隆完成但 origin 校验不符（{got}）")
 
@@ -585,4 +814,5 @@ async def github_clone(request: Request, body: CloneIn):
                        {"path": dest, "shallow": True,
                         "took_ms": round((time.monotonic() - t0) * 1000, 1)})
     return {"ok": True, "path": dest, "repo": slug, "existed": False,
+            "source_id": row.get("id"),
             "took_ms": round((time.monotonic() - t0) * 1000, 1)}

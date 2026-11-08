@@ -1707,6 +1707,7 @@ async function settingsGithubLoad(force) {
   const ts = $('ghTokenState');
   if (ts) ts.textContent = t.set ? ('已设置 ' + (t.mask || '') + ' · ' + (t.type || '') + ' · 来源 ' +
     (srcLabel[t.source] || t.source || '?')) : '未设置';
+  await settingsGithubSources();
   settingsGithubStatus();
 }
 
@@ -1728,6 +1729,80 @@ function settingsGithubStatus(note) {
     '<span class="v">' + escapeHtml(r[1]) + '</span></div>').join('') +
     (note ? '<div style="margin-top:6px">' + escapeHtml(note) + '</div>' : '');
   box.style.display = '';
+}
+
+/* ── 仓库源列表（v0.13.197）：设置页维护，项目页按源分组 ──────────────── */
+var GH_SOURCES = [];
+
+async function settingsGithubSources() {
+  try {
+    const d = await api('/api/settings/github/sources');
+    GH_SOURCES = (d && d.sources) || [];
+  } catch (e) {
+    GH_SOURCES = [];
+  }
+  ghRenderSources();
+}
+
+function ghRenderSources() {
+  const box = $('ghSrcList');
+  if (!box) return;
+  if (!GH_SOURCES.length) {
+    box.innerHTML = '<div class="v">（还没有仓库源：上面添加一条，或保存「远程 / 归属」后会自动生成一条默认源）</div>';
+    box.style.display = '';
+    return;
+  }
+  box.innerHTML = GH_SOURCES.map(s => '<div class="set-diff-row">' +
+    '<div class="k">' + escapeHtml(s.label || s.owner || s.git_host || '') + '</div>' +
+    '<div class="v">' + escapeHtml(s.api_base || '') +
+    (s.owner ? ' · ' + escapeHtml(s.owner) : ' · 当前 key 可见全部') +
+    ' · ' + (s.repo_count || 0) + ' 仓' +
+    (s.enabled ? '' : ' · 已停用') +
+    (s.last_error ? ' · ⚠ ' + escapeHtml(s.last_error) : '') + '</div>' +
+    '<button class="btn ghost sm" data-settings-act="gh-src-toggle" data-sid="' +
+    escapeHtml(s.id) + '">' + (s.enabled ? '停用' : '启用') + '</button>' +
+    '<button class="btn ghost sm" data-settings-act="gh-src-del" data-sid="' +
+    escapeHtml(s.id) + '">删除</button></div>').join('');
+  box.style.display = '';
+}
+
+async function settingsGithubSourceAdd() {
+  const el = $('ghSrcInput');
+  const val = el ? el.value.trim() : '';
+  if (!val) { toast('先填账号或地址', 'err'); return; }
+  try {
+    const d = await ghPost('/api/settings/github/sources', { value: val });
+    if (el) el.value = '';
+    await settingsGithubSources();
+    await settingsGithubLoad(true);
+    toast(d.deduped ? '这个源已经存在' : ('已添加仓库源' + (d.note ? '：' + d.note : '')), 'ok');
+  } catch (e) {
+    toast('添加失败：' + e.message, 'err');
+  }
+}
+
+async function settingsGithubSourceToggle(sid, on) {
+  try {
+    await api('/api/settings/github/sources/' + encodeURIComponent(sid), {
+      method: 'PATCH', body: JSON.stringify({ enabled: !!on }) });
+    await settingsGithubSources();
+    await settingsGithubLoad(true);
+    toast(on ? '已启用该源' : '已停用该源', 'ok');
+  } catch (e) {
+    toast('切换失败：' + e.message, 'err');
+  }
+}
+
+async function settingsGithubSourceDel(sid) {
+  if (!confirm('删除这个仓库源？（只影响本页清单，不删本地仓库、不删 key）')) return;
+  try {
+    await api('/api/settings/github/sources/' + encodeURIComponent(sid), { method: 'DELETE' });
+    await settingsGithubSources();
+    await settingsGithubLoad(true);
+    toast('已删除仓库源', 'ok');
+  } catch (e) {
+    toast('删除失败：' + e.message, 'err');
+  }
 }
 
 function ghPayload(extra) {
@@ -2498,6 +2573,10 @@ function settingsDelegates() {
       if (a === 'gh-apply') return settingsGithubApply();
       if (a === 'gh-clear') return settingsGithubClear();
       if (a === 'gh-refresh') return settingsGithubRefresh();
+      if (a === 'gh-src-add') return settingsGithubSourceAdd();
+      if (a === 'gh-src-toggle') return settingsGithubSourceToggle(
+        act.dataset.sid, (act.textContent || '').trim() === '启用');
+      if (a === 'gh-src-del') return settingsGithubSourceDel(act.dataset.sid);
       /* 日志页（v0.13.46）：刷新 / 复制 / 导出 */
       if (a === 'log-refresh') return settingsLogsLoad();
       if (a === 'log-copy') return settingsLogsCopy();

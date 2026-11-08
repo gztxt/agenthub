@@ -240,7 +240,14 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.196"
+    CURRENT_VERSION = "0.13.197"
+    #: v0.13.197：本轮改的是「多仓库源分组」，不是终端滚动；版本钉照常跟版本号走。
+    #: 这一版学到的两个坑：**公开仓接口不等于全量仓**（/users/<n>/repos 只回公开仓，
+    #: 自有账号须走 /user/repos 才有私有仓），以及**同 URL 并发会 IncompleteRead**
+    #: （两源并行打同一份列表，一路截断一半 —— 修法是单飞锁不是重试）。
+    VERSION_ROOT_CAUSES["0.13.197"] = (
+        "多仓库源", "公开仓", "IncompleteRead", "单飞", "私有仓",
+    )
     #: v0.13.196：关键词取自 main.py 的版本注释实际字句 —— 键栏是 agent 侧手机输入，
     #: 归因是「凭据名 ≠ agent 名」这条口径，两者都必须半年后仍可寻址。
     VERSION_ROOT_CAUSES["0.13.196"] = (

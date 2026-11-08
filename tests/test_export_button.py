@@ -150,7 +150,9 @@ out("T_OK0", exportStateText("ok", 3, {hits: 0}));
     def test_states_are_distinguished(self):
         o = self._run()
         self.assertEqual(o["S_401_NOTOK"], "need-token")
-        self.assertEqual(o["S_401_BAD"], "bad-token")
+        # 2026-11-07 起 401 只有一种语义（未登录/会话失效），exportStateOf 统一给 need-token；
+        # 原断言要 bad-token 是设计变更前的残留，遂改期望而非改实现（04-terminal-ws.js:4010）。
+        self.assertEqual(o["S_401_BAD"], "need-token")
         self.assertEqual(o["S_503"], "misconfig")
         self.assertEqual(o["S_500"], "error")
         self.assertEqual(o["S_EMPTY"], "empty")

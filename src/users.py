@@ -75,7 +75,7 @@ SET_ICONS = {"settings-model": "cpu", "settings-github": "globe", "settings-toke
              "settings-logs": "activity", "settings-users": "eye", "settings-modelcalls": "radar"}
 _LABELS = {"classroom": "课堂", "localprojects": "本地项目", "github": "GitHub", "resources": "资源",
            "ports": "端口", "telemetry": "遥测", "memory": "记忆中心", "skills": "技能中心",
-           "kb": "知识库", "mcp": "工具", "jobs": "定时", "tasks": "协同", "assets": "资产",
+           "kb": "知识库", "mcp": "MCP服务器", "jobs": "定时", "tasks": "协同", "assets": "资产",
            "botboy": "Botboy", "settings-model": "模型", "settings-github": "GitHub",
            "settings-token": "认证状态", "settings-logs": "日志", "settings-users": "用户授权",
            "settings-modelcalls": "模型计量"}
@@ -426,6 +426,11 @@ def seed_menu_items() -> int:
                 " created_at, updated_at) VALUES(?,?,?,?,?,1,?,?)",
                 (m, _LABELS.get(m, m), icons.get(m, ""), grp, i, now, now))
             n += 1
+    # PT-20261110-01：`INSERT OR IGNORE` 只插不覆盖 ⇒ 存量库里 mcp 的旧标签
+    # 「工具」不会自动变。显式迁一次，且只改旧默认值，不动人工改过的 label。
+    _db.execute("UPDATE menu_items SET label=?, updated_at=? "
+                "WHERE module='mcp' AND label='工具'",
+                (_LABELS["mcp"], now))
     return n
 
 

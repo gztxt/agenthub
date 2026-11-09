@@ -2557,6 +2557,69 @@
                 钉着），其余说明下沉到 .sp-r。 -->
         <section class="page sys" id="page-mcp">
             <div class="sp">
+                <!-- PT-20261110-01 · ① 源：可增删的 MCP 服务器目录 URL。
+                     全部按钮走 data-mcp-act + 事件委托（禁 inline onclick，
+                     tests/test_inline_onclick_shards.py 与 probe_inline_onclick.py 钉着）。 -->
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>MCP 服务器源</h3>
+                        <div class="sp-r"><span class="hint">官方 Registry / 子注册表 / 单个 server.json URL；凭据值不落库</span></div>
+                    </div>
+                    <div class="sp-tools">
+                        <div class="toolbar">
+                            <input id="msrcLabel" placeholder="源名称，如 官方 Registry" style="max-width:180px">
+                            <select id="msrcKind" style="max-width:170px">
+                                <option value="official_registry">官方 Registry</option>
+                                <option value="subregistry">子注册表</option>
+                                <option value="manual_url">单个 server.json</option>
+                            </select>
+                            <input id="msrcUrl" placeholder="https://…/v0.1/servers" style="flex:1">
+                            <button class="btn sm" type="button" data-mcp-act="src-add">添加源</button>
+                            <button class="btn ghost sm" type="button" data-mcp-act="src-sync-all">同步全部</button>
+                        </div>
+                    </div>
+                    <div class="sp-bd box flush tscroll" style="border-top:1px solid var(--divider)">
+                        <div id="msrcList" class="sp-list hint">加载中…</div>
+                    </div>
+                </div>
+                <!-- ② 目录：源里搜到的服务器缓存卡；「安装」直接落 mcp_servers -->
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>源内目录 · 可安装服务器</h3>
+                        <div class="sp-r"><span class="hint">只列 active + 最新版本；<code>需凭据</code> 表示调用时要注入，值不落库</span></div>
+                    </div>
+                    <div class="sp-tools">
+                        <div class="toolbar">
+                            <input id="mcatQ" placeholder="按任务/关键词检索，如 地图、filesystem" style="flex:1">
+                            <button class="btn sm" type="button" data-mcp-act="cat-search">检索</button>
+                            <button class="btn ghost sm" type="button" data-mcp-act="cat-list">全部</button>
+                        </div>
+                    </div>
+                    <div class="sp-bd box flush tscroll" style="border-top:1px solid var(--divider)">
+                        <div id="mcatList" class="sp-list hint">加载中…</div>
+                    </div>
+                </div>
+                <!-- ③ 一键编排：discover → install → select → call，默认 plan(dry) -->
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>按任务发现 · 一键运行</h3>
+                        <div class="sp-r"><span class="hint">默认 plan = 只读 dry；exec 才真跑。结构化参数由你给，不经 LLM 猜</span></div>
+                    </div>
+                    <div class="sp-tools">
+                        <div class="toolbar">
+                            <input id="mrunTask" placeholder="任务描述，如 需要地图功能帮我查路线" style="flex:1">
+                            <input id="mrunAgent" placeholder="agent_id" value="manager" style="max-width:130px">
+                            <select id="mrunMode" style="max-width:110px"><option value="plan">plan (dry)</option><option value="exec">exec</option></select>
+                            <label class="set-check"><input type="checkbox" id="mrunAuto"> 自动安装</label>
+                            <button class="btn sm" type="button" data-mcp-act="run">运行</button>
+                        </div>
+                        <div class="toolbar">
+                            <input id="mrunArgs" placeholder='call_args JSON，如 {"city":"杭州"}' style="flex:1">
+                            <input id="mrunEnv" placeholder='call_env JSON（凭据，仅本次内存）' style="flex:1">
+                        </div>
+                    </div>
+                    <div class="sp-bd"><pre class="code" id="mrunOut" style="display:none;margin:0"></pre></div>
+                </div>
                 <div class="sp-card">
                     <div class="sp-hd">
                         <h3>注册 MCP Server</h3>
@@ -3647,7 +3710,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=bbd3e278';
+      var HUB_SRC = '/static/hub.js?v=f74b176b';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

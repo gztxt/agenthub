@@ -1,3 +1,53 @@
+## v0.13.200 — 系统菜单新增「MCP服务器」：源 → 发现 → 安装 → 测试 → 调用 → 持久化（2026-11-10）
+
+> 用户需求：「系统菜单添加一个 MCP 服务器子菜单，可以添加源，agent 根据任务在源里
+> 搜索、添加、测试、调用，用过的服务器存到本机，在子菜单统一管理和调用；
+> 我只要结果。」
+
+- **联网调研结论**：`mcp.so` 是社区目录站、无公开读 API、实测 `amap/gaode/map` 三词 0 命中，
+  不能作自动发现主源；官方 `registry.modelcontextprotocol.io/v0.1/servers` 才是未鉴权只读
+  REST，官方文档明确「聚合器应每小时抓取并持久化到自己的库」，支持 `search` /
+  `version=latest` / 游标分页 / `updated_since` 增量。server.json 有 `packages[]`（npm/pypi/oci，
+  含 `runtimeHint`、`environmentVariables[].isSecret`）与 `remotes[]`（streamable-http）两种形态。
+  业界同型：Meta MCP Proxy（discover+execute 两元工具）、Kong MCP Registry、acumenix/mcp-discovery。
+- **关键判定**：本机已有 `#page-mcp`（菜单叫「工具」）与 `mcpgw.py` 11 条路由（注册/probe/
+  聚合工具/`/mcp/select` 按任务裁剪/`/mcp/call` 带 ACL 与幂等键）。**不新建第二个页面**，
+  改造并改名即可，省掉 7 处菜单接线与 5 个前端闸门。但 `/mcp/call` 全仓只被前端手工调试
+  调用，`src/` 下零调用点 —— 「agent 自动调用第三方 MCP」这条链路此前并不存在。
+- **正解 = `POST /mcp/run` 服务端编排**：discover →（可选 install）→ select → call 全在 hub
+  进程内完成，复用 `select_tools()` 与抽出的 `_call_one()`，不自调 HTTP、不改 6 家 agent 的
+  原生配置、不引入 LLM tool 环、不产生扣费。`mode=plan` 默认 dry（不写盘/不联网/不拉起进程），
+  `mode=exec` 才真跑；`auto_install` 默认 false 且只对 top-1 生效，近一小时额度默认 6。
+- **新增 9 条路由**（读 3 / 写 6）：`/mcp/sources` CRUD、`/mcp/sources/{sid}/sync`、
+  `/mcp/sources/{sid}/servers`、`/mcp/catalog`、`/mcp/install`、`/mcp/run`。
+  命名避撞：`/mcp/registry` 已是工具注册表派生视图，绝不复用。
+- **数据层**：新增 `mcpregistry.py`（纯逻辑，零路由，故 authz 的 module 名仍是 `mcpgw`、
+  `main.py` 的 include_router 不用动），`mcp_sources` / `mcp_source_cache` 两张表；
+  `mcp_servers` 幂等补 9 列（source_id / source_key / registry_name / version /
+  official_status / trust / installed_at / last_used_at / use_count），旧行新列留 NULL。
+  `/mcp/call` 成功分支回写 `use_count+1` / `last_used_at` ⇒ ④「用过的服务器持久化」。
+- **凭据四条铁律**：`isSecret` 只回名字不回值；`probe` 扩到 http 并支持运行时 `env` 注入；
+  高德 `https://mcp.amap.com/mcp?key=xxx` 由 `split_credential_url()` 拆成 `${KEY}` 占位
+  （`outbound.check_url` 只挡 u.username/u.password，挡不住 query 里的 key），值走调用时
+  注入、绝不落库；`GET /mcp/servers` 的 env 恒 redact。
+- **发现层**：复用 `skill_relevance.rank`（词法 BM25F，确定、零费用、不建第二套口径），
+  加中文↔英文别名表缓解跨词表；`why` / `degraded` / `note` 门面信封不静默吞空结果。
+- **前端**：`#page-mcp` 加 3 张卡（源与目录 / 源内目录可安装服务器 / 按任务一键运行），
+  新按钮一律 `data-mcp-act` + `#page-mcp` 事件委托（禁 inline onclick）；已注册 Servers 表
+  增来源/信任/版本/调用次数/最近使用五列；菜单标签「工具」→「MCP服务器」同步
+  `SYS_PAGES` / `PAGE_LABELS` / `users.py::_LABELS` / `menu_items` 存量 UPDATE。
+- **A2 补充（默认不放行）**：`hubmcp.py` 加 `mcp_discover` / `mcp_run` 两个转发工具，
+  但只在 `HUB_MCP_ALLOW_MCP_TOOLS=1` 时注册 —— 白名单为空时 `apply_tool_scope()` 并不摘
+  任何工具，光靠它谈不上「默认关」，故用显式闸门，需用户签字才加名。
+- **同源闸门更新**：`authz.WRITE_ROUTE_SCOPES` +6、`SIDE_EFFECT_ROUTES` +3
+  （`test_authz_scopes` 基线 99→105 / 24→27）；`execsem.SOURCES` / `STATUS_MAP` 登记
+  `mcp_source`；`test_scope_dryrun` 索引 98→104；`test_asset_audit` 的 sync 补审计；
+  `test_outbound_p2_c5_l0` 的「mcpgw 恰好两处 check_url」由 `check_probe_url()` 守住。
+- **验证**：新增 `tests/test_mcp_sources_l0.py` 28 例（映射 5 形态 / 凭据拆分 / 迁移旧行 NULL /
+  目录空态 why / 同步失败不清缓存 / plan 零写盘 / http probe 不再 KeyError）；
+  MCP 相关 L0 89 例全绿；前端 5 闸门 + users 79 例全绿。改了 `src/*.py`，
+  生产生效须按重启军规走 `scripts/hub-restart.sh --reason` 的签字窗口。
+
 ## v0.13.199 — codebuddy 模型清单改双落点：独立 CLI 与桌面端各读一份（2026-11-09）
 
 > 用户报障：「通过设置 → 模型配置 设置了 codebuddy 使用 `openrouter/stealth/crouton-alpha`，

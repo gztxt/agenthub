@@ -127,7 +127,23 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.199"
+VERSION = "0.13.200"
+
+# v0.13.200（2026-11-10）：系统菜单「工具」改名并扩为「MCP服务器」统一管理页
+#   （用户：按任务在源里搜合适的 MCP 服务器 → 添加 → 测试 → 调用，只要结果）。
+#   ① 根因：hub 的 6 家 chat adapter 全无 tools 参数，`/mcp/call` 此前只被前端
+#      手工调试调用 ⇒ 「agent 自动发现并调用第三方 MCP」这条链路根本不存在。
+#      正解是 `POST /mcp/run` 服务端编排（进程内复用 select_tools/_call_one），
+#      不改任何 agent 原生配置、不引入 LLM tool 环、不产生扣费。
+#   ② 源：新增 `mcpregistry.py` 管官方 Registry 抓取（游标分页 + updated_since
+#      增量）与 server.json → 安装规格映射；源/目录/安装/编排共 9 条路由仍挂在
+#      mcpgw.py，故 main.py 的 include_router 与 startup 接线基本不动。
+#   ③ 凭据：`environmentVariables[].isSecret` 只回名字；高德 `?key=` 拆成 `${VAR}`
+#      占位、值走调用时注入 ⇒ 凭据不落库、不进 url 列、不被 GET /mcp/servers 回显。
+#   ④ 发现层复用 `skill_relevance.rank`（词法 BM25F，确定零费用）+ 中文别名扩展；
+#      中文 task ↔ 英文 server 名跨词表原理不可达，硬召回已实测否决，别再试。
+#   关键词锚（版本钉 test_term_scroll_sensitivity 用）：MCP服务器 / 源 /
+#   mcpregistry / 凭据不落库
 
 # v0.13.199（2026-11-09）：codebuddy 模型清单**双落点**（用户：设置页选了
 #   openrouter/stealth/crouton-alpha 却不能用）。根因：hub 终端跑独立 CLI
@@ -1496,6 +1512,9 @@ async def startup():
         from catalog import schedule as catalog_schedule
         _spawn(catalog_schedule.scan_loop())
     mcpgw_mod.ensure_schema()
+    # PT-20261110-01：官方 Registry 要求聚合器「定期但不频繁地抓取」（约每小时）。
+    # HUB_MCP_AUTO_SYNC=0 可关；同步在 to_thread 里跑，不堵事件循环。
+    _spawn(mcpgw_mod.mcpregistry.sync_loop())
     cronjobs_mod.ensure_schema()
     cronjobs_mod.set_context(
         chat_fn=lambda a, m, s=None, mo=None, tr=None: _chat_dispatch(a, m, s, mo, tr))

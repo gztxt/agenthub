@@ -39,6 +39,10 @@ SOURCES: Tuple[str, ...] = (
     "cron_run",       # cronjobs：定时作业
     "mcp_call",       # mcpgw：MCP 工具调用
     "mcp_acl_shadow", # P2 C2：影子 ACL 规则「本应拒绝」的记录（不拦，但必须可查）
+    # PT-20261110-01：源抓取与自动安装。为什么不并进 mcp_call：那是**一次工具调用**
+    # 的成败，这里是「目录同步/装上了一个 server」的配置动作，混进去会让工具成功率
+    # 被运维动作污染。
+    "mcp_source",
     "rest",           # runlog：REST 端点留痕
     "ctx_manifest",   # P1-1：上下文清单
     "resilience",     # P1-6：出站重试的逐次尝试
@@ -80,6 +84,9 @@ STATUS_MAP: Dict[str, Dict[str, str]] = {
     "task_run": {"reap_orphans": "ok"},
     "cron_run": {"success": "ok", "fail": "failed", "skipped": "skipped"},
     "mcp_call": {"success": "ok", "fail": "failed"},
+    # PT-20261110-01：抓取/安装只有「成了」与「挂了」两态；degraded 不落 profile_event
+    # 的 status（它写在 detail 里并由 sync 回包如实报），避免把降级伪装成第三种结果。
+    "mcp_source": {"success": "ok", "fail": "failed"},
     # P2 C2：影子规则只观测不拦 ⇒ 命中即「有异常但未阻断」= degraded（不是 failed）。
     "mcp_acl_shadow": {"would_deny": "degraded"},
     "rest": {"success": "ok", "fail": "failed", "degraded": "degraded"},

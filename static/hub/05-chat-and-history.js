@@ -63,14 +63,22 @@ async function delServer(id) {
 }
 async function loadMcp() {
   bindChatDelegation();   // v0.13.131：工具行/命令项走 data-* 委托（幂等）
+  bindMcpDelegation();    // PT-20261110-01：源/目录/编排按钮走同一套委托
+  loadMcpSources();
+  mcpCatalog('');
   try {
     const s = await api('/mcp/servers');
-    $('mcServers').innerHTML = '<table><thead><tr><th>名称</th><th>传输</th><th>目标</th><th></th></tr></thead><tbody>' +
+    $('mcServers').innerHTML = '<table><thead><tr><th>名称</th><th>传输</th><th>目标</th><th>来源</th><th>信任</th><th>版本</th><th>调用</th><th>最近使用</th><th></th></tr></thead><tbody>' +
       (s.servers || []).map(x => '<tr><td><b>' + escapeHtml(x.name) + '</b></td><td>' + x.transport + '</td>' +
         /* v0.13.40：补 white-space:nowrap —— 只写 overflow/text-overflow 而没 nowrap
            时省略号不生效，长 command 会把行撑成三行（1440 截图实测）。父级 .tscroll
            已给横向滚动，兜住超长值。 */
         '<td style="font-family:var(--font-mono);font-size:var(--fs-sm);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(x.transport === 'stdio' ? (x.command || '') + ' ' + (x.args || []).join(' ') : x.url || '') + '">' + escapeHtml(x.transport === 'stdio' ? (x.command || '') + ' ' + (x.args || []).join(' ') : x.url || '') + '</td>' +
+        '<td class="hint">' + escapeHtml(x.registry_name || '手工') + '</td>' +
+        '<td class="hint">' + escapeHtml(x.trust || 'manual') + '</td>' +
+        '<td class="hint">' + escapeHtml(x.version || '-') + '</td>' +
+        '<td class="hint">' + (x.use_count || 0) + '</td>' +
+        '<td class="hint">' + escapeHtml((x.last_used_at || '-').slice(5, 16).replace('T', ' ')) + '</td>' +
         '<td><button class="btn sm danger" onclick="delServer(\'' + x.id + '\')">' + ico('x') + '</button></td></tr>').join('') +
       '</tbody></table>';
     $('mcTools').innerHTML = '聚合工具中（stdio 会临时拉起进程）…';
@@ -184,6 +192,141 @@ async function callToolSel() {
     const d = await api('/mcp/call', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ server: mcpToolSel.server, tool: mcpToolSel.tool, args: args, agent_id: 'manager' }) });
     $('mcCallOut').textContent = JSON.stringify(d, null, 1);
   } catch (e) { $('mcCallOut').textContent = '失败: ' + e.message; }
+}
+
+/* ── PT-20261110-01 · MCP 源 / 目录 / 一键编排 ────────────────────────────
+ * 所有按钮一律 data-mcp-act + 事件委托：inline onclick 在双引号属性里会被
+ * 外部 id 里的引号截断 ⇒ 点击静默 SyntaxError（v0.13.131 的回归）。
+ * 委托挂在 #page-mcp 上（容器静态、innerHTML 反复重写不掉监听），marker 防重复挂。
+ */
+function bindMcpDelegation() {
+  const page = $('page-mcp');
+  if (!page || page.__mcpDeleg) return;
+  page.__mcpDeleg = true;
+  page.addEventListener('click', async e => {
+    const b = e.target.closest('[data-mcp-act]');
+    if (!b || !page.contains(b)) return;
+    const act = b.dataset.mcpAct, id = b.dataset.id || '', key = b.dataset.key || '';
+    try {
+      if (act === 'src-add') return await mcpSourceAdd();
+      if (act === 'src-sync-all') return await mcpSourceSyncAll();
+      if (act === 'src-sync') return await mcpSourceSync(id);
+      if (act === 'src-toggle') return await mcpSourceToggle(id, b.dataset.val === '1');
+      if (act === 'src-del') return await mcpSourceDel(id);
+      if (act === 'cat-search') return await mcpCatalog($('mcatQ').value.trim());
+      if (act === 'cat-list') return await mcpCatalog('');
+      if (act === 'cat-install') return await mcpInstall(key);
+      if (act === 'run') return await mcpRun();
+    } catch (err) { toast(err.message || String(err), 'err'); }
+  });
+}
+
+function _mcpJson(id, label) {
+  const raw = ($(id) && $(id).value || '').trim();
+  if (!raw) return {};
+  try { const v = JSON.parse(raw); if (typeof v !== 'object' || !v || Array.isArray(v)) throw new Error('需为 JSON 对象'); return v; }
+  catch (e) { throw new Error(label + ' 需为 JSON 对象：' + e.message); }
+}
+
+async function loadMcpSources() {
+  const el = $('msrcList'); if (!el) return;
+  try {
+    const d = await api('/mcp/sources');
+    if (d.default_base_url) $('msrcUrl').placeholder = d.default_base_url;
+    el.innerHTML = (d.sources || []).map(s =>
+      '<div class="mem-item"><span class="tag ' + (s.enabled ? 'fact' : 'constraint') + '">' + escapeHtml(s.kind) + '</span>' +
+      '<p><b>' + escapeHtml(s.label) + '</b> <span class="hint">' + escapeHtml(s.base_url) + '</span><br>' +
+      '<span class="hint">卡片 ' + (s.server_count || 0) + ' · 同步 ' + escapeHtml((s.synced_at || '从未').slice(5, 16).replace('T', ' ')) +
+      (s.last_error ? ' · <span style="color:var(--danger-text)">' + escapeHtml(String(s.last_error).slice(0, 60)) + '</span>' : '') + '</span></p>' +
+      '<button class="btn sm ghost" type="button" data-mcp-act="src-sync" data-id="' + escapeHtml(s.id) + '">同步</button> ' +
+      '<button class="btn sm ghost" type="button" data-mcp-act="src-toggle" data-id="' + escapeHtml(s.id) + '" data-val="' + (s.enabled ? '0' : '1') + '">' + (s.enabled ? '停用' : '启用') + '</button> ' +
+      '<button class="btn sm danger" type="button" data-mcp-act="src-del" data-id="' + escapeHtml(s.id) + '">删</button></div>'
+    ).join('') || '<div class="hint">暂无源——填上方地址添加（官方 Registry 地址已作占位提示）</div>';
+  } catch (e) { el.innerHTML = '<span style="color:var(--danger-text)">' + escapeHtml(e.message) + '</span>'; }
+}
+
+async function mcpSourceAdd() {
+  const body = { kind: $('msrcKind').value, label: $('msrcLabel').value.trim(), base_url: $('msrcUrl').value.trim() };
+  if (!body.base_url) return toast('源地址必填', 'err');
+  const d = await api('/mcp/sources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  toast(d.deduped ? '该源已存在' : '源已添加', 'ok');
+  $('msrcLabel').value = $('msrcUrl').value = '';
+  await loadMcpSources();
+}
+
+async function mcpSourceSync(id) {
+  toast('同步中…');
+  const d = await api('/mcp/sources/' + encodeURIComponent(id) + '/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  toast(d.degraded ? ('同步降级：' + d.last_error) : ('同步完成，落卡 ' + d.fetched), d.degraded ? 'err' : 'ok');
+  await loadMcpSources(); await mcpCatalog('');
+}
+
+async function mcpSourceSyncAll() {
+  const d = await api('/mcp/sources');
+  const ids = (d.sources || []).filter(s => s.enabled).map(s => s.id);
+  if (!ids.length) return toast('没有启用的源', 'err');
+  for (const id of ids) {
+    try { await api('/mcp/sources/' + encodeURIComponent(id) + '/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); }
+    catch (e) { toast('源 ' + id + ' 同步失败：' + e.message, 'err'); }
+  }
+  toast('已同步 ' + ids.length + ' 个源', 'ok');
+  await loadMcpSources(); await mcpCatalog('');
+}
+
+async function mcpSourceToggle(id, enabled) {
+  await api('/mcp/sources/' + encodeURIComponent(id), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled }) });
+  await loadMcpSources();
+}
+
+async function mcpSourceDel(id) {
+  if (!confirm('删除源 ' + id + '？（缓存卡保留，但不再出现在目录）')) return;
+  await api('/mcp/sources/' + encodeURIComponent(id), { method: 'DELETE' });
+  await loadMcpSources(); await mcpCatalog('');
+}
+
+async function mcpCatalog(q) {
+  const el = $('mcatList'); if (!el) return;
+  el.innerHTML = '<div class="hint">检索中…</div>';
+  try {
+    const d = await api('/mcp/catalog?q=' + encodeURIComponent(q || '') + '&n=20');
+    const rows = d.items || [];
+    el.innerHTML = rows.map(x =>
+      '<div class="mem-item"><span class="tag ' + (x.trust === 'official' ? 'fact' : 'agent') + '">' + escapeHtml(x.transport_hint || '-') + '</span>' +
+      '<p><b>' + escapeHtml(x.title || x.name) + '</b> <span class="hint">' + escapeHtml(x.name) + '</span><br>' +
+      '<span class="hint">' + escapeHtml(String(x.description || '').slice(0, 150)) + '</span>' +
+      (x.required_secrets && x.required_secrets.length ? '<br><span class="hint" style="color:var(--danger-text)">需凭据：' + escapeHtml(x.required_secrets.join(', ')) + '（值不落库）</span>' : '') +
+      (!x.installable ? '<br><span class="hint" style="color:var(--danger-text)">不可安装：' + escapeHtml(x.install_reason || '') + '</span>' : '') + '</p>' +
+      (x.installable ? '<button class="btn sm" type="button" data-mcp-act="cat-install" data-key="' + escapeHtml(x.cache_key) + '">安装</button>' : '') +
+      '</div>'
+    ).join('') || '<div class="hint">' + escapeHtml(d.why || '无候选') + '</div>' +
+      (d.note ? '<div class="hint">' + escapeHtml(d.note) + '</div>' : '');
+  } catch (e) { el.innerHTML = '<span style="color:var(--danger-text)">' + escapeHtml(e.message) + '</span>'; }
+}
+
+async function mcpInstall(key) {
+  const d = await api('/mcp/install', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cache_key: key }) });
+  toast(d.status === 'installed' ? ('已安装 ' + d.name) : '已安装过（幂等）', 'ok');
+  await loadMcp();
+}
+
+async function mcpRun() {
+  const out = $('mrunOut'); out.style.display = 'block'; out.textContent = '运行中…';
+  let body;
+  try {
+    body = {
+      task: ($('mrunTask').value || '').trim(),
+      agent_id: ($('mrunAgent').value || 'manager').trim() || 'manager',
+      mode: $('mrunMode').value,
+      auto_install: $('mrunAuto').checked,
+      call_args: _mcpJson('mrunArgs', 'call_args'),
+      call_env: _mcpJson('mrunEnv', 'call_env')
+    };
+  } catch (e) { out.textContent = '参数错：' + e.message; return; }
+  try {
+    const d = await api('/mcp/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    out.textContent = JSON.stringify(d, null, 1);
+    if (d.mode === 'exec' && d.installed && d.installed.length) loadMcp();
+  } catch (e) { out.textContent = '失败：' + e.message; }
 }
 
 /* ── T8 命令面板（⌘K/Ctrl+K）：搜实体直达工作台 ──
@@ -334,7 +477,7 @@ const NAV_ORDER = ['agents', 'infra', 'system', 'settings'];
 const NAV_SUB_KINDS = [['gateway', '网关'], ['service', '服务'], ['tool', '工具'], ['memory', '记忆']];
 const SYS_PAGES = [['ports', '端口', 'share'], ['telemetry', '遥测', 'activity'], ['memory', '记忆中心', 'database'],
                    ['skills', '技能中心', 'zap'], ['kb', '知识库', 'book'],
-                   ['mcp', '工具', 'wrench'], ['jobs', '定时', 'clock'], ['tasks', '协同', 'flow'],
+                   ['mcp', 'MCP服务器', 'wrench'], ['jobs', '定时', 'clock'], ['tasks', '协同', 'flow'],
                    ['assets', '资产', 'layers'], ['botboy', 'Botboy', 'message']];
 /* v0.13.47：运行日志页删除，内容并入设置→日志。
    v0.13.170：Botboy = DS Bot 团队面板（只读投影 ~/.dsh/bot/state.json）。
@@ -349,7 +492,7 @@ const SET_PAGES = [['settings-model', '模型', 'cpu'], ['settings-github', 'Git
 /* 2026-10-25：「设置 · 记忆存储」并入「系统 · 记忆中心」（同一份本机记忆的读写入口
    不该分居两个菜单，设置组也不该为 4 条便签单占一个一级项）。 */
 const PAGE_LABELS = { classroom: '总览', chat: '统一对话', tasks: '协同', jobs: '定时',
-                      memory: '记忆中心', skills: '技能中心', kb: '知识库', mcp: '工具', ports: '端口', telemetry: '遥测',
+                      memory: '记忆中心', skills: '技能中心', kb: '知识库', mcp: 'MCP服务器', ports: '端口', telemetry: '遥测',
                       assets: '资产', localprojects: '本机项目', github: 'GitHub 项目', resources: '资源监控',
                       botboy: 'Botboy',
                       'settings-model': '设置 · 模型', 'settings-github': '设置 · GitHub',

@@ -235,6 +235,19 @@ CREATE TABLE IF NOT EXISTS menu_items (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+-- P1 命令幂等回执（借鉴 t3code `INSERT … ON CONFLICT(command_id) DO NOTHING
+-- RETURNING` + 重放回执思路，只借逻辑不抄代码）。覆盖「对外派发动作」这一层：
+-- `command_id` 是稳定去重键（见 tasks_runner._command_id_for），一行 = 一次
+-- 「已派发」声明，**写一次不再 UPDATE** ⇒ 重放永远拿到首次回执。
+-- 幂等建表：存量库启动自动补，不动任何既有行（SCHEMA 用 CREATE ... IF NOT EXISTS，
+-- 与其余表同款；不靠 ALTER，故无「列还不存在就建索引」的迁移陷阱）。
+CREATE TABLE IF NOT EXISTS command_receipts (
+    command_id TEXT PRIMARY KEY,       -- 稳定去重键：run:task:attempt
+    run_id TEXT NOT NULL,
+    action TEXT NOT NULL,              -- 外部动作种类，如 dispatch_chat
+    result_json TEXT,                  -- 派发声明；写一次不改，保证重放回执一致
+    created_at TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS trg_termrec_ins AFTER INSERT ON term_recordings BEGIN
     INSERT INTO term_rec_meta(k, v) VALUES('total_bytes', NEW.bytes)
     ON CONFLICT(k) DO UPDATE SET v = v + NEW.bytes;

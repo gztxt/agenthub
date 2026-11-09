@@ -9,6 +9,7 @@
 import asyncio
 import inspect
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
@@ -20,6 +21,7 @@ import verifier
 
 import tasks_tiers as _tiers
 
+log = logging.getLogger(__name__)
 
 _runners: Dict[str, asyncio.Task] = {}
 
@@ -581,6 +583,23 @@ async def _run_task(run_id: str, row: dict):
     prompt = await _attach_retrieval(run_id, row, prompt, exec_agent)
     # 缺陷1：本任务的超时按**它自己的档位**取（A 未落地时回落 TASK_TIMEOUT_S）。
     _tout = _timeout_s_for(row.get("tier"))
+    # ── P1 命令幂等闸（借鉴 t3code 重放回执，只借逻辑不抄代码；实现见文件末尾
+    #    「命令幂等回执」段）──
+    # 全链路唯一对外派发点是下面的 `_call_chat`：它调 chat_fn，而 chat_fn 才是
+    # 起 agent 子进程 / 发 LLM 请求 / 触发 git push 等外部动作的源头。claim 放在
+    # 紧邻它、且唯一的位置：同一 (run,task,attempt) 在「服务重启 → 恢复重放」时
+    # 会命中首次回执 ⇒ 跳过，不再产生第二次外部动作。
+    is_new, _receipt = claim_command(_command_id_for(run_id, row), run_id, "dispatch_chat")
+    if not is_new:
+        # 命中回执 = 上一次生命周期已派发过该外部动作。为杜绝重复对外动作，
+        # 不重新派发；首次执行被重启打断时其结果可能已丢失，故落 failed 待人工
+        # 按现场核对后决定是否重跑（不静默假装成功、也不静默挂死）。
+        db.execute("UPDATE tasks SET status='failed',error=?,finished_at=?,updated_at=?"
+                   " WHERE run_id=? AND task_id=?",
+                   ("重启恢复：外部动作已派发（command 回执命中），跳过以避免重复对外动作；"
+                    "请核对现场后决定是否重跑", _tiers._now(), _tiers._now(),
+                    run_id, row["task_id"]))
+        return
     t0 = asyncio.get_event_loop().time()
     try:
         result = await asyncio.wait_for(
@@ -849,6 +868,62 @@ RECOVERY_NOTE = (
     "核对完成之前，不要重复任何对外动作（提交、推送、发消息、改线上配置）；"
     "已经做完的沿用结果，不要从头重做。"
 )
+
+
+# ─────────────────────────── 命令幂等回执（P1）───────────────────────────
+# 借鉴 t3code `Orchestrator.ts:13992-14023` 的
+# `INSERT … ON CONFLICT(command_id) DO NOTHING RETURNING` + 重放回执思路，
+# **只借逻辑不抄代码**：一个稳定去重键 + 「首次落一行回执、重放返回首次回执」。
+#
+# 覆盖边界（如实口径，见交付说明）：
+#   · 覆盖到「对外派发」这一层 —— `_run_task` 里调 chat_fn 的那一次派发。
+#   · 不覆盖 agent 子进程**内部**发生的外部动作（它自己 git push / 发消息 / 改文件）：
+#     那些动作在子进程里、chat_fn 返回之后才发生，回执无法回滚，也不在派发点之内。
+#   · 回执写在派发**之前** ⇒ 语义是 at-most-once 派发。窄窗口（声明已落库、动作
+#     还没真跑就重启）无法自证「动作到底跑没跑」，这是 at-most-once 的固有边界：
+#     宁可漏一次（落 failed 待人核对），也不重复对外动作。
+def _command_id_for(run_id: str, row: dict) -> str:
+    """稳定 run 级去重键：同一 (run, task, attempt) 在重启前后逐字相同（不随机）。
+
+    为什么要带 `attempts`：合法的自动重试 / 升档会 attempts+1 后重新派发，那是
+    **应当**再发一次外部动作的新尝试；带上次数才不会把重试误去重成「跳过」。
+    而重启恢复（`recover_interrupted_tasks`）不改 attempts ⇒ 恢复重放与被打断的
+    首次派发命中同一个 command_id，从而实现「同一 run 重启恢复只产生一次外部动作」。
+    """
+    attempt = int(row.get("attempts") or 0)
+    return "task-dispatch:%s:%s:%d" % (run_id, row["task_id"], attempt)
+
+
+def claim_command(command_id: str, run_id: str, action: str) -> Tuple[bool, dict]:
+    """领一次「外部派发」的幂等回执，返回 `(is_new, receipt)`。
+
+    · 首次（command_id 没出现过）：INSERT 一行「已派发」声明 ⇒ `is_new=True`，
+      调用方据此**执行**外部动作。
+    · 重放（同一 command_id 再来一次，典型是服务重启恢复）：`ON CONFLICT DO NOTHING`
+      让 INSERT 静默不写（rowcount=0）⇒ `is_new=False`，并返回**首次那行回执**，
+      调用方据此**跳过**外部动作，避免重复对外副作用。
+
+    去重键只有 `command_id`（主键）；传入的 run_id/action 仅用于首次落库，重放一律
+    以首次回执为准。回执行**写一次不再 UPDATE**，所以重放拿到的就是首次值。
+    回执面不可用（缺表等）时降级 fail-open 返回 `(True, ...)`：宁可照旧派发，
+    也不让幂等闸带倒任务执行（与本仓「增强失败不阻塞」纪律一致）。
+    """
+    now = _tiers._now()
+    receipt_decl = json.dumps({"dispatched": True}, ensure_ascii=False)
+    try:
+        n = db.execute(
+            "INSERT INTO command_receipts(command_id,run_id,action,result_json,created_at)"
+            " VALUES(?,?,?,?,?) ON CONFLICT(command_id) DO NOTHING",
+            (command_id, run_id, action, receipt_decl, now))
+        rows = db.query("SELECT * FROM command_receipts WHERE command_id=?", (command_id,))
+    except Exception as e:  # noqa: BLE001 — 回执面不可用 ⇒ 降级照旧派发，不阻塞任务
+        log.warning("[receipt] claim 失败（%s: %s），降级照旧派发", type(e).__name__, e)
+        return True, {"command_id": command_id, "run_id": run_id, "action": action,
+                      "result_json": receipt_decl, "created_at": now, "degraded": True}
+    receipt = rows[0] if rows else {"command_id": command_id, "run_id": run_id,
+                                    "action": action, "result_json": receipt_decl,
+                                    "created_at": now}
+    return (n == 1), receipt
 
 
 def recover_interrupted_tasks() -> int:

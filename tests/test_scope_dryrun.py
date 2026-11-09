@@ -48,7 +48,8 @@ class BScopeByPath(unittest.TestCase):
     def test_index_size_and_no_ambiguity(self):
         # /install 同时出现在 skill.py 与 skill_store.py，但两者同属 skill.write
         # ⇒ 98 key（P3 事件出口 chat/events + interrupt 各 +1）。
-        self.assertEqual(len(authz.SCOPE_BY_PATH), 98)
+        # PT-20261110-01：新增 6 条 MCP 源/安装/编排写路由，路径互不撞 ⇒ 104。
+        self.assertEqual(len(authz.SCOPE_BY_PATH), 104)
 
     def test_known_and_unknown(self):
         self.assertEqual(authz.scope_for_path("put", "/api/memory/l3"), "hub.memory.write")

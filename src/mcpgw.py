@@ -25,6 +25,7 @@ from mcp.client.stdio import stdio_client
 import outbound    # P2 C5：出站地址准入（与 ghsettings 共用同一份判据）
 import resilience   # P1-6 接线②：逻辑调用的 call_id / 幂等键 + 熔断
 import tooldesc     # P2 C17：工具描述质量（模板归一 + 完备性三态 + 按任务裁剪）
+import mcpregistry  # PT-20261110-01：源 / 目录 / server.json 映射（纯逻辑层，无路由）
 
 #: MCP server 是否允许指向本机/内网。**默认允许** —— MCP server 本来就常在 127.0.0.1
 #: （本机 stdio/http 桥），一刀切会把最正常的用法挡死（把安全做成可用性事故）。
@@ -74,6 +75,23 @@ CREATE TABLE IF NOT EXISTS mcp_acl (
 );
 """
 
+#: PT-20261110-01：存量 `mcp_servers` 幂等补的 9 列。**旧行新列留 NULL，不回填**
+#: （`db.py:327-336` 的诚实纪律）—— NULL 就表示「手工注册，无来源」。
+MCP_SERVER_EXTRA_COLUMNS: Tuple[Tuple[str, str], ...] = (
+    ("source_id", "TEXT"),
+    ("source_key", "TEXT"),
+    ("registry_name", "TEXT"),
+    ("version", "TEXT"),
+    ("official_status", "TEXT"),
+    ("trust", "TEXT DEFAULT 'manual'"),
+    ("installed_at", "TEXT"),
+    ("last_used_at", "TEXT"),
+    ("use_count", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+#: 两条新表在 `mcpregistry.SOURCES_SCHEMA`，由本模块 `ensure_schema()` 一并执行
+#: ⇒ `main.py` 的 startup 接线一个字都不用动（已在调 `mcpgw.ensure_schema()`）。
+
 _tool_cache: Dict[str, Tuple[float, list]] = {}
 _rate: Dict[str, deque] = defaultdict(deque)
 
@@ -84,10 +102,22 @@ ACL_EFFECTS = ("enforce", "shadow")
 
 def ensure_schema():
     db.execute_script(SCHEMA)
+    db.execute_script(mcpregistry.SOURCES_SCHEMA)
     # P2 C2：存量库幂等补 `effect` 列。**缺失=enforce**（与旧行为逐字一致 —— 灰度是选择进入的）。
     have = {r["name"] for r in db.query("PRAGMA table_info(mcp_acl)")}
     if "effect" not in have:
         db.execute("ALTER TABLE mcp_acl ADD COLUMN effect TEXT DEFAULT 'enforce'")
+    # PT-20261110-01：mcp_servers 逐列幂等补；索引**一律建在 ALTER 之后**
+    # （db.py:156-159 教训：列不存在就 CREATE INDEX ⇒ 存量库启动即挂）。
+    have_srv = {r["name"] for r in db.query("PRAGMA table_info(mcp_servers)")}
+    for col, decl in MCP_SERVER_EXTRA_COLUMNS:
+        if col not in have_srv:
+            db.execute("ALTER TABLE mcp_servers ADD COLUMN %s %s" % (col, decl))
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_servers_source"
+        " ON mcp_servers(source_id, registry_name, version)"
+        " WHERE source_id IS NOT NULL")
+    mcpregistry.seed_default_source()
 
 
 def _now() -> str:
@@ -183,6 +213,28 @@ def _acl_check(agent_id: Optional[str], server_id: str, tool: str) -> dict:
                         + (f"（规则 {by}）" if by else ""))
 
 
+def _runtime_server(server: dict, runtime_env: Optional[dict] = None) -> dict:
+    """把**调用时注入**的凭据折进一份 server 副本，绝不写回 db。
+
+    刻意不改 `_session_for` 的签名：现有 L0 用 1 参替身 mock 它（`test_mcp_registry`
+    / `test_mcp_idempotency_l0` / `test_mcp_acl_shadow_l0`），加参数会让那批红向
+    用例集体假红。URL 的 `${VAR}`（来自 `mcpregistry.split_credential_url`）在这里
+    替换，缺变量直接报出来，不静默发一个必然失败的请求。
+    """
+    out = dict(server)
+    if out["transport"] == "http":
+        url, missing = mcpregistry.resolve_url(out["url"], runtime_env)
+        if missing:
+            raise HTTPException(400, "缺少运行时凭据 %s（请在 env 中注入，不落库）"
+                                % ",".join(missing))
+        out["url"] = url
+    elif runtime_env:
+        env = {k: str(v) for k, v in json.loads(out["env"] or "{}").items()}
+        env.update({k: str(v) for k, v in runtime_env.items()})
+        out["env"] = json.dumps(env)
+    return out
+
+
 async def _session_for(server: dict) -> Tuple[AsyncExitStack, ClientSession]:
     stack = AsyncExitStack()
     if server["transport"] == "http":
@@ -260,35 +312,56 @@ async def del_server(sid: str, request: Request):
 
 
 class ServerProbe(BaseModel):
-    command: str
+    """PT-20261110-01：probe 扩到 http + 运行时凭据。`command` 改可选以兼容
+    现有前端 `probeServer()`（仍只发 command/args）。`env` 的值只在本次请求内存里。"""
+    transport: str = "stdio"
+    command: Optional[str] = None
     args: list = []
+    url: Optional[str] = None
+    env: dict = {}
 
 
 @router.post("/mcp/servers/probe")
 async def probe_server(body: ServerProbe):
-    """临时起 stdio server 看它有哪些工具（不落库）——添加前的'预览'语义"""
-    fake = {"transport": "stdio", "command": body.command,
-            "args": json.dumps(body.args), "env": "{}", "url": None}
-    tools = await _list_tools(fake, use_cache=False)
+    """临时起 server 看它有哪些工具（不落库）——添加前的'预览'语义。"""
+    if body.transport == "http":
+        if not body.url:
+            raise HTTPException(400, "http 需要 url")
+        why = mcpregistry.check_probe_url(body.url, MCP_ALLOW_PRIVATE)
+        if why:
+            raise HTTPException(400, "出站准入拒绝：%s" % why)
+        fake = {"transport": "http", "url": body.url,
+                "command": None, "args": "[]", "env": "{}"}
+    elif body.transport == "stdio":
+        if not body.command:
+            raise HTTPException(400, "stdio 需要 command")
+        fake = {"transport": "stdio", "command": body.command,
+                "args": json.dumps(body.args), "env": "{}", "url": None}
+    else:
+        raise HTTPException(400, "transport 仅支持 stdio|http")
+    tools = await _list_tools(fake, use_cache=False, runtime_env=body.env)
     return {"tools": [{"name": t.name, "description": (t.description or "")[:120]}
                       for t in tools]}
 
 
-async def _list_tools(server: dict, use_cache: bool = True):
+async def _list_tools(server: dict, use_cache: bool = True,
+                      runtime_env: Optional[dict] = None):
     """列某 server 的工具。`use_cache=False` 给 probe 用——
     probe 是"改完 server 代码后预览"的语义，吃 60s 缓存会**静默给出旧工具表**，
     属于本机最禁的"全绿但信息是旧的"那一族。"""
-    key = server["id"] if "id" in server else server["command"]
+    # PT-20261110-01：旧写法 `server["id"] if "id" in server else server["command"]`
+    # 在 http fake（既无 id 又无 command）上直接 KeyError。改成三者兜底。
+    key = (server.get("id") or server.get("url") or server.get("command") or "")
     hit = _tool_cache.get(key)
     if use_cache and hit and time.monotonic() - hit[0] < LIST_TTL_S:
         return hit[1]
     async with AsyncExitStack() as outer:
-        stack, session = await _session_for(server)
+        stack, session = await _session_for(_runtime_server(server, runtime_env))
         outer.push_async_callback(stack.aclose)
         resp = await asyncio.wait_for(session.list_tools(), timeout=30)
         tools = resp.tools
     if use_cache:
-        _tool_cache[server.get("id", key)] = (time.monotonic(), tools)
+        _tool_cache[key] = (time.monotonic(), tools)
     return tools
 
 
@@ -522,10 +595,18 @@ class CallIn(BaseModel):
     tool: str
     args: dict = {}
     agent_id: Optional[str] = None
+    #: PT-20261110-01：调用时注入的凭据（替换 url 里的 `${VAR}` / 并入 stdio env）。
+    #: **只在本次请求内存里存在，绝不写回 mcp_servers**。
+    env: dict = {}
 
 
-@router.post("/mcp/call")
-async def mcp_call(body: CallIn):
+async def _call_one(body: CallIn) -> dict:
+    """单次 MCP 工具调用的**唯一实现**。
+
+    `POST /mcp/call` 与 `POST /mcp/run` 都走这里 —— 复制一份调用逻辑就会让
+    ACL / 幂等键 / resilience / 审计出现第二套漂移（本仓「两套并行实现只修一套」
+    的复发点）。失败以 `out.ok=False` 返回，由调用方决定要不要转成 502。
+    """
     # 确保 db 已初始化（manager 调 mcp_call 路径可能绕过 main.py init）
     # ⚠ 09-24 改：以前是无条件 `init_db(config.Config().db_path)`，而 init_db 会把**全局连接重指**。
     #   生产上看似无害（路径相同），但：① 任何 in-process 测试一发 /mcp/call 就会从 tmp 库
@@ -566,7 +647,7 @@ async def mcp_call(body: CallIn):
     status = "success"
     try:
         async with AsyncExitStack() as outer:
-            stack, session = await _session_for(server)
+            stack, session = await _session_for(_runtime_server(server, body.env))
             outer.push_async_callback(stack.aclose)
 
             async def _once():
@@ -596,6 +677,264 @@ async def mcp_call(body: CallIn):
                                      # P2 C2：影子规则「本应拒绝」的可查证据
                                      "acl_shadow_would_deny": (acl_decision or {}).get("shadow_would_deny"),
                                      "acl_shadow_rules": (acl_decision or {}).get("shadow_rules")})
+    # PT-20261110-01 ④「用过的服务器持久化」：成功才计一次，记账失败不倒带调用。
+    if out.get("ok"):
+        try:
+            db.execute("UPDATE mcp_servers SET use_count=COALESCE(use_count,0)+1,"
+                       " last_used_at=? WHERE id=?", (_now(), server["id"]))
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+@router.post("/mcp/call")
+async def mcp_call(body: CallIn):
+    out = await _call_one(body)
     if not out.get("ok"):
         raise HTTPException(502, json.dumps(out, ensure_ascii=False))
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PT-20261110-01 · 源 / 目录 / 安装 / 一键编排
+#
+# 命名避撞：`/mcp/registry` 已是「agent 视角工具注册表派生视图」（:473，
+# tests/test_mcp_registry.py 钉着）⇒ 源一律 `/mcp/sources`、本地目录 `/mcp/catalog`。
+# 写路由全部由 main.py 的全局 write_gate 覆盖，另在 authz.WRITE_ROUTE_SCOPES 登记。
+# ══════════════════════════════════════════════════════════════════════════
+
+class SourceIn(BaseModel):
+    kind: str = "official_registry"
+    label: str = ""
+    base_url: str
+
+
+class SourcePatchIn(BaseModel):
+    label: Optional[str] = None
+    enabled: Optional[bool] = None
+    base_url: Optional[str] = None
+
+
+class SyncIn(BaseModel):
+    search: str = ""
+    force: bool = False
+
+
+class InstallIn(BaseModel):
+    cache_key: str
+    auto: bool = False
+    name: str = ""
+
+
+class RunIn(BaseModel):
+    task: str = ""
+    agent_id: str = "manager"
+    auto_install: bool = False
+    n: int = 8
+    mode: str = "plan"          # plan（默认 dry）| exec
+    cache_key: str = ""         # 指定安装哪张卡；空 = 用发现结果 top-1
+    server: str = ""            # exec 指定目标 server（id/name）
+    tool: str = ""              # exec 指定目标 tool
+    call_args: dict = {}        # 结构化参数由调用方给，不让 hub 引入 LLM 猜参数
+    call_env: dict = {}         # 运行时凭据，绝不落库
+
+
+def _err(exc: Exception) -> HTTPException:
+    """把逻辑层的 ValueError/LookupError/PermissionError 翻成带人话的 4xx。"""
+    if isinstance(exc, LookupError):
+        return HTTPException(404, str(exc))
+    if isinstance(exc, PermissionError):
+        return HTTPException(403, str(exc))
+    return HTTPException(400, str(exc))
+
+
+@router.get("/mcp/sources")
+async def list_sources():
+    return {"sources": mcpregistry.source_list(),
+            "default_base_url": mcpregistry.OFFICIAL_REGISTRY}
+
+
+@router.post("/mcp/sources")
+async def add_source(body: SourceIn, request: Request):
+    try:
+        res = mcpregistry.source_add(body.kind, body.label, body.base_url)
+    except (ValueError, LookupError, PermissionError) as e:
+        raise _err(e)
+    db.log_asset_event("mcp_source", res.get("id") or "deduped",
+                       "create" if not res.get("deduped") else "update",
+                       writeauth.actor_of(request),
+                       {"kind": body.kind, "base_url": body.base_url})
+    return res
+
+
+@router.patch("/mcp/sources/{sid}")
+async def patch_source(sid: str, body: SourcePatchIn, request: Request):
+    try:
+        res = mcpregistry.source_patch(sid, body.label, body.enabled, body.base_url)
+    except (ValueError, LookupError, PermissionError) as e:
+        raise _err(e)
+    db.log_asset_event("mcp_source", sid, "update", writeauth.actor_of(request),
+                       {"enabled": body.enabled, "label": body.label})
+    return res
+
+
+@router.delete("/mcp/sources/{sid}")
+async def delete_source(sid: str, request: Request):
+    try:
+        res = mcpregistry.source_delete(sid)
+    except (ValueError, LookupError, PermissionError) as e:
+        raise _err(e)
+    db.log_asset_event("mcp_source", sid, "delete", writeauth.actor_of(request))
+    return res
+
+
+@router.post("/mcp/sources/{sid}/sync")
+async def sync_source(sid: str, body: SyncIn, request: Request):
+    """手动抓一次源。失败不清空旧缓存，`degraded/last_error` 如实回。"""
+    try:
+        res = mcpregistry.sync_source(sid, body.search, body.force)
+    except (ValueError, LookupError, PermissionError) as e:
+        raise _err(e)
+    db.log_asset_event("mcp_source", sid, "update", writeauth.actor_of(request),
+                       {"pages": res.get("pages"), "fetched": res.get("fetched"),
+                        "degraded": res.get("degraded")})
+    return res
+
+
+@router.get("/mcp/sources/{sid}/servers")
+async def source_servers(sid: str, limit: int = 100):
+    rows = db.query(
+        "SELECT cache_key,name,version,title,description,status,is_latest,"
+        " transport_hint,has_secret,fetched_at FROM mcp_source_cache"
+        " WHERE source_id=? ORDER BY name LIMIT ?", (sid, min(max(limit, 1), 500)))
+    return {"servers": [dict(r) for r in rows], "count": len(rows)}
+
+
+@router.get("/mcp/catalog")
+async def catalog(q: str = "", n: int = 20, status: str = "active"):
+    """可装池派生视图 + 按任务 BM25F 发现（纯本地缓存，零网络零费用）。"""
+    if status != "active":
+        raise HTTPException(400, "status 只支持 active（deprecated/deleted 不入可装池）")
+    return mcpregistry.catalog(q, n)
+
+
+@router.post("/mcp/install")
+async def install_server(body: InstallIn, request: Request):
+    """把缓存卡落库成 `mcp_servers`。凭据值不落库，URL 只留 `${VAR}` 占位。"""
+    try:
+        prepared = mcpregistry.prepare_install(body.cache_key, auto=body.auto)
+    except (ValueError, LookupError, PermissionError) as e:
+        raise _err(e)
+    spec = prepared["spec"]
+    sid = f"{int(time.time()*1000):x}"
+    now = _now()
+    # 幂等：同 (source_id, registry_name, version) 已装过就回既有行
+    dup = db.query(
+        "SELECT id FROM mcp_servers WHERE source_id=? AND registry_name=? AND version=?",
+        (prepared["source_id"], prepared["registry_name"], prepared["version"]))
+    if dup:
+        return {"id": dup[0]["id"], "status": "deduped", "installed": False}
+    name = (body.name or "").strip()[:80] or prepared["registry_name"].split("/")[-1]
+    db.execute(
+        "INSERT INTO mcp_servers(id,name,transport,command,args,env,url,enabled,"
+        "description,created_at,updated_at,source_id,source_key,registry_name,"
+        "version,official_status,trust,installed_at,use_count) "
+        "VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,0)",
+        (sid, name, spec["transport"], spec["command"],
+         json.dumps(spec["args"]), json.dumps(spec["env"]),
+         spec["url"], prepared["description"], now, now,
+         prepared["source_id"], body.cache_key, prepared["registry_name"],
+         prepared["version"], prepared["official_status"], prepared["trust"], now))
+    _tool_cache.clear()
+    db.log_asset_event(
+        "mcp_server", sid, "create", writeauth.actor_of(request),
+        {"name": name, "transport": spec["transport"],
+         "source_id": prepared["source_id"], "registry_name": prepared["registry_name"],
+         "version": prepared["version"], "trust": prepared["trust"],
+         # env 里只有非敏感默认值；secret 只记名字，绝不记值
+         "has_env": bool(spec["env"]),
+         "required_secrets": spec["required_secrets"]})
+    if body.auto:
+        db.log_profile_event("mcp_source", "install_auto", "success", None,
+                             detail={"cache_key": body.cache_key, "server_id": sid})
+    return {"id": sid, "status": "installed", "installed": True,
+            "name": name, "spec": spec}
+
+
+@router.post("/mcp/run")
+async def mcp_run(body: RunIn, request: Request):
+    """「我只要结果」：discover →（可选 install）→ select → call 一次收在 hub 内。
+
+    `mode=plan`（默认）是 dry：只读本地库与缓存，**不写盘、不联网、不拉起进程、
+    不花钱**；`mode=exec` 才执行。`auto_install` 默认 false，且只对 top-1 生效。
+    """
+    t0 = time.monotonic()
+    if body.mode not in ("plan", "exec"):
+        raise HTTPException(400, "mode 仅支持 plan|exec")
+    out: Dict[str, Any] = {
+        "task": body.task, "mode": body.mode, "agent_id": body.agent_id,
+        "auto_install": body.auto_install,
+        "discovered": [], "installed": [], "selected": [], "calls": [],
+        "considered": 0, "degraded": [], "note": "", "why": None,
+    }
+    # ① 发现（本地缓存，零网络）
+    cat = mcpregistry.catalog(body.task, max(body.n, 1))
+    out["discovered"] = cat["items"]
+    out["considered"] = cat["considered"]
+    out["why"] = cat.get("why")
+    if cat.get("note") and body.mode == "plan":
+        out["note"] = cat["note"]
+    if cat["considered"] == 0:
+        out["degraded"].append("本地目录为空：先添加源并同步")
+    # ② 安装（仅 exec + auto_install，且只 top-1，额度闸在 prepare_install 里）
+    if body.mode == "exec" and body.auto_install:
+        key = body.cache_key or (cat["items"][0]["cache_key"] if cat["items"] else "")
+        if not key:
+            out["degraded"].append("没有可安装的候选（发现为空）")
+        else:
+            try:
+                inst = await install_server(
+                    InstallIn(cache_key=key, auto=True), request)
+                out["installed"].append(inst)
+            except HTTPException as e:
+                out["degraded"].append("自动安装被拒：%s" % e.detail)
+    # ③ 按任务裁剪已注册工具（复用 select_tools，进程内调用，不自调 HTTP）
+    if body.mode == "exec":
+        sel = await select_tools(body.task, n=body.n, agent=body.agent_id)
+        out["selected"] = sel.get("items") or []
+        if sel.get("why"):
+            out["why"] = "；".join(x for x in (out["why"], sel["why"]) if x)
+        if sel.get("dropped_acl"):
+            out["note"] = "；".join(x for x in (
+                out["note"], "%d 个工具被 ACL 裁掉" % sel["dropped_acl"]) if x)
+        # ④ 执行（调用方给结构化 args，不让 hub 引入 LLM 猜参数）
+        target = None
+        if body.server and body.tool:
+            target = (body.server, body.tool)
+        elif out["selected"]:
+            it = out["selected"][0]
+            target = (it.get("server") or "", it.get("name") or "")
+        if not target or not target[0] or not target[1]:
+            out["degraded"].append("没有可调用的目标工具：请给 server+tool，"
+                                   "或先安装并让 /mcp/select 选出工具")
+        else:
+            try:
+                res = await _call_one(CallIn(
+                    server=target[0], tool=target[1], args=body.call_args,
+                    agent_id=body.agent_id, env=body.call_env))
+                out["calls"].append({"server": target[0], "tool": target[1],
+                                     "ok": bool(res.get("ok")), "result": res})
+                if not res.get("ok"):
+                    out["degraded"].append("工具调用失败：%s" %
+                                           (res.get("error") or "is_error"))
+            except HTTPException as e:
+                out["calls"].append({"server": target[0], "tool": target[1],
+                                     "ok": False, "error": str(e.detail),
+                                     "http": e.status_code})
+                out["degraded"].append("工具调用被拒：%s" % e.detail)
+    else:
+        out["note"] = "；".join(x for x in (
+            out["note"], "plan 模式为 dry：未写盘、未联网、未拉起进程、未产生扣费；"
+            "带 mode=exec + call_args 才会真调") if x)
+    out["took_ms"] = int((time.monotonic() - t0) * 1000)
     return out

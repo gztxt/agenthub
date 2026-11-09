@@ -35,7 +35,7 @@ SCOPES = frozenset({
 })
 
 #: 键 = (模块名不含 .py, HTTP 方法, 路由字面量)。路由里的 `{param}` 原样保留。
-#: 99 条 = 2026-11-09 源码实测（P3 事件出口 chat/events + interrupt 各 +1）；加/删端点必须同步本表。
+#: 105 条 = 2026-11-10 源码实测（PT-20261110-01 新增 6 条 MCP 源/安装/编排写路由）；加/删端点必须同步本表。
 WRITE_ROUTE_SCOPES = {
     ("actionplane", "POST", "/api/actions"): "hub.catalog.write",
     ("actionplane", "POST", "/api/actions/{action_id}/decide"): "hub.catalog.write",
@@ -82,6 +82,13 @@ WRITE_ROUTE_SCOPES = {
     ("mcpgw", "POST", "/mcp/servers"): "hub.mcp.write",
     ("mcpgw", "POST", "/mcp/servers/probe"): "hub.mcp.write",
     ("mcpgw", "DELETE", "/mcp/servers/{sid}"): "hub.mcp.write",
+    # PT-20261110-01：源 / 目录 / 安装 / 编排（6 条写路由）
+    ("mcpgw", "POST", "/mcp/sources"): "hub.mcp.write",
+    ("mcpgw", "PATCH", "/mcp/sources/{sid}"): "hub.mcp.write",
+    ("mcpgw", "DELETE", "/mcp/sources/{sid}"): "hub.mcp.write",
+    ("mcpgw", "POST", "/mcp/sources/{sid}/sync"): "hub.mcp.write",
+    ("mcpgw", "POST", "/mcp/install"): "hub.mcp.write",
+    ("mcpgw", "POST", "/mcp/run"): "hub.mcp.write",
     ("memory", "POST", "/api/memory/archive"): "hub.memory.write",
     ("memory", "POST", "/api/memory/l1"): "hub.memory.write",
     ("memory", "POST", "/api/memory/l1/batch"): "hub.memory.write",
@@ -147,8 +154,8 @@ EXEMPT_WRITE_ROUTES = frozenset({
     ("hook", "POST", "/telemetry/events/{source}"),
 })
 
-#: 24 条有副作用的写路由：起进程、发外网、改全局配置、调 LLM 或重扫。
-#: P0-3 先只对这 24 条强制 scope，其余保持登录放行，降低回归面。
+#: 27 条有副作用的写路由：起进程、发外网、改全局配置、调 LLM 或重扫。
+#: P0-3 先只对这 27 条强制 scope，其余保持登录放行，降低回归面。
 SIDE_EFFECT_ROUTES = frozenset({
     ("api_agents", "POST", "/api/agents/{agent_id}/chat"),
     ("api_agents", "POST", "/api/agents/{agent_id}/chat/stream"),
@@ -164,6 +171,10 @@ SIDE_EFFECT_ROUTES = frozenset({
     ("githubprojects", "POST", "/api/github/clone"),
     ("main", "POST", "/api/scan/run"),
     ("mcpgw", "POST", "/mcp/call"),
+    # PT-20261110-01：发外网 / 起进程 / 改配置的三条
+    ("mcpgw", "POST", "/mcp/sources/{sid}/sync"),
+    ("mcpgw", "POST", "/mcp/install"),
+    ("mcpgw", "POST", "/mcp/run"),
     ("modelcfg", "POST", "/api/settings/model/apply"),
     ("resources", "POST", "/api/resources/kill"),
     ("settings_bundle", "POST", "/api/settings/import"),

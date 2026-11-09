@@ -392,12 +392,14 @@ class DocTruth(unittest.TestCase):
         self.assertIn("FROM mcp_acl WHERE agent_id IN (?, '*') ORDER BY id", src)
 
     def test_mcp_call_never_rebinds_global_db(self):
-        """★ 红向：`mcp_call` 里丌得再出现无条件 `db.init_db(...)`。
+        """★ 红向：调用实现里丌得再出现无条件 `db.init_db(...)`。
         旧写法会在全局已连着 tmp 库时把它重指到生产库 ⇒ 一发 `/mcp/call`，
         测试的写入就落在真库上（本机 09-24 实际造成过一次 mcp_servers/mcp_acl 污染）。
-        同时 P0 往 init_db 里加了 wal_checkpoint(TRUNCATE) ⇒ 按次重进就是按次抢锁。"""
+        同时 P0 往 init_db 里加了 wal_checkpoint(TRUNCATE) ⇒ 按次重进就是按次抢锁。
+        PT-20261110-01：调用体抽到 `_call_one`（`/mcp/call` 与 `/mcp/run` 同源），
+        判据跟着指向那一份唯一实现，不能因为换了函数名就放过。"""
         src = pathlib.Path(_REPO / "src" / "mcpgw.py").read_text(encoding="utf-8")
-        body = src[src.index("async def mcp_call"):]
+        body = src[src.index("async def _call_one"):]
         seg = body[:900]
         self.assertIn("if not db.is_open():", seg,
                       "init_db 没被“已连接则跳过”守住 ⇒ 全局连接可被单次调用重指")

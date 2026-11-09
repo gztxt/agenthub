@@ -943,6 +943,41 @@ def hub_summarize(text: str, points: int = 3, style: str = "") -> str:
     return json.dumps(_post("/api/summarize", body, _timeout=300), ensure_ascii=False)
 
 
+# ── PT-20261110-01 A2：源发现 / 一键编排转发（**默认不注册**）──────────────
+#: 为什么不靠 `ALLOW_TOOLS` 白名单自动收窄：白名单为空时 `apply_tool_scope()` 的
+#: `if keep:` 根本不执行 ⇒ 新工具照样全量外泄。故这里用显式闸门，签了字才注册。
+#: `HUB_MCP_ALLOW_MCP_TOOLS=1` 才会出现这两个工具；`test_hubmcp_scope` 的 default
+#: 场景会清掉所有 `HUB_MCP_ALLOW_*` 变量 ⇒ 天然不含它们，既有断言不受影响。
+ALLOW_MCP_TOOLS = os.getenv("HUB_MCP_ALLOW_MCP_TOOLS", "0") == "1"
+
+if ALLOW_MCP_TOOLS:
+    @server.tool()
+    def mcp_discover(task: str = "", n: int = 8) -> str:
+        """按任务从本机 MCP 服务器目录（源缓存）检索候选服务器。
+
+        返回候选的 name/title/description、transport_hint、是否可安装、所需凭据**名字**
+        （值绝不返回）。纯本地缓存，零网络零费用。要安装/调用请用 `mcp_run`。
+        """
+        return json.dumps(_get("/mcp/catalog", q=task, n=n), ensure_ascii=False)
+
+    @server.tool()
+    def mcp_run(task: str = "", mode: str = "plan", auto_install: bool = False,
+                call_args: str = "{}") -> str:
+        """一句任务 → 发现候选 MCP 服务器 → 裁剪工具 → 调用，回完整结果。
+
+        `mode=plan`（默认）是 dry，只回候选、不写盘不联网；`mode=exec` 才真执行。
+        `auto_install` 默认 false；`call_args` 是 JSON 字符串，结构化参数由调用方给。
+        返回 discovered/installed/selected/calls/degraded/note/why 门面信封。
+        """
+        try:
+            args = json.loads(call_args or "{}")
+        except Exception:  # noqa: BLE001
+            args = {}
+        return json.dumps(_post("/mcp/run", {
+            "task": task, "mode": mode, "auto_install": bool(auto_install),
+            "call_args": args}, _timeout=180), ensure_ascii=False)
+
+
 def apply_tool_scope() -> dict:
     """按 env 收窄对外工具面（幂等）。返回审计摘要，供启动日志与测试断言。
 

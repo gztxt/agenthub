@@ -47,16 +47,19 @@ fi
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 HUB="${HUB_URL:-http://127.0.0.1:${PORT:-3102}}"
 # 2026-11-07 用户裁定：机器侧身份 = HTTP Basic（共享 token 兼容面已删除）。
-HUB_USER="${HUB_BASIC_USER:-gztxt}"
-HUB_PW="${HUB_SUPERADMIN_PW:-}"
-if [ -z "$HUB_PW" ] && [ -r "$REPO/.env" ]; then
-  HUB_PW=$(grep -m1 '^HUB_SUPERADMIN_PW=' "$REPO/.env" 2>/dev/null | cut -d= -f2-)
-fi
-if [ -z "$HUB_PW" ]; then
-  echo "FAIL: 无凭据（HUB_SUPERADMIN_PW 未设置，且读不到 agenthub/.env）" >&2
+# 解析实现只有一份：scripts/hub-basic.sh（.env 压过环境变量；口令不进 argv）。
+# 旧实现先读环境变量 ⇒ PTY 里的旧口令快照压过 .env，实测恒 401（2026-11-09）。
+if [ ! -r "$REPO/scripts/hub-basic.sh" ]; then
+  echo "FAIL: 缺凭据解析库（$REPO/scripts/hub-basic.sh）" >&2
   exit 2
 fi
-CURL_AUTH=(-u "$HUB_USER:$HUB_PW")
+# shellcheck source=/dev/null
+. "$REPO/scripts/hub-basic.sh"
+HUB_ENV_FILE="${HUB_ENV_FILE:-$REPO/.env}"
+if ! hub_basic_resolve "$HUB_ENV_FILE"; then
+  echo "FAIL: 无凭据（HUB_SUPERADMIN_PW 未设置，且读不到 $HUB_ENV_FILE）" >&2
+  exit 2
+fi
 
 HEALTH=$(curl -sf -m 5 "$HUB/health" 2>/dev/null) || {
   echo "FAIL: hub 不可达（$HUB/health）——自检必须先有在跑的服务" >&2; exit 2; }
@@ -71,8 +74,8 @@ if [ "$REF_MODE" = "auto" ]; then
 fi
 
 post() {  # post <json-body> <timeout>
-  curl -s -m "$2" -X POST "$HUB/api/intake/task" \
-    -H 'Content-Type: application/json' "${CURL_AUTH[@]}" -d "$1" 2>/dev/null
+  hub_basic_curl -s -m "$2" -X POST "$HUB/api/intake/task" \
+    -H 'Content-Type: application/json' -d "$1" 2>/dev/null
 }
 
 FAST_BODY='{"task":"自检：接单前置四查能否正常出简报","caller":"selfcheck","escalate":"off","auto_deep":false}'

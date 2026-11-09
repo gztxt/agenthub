@@ -1221,6 +1221,18 @@
            的 height 算行数，而它只减去 xterm 自己的 padding、不减父元素的——一旦给任一层加 inset，
            算出的行数就会多出一行，屏幕高度超出内容盒被 overflow:hidden 裁掉（底部遵住）。
            旧实测凭据：父层带 6px padding 时 .xterm 高 468px、#termEl 内容盒仅 459px，底部溢出 9~10px。 */
+        /* P3 v1 结构化事件面板（与终端并列；事件不写进 xterm）。 */
+        .ev-body { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--surface); }
+        .ev-body .bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); flex: none; flex-wrap: wrap; }
+        .ev-list { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+        .ev-item { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--surface-2); font-size: var(--fs-sm); }
+        .ev-item .ev-k { display: block; font-family: var(--font-mono); font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+        .ev-item.ev-text { white-space: pre-wrap; word-break: break-word; line-height: var(--lh-loose); }
+        .ev-item.ev-error { border-color: var(--danger); color: var(--danger-text); }
+        .ev-item details summary { cursor: pointer; color: var(--text-2); }
+        .ev-item pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 11px; }
+        .ev-body .composer { padding: 8px 10px; }
+        .ev-body .composer textarea { flex: 1; min-height: 34px; max-height: 120px; resize: vertical; }
         .term-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; position: relative; }
         #termEl { flex: 1; min-height: 0; padding: 0; background: var(--term-bg); overflow: hidden; }
         /* 连接中反馈：终端区顶部一条 2px 走马灯（绝对定位，不进内容流，所以不破上面那条
@@ -1903,6 +1915,7 @@
                             <span class="sess-row" id="termSessList"></span>
                             <span class="ebar-sp"></span>
                             <button class="ebar-btn" onclick="termNew()" title="新建终端会话"><svg class="i xs" aria-hidden="true"><use href="#i-plus"/></svg>新会话</button>
+                            <button class="ebar-btn" id="termToEvents" onclick="evToggle()" title="查看结构化事件流（不污染终端字节流）"><svg class="i xs" aria-hidden="true"><use href="#i-flow"/></svg>事件</button>
                             <button class="ebar-btn" id="termToEmbed" onclick="switchMode('embed')" title="改用内嵌的原生界面"><svg class="i xs" aria-hidden="true"><use href="#i-monitor"/></svg>原生界面</button></div>
                         <div class="term-body"><div id="termEl"></div>
                             <!-- 终端内查找（Ctrl/Cmd+F）。刻意用 absolute 浮层：不给 #termEl 的父层
@@ -1924,6 +1937,22 @@
                                 <button class="tc-btn" id="termCtxCopy" role="menuitem">复制</button>
                                 <button class="tc-btn" id="termCtxPaste" role="menuitem">粘贴</button>
                                 <button class="tc-btn" id="termCtxSelAll" role="menuitem">全选</button>
+                            </div>
+                        </div>
+                        <!-- P3 v1 结构化事件面板：与 xterm 终端并列、可切换。
+                             事件只走 SSE，绝不写进 term.write()（否则会像 auth_url 一样被当正文画出来）。 -->
+                        <div class="ev-body" id="evBody" style="display:none">
+                            <div class="bar">
+                                <b>结构化事件</b>
+                                <span class="hint" id="evSidHint">未开始</span>
+                                <span class="ebar-sp"></span>
+                                <button class="btn ghost sm" id="evInterrupt" onclick="evInterrupt()" disabled>中断</button>
+                                <button class="btn ghost sm" onclick="evToggle(false)">返回终端</button>
+                            </div>
+                            <div class="ev-list" id="evList"><div class="hint">输入消息后点「发送事件流」。事件按 type 结构化渲染，与终端字节流互不污染。</div></div>
+                            <div class="composer">
+                                <textarea id="evInput" rows="1" placeholder="消息…（Enter 发送，Shift+Enter 换行）" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();evSend()}"></textarea>
+                                <button class="btn" id="evSendBtn" onclick="evSend()">发送事件流</button>
                             </div>
                         </div>
                     </div>
@@ -3619,7 +3648,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=0aa8f7b9';
+      var HUB_SRC = '/static/hub.js?v=3679532b';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

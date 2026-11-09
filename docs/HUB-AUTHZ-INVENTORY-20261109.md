@@ -17,11 +17,11 @@
 
 ## 1. 五条结论
 
-1. **写面是「登录即全权」，不是「按模块授权」**：`writeauth.decide()` 只判 `identity`，命中就 `allow`（`src/writeauth.py:66-75`）。97 条写端点拆开是：**88 条登录即全权**（无任何 admin/模块校验）+ **7 条 admin 校验**（全在 `src/users.py`）+ **2 条豁免**（登录/登出）。
+1. **写面是「登录即全权」，不是「按模块授权」**：`writeauth.decide()` 只判 `identity`，命中就 `allow`（`src/writeauth.py:66-75`）。99 条写端点拆开是：**90 条登录即全权**（无任何 admin/模块校验）+ **7 条 admin 校验**（全在 `src/users.py`）+ **2 条豁免**（登录/登出）。
 2. **现有 `user_perms` 管的是菜单可见性，不参与写判定**：定义即「按菜单节点 id 授权」（`src/users.py:10`），读取只用于过滤导航（`src/users.py:96-97`）。所以「给某人只开记忆模块」目前只影响他看不看得见入口，不影响他能不能直接 POST。
 3. **3 条豁免是有理由的，不是漏网**：`/telemetry/events/`、`/api/users/login`、`/api/users/logout`（`src/writeauth.py:36-47`），每条都自带鉴权或必须未登录可达。
-4. **97 条写里 22 条有外部副作用**，最危险的 5 条按后果排序：`POST /api/system/restart`（杀活会话）、`POST /api/resources/kill`（杀进程）、`POST /mcp/call`（任意工具调用）、`POST /api/settings/model/apply`（改全局模型路由）、`POST /api/settings/github/apply`（改 GitHub 凭据）。
-5. **当前风险不是「已有人越权」，而是「未来设备令牌一出生就是管理员」**：本机只有 1 个 admin 用户、0 个非管理员。一旦按 t3 模式发只读配对令牌，若不先做 scope，拿到令牌的手机等于拿到全部 97 条写权限。
+4. **99 条写里 24 条有外部副作用**，最危险的 5 条按后果排序：`POST /api/system/restart`（杀活会话）、`POST /api/resources/kill`（杀进程）、`POST /mcp/call`（任意工具调用）、`POST /api/settings/model/apply`（改全局模型路由）、`POST /api/settings/github/apply`（改 GitHub 凭据）。
+5. **当前风险不是「已有人越权」，而是「未来设备令牌一出生就是管理员」**：本机只有 1 个 admin 用户、0 个非管理员。一旦按 t3 模式发只读配对令牌，若不先做 scope，拿到令牌的手机等于拿到全部 99 条写权限。
 
 ## 2. 建议的 9 个 scope
 
@@ -81,6 +81,8 @@
 | DELETE | `/api/agents/{agent_id}` | `src/api_agents.py:204` | — |
 | POST | `/api/agents/{agent_id}/chat` | `src/api_agents.py:470` | 🟠 调 LLM |
 | POST | `/api/agents/{agent_id}/chat/stream` | `src/api_agents.py:485` | 🟠 调 LLM |
+| POST | `/api/agents/{agent_id}/chat/events` | `src/api_events.py:107` | 🟠 调 LLM（P3 事件流） |
+| POST | `/api/agents/{agent_id}/interrupt` | `src/api_events.py:156` | 🔴 杀进程（P3） |
 | POST | `/api/agents/{agent_id}/ui-start` | `src/api_agents.py:341` | 🟠 起进程 |
 | POST | `/api/agents/{agent_id}/verify` | `src/api_agents.py:149` | — |
 | PATCH | `/api/sessions/{session_id}` | `src/api_sessions.py:131` | — |
@@ -202,21 +204,21 @@
 
 按本清单，P0 不是「加登录」（登录已有），而是把 `write_gate` 的单一 `allow` 改成「identity + scope」。分三步，两个判断点单列：
 
-1. **声明层**：建 `SCOPES` 表，给 97 条逐条标 scope（默认 `hub.ops.write` 仅限现存的 14 条，其余必须显式声明）。
+1. **声明层**：建 `SCOPES` 表，给 99 条逐条标 scope（默认 `hub.ops.write` 仅限现存的 14 条，其余必须显式声明）。
 2. **判据**：加测试「每条写路由必须在声明表里，漏一条就失败」——照 t3 的 `satisfies Record` 思路，但 Python 用测试兜底。
 3. **看第 2 步结果再决定兼容策略**：admin 自动全通；非 admin 按 `user_perms` 映射只读（因为当前 0 非管理员，不会伤到现网）。
 4. **干跑 24h**：只记 403 候选、不真拒，确认页面无回归。
-5. **切换 enforce**：先只对 22 条副作用端点强制 scope，其余保持登录放行；稳定后再全量。
+5. **切换 enforce**：先只对 24 条副作用端点强制 scope，其余保持登录放行；稳定后再全量。
 
-**验收判据（可执行）**：只读令牌打 22 条副作用端点 → 全部 403；admin 会话 → 全通；现有前端零 403；`tests/test_writeauth.py` 的清单覆盖断言仍绿。
+**验收判据（可执行）**：只读令牌打 24 条副作用端点 → 全部 403；admin 会话 → 全通；现有前端零 403；`tests/test_writeauth.py` 的清单覆盖断言仍绿。
 
 ## 5. P0-1 落地状态（2026-11-09）
 
-- **声明表（唯一权威）**：`src/authz.py`。97 条 `(module, method, path) → scope`，9 个写 scope，22 条副作用集合，3 条豁免（`EXEMPT_WRITE_ROUTES`，与 `writeauth.EXEMPT_PREFIXES` 逐条对齐）。
+- **声明表（唯一权威）**：`src/authz.py`。99 条 `(module, method, path) → scope`，9 个写 scope，24 条副作用集合，3 条豁免（`EXEMPT_WRITE_ROUTES`，与 `writeauth.EXEMPT_PREFIXES` 逐条对齐）。
 - **一致性闸门**：`tests/test_authz_scopes.py`，8 条断言。核心是「真实路由集合 == 声明集合」的双向比对：漏声明、僵尸声明、未知 scope、豁免口径分叉、副作用条数漂移，任一条都失败。
 - **行为零变化**：`writeauth.decide()` 未被修改，本表尚不参与鉴权。P0-2 才接。
 - **验收命令**：`venv/bin/python -m pytest -q tests/test_authz_scopes.py tests/test_writeauth.py` → 22 passed。
-- **分布核对**：task 11 / agent 12 / memory 8 / skill 10 / catalog 15 / mcp 6 / settings 12 / ops 14 / user 9 = 97。
+- **分布核对**：task 11 / agent 14 / memory 8 / skill 10 / catalog 15 / mcp 6 / settings 12 / ops 14 / user 9 = 99。
 
 ### P0-2 的第一个判断点：scope 挂在哪
 
@@ -273,7 +275,7 @@
 
 | 文件 | 改动 |
 |---|---|
-| `src/authz.py` | 新增 `is_side_effect_path`（22 条按 (method,path) 模板匹配）与 `enforce_verdict` 四条件纯判定 |
+| `src/authz.py` | 新增 `is_side_effect_path`（24 条按 (method,path) 模板匹配）与 `enforce_verdict` 四条件纯判定 |
 | `src/writeauth.py` | `write_gate` 干跑块后接 enforce；`read_gate` 公共放行面加 `/api/meta`（P4 联动） |
 | `src/users.py` | `issue_session(user_row, scopes=None)` 写 `user_credentials.scopes`（NULL=沿用现行） |
 | `src/meta.py` | `MIN_CLIENT_VERSION=None`（裁定：本机前端无独立版本号，不回填假值） |
@@ -281,7 +283,7 @@
 | `tests/test_meta_l0.py` | `min_client` 断言改为允许 None |
 
 **enforce 判据（四条件同时成立才拒）**：`HUB_AUTHZ_ENFORCE=1` + 会话 scopes 非 NULL
-（显式受限）+ 缺所需 scope + 端点在 22 条副作用集合内。其余一律放行：默认关、
+（显式受限）+ 缺所需 scope + 端点在 24 条副作用集合内。其余一律放行：默认关、
 NULL scopes（升级零感知）、非副作用端点、已持 scope、未声明端点、判定异常 fail-open
 —— 全部放行，不因新逻辑把合法写请求打成 500。
 
@@ -323,7 +325,7 @@ NULL scopes（升级零感知）、非副作用端点、已持 scope、未声明
 
 **为什么暂停（三条叠加，照 t3 直接落地 = 假受限）**：
 1. `HUB_AUTHZ_ENFORCE` 默认关 ⇒ 所有会话（含受限会话）一律走干跑、写端点全放行；
-2. `enforce_verdict` 只强制 22 条副作用端点，其余 75 条写端点即使缺 scope 也放行；
+2. `enforce_verdict` 只强制 24 条副作用端点，其余 75 条写端点即使缺 scope 也放行；
 3. `read_gate` / `read_verdict` 完全不看 scope ⇒ 读面无鉴权。
 t3 实测 `--scope orchestration:read` 会话**真**只剩 1 权限；本机若照搬，签出的是
 `scopes=[]`（`parse_scopes` 语义＝只读）却几乎全权的会话 —— 给用户错误的安全感，
@@ -342,6 +344,6 @@ t3 实测 `--scope orchestration:read` 会话**真**只剩 1 权限；本机若�
 （即 ①b 或等价物），再谈开关。开关与 ①b 绑定，本轮一并挂起，不单独开启。
 
 **再启动触发条件**：将来若要落地配对码，须先做「scope 语义统一」专项 —— 读面鉴权 +
-把 enforce 从 22 条副作用端点扩到全部 97 条写端点，再一次性改完 ①b 的 6 硬同源点 →
+把 enforce 从 24 条副作用端点扩到全部 99 条写端点，再一次性改完 ①b 的 6 硬同源点 →
 单独 L0 → **用户签字重启窗口**（`term_sessions=1`，唯一入口
 `bash agenthub/scripts/hub-restart.sh --reason "..."`）。主会话不自行拍板、不自行重启。

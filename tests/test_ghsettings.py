@@ -369,7 +369,11 @@ class TestFrontendWiring(unittest.TestCase):
                    "settingsGithubClear", "settingsGithubRefresh", "settingsGithubStatus"):
             self.assertIn(f"function {fn}(", self.js, f"{fn} 缺失 ⇒ 点了没反应")
         i = self.js.find("function settingsDelegates(")
-        body = self.js[i:i + 1400]
+        self.assertGreaterEqual(i, 0, "settingsDelegates 缺失")
+        # 按函数边界取全文，不用固定字符窗口：函数会随功能增长，1400 字符
+        # 窗口会让后加的 act 落在窗口外造成假红（PT-20261108-03 / PT-20261109-09）。
+        nxt = self.js.find("\nfunction ", i + 1)
+        body = self.js[i:nxt if nxt > 0 else len(self.js)]
         for act in ("gh-test", "gh-apply", "gh-clear", "gh-refresh"):
             self.assertIn(act, body, f"委托没接管 {act}")
 

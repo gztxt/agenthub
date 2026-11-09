@@ -110,8 +110,10 @@ def _basic() -> dict:
                     env[k.strip()] = v.strip().strip('"').strip("'")
     except Exception:  # noqa: BLE001
         pass
-    user = os.getenv("HUB_BASIC_USER") or env.get("HUB_BASIC_USER") or "gztxt"
-    pw = os.getenv("HUB_SUPERADMIN_PW") or env.get("HUB_SUPERADMIN_PW") or ""
+    # .env 压过环境变量：cron/PTY 里的 HUB_SUPERADMIN_PW 是启动时的旧快照，
+    # 用户改口令后它会让每次调用恒 401（2026-11-09 实测，intake.sh 同型）。
+    user = env.get("HUB_BASIC_USER") or os.getenv("HUB_BASIC_USER") or "gztxt"
+    pw = env.get("HUB_SUPERADMIN_PW") or os.getenv("HUB_SUPERADMIN_PW") or ""
     if not pw:
         return {}
     return {"Authorization": "Basic " + _b64.b64encode(

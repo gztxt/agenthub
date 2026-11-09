@@ -46,8 +46,9 @@ class AParseScopes(unittest.TestCase):
 
 class BScopeByPath(unittest.TestCase):
     def test_index_size_and_no_ambiguity(self):
-        # /install 同时出现在 skill.py 与 skill_store.py，但两者同属 skill.write ⇒ 96 key
-        self.assertEqual(len(authz.SCOPE_BY_PATH), 96)
+        # /install 同时出现在 skill.py 与 skill_store.py，但两者同属 skill.write
+        # ⇒ 98 key（P3 事件出口 chat/events + interrupt 各 +1）。
+        self.assertEqual(len(authz.SCOPE_BY_PATH), 98)
 
     def test_known_and_unknown(self):
         self.assertEqual(authz.scope_for_path("put", "/api/memory/l3"), "hub.memory.write")

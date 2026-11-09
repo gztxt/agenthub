@@ -40,7 +40,7 @@ class ScopeTable(unittest.TestCase):
         self.declared = set(authz.WRITE_ROUTE_SCOPES)
 
     def test_route_count_baseline(self):
-        self.assertEqual(len(self.routes), 97,
+        self.assertEqual(len(self.routes), 99,
                          "写路由数变了：新增/删除端点必须同步 authz.WRITE_ROUTE_SCOPES")
 
     def test_every_write_route_declared(self):
@@ -56,8 +56,8 @@ class ScopeTable(unittest.TestCase):
         self.assertEqual(bad, {}, f"未知 scope：{bad}")
 
     def test_side_effect_routes_declared_and_counted(self):
-        self.assertEqual(len(authz.SIDE_EFFECT_ROUTES), 22,
-                         "副作用端点基线是 22 条；增删必须同时改 docs 与本集合")
+        self.assertEqual(len(authz.SIDE_EFFECT_ROUTES), 24,
+                         "副作用端点基线是 24 条；增删必须同时改 docs 与本集合")
         self.assertLessEqual(authz.SIDE_EFFECT_ROUTES, self.declared,
                              "副作用端点里有未声明的路由")
         self.assertFalse(authz.SIDE_EFFECT_ROUTES & authz.EXEMPT_WRITE_ROUTES,

@@ -30,8 +30,10 @@ import os
 import re
 import signal
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+import events
 from .base import BaseAdapter
 
 #: dsh 的 headless 需要 provider 凭据；与 `systemctl --user cat dsh` 的
@@ -125,6 +127,56 @@ def _clean_codex(out: str) -> Tuple[str, Optional[dict]]:
     if not texts:   # 非 JSON 尾部（旧版 codex）回落纯文本
         return out.strip(), usage
     return "\n".join(texts).strip(), usage
+
+
+def _codex_usage(u: dict) -> Optional[dict]:
+    """codex 的 usage 字段名（input/output_tokens）→ 事件契约的通用口径。"""
+    if not isinstance(u, dict) or u.get("output_tokens") is None:
+        return None
+    return {"prompt_tokens": u.get("input_tokens"),
+            "completion_tokens": u.get("output_tokens"),
+            "total_tokens": (u.get("input_tokens") or 0) + (u.get("output_tokens") or 0)}
+
+
+def _codex_line_events(obj: dict) -> List[Tuple[str, dict]]:
+    """codex `--json` NDJSON 单行 → v1 事件（type, payload）列表。
+
+    字段识别与 `_clean_codex` 同源：正文在 `item.completed/agent_message`，
+    用量在 `turn.completed/usage`；工具类 item 只在能确定类型时映射，
+    不认识的 item 忽略（不让上游新增类型把事件层打挂）。
+    """
+    out: List[Tuple[str, dict]] = []
+    if not isinstance(obj, dict):
+        return out
+    typ = obj.get("type")
+    it = obj.get("item") or {}
+    itt = it.get("type")
+    if typ == "item.completed" and itt == "agent_message" and it.get("text"):
+        out.append(("message_delta", {"text": it["text"]}))
+    elif typ in ("item.started", "item.completed") and itt in (
+            "command_execution", "mcp_tool_call", "file_change", "web_search"):
+        cid = it.get("id") or it.get("call_id")
+        if typ == "item.started":
+            out.append(("tool_call", {
+                "call_id": cid, "name": itt,
+                "input": it.get("command") or it.get("arguments")
+                         or it.get("query") or ""}))
+        else:
+            out.append(("tool_result", {
+                "call_id": cid, "name": itt,
+                "output": it.get("aggregated_output") or it.get("output")
+                          or it.get("result") or "",
+                "exit_code": it.get("exit_code")}))
+    elif typ == "turn.completed":
+        u = _codex_usage(obj.get("usage") or {})
+        if u:
+            out.append(("usage", u))
+    elif typ in ("error", "turn.failed"):
+        err = obj.get("error")
+        msg = (obj.get("message") or (err.get("message") if isinstance(err, dict) else err)
+               or json.dumps(obj, ensure_ascii=False)[:300])
+        out.append(("error", {"reason": "provider_error", "message": str(msg)}))
+    return out
 
 
 def _clean_pi(out: str) -> Tuple[str, Optional[dict]]:
@@ -414,6 +466,18 @@ class CliAgentAdapter(BaseAdapter):
             return m
         return self.spec.get("model_fallback") or None
 
+    @staticmethod
+    def _build_prompt(message: str, history: Optional[list]) -> str:
+        """CLI 无会话续接：把历史压成前言（chat() 与 chat_events() 共用同一口径）。"""
+        if not history:
+            return message
+        head = "\n".join("%s: %s" % (h.get("role"), h.get("content"))
+                         for h in history if h.get("content"))
+        if not head:
+            return message
+        return "以下是同一会话的历史（仅供参考）：\n%s\n\n当前任务：\n%s" % (
+            head[-4000:], message)
+
     # ── 对话 ────────────────────────────────────────────────────────
     async def chat(self, message: str, session_id: Optional[str] = None,
                    model: Optional[str] = None, history: Optional[list] = None,
@@ -424,13 +488,7 @@ class CliAgentAdapter(BaseAdapter):
         if not (message or "").strip():
             return {"success": False, "agent": self.agent_id, "error": "empty-prompt"}
 
-        prompt = message
-        if history:   # CLI 无会话续接：把历史压成前言，别丢上下文也別装成同一会话
-            head = "\n".join("%s: %s" % (h.get("role"), h.get("content"))
-                             for h in history if h.get("content"))
-            if head:
-                prompt = "以下是同一会话的历史（仅供参考）：\n%s\n\n当前任务：\n%s" % (
-                    head[-4000:], message)
+        prompt = self._build_prompt(message, history)
 
         used_model = self.resolve_model(model)
         argv = [self.bin_path()] + self.spec["argv"](prompt, used_model,
@@ -509,6 +567,183 @@ class CliAgentAdapter(BaseAdapter):
             yield r.get("response") or ""
         else:
             yield "[error] %s" % (r.get("error") or "unknown")
+
+    async def chat_events(self, message: str, session_id: Optional[str] = None,
+                          model: Optional[str] = None, history: Optional[list] = None,
+                          cwd: Optional[str] = None, **kwargs):
+        """v1 事件流：codex 逐行增量解析，其余 CLI 走基类默认包装。"""
+        if self.agent_id != "codex":
+            async for ev in super().chat_events(message, session_id=session_id,
+                                                model=model, history=history,
+                                                cwd=cwd, **kwargs):
+                yield ev
+            return
+        async for ev in self._codex_events(message, session_id=session_id, model=model,
+                                           history=history, cwd=cwd, **kwargs):
+            yield ev
+
+    async def _codex_events(self, message: str, session_id: Optional[str] = None,
+                            model: Optional[str] = None, history: Optional[list] = None,
+                            cwd: Optional[str] = None, **kwargs):
+        """codex --json 的 NDJSON 逐行读（替代 chat() 的 communicate 整段收）。
+
+        语义与 chat() 对齐：空输出 / 需审批 / 非零退出码都判失败；额外把
+        item.completed 与 turn.completed 映射成 message_delta / usage。
+        中断走运行登记表：endpoint 调 interrupt() → SIGTERM 进程组 → 这里读到 EOF
+        后按 entry["interrupted"] 出 error{interrupted} + turn_completed。
+        """
+        sid = session_id or ""
+        run_id = kwargs.pop("run_id", None) or uuid.uuid4().hex[:12]
+        em = events.EventEmitter(sid, self.agent_id, kwargs.pop("turn_id", None))
+        events.unregister_run(run_id)      # 同 id 重入：先清旧账（正常路径不会发生）
+        yield em.emit("turn_started", model=model)
+
+        ok, why = self.available()
+        if not ok:
+            yield em.error("provider_error", why)
+            yield em.emit("turn_completed", success=False, reason="provider_error")
+            return
+        if not (message or "").strip():
+            yield em.error("provider_error", "empty-prompt")
+            yield em.emit("turn_completed", success=False, reason="provider_error")
+            return
+
+        prompt = self._build_prompt(message, history)
+        used_model = self.resolve_model(model)
+        argv = [self.bin_path()] + self.spec["argv"](prompt, used_model,
+                                                     _approve_flags(self.agent_id))
+        try:
+            timeout_s = float(kwargs.get("timeout_s") or 600)
+        except (TypeError, ValueError):
+            timeout_s = 600.0
+
+        t0 = time.monotonic()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv, stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                cwd=cwd or self.spec.get("cwd") or DEFAULT_CWD,
+                env=self.env(), start_new_session=True,
+                limit=4 * 1024 * 1024)     # NDJSON 单行可能远超默认 64KiB
+        except Exception as e:  # noqa: BLE001
+            yield em.error("provider_error",
+                           "spawn_failed: %s: %s" % (type(e).__name__, str(e)[:200]))
+            yield em.emit("turn_completed", success=False, reason="provider_error")
+            return
+
+        register_process(proc, str(kwargs.get("tag") or ""))
+        entry: Dict[str, Any] = {}
+
+        def _stop() -> bool:
+            entry["interrupted"] = True
+            _kill_group(proc)
+            return True
+
+        entry = events.register_run(run_id, self.agent_id, sid,
+                                    interrupt=_stop, turn_id=em.turn_id)
+        stderr_buf = bytearray()
+
+        async def _drain() -> None:
+            try:
+                while True:
+                    b = await proc.stderr.read(4096)
+                    if not b:
+                        break
+                    if len(stderr_buf) < 8000:
+                        stderr_buf.extend(b)
+            except Exception:  # noqa: BLE001
+                pass
+
+        drain = asyncio.create_task(_drain())
+        texts: List[str] = []
+        plain: List[str] = []
+        got_error: Optional[str] = None
+        timed_out = False
+        try:
+            deadline = time.monotonic() + timeout_s
+            while True:
+                remain = deadline - time.monotonic()
+                if remain <= 0:
+                    timed_out = True
+                    break
+                try:
+                    raw = await asyncio.wait_for(proc.stdout.readline(), timeout=remain)
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    break
+                if not raw:
+                    break
+                line = raw.decode("utf-8", "ignore").strip()
+                if not line:
+                    continue
+                if not line.startswith("{"):
+                    plain.append(line)     # 旧版 codex / 非 JSON 尾部：回落整段文本
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    plain.append(line)
+                    continue
+                for typ, payload in _codex_line_events(obj):
+                    if typ == "message_delta":
+                        texts.append(payload.get("text") or "")
+                    elif typ == "error":
+                        got_error = payload.get("message")
+                    yield em.emit(typ, **payload)
+            if timed_out:
+                _kill_group(proc)
+        finally:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=10)
+            except Exception:  # noqa: BLE001
+                _kill_group(proc)
+            try:
+                drain.cancel()
+                await drain
+            except Exception:  # noqa: BLE001
+                pass
+            unregister_process(proc)
+            events.unregister_run(run_id)
+
+        dur = int((time.monotonic() - t0) * 1000)
+        rc = proc.returncode or 0
+        if timed_out:
+            yield em.error("timeout", "timeout(%ds)：进程组已终止" % int(timeout_s),
+                           ms=dur)
+            yield em.emit("turn_completed", success=False, reason="timeout", ms=dur)
+            return
+        if entry.get("interrupted"):
+            yield em.error("interrupted", "本轮被用户中断", ms=dur)
+            yield em.emit("turn_completed", success=False, reason="interrupted", ms=dur)
+            return
+        if rc != 0:
+            tail = (bytes(stderr_buf).decode("utf-8", "ignore") or "").strip()[-400:]
+            yield em.error("provider_error", ("exit:%d: %s" % (rc, tail))[:500], ms=dur)
+            yield em.emit("turn_completed", success=False, reason="provider_error", ms=dur)
+            return
+        if got_error:
+            # 上游已显式报过错（error/turn.failed 行）：最终态必须一致，不许记成功。
+            yield em.emit("turn_completed", success=False, reason="provider_error", ms=dur)
+            return
+        if not texts and plain:
+            txt = "\n".join(plain).strip()
+            texts.append(txt)
+            yield em.emit("message_delta", text=txt)
+        text = "\n".join(t for t in texts if t).strip()
+        if not text:
+            yield em.error("provider_error",
+                           "empty-output: 退出码 0 但无正文（stderr %d 字）" % len(stderr_buf),
+                           ms=dur)
+            yield em.emit("turn_completed", success=False, reason="provider_error", ms=dur)
+            return
+        if _NEEDS_APPROVAL.search(text):
+            yield em.error("provider_error",
+                           ("needs_approval: 执行者在等审批，未真正执行（%s）"
+                            % text.strip()[:160]), ms=dur)
+            yield em.emit("turn_completed", success=False, reason="provider_error", ms=dur)
+            return
+        yield em.emit("turn_completed", success=True, ms=dur, chars=len(text),
+                      model=used_model if self.spec.get("model_path") == "ccr" else "native")
 
     async def get_sessions(self, limit: int = 10) -> list:
         return []   # CLI 一次性调用，不建 hub 侧会话

@@ -67,6 +67,14 @@ class _DeployCase(unittest.TestCase):
         skill._STATUS_CACHE.update(ts=0.0, data=None)
 
         db.init_db(self.tmp / "t.db")
+        # 2026-11-07 起写门只认 Cookie / HTTP Basic（共享 token 面已删除）；
+        # 2026-11-09 去掉兼容分支后，假 TestClient 再发匿名/假 Basic 就恒 401。
+        # 这里种一个真用户，让「工具 → 真 REST」这条 e2e 路径继续有身份可验。
+        import users as _users
+        db.execute(
+            "INSERT INTO users(username, display, is_admin, pw_hash, created_at, updated_at)"
+            " VALUES(?,?,?,?,?,?)",
+            ("l0-test", "", 1, _users.hash_password(TOKEN), db._now(), db._now()))
         app = FastAPI()
         app.include_router(skill.router)
         app.middleware("http")(writeauth.write_gate)
@@ -90,8 +98,12 @@ class _DeployCase(unittest.TestCase):
     def _install_fakes(self, token: str = TOKEN):
         client = self.client
         # 2026-11-07：身份 = Cookie / HTTP Basic，共享 token 面已删除。
-        # token 非空 ⇒ 带 Basic 头；空串 ⇒ 不带任何凭据（模拟未登录）。
-        hdr = {"authorization": "Basic bDAtdGVzdDp4"} if token else {}
+        # token 非空 ⇒ 带 **真用户** 的 Basic 头（setUp 里种的 l0-test，密码=TOKEN）；
+        # 空串 ⇒ 不带任何凭据（模拟未登录）。
+        # 旧写法是写死的 base64("l0-test:x")，库里没有这个用户 ⇒ 修掉 token 兼容面后恒 401。
+        import base64 as _b64
+        hdr = ({"authorization": "Basic " + _b64.b64encode(
+            ("l0-test:%s" % token).encode()).decode()} if token else {})
 
         def fake_post(path, body, _timeout=0, **params):
             r = client.post(path, json=body, headers=hdr)

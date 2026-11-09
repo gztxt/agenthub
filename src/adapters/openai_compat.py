@@ -12,10 +12,12 @@ dict、错误串格式保持 "HTTP {status}: {text}"），调用方零改动；`
 """
 import json
 import os
+import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import aiohttp
 
+import events
 import resilience  # noqa: E402 —— 平铺导入（src 在 sys.path；adapters/tdai.py 同款）
 from .base import BaseAdapter
 
@@ -167,6 +169,10 @@ class OpenAICompatAdapter(BaseAdapter):
         messages = (history or []) + [{"role": "user", "content": message}]
         body = {"model": model or self.default_model or "default",
                 "messages": messages, "stream": True}
+        # 事件通道（P3）需要 usage：显式 opt-in（/chat/stream 的既有消费者不受影响）。
+        want_usage = bool(kwargs.get("include_usage"))
+        if want_usage:
+            body["stream_options"] = {"include_usage": True}
         url = f"{self.base_url}/v1/chat/completions"
         try:
             async with aiohttp.ClientSession() as s:
@@ -190,10 +196,57 @@ class OpenAICompatAdapter(BaseAdapter):
                                 .get("delta", {}).get("content")
                             if delta:
                                 yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n"
+                            u = chunk.get("usage")
+                            if u and want_usage:
+                                yield f"data: {json.dumps({'usage': u}, ensure_ascii=False)}\n\n"
                         except json.JSONDecodeError:
                             continue
         except Exception as e:  # noqa: BLE001
             yield f"data: {json.dumps({'error': repr(e)}, ensure_ascii=False)}\n\n"
+
+    async def chat_events(self, message: str, session_id: Optional[str] = None,
+                          model: Optional[str] = None, history: Optional[List[dict]] = None,
+                          cwd: Optional[str] = None, **kwargs) -> AsyncIterator[dict]:
+        """把现有 SSE 的 delta / usage 包成 v1 事件（chat_stream 的对外契约不变）。"""
+        sid = session_id or ""
+        run_id = kwargs.pop("run_id", None) or uuid.uuid4().hex[:12]
+        em = events.EventEmitter(sid, self.agent_id, kwargs.pop("turn_id", None))
+        events.register_run(run_id, self.agent_id, sid, interrupt=None,
+                            turn_id=em.turn_id)
+        parts: List[str] = []
+        got_error = False
+        try:
+            yield em.emit("turn_started", model=model or self.default_model or "default")
+            async for raw in self.chat_stream(message, session_id=session_id, model=model,
+                                              history=history, cwd=cwd,
+                                              include_usage=True):
+                line = (raw or "").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("delta"):
+                    parts.append(obj["delta"])
+                    yield em.emit("message_delta", text=obj["delta"])
+                elif obj.get("usage"):
+                    u = em.usage(obj["usage"])
+                    if u:
+                        yield u
+                elif obj.get("error"):
+                    got_error = True
+                    msg = str(obj["error"])
+                    yield em.error(events.reason_for_error(msg), msg[:400])
+            if got_error:
+                yield em.emit("turn_completed", success=False, reason="provider_error")
+            else:
+                yield em.emit("turn_completed", success=True, chars=len("".join(parts)))
+        finally:
+            events.unregister_run(run_id)
 
     async def get_models(self) -> list:
         try:

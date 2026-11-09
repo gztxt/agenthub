@@ -117,6 +117,7 @@ import meta as meta_mod             # P4：GET /api/meta 协议能力协商（�
 # C2（2026-10-12）：领域路由从本文件抽成独立 module —— main 只留组装职责。
 import appstate                     # 组装方写、领域方读的共享可变状态（discovery）
 from api_agents import router as agents_router, _chat_dispatch   # 启动期 chat_fn 回调仍要它
+import api_events as api_events_mod   # P3 v1：/api/agents/{id}/chat/events（SSE）+ /interrupt
 from api_sessions import router as sessions_router
 from api_models import router as models_router
 from api_vitals import router as vitals_router, agent_profs_for_vitals
@@ -1096,6 +1097,7 @@ async def datastore_describe():
 
 # ── 领域路由（C2：已从本文件抽成独立 module，见 src/api_*.py）──
 app.include_router(agents_router)
+app.include_router(api_events_mod.router)    # P3 v1：事件流 SSE + interrupt（与 pty 终端并列）
 app.include_router(vitals_router)
 app.include_router(summarize_router)
 app.include_router(sessions_router)

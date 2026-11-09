@@ -1,6 +1,6 @@
 """端点 → scope 声明表（P0-1：只声明，不执行）。
 
-为什么单独一张表：`writeauth.decide()` 现在只判「是否登录」，97 条写端点里 88 条
+为什么单独一张表：`writeauth.decide()` 现在只判「是否登录」，99 条写端点里 90 条
 登录即全权。P0 要把它改成「identity + scope」，但**改判定前必须先把每条端点的
 归属钉死**——否则改一行就是 97 条逐个猜。
 
@@ -35,7 +35,7 @@ SCOPES = frozenset({
 })
 
 #: 键 = (模块名不含 .py, HTTP 方法, 路由字面量)。路由里的 `{param}` 原样保留。
-#: 97 条 = 2026-11-09 源码实测；加/删端点必须同步本表。
+#: 99 条 = 2026-11-09 源码实测（P3 事件出口 chat/events + interrupt 各 +1）；加/删端点必须同步本表。
 WRITE_ROUTE_SCOPES = {
     ("actionplane", "POST", "/api/actions"): "hub.catalog.write",
     ("actionplane", "POST", "/api/actions/{action_id}/decide"): "hub.catalog.write",
@@ -48,6 +48,8 @@ WRITE_ROUTE_SCOPES = {
     ("api_agents", "DELETE", "/api/agents/{agent_id}"): "hub.agent.write",
     ("api_agents", "POST", "/api/agents/{agent_id}/chat"): "hub.agent.write",
     ("api_agents", "POST", "/api/agents/{agent_id}/chat/stream"): "hub.agent.write",
+    ("api_events", "POST", "/api/agents/{agent_id}/chat/events"): "hub.agent.write",
+    ("api_events", "POST", "/api/agents/{agent_id}/interrupt"): "hub.agent.write",
     ("api_agents", "POST", "/api/agents/{agent_id}/ui-start"): "hub.agent.write",
     ("api_agents", "POST", "/api/agents/{agent_id}/verify"): "hub.agent.write",
     ("api_sessions", "DELETE", "/api/sessions/{session_id}"): "hub.agent.write",
@@ -145,11 +147,13 @@ EXEMPT_WRITE_ROUTES = frozenset({
     ("hook", "POST", "/telemetry/events/{source}"),
 })
 
-#: 22 条有副作用的写路由：起进程、发外网、改全局配置、调 LLM 或重扫。
-#: P0-3 先只对这 22 条强制 scope，其余保持登录放行，降低回归面。
+#: 24 条有副作用的写路由：起进程、发外网、改全局配置、调 LLM 或重扫。
+#: P0-3 先只对这 24 条强制 scope，其余保持登录放行，降低回归面。
 SIDE_EFFECT_ROUTES = frozenset({
     ("api_agents", "POST", "/api/agents/{agent_id}/chat"),
     ("api_agents", "POST", "/api/agents/{agent_id}/chat/stream"),
+    ("api_events", "POST", "/api/agents/{agent_id}/chat/events"),
+    ("api_events", "POST", "/api/agents/{agent_id}/interrupt"),
     ("api_agents", "POST", "/api/agents/{agent_id}/ui-start"),
     ("api_summarize", "POST", "/api/summarize"),
     ("api_system", "POST", "/api/system/restart"),

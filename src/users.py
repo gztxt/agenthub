@@ -149,13 +149,21 @@ SESSION_COOKIE = "hub_session"
 SESSION_TTL_S = 7 * 24 * 3600
 
 
-def issue_session(user_row: dict) -> str:
+def issue_session(user_row: dict, scopes=None) -> str:
     """签发一个浏览器会话：随机串只进 Cookie，DB 只存 sha256（同 token 存储纪律）。
-    cred_type 复用 user_credentials 表，name 前缀 session- 便于改密时整批吊销。"""
+    cred_type 复用 user_credentials 表，name 前缀 session- 便于改密时整批吊销。
+
+    P0-3：`scopes` 为 None（默认）⇒ 写 NULL＝沿用现行全权；传 list/set ⇒
+    序列化成 JSON 白名单，配合 HUB_AUTHZ_ENFORCE 让受限设备会话真正生效。
+    调用方应只传 authz.SCOPES 里的已知项（parse_scopes 读取时会再过滤一次）。
+    """
+    import json as _json
+    raw = _json.dumps(sorted(set(scopes))) if scopes is not None else None
     tok = _secrets.token_urlsafe(32)
     db.execute(
-        "INSERT INTO user_credentials(user_id, token_hash, name, created_at) VALUES(?,?,?,?)",
-        (user_row["id"], _sha(tok), "session-" + _secrets.token_hex(2), db._now()))
+        "INSERT INTO user_credentials(user_id, token_hash, name, created_at, scopes)"
+        " VALUES(?,?,?,?,?)",
+        (user_row["id"], _sha(tok), "session-" + _secrets.token_hex(2), db._now(), raw))
     return tok
 
 

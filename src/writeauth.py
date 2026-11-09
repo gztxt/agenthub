@@ -157,7 +157,10 @@ async def read_gate(request, call_next):
     path = request.url.path
     host = request.client.host if request.client else ""
     # 公共面先放行：静态资源每页几十个请求，不该为它们查会话表。
-    if (path in ("/", "/health", "/api/csp/report") or path.startswith("/static/")):
+    # /api/meta = 协议能力协商「握手前发现端点」（同 t3code /.well-known/t3/environment
+    # 的公开语义）：只回 protocol/capabilities/version，不含凭据与数据面，故与 /health
+    # 同级全来源匿名可达——非回环客户端须先读到它才能决定降级，未登录也必须能取。
+    if (path in ("/", "/health", "/api/csp/report", "/api/meta") or path.startswith("/static/")):
         return await call_next(request)
     # Cookie / Basic 身份（浏览器与脚本的同一份用户名+密码）
     urow = None
@@ -251,15 +254,31 @@ async def write_gate(request, call_next):
         if verdict == "allow":
             # P0-2 干跑（2026-11-09）：只算「若 enforce 会怎样」，绝不改变准入。
             # 现阶段所有会话 scopes=NULL ⇒ 一律 legacy，先取真实分布，P0-3 才切 enforce。
+            _scopes_parsed = None
             try:
                 import authz
                 import users as _users_dry
                 _raw = ureq.get("scopes") if ureq else None
-                _tag, _need, _why = authz.dryrun_verdict(
-                    method, path, _users_dry.parse_scopes(_raw))
+                _scopes_parsed = _users_dry.parse_scopes(_raw)
+                _tag, _need, _why = authz.dryrun_verdict(method, path, _scopes_parsed)
             except Exception:  # noqa: BLE001 —— 观测面失败绝不打断业务
                 _tag, _need, _why = "error", None, "干跑解析异常"
             print(f"[writegate][dryrun] {_tag} need={_need} {method} {path} —— {_why}")
+            # P0-3 enforce（默认关）：HUB_AUTHZ_ENFORCE=1 才生效，且只强制 22 条
+            # 副作用端点；其余 75 条写端点保持登录即放行。判定异常一律 fail-open
+            # （观测期不许因新逻辑把合法写请求打成 500）。
+            try:
+                import os as _os
+                import authz as _authz_e
+                _enabled = _os.getenv("HUB_AUTHZ_ENFORCE", "0") == "1"
+                _ok, _etag, _eneed, _ewhy = _authz_e.enforce_verdict(
+                    method, path, _scopes_parsed, _enabled)
+            except Exception:  # noqa: BLE001
+                _ok, _etag, _eneed, _ewhy = True, "error", None, "enforce 判定异常（fail-open）"
+            if not _ok:
+                print(f"[writegate][enforce] 403 need={_eneed} {method} {path} —— {_ewhy}")
+                return JSONResponse({"detail": "该会话没有此操作的 scope 授权",
+                                     "required_scope": _eneed}, status_code=403)
             ask = approvals.ask_reason(path)
             if ask:
                 aid, tk = approvals.split_header(approval_header(request.headers.raw))

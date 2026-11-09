@@ -262,3 +262,81 @@
 
 **P0-3 及 P1–P4 的阻塞**：都要改判定 / 建表 / handler 并重启生产。当前 `term_sessions=1`
 （本会话），按生产单元重启军规，restart 会连坐杀掉活会话，须用户明确签字重启窗口。
+
+## 7. ①a P0-3 落地状态（2026-11-09）：enforce 开关 + 受限凭据签发
+
+**① 拆 ①a / ①b 是工程判断，不是缩水**：①a 零新增写路由；①b 配对一次性码要新增
+匿名可达写端点，联动 `WRITE_ROUTE_SCOPES` / `EXEMPT_WRITE_ROUTES` / `EXEMPT_PREFIXES` /
+`test_writeauth` 豁免上限 / `test_authz_scopes` 的 97 基线共 5 处同源点，单独一批验证更稳。
+
+**改动面（4 源文件 + 2 测试 + 1 文档）**
+
+| 文件 | 改动 |
+|---|---|
+| `src/authz.py` | 新增 `is_side_effect_path`（22 条按 (method,path) 模板匹配）与 `enforce_verdict` 四条件纯判定 |
+| `src/writeauth.py` | `write_gate` 干跑块后接 enforce；`read_gate` 公共放行面加 `/api/meta`（P4 联动） |
+| `src/users.py` | `issue_session(user_row, scopes=None)` 写 `user_credentials.scopes`（NULL=沿用现行） |
+| `src/meta.py` | `MIN_CLIENT_VERSION=None`（裁定：本机前端无独立版本号，不回填假值） |
+| `tests/test_scope_enforce.py` | 17 条：enforce 真值表 / 带参模板命中 / 凭据落库 / write_gate 403 / **真实 read_gate 中间件** 下非回环匿名 `/api/meta` 200 + 反向 401 |
+| `tests/test_meta_l0.py` | `min_client` 断言改为允许 None |
+
+**enforce 判据（四条件同时成立才拒）**：`HUB_AUTHZ_ENFORCE=1` + 会话 scopes 非 NULL
+（显式受限）+ 缺所需 scope + 端点在 22 条副作用集合内。其余一律放行：默认关、
+NULL scopes（升级零感知）、非副作用端点、已持 scope、未声明端点、判定异常 fail-open
+—— 全部放行，不因新逻辑把合法写请求打成 500。
+
+**生效条件（判断点留给用户，不自行开启）**：`HUB_AUTHZ_ENFORCE=1` + 重启窗口。
+默认 0 ⇒ 仍走干跑、零行为变化。
+
+**活体复验（两个时点，别混读）**：
+- ①a 落地时点：`/health` 200 / 匿名写 401 / `GET /api/meta` 404（当时 P4 代码未在生产）/
+  `code_stale=True` / `term_sessions=1` / 未重启。
+- 本次续跑复验（2026-11-09）：10:40:03 有一次**非本会话**发起的 graceful restart
+  （`NRestarts=0`、journal 成对 Shutting down / Started agenthub），此后 P4 代码在生产生效：
+  `/api/meta` 回环 200、非回环 200、匿名写 401、`/health` 200 / 0.13.198 / `term_sessions=1`。
+  本轮 ①a/P1/P4 新代码再次落盘后 `code_stale` 重新为 True（`code_fp_boot≠code_fp_worktree`，
+  运行进程落后磁盘）——这是「有未重启新代码」的预期信号，不是故障，也不触发本会话重启。
+
+**全链路一次改完（军规第 11 条）**：生产者 `issue_session` → 入口 `write_gate` →
+消费端 `enforce_verdict` → 文档本节 → 17 条测试。另把 P4 的 `/api/meta` 读门放行
+一并收口：子代理的「裸 app」测试绕过 read_gate/write_gate 属测试环境分叉（假绿），
+已补**挂真实中间件**的 mini-app 验证，并加反向用例证明放行面没扩大。
+
+**同类点纠错**：曾计划用 `read_verdict(非回环, "/api/meta", False, True) → allow` 做链路
+断言 —— 错。`read_verdict` 纯函数不知道 `read_gate:160` 的公共面短路，那样断言必挂。
+正确判据是「公共面在 read_gate 里直接 `call_next`」，故改用真实中间件验证。
+
+**①b 待做（判断点，见 §8）**：配对一次性码（12 位无歧义码、TTL、原子消费、限速），
+复用 `approvals.py:180-249` 的进程内 + 单次 + 绑定三元组 + `compare_digest` 存储纪律；
+新增匿名兑换端点后须同步 5 处同源点，并重跑 `test_authz_scopes.py:43` 的 97 基线。
+
+## 8. ①b 配对一次性码：暂停在裁决点（2026-11-09）
+
+**①a / P1 / P2 / P4 已落地并全绿（L0 hermetic 4097 例、收集器对账 4177=4177），
+本会话不实现 ①b**。这不是缩水，是「发现 → 分析 → 全链路」后判出的真判断点：
+
+**实现规格已探明**（只读调研，file:line 级，未写盘）：配对兑换端点挂
+`users.py:55` router（`login:301` / `logout:334` 同款）；联动 6 硬同源点 ——
+`authz.WRITE_ROUTE_SCOPES`（97→98）、`authz.EXEMPT_WRITE_ROUTES`（3→4）、
+`writeauth.EXEMPT_PREFIXES`（3→4）、`test_authz_scopes.py:43`（97 基线）、
+`test_writeauth.py:95`（`<=3`→`<=4`）、新路由本体；另 8 处软同步（口径注释 + 文档 + 台账）。
+复用 `approvals.verify_and_consume:218` 的进程内 + TTL + 单次 + `compare_digest` 纪律。
+
+**为什么暂停（三条叠加，照 t3 直接落地 = 假受限）**：
+1. `HUB_AUTHZ_ENFORCE` 默认关 ⇒ 所有会话（含受限会话）一律走干跑、写端点全放行；
+2. `enforce_verdict` 只强制 22 条副作用端点，其余 75 条写端点即使缺 scope 也放行；
+3. `read_gate` / `read_verdict` 完全不看 scope ⇒ 读面无鉴权。
+t3 实测 `--scope orchestration:read` 会话**真**只剩 1 权限；本机若照搬，签出的是
+`scopes=[]`（`parse_scopes` 语义＝只读）却几乎全权的会话 —— 给用户错误的安全感，
+比不做更糟。且兑换端点匿名可达，扩大了攻击面。这与本仓反复强调的「不回填假数据 /
+诚实表达 / 假绿」同源。
+
+**裁决点（留给用户，三选一或全缓）**：
+- (A) 先把 scope 强制补齐到「读面 + 全部 97 条写端点」，再上配对码 —— 工作量最大，
+  但语义真；
+- (B) 本批只做「能签受限会话」的骨架，卡面/文档显式标注「须 `HUB_AUTHZ_ENFORCE=1`
+  且重启后才生效」，承认默认不设防；
+- (C) ①b 整体暂缓，P0 以「①a enforce 开关 + 声明表」收口，等 scope 语义统一再做。
+
+**依赖链**：(A)/(B) 都要 ①b 的 6 硬点一次性改完 → 单独 L0 → **用户签字重启窗口**
+（当前 `term_sessions=1`）；enforce 开关是否 `=1` 同样须用户签字。主会话均不自行拍板。

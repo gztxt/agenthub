@@ -249,3 +249,49 @@ def dryrun_verdict(method: str, path: str, scopes):
     if needed in scopes:
         return "would_allow", needed, "会话已持该 scope"
     return "would_deny", needed, "会话缺该 scope（干跑不拒）"
+
+
+# ── P0-3 enforce（默认关；只强制 22 条副作用端点）───────────────────────────
+# SIDE_EFFECT_ROUTES 按 (module, method, path) 分键，但闸门手里只有 (method, path)
+# 且 path 是具体值（/api/tasks/run-1/start），故同样建 path 索引 + 模板匹配。
+def _build_side_index():
+    exact = set()
+    patterns = []
+    for (_mod, method, path) in SIDE_EFFECT_ROUTES:
+        if "{" in path:
+            patterns.append((method, _compile_path(path)))
+        else:
+            exact.add((method, path))
+    return exact, patterns
+
+
+_SIDE_EXACT, _SIDE_PATTERNS = _build_side_index()
+
+
+def is_side_effect_path(method: str, path: str) -> bool:
+    """运行时按 (method, path) 判是否副作用端点；带参路由走模板匹配。"""
+    m = method.upper()
+    if (m, path) in _SIDE_EXACT:
+        return True
+    return any(pm == m and rx.match(path) for pm, rx in _SIDE_PATTERNS)
+
+
+def enforce_verdict(method: str, path: str, scopes, enabled: bool):
+    """P0-3 准入判定（纯函数）：返回 (allow, tag, needed_scope, why)。
+
+    只有四个条件**同时**成立才拒：enabled、scopes 非 None（显式受限会话）、
+    缺所需 scope、且该端点在 22 条副作用集合内。其余一律放行 ——
+    这是「先只对副作用端点强制」的落地，其余 75 条保持登录即放行。
+    """
+    needed = scope_for_path(method, path)
+    if not enabled:
+        return True, "disabled", needed, "HUB_AUTHZ_ENFORCE 未开启"
+    if scopes is None:
+        return True, "legacy", needed, "NULL=沿用现行，放行"
+    if needed is None:
+        return True, "unscoped", None, "端点无 scope 声明，放行（待补表）"
+    if needed in scopes:
+        return True, "would_allow", needed, "会话已持该 scope"
+    if not is_side_effect_path(method, path):
+        return True, "would_deny_but_not_side_effect", needed, "仅对 22 条副作用端点强制"
+    return False, "deny", needed, "会话缺该 scope 且端点有外部副作用"

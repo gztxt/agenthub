@@ -112,6 +112,7 @@ import ghsettings as ghsettings_mod  # GitHub 地址/key/落点（v0.13.42：设
 import hublog as hublog_mod        # 日志中心（v0.13.46：设置→日志子菜单，journald + 操作事件聚合）
 import api_dataset as api_dataset_mod  # P0-1：数据集/经验库只读门面（无写端点）
 import botboy as botboy_mod         # v0.13.170：DS Bot 团队只读概览（读 ~/.dsh/bot/state.json）
+import meta as meta_mod             # P4：GET /api/meta 协议能力协商（只读）
 
 # C2（2026-10-12）：领域路由从本文件抽成独立 module —— main 只留组装职责。
 import appstate                     # 组装方写、领域方读的共享可变状态（discovery）
@@ -865,6 +866,7 @@ app.include_router(settings_bundle_mod.router)   # PT-20260927-15：/api/setting
 app.include_router(approvals_mod.router)         # P1-2：/api/approvals（ASK 审批队列与决定端）
 app.include_router(skill_assets_mod.router)      # P1-5：/api/skill-assets（资产登记与状态机）
 app.include_router(actionplane_mod.router)       # P2 A10：/api/actions（行动台账，只读为主）
+app.include_router(meta_mod.router)              # P4：GET /api/meta 协议能力协商（只读）
 app.include_router(admission_mod.router)        # P2 C7：/api/admission（外部资产准入六阶段）
 app.include_router(hublog_mod.router)
 app.include_router(refscout_mod.router)          # PT-20261021-04：/api/ref/*（情报卡）

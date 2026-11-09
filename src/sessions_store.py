@@ -315,11 +315,17 @@ def _t_codebuddy(cwd: str, limit: int, t0: float) -> Tuple[List[dict], str]:
         if p.stat().st_size == 0:                       # 空占位会话，续了也是空会话
             continue
         bucket = p.parent.name
+        sid = p.stem
+        # 过滤必须在 limit 之前：否则最新 15 条若全是 /tmp 影子会话/子代理记录，
+        # 先截断再过滤就只剩个位数（2026-11-09 用户报「应为 15 条只剩 3 条」）。
+        if sid.startswith(("agent-", "sub-")):
+            continue
         objs = _head_lines(p)
         rec_cwd = _cwd_of_records(objs)
+        if rec_cwd and _is_temp_path(rec_cwd):
+            continue
         if bucket != _cb_effective_bucket(rec_cwd, cwd):
             continue                                    # 生效目录对不上 ⇒ 点了也 resume 不到
-        sid = p.stem
         if sid in seen:                                 # 同 id 多桶：留 mtime 最新的那份（列表已倒序）
             continue
         seen.add(sid)

@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import term_events  # noqa: E402
+import db  # noqa: E402
 
 
 def _write_codebuddy(p: Path):
@@ -65,6 +66,26 @@ class TestParseCodebuddy(unittest.TestCase):
             self.assertEqual(len(out["events"]), 2)
             self.assertTrue(out["truncated"])
             self.assertGreater(out["total_events"], 2)
+
+    def test_events_are_persistable_with_stable_keys(self):
+        self.assertIn("session_events", db.SCHEMA, "事件表必须进 schema（append-only 留存）")
+        ev1 = {"turn_id": "t1", "type": "tool_call", "_src": 7}
+        ev2 = dict(ev1)
+        ev3 = {"turn_id": "t1", "type": "tool_result", "_src": 7}
+        self.assertEqual(term_events._event_key("codebuddy", "abc", ev1),
+                         term_events._event_key("codebuddy", "abc", ev2))
+        self.assertNotEqual(term_events._event_key("codebuddy", "abc", ev1),
+                            term_events._event_key("codebuddy", "abc", ev3))
+
+    def test_parser_keeps_source_line_for_dedupe(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "sess-3.jsonl"
+            _write_codebuddy(p)
+            out = term_events.parse_codebuddy(p, limit=100)
+            self.assertIn("_all_events", out)
+            self.assertTrue(all("_src" in e for e in out["_all_events"]))
+            self.assertTrue(all("_src" not in e for e in out["events"]),
+                            "对外事件不应暴露内部源行号")
 
     def test_unsupported_agent_is_explicit(self):
         class S:

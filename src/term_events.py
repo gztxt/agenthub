@@ -140,12 +140,14 @@ def parse_codebuddy(path: Path, limit: int = 300) -> Dict[str, Any]:
     tool_calls = 0
     messages = 0
     seq = 0
+    cur_src = 0
 
-    def emit(typ: str, ts_ms: Any, **payload: Any) -> None:
+    def emit(typ: str, ts_ms: Any, src: Optional[int] = None, **payload: Any) -> None:
         nonlocal seq
         seq += 1
         ev = {"v": 1, "seq": seq, "ts": _iso(ts_ms), "sid": path.stem,
-              "turn_id": turn_id, "agent_id": "codebuddy", "type": typ}
+              "turn_id": turn_id, "agent_id": "codebuddy", "type": typ,
+              "_src": cur_src if src is None else src}
         ev.update(payload)
         events.append(ev)
 
@@ -154,7 +156,7 @@ def parse_codebuddy(path: Path, limit: int = 300) -> Dict[str, Any]:
     except OSError:
         lines = []
 
-    for line in lines:
+    for cur_src, line in enumerate(lines, 1):
         line = line.strip()
         if not line:
             continue
@@ -200,12 +202,13 @@ def parse_codebuddy(path: Path, limit: int = 300) -> Dict[str, Any]:
         mtime = time.time()
     live = (time.time() - mtime) < LIVE_WINDOW_S
     if events and not live:
-        emit("turn_completed", last_ms,
+        emit("turn_completed", last_ms, src=-(turn_no or 1),
              success=True, ms=int((last_ms or 0) - (turn_started_ms or 0)),
              turns=turn_no)
 
     total = len(events)
     shown = events[-limit:] if limit and total > limit else events
+    shown = [{k: v for k, v in e.items() if k != "_src"} for e in shown]
     return {
         "supported": True,
         "transcript": path.stem,
@@ -224,7 +227,62 @@ def parse_codebuddy(path: Path, limit: int = 300) -> Dict[str, Any]:
         "events": shown,
         "total_events": total,
         "truncated": total > len(shown),
+        "_all_events": events,
     }
+
+
+def _event_key(agent_id: str, transcript: str, ev: Dict[str, Any]) -> str:
+    return "%s|%s|%s|%s|%s" % (
+        agent_id, transcript, ev.get("turn_id") or "", ev.get("type") or "",
+        ev.get("_src") if ev.get("_src") is not None else ev.get("seq"))
+
+
+def store_events(session_id: str, agent_id: str, transcript: str,
+                 events: List[Dict[str, Any]]) -> int:
+    """append-only 入库；同一事件重复轮询靠 event_key UNIQUE + INSERT OR IGNORE 去重。"""
+    if not events:
+        return 0
+    import db
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    rows = []
+    for ev in events:
+        payload = {k: v for k, v in ev.items() if k != "_src"}
+        rows.append((
+            _event_key(agent_id, transcript, ev), session_id, agent_id, transcript,
+            ev.get("turn_id") or "", ev.get("seq"), ev.get("ts"), ev.get("type") or "",
+            json.dumps(payload, ensure_ascii=False, default=str), now,
+        ))
+    return db.executemany(
+        "INSERT OR IGNORE INTO session_events"
+        "(event_key,session_id,agent_id,transcript,turn_id,seq,ts,type,payload,created_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)", rows)
+
+
+def stored_events(session_id: Optional[str] = None, agent_id: Optional[str] = None,
+                  limit: int = 200) -> List[Dict[str, Any]]:
+    """从库里取已留存事件（核查/引用）；过滤条件至少给一个，否则只回最近 limit 条。"""
+    import db
+    where, params = [], []
+    if session_id:
+        where.append("session_id=?"); params.append(session_id)
+    if agent_id:
+        where.append("agent_id=?"); params.append(agent_id)
+    sql = "SELECT * FROM session_events"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, min(int(limit or 200), 2000)))
+    rows = db.query(sql, tuple(params))
+    out = []
+    for r in rows:
+        try:
+            ev = json.loads(r.get("payload") or "{}")
+        except json.JSONDecodeError:
+            ev = {"type": r.get("type"), "raw": r.get("payload")}
+        out.append({"id": r.get("id"), "session_id": r.get("session_id"),
+                    "agent_id": r.get("agent_id"), "transcript": r.get("transcript"),
+                    "stored_at": r.get("created_at"), "event": ev})
+    return out
 
 
 def session_events(sess, limit: int = 300) -> Dict[str, Any]:
@@ -251,6 +309,12 @@ def session_events(sess, limit: int = 300) -> Dict[str, Any]:
     out = parse_codebuddy(path, limit=limit)
     out["agent_id"] = agent
     out["session_id"] = getattr(sess, "id", "")
+    all_events = out.pop("_all_events", [])
+    try:
+        store_events(out["session_id"], agent, out.get("transcript", ""), all_events)
+    except Exception as e:  # noqa: BLE001 —— 入库失败不能打断面板读取
+        import logging
+        logging.getLogger(__name__).warning("[term_events] 入库失败：%s", e)
     try:
         sess._ev_cache = (cache_key, out)
     except Exception:  # noqa: BLE001

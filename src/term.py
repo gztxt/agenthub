@@ -1008,6 +1008,16 @@ async def session_events(sid: str, request: Request, limit: int = Query(default=
     return await asyncio.to_thread(term_events.session_events, sess, limit)
 
 
+@router.get("/api/session-events")
+async def stored_session_events(request: Request, session_id: str = "",
+                                agent_id: str = "", limit: int = Query(default=200, ge=1, le=2000)):
+    """已入库事件查询（核查/引用）。事件在打开面板或调用会话事件端点时 append-only 入库。"""
+    _check_term_auth(request, "GET /api/session-events")
+    import term_events
+    return {"items": await asyncio.to_thread(
+        term_events.stored_events, session_id or None, agent_id or None, limit)}
+
+
 @router.get("/api/term/sessions")
 async def list_sessions(request: Request):
     # P1-7：列表本身是**控制平面入口** —— 它漏 sid + agent_id + cmd + cwd + alive，

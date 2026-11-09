@@ -93,6 +93,23 @@ CREATE TABLE IF NOT EXISTS manager_messages (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_msg_session ON chat_messages(session_id);
+-- P3 事件统一入库（2026-11-09）：转录解析出的结构化事件 append-only 留存，
+-- 供后续核查/引用；event_key 由 转录+轮次+类型+源行号 组成，重复轮询 INSERT OR IGNORE。
+CREATE TABLE IF NOT EXISTS session_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key TEXT NOT NULL UNIQUE,
+    session_id TEXT,
+    agent_id TEXT NOT NULL,
+    transcript TEXT NOT NULL,
+    turn_id TEXT,
+    seq INTEGER,
+    ts TEXT,
+    type TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sev_session ON session_events(session_id, id);
+CREATE INDEX IF NOT EXISTS idx_sev_transcript ON session_events(agent_id, transcript, ts);
 CREATE INDEX IF NOT EXISTS idx_mem_status ON memories(status);
 CREATE INDEX IF NOT EXISTS idx_mgr_session ON manager_messages(session_id);
 CREATE TABLE IF NOT EXISTS profile_events (
@@ -373,6 +390,17 @@ def query(sql: str, params: tuple = ()) -> list[dict]:
 def execute(sql: str, params: tuple = ()) -> int:
     with _lock:
         cur = _conn.execute(sql, params)
+        _conn.commit()
+        return cur.rowcount
+
+
+def executemany(sql: str, rows) -> int:
+    """批量写 + 单次 commit（事件入库一次可能几百行，逐行 commit 会明显拖慢轮询）。"""
+    rows = list(rows)
+    if not rows:
+        return 0
+    with _lock:
+        cur = _conn.executemany(sql, rows)
         _conn.commit()
         return cur.rowcount
 

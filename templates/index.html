@@ -1227,12 +1227,13 @@
         .ev-list { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
         .ev-item { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--surface-2); font-size: var(--fs-sm); }
         .ev-item .ev-k { display: block; font-family: var(--font-mono); font-size: 11px; color: var(--muted); margin-bottom: 3px; }
-        .ev-item.ev-text { white-space: pre-wrap; word-break: break-word; line-height: var(--lh-loose); }
+        .ev-item.ev-text, .ev-item .ev-text { white-space: pre-wrap; word-break: break-word; line-height: var(--lh-loose); }
         .ev-item.ev-error { border-color: var(--danger); color: var(--danger-text); }
         .ev-item details summary { cursor: pointer; color: var(--text-2); }
         .ev-item pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 11px; }
-        .ev-body .composer { padding: 8px 10px; }
-        .ev-body .composer textarea { flex: 1; min-height: 34px; max-height: 120px; resize: vertical; }
+        .ev-sum { flex: none; padding: 8px 12px; border-bottom: 1px solid var(--border);
+                  font-size: var(--fs-sm); color: var(--muted); }
+        .ev-sum.live { color: var(--ok, #28a745); }
         .term-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; position: relative; }
         #termEl { flex: 1; min-height: 0; padding: 0; background: var(--term-bg); overflow: hidden; }
         /* 连接中反馈：终端区顶部一条 2px 走马灯（绝对定位，不进内容流，所以不破上面那条
@@ -1939,21 +1940,19 @@
                                 <button class="tc-btn" id="termCtxSelAll" role="menuitem">全选</button>
                             </div>
                         </div>
-                        <!-- P3 v1 结构化事件面板：与 xterm 终端并列、可切换。
-                             事件只走 SSE，绝不写进 term.write()（否则会像 auth_url 一样被当正文画出来）。 -->
+                        <!-- 当前会话的结构化事件面板：自动关联当前终端会话，不输入、不新开对话。
+                             事件只读磁盘转录，绝不写进 term.write()。 -->
                         <div class="ev-body" id="evBody" style="display:none">
                             <div class="bar">
-                                <b>结构化事件</b>
-                                <span class="hint" id="evSidHint">未开始</span>
+                                <b>本会话事件</b>
+                                <span class="hint" id="evSidHint">自动关联</span>
                                 <span class="ebar-sp"></span>
-                                <button class="btn ghost sm" id="evInterrupt" onclick="evInterrupt()" disabled>中断</button>
+                                <button class="btn ghost sm" id="evInterrupt" onclick="evInterrupt()">中断 ^C</button>
+                                <button class="btn ghost sm" onclick="evLoad()">刷新</button>
                                 <button class="btn ghost sm" onclick="evToggle(false)">返回终端</button>
                             </div>
-                            <div class="ev-list" id="evList"><div class="hint">输入消息后点「发送事件流」。事件按 type 结构化渲染，与终端字节流互不污染。</div></div>
-                            <div class="composer">
-                                <textarea id="evInput" rows="1" placeholder="消息…（Enter 发送，Shift+Enter 换行）" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();evSend()}"></textarea>
-                                <button class="btn" id="evSendBtn" onclick="evSend()">发送事件流</button>
-                            </div>
+                            <div class="ev-sum" id="evSum">等待当前会话…</div>
+                            <div class="ev-list" id="evList"><div class="hint">事件随当前会话自动更新，只对应当前会话。</div></div>
                         </div>
                     </div>
                     <!-- 模式3：对话框（有 chat 适配器的实体） -->
@@ -3648,7 +3647,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=3679532b';
+      var HUB_SRC = '/static/hub.js?v=bbd3e278';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

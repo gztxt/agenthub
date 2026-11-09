@@ -282,5 +282,25 @@ class _E(unittest.TestCase):
         self.assertIsNone(events.find_run("other", "s3"))
 
 
+class TestAutoSessionPanel(unittest.TestCase):
+    """用户口径（2026-11-09）：点「事件」自动汇总当前终端会话，不主动输入消息。"""
+
+    def test_panel_binds_current_term_session(self):
+        p = Path(__file__).resolve().parent.parent / "static" / "hub" / "16-events-panel.js"
+        src = p.read_text(encoding="utf-8")
+        self.assertIn("/api/term/sessions/", src, "必须读当前终端会话的事件端点")
+        self.assertIn("termSid", src, "必须绑定当前终端会话 id")
+        self.assertIn("evLoad", src, "必须自动轮询加载")
+        self.assertNotIn("evSend", src, "不应再有主动发送消息的入口")
+        self.assertNotIn("chat/events", src, "不应再走「新开一轮对话」的 SSE 端点")
+
+    def test_template_has_no_composer(self):
+        p = Path(__file__).resolve().parent.parent / "templates" / "index.html"
+        html = p.read_text(encoding="utf-8")
+        self.assertIn('id="evSum"', html, "必须有会话级汇总条")
+        self.assertNotIn('id="evSendBtn"', html, "不应再有发送事件流按钮")
+        self.assertNotIn('id="evInput"', html, "不应再有事件输入框")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -994,6 +994,20 @@ async def term_activity(request: Request):
                           for k, v in sorted(per.items())]}
 
 
+@router.get("/api/term/sessions/{sid}/events")
+async def session_events(sid: str, request: Request, limit: int = Query(default=300, ge=20, le=2000)):
+    """当前终端会话的结构化事件（自动关联该会话的磁盘转录，无需用户输入）。"""
+    _check_term_auth(request, "GET /api/term/sessions/{sid}/events")
+    sess = _sessions.get(sid)
+    if sess is None:
+        raise HTTPException(404, "会话不存在或已回收")
+    owner = _owner_of(request)
+    if owner and getattr(sess, "owner", "") != owner:
+        raise HTTPException(403, "不是该会话的创建者")
+    import term_events
+    return await asyncio.to_thread(term_events.session_events, sess, limit)
+
+
 @router.get("/api/term/sessions")
 async def list_sessions(request: Request):
     # P1-7：列表本身是**控制平面入口** —— 它漏 sid + agent_id + cmd + cwd + alive，

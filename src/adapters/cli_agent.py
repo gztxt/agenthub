@@ -148,6 +148,13 @@ def _clean_dsh(out: str) -> Tuple[str, Optional[dict]]:
 
 # ── 规格表 ───────────────────────────────────────────────────────────
 
+# CodeBuddy CLI 位置（2026-11-09）：官方 native 安装 ~/.local/bin（2.181.0，自更新）优先；
+# 缺失时回落 WorkBuddy 包内 2.137.1（该副本只随桌面端 deb 更新）。绝对路径是硬要求：
+# 派发进程 PATH 不保证含 ~/.local/bin。
+_CB_LOCAL = os.path.expanduser("~/.local/bin/codebuddy")
+CODEBUDDY_BIN = (_CB_LOCAL if os.access(_CB_LOCAL, os.X_OK)
+                 else "/opt/WorkBuddy/resources/app.asar.unpacked/cli/bin/codebuddy")
+
 SPECS: Dict[str, Dict[str, Any]] = {
     # 注意 id 是 `claude-code` 不是 `claude`：`claude` 这个 id 在 registry 里
     # 早已是 CCR 的 OpenAI 兼容端点（对话页/设置页都在用），改名会静默改变既有语义。
@@ -164,7 +171,7 @@ SPECS: Dict[str, Dict[str, Any]] = {
     "pi": {"bin": "pi", "argv": _argv_pi, "clean": _clean_pi,
            "model_path": "ccr", "model_fallback": PI_DEFAULT_MODEL,
            "label": "pi（-p）"},
-    "codebuddy": {"bin": "/opt/WorkBuddy/resources/app.asar.unpacked/cli/bin/codebuddy",
+    "codebuddy": {"bin": CODEBUDDY_BIN,
                   "argv": _argv_codebuddy, "clean": _clean_text,
                   "model_path": "native", "approve": ("-y",),
                   "label": "CodeBuddy CLI（-p）"},

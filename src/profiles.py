@@ -102,11 +102,15 @@ def _embed_proxy_url(pid: str, url: str) -> str:
             + (("?" + sp.query) if sp.query else "")
             + (("#" + sp.fragment) if sp.fragment else ""))
 
-# CodeBuddy Code 的 CLI 只在 WorkBuddy 包内，不在 PATH（2026-09-27 实测：
-# `which codebuddy` 落空，`shutil.which(<绝对路径>)` 原样返回）。终端入口因此必须写
-# 绝对路径，否则 term.py 的 `which(cmd[0])` 判定失败、会话拉不起来。
-CODEBUDDY_CLI = os.getenv("CODEBUDDY_CLI",
-                          "/opt/WorkBuddy/resources/app.asar.unpacked/cli/bin/codebuddy")
+# CodeBuddy Code 的 CLI：2026-11-09 起官方 native 安装落在 ~/.local/bin（2.181.0，
+# 自带自更新）；WorkBuddy 包内 2.137.1 只剩桌面端与 :35431 原生界面在用。
+# 终端入口仍写**绝对路径**：服务进程 PATH 不保证含 ~/.local/bin，而 term.py 的
+# `which(cmd[0])` 对带目录分隔符的路径原样返回 ⇒ 绝对路径两路都走得通。
+# 本地版缺失时回落包内旧版（宁可拉旧版，也不要 400「命令未在本机找到」）。
+_LOCAL_CODEBUDDY = os.path.expanduser("~/.local/bin/codebuddy")
+_BUNDLED_CODEBUDDY = "/opt/WorkBuddy/resources/app.asar.unpacked/cli/bin/codebuddy"
+CODEBUDDY_CLI = os.getenv("CODEBUDDY_CLI") or (
+    _LOCAL_CODEBUDDY if os.access(_LOCAL_CODEBUDDY, os.X_OK) else _BUNDLED_CODEBUDDY)
 
 # 进程扫描缓存（一次 discovery 周期复用）
 _proc_cache = {"ts": 0.0, "procs": []}
@@ -558,13 +562,13 @@ PROFILES: List[dict] = [
     {"id": "codebuddy", "name": "CodeBuddy Code", "kind": "agent",
      "detect": {"proc": [r"(^|/)codebuddy( |$)"]},
      "cli": None, "port": 35431, "ui": "http://127.0.0.1:35431",
-     # 终端入口用**绝对路径**：该 CLI 只在 WorkBuddy 包内、不在 PATH，`which("codebuddy")`
-     # 必然落空；shutil.which() 对带目录分隔符的路径原样返回（实测通过），
-     # term.py 的 `which(cmd[0])` 因此走得通 ⇒ 可在项目目录拉起 TUI 会话。
+     # 终端入口走 CODEBUDDY_CLI（默认 ~/.local/bin/codebuddy，2.181.0）：绝对路径
+     # 对服务进程 PATH 与 term.py 的 `which(cmd[0])` 都是最稳口径。
      "terminal": {"cmd": CODEBUDDY_CLI, "cwd": "/fs/1000/ftp/技术文档"},
      "chat": None,
      "desc": "WorkBuddy 包内捆绑 CLI（`codebuddy --serve`）的遥控 Web 界面 :35431" +
-             "（" + LAN_HOST_NOTE + "）→ 原生会话；CLI 亦可在项目目录拉起终端会话；"
+             "（" + LAN_HOST_NOTE + "）→ 原生会话；终端会话走 ~/.local/bin/codebuddy"
+             "（2.181.0，自更新）；"
              "⚠ workbuddy-daemon/headless 两单元 2026-10-24 用户裁定**豁免**"
              "「不长驻」（小程序通道与桌面 Electron 依赖它们，停了手机端断）"},
     # QoderWake：Qoder 云端 Agent 的本地宿主。2026-10-24 用户报「不是所有 agent 都

@@ -12,9 +12,12 @@
    terminal 后即可在选中项目目录拉起会话；qwenpaw 无 CLI，仍只有原生界面。
 3. **codebuddy 的 cmd 必须是绝对路径**：二进制只在 WorkBuddy 包内、不在 PATH，
    `which("codebuddy")` 落空 ⇒ term.py `which(cmd[0])` 会 400「命令未在本机找到」。
+4. **2026-11-09 换装**：CLI 升级到 2.181.0（官方 native 安装 `~/.local/bin`），cmd 随
+   `CODEBUDDY_CLI` 走新路径；包内 2.137.1 只服务桌面端与 :35431 原生界面。
 
 本文件属 L0 hermetic：只读画像表与判定函数，**零网络**（不探测 35431 是否真活着）。
 """
+import os
 import re
 import sys
 import unittest
@@ -61,12 +64,14 @@ class TestCodebuddyNativeCard(unittest.TestCase):
         self.assertEqual(c["ui"], "http://127.0.0.1:%d" % PORT)
 
     def test_terminal_cmd_is_absolute_and_resolvable(self):
-        """`which codebuddy` 落空 ⇒ cmd 必须带目录分隔符，且 which() 能解析"""
+        """cmd 必须是绝对路径且 which() 能解析；2026-11-09 起默认指向 ~/.local/bin 的 2.181.0"""
         c = _card("codebuddy")
         cmd = (c.get("terminal") or {}).get("cmd")
-        self.assertTrue(cmd and "/" in cmd, cmd)
-        self.assertIsNone(profiles.which("codebuddy"))     # 前提：裸名确实打不到
+        self.assertTrue(cmd and cmd.startswith("/"), cmd)
         self.assertEqual(profiles.which(cmd), cmd)
+        local = os.path.expanduser("~/.local/bin/codebuddy")
+        if os.access(local, os.X_OK):
+            self.assertEqual(cmd, local)   # 装了新版就必须用它，不得静默回落包内 2.137.1
 
     def test_entries_native_ui_first_then_term(self):
         """embed 必须排在 term 之前：形态优先级 embed>term>chat，原生界面是默认"""

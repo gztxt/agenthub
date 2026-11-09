@@ -1,3 +1,25 @@
+## v0.13.199 — codebuddy 模型清单改双落点：独立 CLI 与桌面端各读一份（2026-11-09）
+
+> 用户报障：「通过设置 → 模型配置 设置了 codebuddy 使用 `openrouter/stealth/crouton-alpha`，
+> 却不能正常使用」。
+
+- **根因**：本机有两套 codebuddy。hub 终端/子代理跑的是独立 CLI `~/.local/bin/codebuddy`
+  （2.181.0），它只读 `~/.codebuddy/models.json`；旧写手只写 `~/.workbuddy/models.json`
+  （判例 321 验的是 WorkBuddy **桌面端/包内** CLI）。设置页因此显示「已保存」，
+  而终端注入 `--model openrouter/stealth/crouton-alpha` 时 CLI 回
+  `400 model [...] service info not found`。
+- **取证**：二进制内 `.codebuddy/models.json` 出现 16 次、`.workbuddy/models.json` 0 次；
+  未加条目时 CLI 的自定义模型清单恰好只列出 `~/.codebuddy` 里那 3 条
+  （`custom-local:<id>`），`~/.workbuddy` 的第 4 条不出现；补进前者后
+  `codebuddy --model openrouter/stealth/crouton-alpha -p '…'` 真回包，
+  读 `/etc/hostname` 的工具环也正常（输出 `zzst`）。
+- **修法**：`_codebuddy_models_paths()` 返回两份落点，写入时**都写**，各自保持形状 ——
+  独立 CLI 那份保留对象格式 `{"models":[…]}`，桌面端那份恒数组（对象会被桌面端降级成 []）。
+  读侧 `catalog_ids` 取两文件并集，漂移判据改为「任一落点在册即一致」。
+- **同源改动**：`modelcfg.py` / `modelcfg_shape.py` / `adapters/cli_agent.py` 的落点注释；
+  新增 `NCodebuddyDualLanding` 两例（双文件写入+形状保持、只在 CLI 文件里在册也判一致）。
+- **测试**：`tests/test_modelcfg.py` 134 例全绿。
+
 ## v0.13.198 — 仓库源改「标签页」呈现：设置与项目页同口径（tab 名＝归属账号）（2026-11-09）
 
 > 用户需求：「设置 github 和 github 项目都要是标签页分组 例如仓库名 gztxt 作为标签页名」。

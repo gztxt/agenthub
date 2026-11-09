@@ -965,16 +965,24 @@ def _cursor_write(model: str):
     except (KeyError, jsonspan.JsonSpanError):
         return [(p, json.dumps(d, ensure_ascii=False, indent=2) + "\n", changes)]
 
-# ── codebuddy（WorkBuddy 包内 CLI）：落 ~/.workbuddy/models.json（数组格式）────
-# 判据（2026-11-03 实测，判例 321）：CLI dist 的 CustomModelsProductProvider 才是
-# `/model` 清单的数据源，它读的文件是 **~/.workbuddy/models.json**（productName=WorkBuddy
-# ⇒ isWorkBuddyProduct=true ⇒ 落点 .workbuddy），**不是** ~/.codebuddy/models.json
-# （后者只服务 Web UI 的 /custom/list 接口，provider 不读）。
+# ── codebuddy：两套产品、两个 models.json 落点（2026-11-09 修正）────────────
+# 本机两套 codebuddy 读的**不是同一个文件**（当日实测）：
 #
-# ⚠ **必须写数组格式** `[ {...}, {...} ]`：桌面端 asar 的 local-model storage 把同一文件
-# **当数组**处理（`Array.isArray(current) ? [...current] : []`），写对象格式 ⇒ 被当非数组
-# ⇒ 桌面端下次启动写回 []，内容丢失。provider 的 extractConfig() 两种格式都吃，
-# 而数组格式下桌面端写回只剔 `local:true` 条目 ⇒ 我们的条目存活（实测模拟验证）。
+#   ① 独立 CLI `~/.local/bin/codebuddy`（2.181.0；hub 的终端与子代理跑的就是它）
+#      → `~/.codebuddy/models.json`，对象格式 `{ "models": [...] }`。
+#      取证：二进制内 `.codebuddy/models.json` 出现 16 次、`.workbuddy/models.json` 0 次；
+#      文件里 3 条自定义模型，`codebuddy --model` 的报错清单原样列出
+#      `custom-local:<id>` 这三条，而 ~/.workbuddy 里的第 4 条不出现。
+#   ② WorkBuddy 桌面端/包内 CLI（productName=WorkBuddy，判例 321）
+#      → `~/.workbuddy/models.json`，**必须是数组**：桌面端 local-model storage 把同一文件
+#      当数组处理（`Array.isArray(current) ? [...current] : []`），写对象格式 ⇒ 开学写回 []
+#      ⇒ 内容丢失；数组格式下桌面端写回只剔 `local:true` 条目，我们的条目存活。
+#
+# ⚠ 旧实现只写 ②（判例 321 只验了包内 CLI）⇒ hub 终端读不到条目，注入
+#   `--model openrouter/stealth/crouton-alpha` 时 CLI 回
+#   `400 model [...] service info not found`，设置页却显示「已保存」——
+#   2026-11-09 用户报障「设置了却不能正常使用」就是这个断层。
+#   两个文件都存在时**同时写**，各自按原形状回写（不吃掉桌面端的数组约束）。
 #
 # ⚠ **id 必须带 provider 前缀**（`alibaba/xxx`）：本地条目 id 若与云账号内置清单同名，
 # 云条目优先 ⇒ 本地 url/apiKey 被完全忽略（云在答）。带前缀即避开。
@@ -984,12 +992,18 @@ def _cursor_write(model: str):
 # 拉起的会话 cwd = 用户选的项目目录 ⇒ 只有用户级才是 cwd 无关的落点。
 
 
-def _codebuddy_models_path() -> Path:
-    """provider 真正读的用户级清单路径（productName=WorkBuddy ⇒ .workbuddy）。
+def _codebuddy_models_paths() -> List[Path]:
+    """两套 codebuddy 各自的用户级清单路径（顺序：独立 CLI 在前）。
 
     每次现取（不模块级缓存）：L0 用例靠改 HOME 造假盘，模块级常量会让夹具失效。
     """
-    return _home() / ".workbuddy" / "models.json"
+    h = _home()
+    return [h / ".codebuddy" / "models.json", h / ".workbuddy" / "models.json"]
+
+
+def _codebuddy_models_path() -> Path:
+    """独立 CLI 的落点（hub 终端实际跑的 `~/.local/bin/codebuddy` 读它）。"""
+    return _codebuddy_models_paths()[0]
 
 
 def _codebuddy_load_entries(p: Path) -> List[dict]:
@@ -1014,19 +1028,27 @@ def _codebuddy_load_entries(p: Path) -> List[dict]:
 
 
 def _codebuddy_read() -> dict:
-    """读 ~/.workbuddy/models.json：现值 = 指向本机 CCR 的第一个条目。
+    """读两套 codebuddy 的模型清单（~/.codebuddy + ~/.workbuddy）。
 
-    「current」取**指向 CCR 的条目**（url 含本机 CCR 口）的 id —— 该文件里的条目
-    可能混着桌面端下载的本地模型（`local:true`，url 是 llama-server 口）与别的来源，
-    只有指向 CCR 的那些才是 hub 该管的。
+    「current」取**指向 CCR 的条目**（url 含本机 CCR 口）的 id —— 文件里可能混着
+    桌面端下载的本地模型（`local:true`，url 是 llama-server 口）与别的来源，
+    只有指向 CCR 的那些才是 hub 该管的。catalog_ids 是**两个文件的并集**：
+    hub 值只要在任一落点在册就算一致（写入侧两个文件都写）。
     """
-    p = _codebuddy_models_path()
-    if not p.exists():
-        return {"current": "", "files": [], "note": "未找到 ~/.workbuddy/models.json"}
-    entries = _codebuddy_load_entries(p)
+    paths = [p for p in _codebuddy_models_paths() if p.exists()]
+    if not paths:
+        return {"current": "", "files": [],
+                "note": "未找到 ~/.codebuddy/models.json 或 ~/.workbuddy/models.json"}
     ccr = _ccr_base()
-    ccr_ids = [str(m.get("id") or "") for m in entries
-                if str(m.get("id") or "") and ccr in str(m.get("url") or "")]
+    ccr_ids: List[str] = []
+    total = 0
+    for p in paths:
+        entries = _codebuddy_load_entries(p)
+        total += len(entries)
+        for m in entries:
+            mid = str(m.get("id") or "")
+            if mid and ccr in str(m.get("url") or "") and mid not in ccr_ids:
+                ccr_ids.append(mid)
     # 2026-11-04：models.json 是**多值清单**，不是单值默认模型字段 —— 「第一条 CCR
     # 条目」只是展示用的启发值，不代表当前生效模型（桌面端另存 settings.json.model，
     # hub 拉起终端则靠 --model 注入）。写入是按 id upsert、不改顺序 ⇒ 用 current
@@ -1036,29 +1058,51 @@ def _codebuddy_read() -> dict:
     return {"current": ccr_ids[0] if ccr_ids else "",
             "catalog_ids": ccr_ids,
             "provider": "ccr" if ccr_ids else "",
-            "extra": {"entries": len(entries), "ccr_entries": len(ccr_ids)},
-            "files": [str(p)],
-            "note": ("codebuddy 的模型清单是 ~/.workbuddy/models.json（数组格式）："
-                     "provider 只认指向本机 CCR 的条目；桌面端下载的本地模型"
-                     "（local:true）不在其列")}
+            "extra": {"entries": total, "ccr_entries": len(ccr_ids),
+                      "files_used": [str(p) for p in paths]},
+            "files": [str(p) for p in paths],
+            "note": ("codebuddy 有**两个**清单落点：~/.codebuddy/models.json（独立 CLI，"
+                     "hub 终端跑的就是它）与 ~/.workbuddy/models.json（WorkBuddy 桌面端/"
+                     "包内 CLI）；保存时两个文件都按 id 写入")}
+
+
+def _codebuddy_dump(p: Path, entries: List[dict]) -> str:
+    """按落点回写：桌面端那份**恒定数组**，独立 CLI 那份按原形状（对象/数组）。
+
+    - ~/.workbuddy/models.json：桌面端 local-model storage 把对象格式当非数组、
+      启动即写回 []（判例 321）⇒ 无论原文件是什么形状，一律数组。
+    - ~/.codebuddy/models.json：独立 CLI 吃对象格式 `{"models": [...]}`；
+      原文件是对象就保留其它顶层键，是数组就维持数组，不做无谓改写。
+    """
+    if p.parent.name != ".workbuddy":
+        try:
+            raw = json.loads(_read_text(p))
+        except (json.JSONDecodeError, ModelCfgError):
+            raw = None
+        if isinstance(raw, dict):
+            raw = dict(raw)
+            raw["models"] = entries
+            return json.dumps(raw, ensure_ascii=False, indent=2) + "\n"
+    return json.dumps(entries, ensure_ascii=False, indent=2) + "\n"
 
 
 def _codebuddy_write(model: str) -> List[Tuple[Path, str, List[dict]]]:
-    """把 model 作为一条 CCR 条目 upsert 进 ~/.workbuddy/models.json。
+    """把 model 作为一条 CCR 条目 upsert 进**所有存在的** codebuddy 清单。
 
     写手是纯函数（不落盘），返回 [(路径, 新文本, changes)] 交由 apply_model 落。
 
-    硬约束（三条都来自实测，见判例 321）：
-      ① **输出必为数组格式** —— 对象格式会被桌面端启动时降级成 []；
+    硬约束（前两条来自 2026-11-03 实测，第三条来自 2026-11-09 的断层）：
+      ① **保持各文件原有形状** —— 桌面端那份必须是数组，独立 CLI 那份是对象；
       ② **按 id 幂等 upsert** —— 同 id 只更新该条，不追加重复项；
-      ③ **不碰别人的条目** —— 桌面端的 local:true 条目、其它 id 的条目原样保留。
+      ③ **不碰别人的条目** —— 桌面端的 local:true 条目、其它 id 的条目原样保留；
+      ④ **两套产品都写** —— 只写一份就是「设置页成功、终端报 model 不存在」。
     """
-    p = _codebuddy_models_path()
-    if not p.exists():
+    paths = [p for p in _codebuddy_models_paths() if p.exists()]
+    if not paths:
         raise ModelCfgError(
-            f"配置文件不存在，拒绝新建：{p}（codebuddy 的模型清单由 CLI/桌面端创建；"
-            f"请先在 WorkBuddy 里启动一次 codebuddy，或手动建该文件）", 404)
-    entries = _codebuddy_load_entries(p)
+            "配置文件不存在，拒绝新建：~/.codebuddy/models.json 与 "
+            "~/.workbuddy/models.json 都不存在（codebuddy 的模型清单由 CLI/桌面端创建；"
+            "请先启动一次 codebuddy，或手动建该文件）", 404)
     url = _ccr_base() + "/v1/chat/completions"
     api_key = _api_key()
     entry = {
@@ -1075,23 +1119,25 @@ def _codebuddy_write(model: str) -> List[Tuple[Path, str, List[dict]]]:
         "supportsToolCall": True,
         "supportsReasoning": True,
     }
-    changes: List[dict] = []
-    hit = -1
-    for i, m in enumerate(entries):
-        if str(m.get("id") or "") == model:
-            hit = i
-            break
-    if hit >= 0:
-        old = dict(entries[hit])
-        entries[hit] = entry
-        changes.append({"where": f"models[{model}]", "from": str(old.get("url") or ""),
-                        "to": url, "op": "set"})
-    else:
-        entries.append(entry)
-        changes.append({"where": f"models[{model}]", "from": "", "to": url, "op": "add"})
-    # 永远写数组（见硬约束①）。ensure_ascii=False + indent=2：与桌面端写的形态一致。
-    new = json.dumps(entries, ensure_ascii=False, indent=2) + "\n"
-    return [(p, new, changes)]
+    out: List[Tuple[Path, str, List[dict]]] = []
+    for p in paths:
+        entries = _codebuddy_load_entries(p)
+        changes: List[dict] = []
+        hit = -1
+        for i, m in enumerate(entries):
+            if str(m.get("id") or "") == model:
+                hit = i
+                break
+        if hit >= 0:
+            old = dict(entries[hit])
+            entries[hit] = entry
+            changes.append({"where": f"models[{model}]", "from": str(old.get("url") or ""),
+                            "to": url, "op": "set"})
+        else:
+            entries.append(entry)
+            changes.append({"where": f"models[{model}]", "from": "", "to": url, "op": "add"})
+        out.append((p, _codebuddy_dump(p, entries), changes))
+    return out
 
 
 # ── argv-only 型 agent（2026-10-25：omp 入册）────────────────────────

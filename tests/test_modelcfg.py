@@ -963,6 +963,49 @@ class NCodebuddyCatalogDrift(_HomeFixture):
                          "页面不许同时显示两个都生效的值")
 
 
+class NCodebuddyDualLanding(_HomeFixture):
+    """2026-11-09 用户报障：设置页存了 crouton，终端却报 model 不存在。
+
+    根因：hub 终端跑独立 CLI `~/.local/bin/codebuddy`，它只读
+    `~/.codebuddy/models.json`；旧写手只落 `~/.workbuddy/models.json`（桌面端/包内 CLI）
+    ⇒ 设置页显示成功，终端注入 `--model <id>` 时 CLI 报
+    `400 model [...] service info not found`。
+    """
+
+    @staticmethod
+    def _entry(mid: str) -> dict:
+        return {"id": mid, "name": mid,
+                "url": "http://127.0.0.1:3456/v1/chat/completions"}
+
+    def test_write_lands_in_both_files_and_keeps_shape(self):
+        self._write(".codebuddy/models.json", json.dumps(
+            {"models": [self._entry("alibaba/deepseek-v4.1-flash")]}, ensure_ascii=False))
+        self._write(".workbuddy/models.json", json.dumps(
+            [self._entry("alibaba/deepseek-v4.1-flash")], ensure_ascii=False))
+        modelcfg.set_hub_model("codebuddy", "openrouter/stealth/crouton-alpha")
+        out = modelcfg.repair_drift()
+        self.assertIn("codebuddy", [r["id"] for r in out["repaired"]],
+                      "条目不在任一清单里，巡检应写回")
+        cli = json.loads(self._read(".codebuddy/models.json"))
+        self.assertIsInstance(cli, dict, "独立 CLI 那份必须保持对象格式")
+        self.assertIn("openrouter/stealth/crouton-alpha",
+                      [m["id"] for m in cli["models"]])
+        self.assertIn("alibaba/deepseek-v4.1-flash",
+                      [m["id"] for m in cli["models"]], "不许动别人的条目")
+        desk = json.loads(self._read(".workbuddy/models.json"))
+        self.assertIsInstance(desk, list, "桌面端那份必须保持数组格式")
+        self.assertIn("openrouter/stealth/crouton-alpha", [m["id"] for m in desk])
+
+    def test_value_present_only_in_cli_file_is_not_drift(self):
+        self._write(".codebuddy/models.json", json.dumps(
+            {"models": [self._entry("openrouter/stealth/crouton-alpha")]}, ensure_ascii=False))
+        self._write(".workbuddy/models.json", json.dumps(
+            [self._entry("alibaba/deepseek-v4.1-flash")], ensure_ascii=False))
+        modelcfg.set_hub_model("codebuddy", "openrouter/stealth/crouton-alpha")
+        self.assertEqual([d["id"] for d in modelcfg.drift_report()], [],
+                         "任一落点在册即一致（旧实现只看 workbuddy 会报假漂移）")
+
+
 class MAutoDiscovery(_HomeFixture):
     """agent 清单自动发现（2026-10-25 用户令「应该是自动发现并添加」）。
 

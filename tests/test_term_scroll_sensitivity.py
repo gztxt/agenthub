@@ -240,7 +240,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.198"
+    CURRENT_VERSION = "0.13.199"
+    #: v0.13.199：本轮改的是「codebuddy 模型清单双落点」，不是终端滚动；版本钉照常跟版本号走。
+    #: 学到的：**同一个 agent 名字下可能是两套产品**（独立 CLI / 桌面端包内 CLI），
+    #: 「设置页说成功」只证明写进了自己以为的那个文件，不代表执行者读得到。
+    VERSION_ROOT_CAUSES["0.13.199"] = (
+        "双落点", "custom-local", "service info not found", "~/.codebuddy/models.json",
+    )
     #: v0.13.198：本轮改的是「仓库源标签页」，不是终端滚动；版本钉照常跟版本号走。
     #: 学到的：同一个信息在「设置」与「项目页」两处呈现时，分组口径必须同源
     #: （都取 owner 当 tab 名），否则用户要在脑子里做一次映射才能对上号。

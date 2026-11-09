@@ -20,10 +20,12 @@ yaml，pi 还要顺带补模型清单、grok 要建命名 profile），逐一白
   pi      ~/.pi/agent/settings.json   defaultModel / defaultProvider（模型不在清单时补进 models.json）
   grok    ~/.grok/config.toml         [model.ccr-hub] 块 + [models].default
   hermes  ~/.hermes/config.yaml       model.default / model.provider
-  codebuddy（WorkBuddy 包内 CLI）    ~/.workbuddy/models.json（**数组格式**！见 _codebuddy_write）
+  codebuddy  ~/.codebuddy/models.json（独立 CLI，**对象格式**）
+             + ~/.workbuddy/models.json（WorkBuddy 桌面端/包内 CLI，**数组格式**）
+          两份都写（2026-11-09 修正，见 _codebuddy_write）：hub 终端跑 ~/.local/bin/codebuddy，
+          它只读前者；旧实现只写后者 ⇒ 设置页成功、终端报 model 不存在。
           条目直写 CCR 的 provider/model ID（alibaba/xxx）；provider 把它们并进 /model 清单
-          （带 custom-local: 前缀，原 id 同时进 aliases）。2026-11-03 实测入册（判例 321）——
-          此前标「不支持」的理由「--model 只认自有清单」已被推翻。
+          （带 custom-local: 前缀，原 id 同时进 aliases）。2026-11-03 实测入册（判例 321）。
   dsh     ~/.dsh/profiles/{web,tui,headless}/cordis.patch.yml
           llm-deepseek.models（可选目录，**由 hub 定期从 CCR 清单同步**）+
           agent-default-model.model（新会话默认值，三份同批写）

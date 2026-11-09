@@ -127,7 +127,17 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.198"
+VERSION = "0.13.199"
+
+# v0.13.199（2026-11-09）：codebuddy 模型清单**双落点**（用户：设置页选了
+#   openrouter/stealth/crouton-alpha 却不能用）。根因：hub 终端跑独立 CLI
+#   ~/.local/bin/codebuddy（2.181.0），它只读 ~/.codebuddy/models.json；旧写手只落
+#   ~/.workbuddy/models.json（判例 321 验的是 WorkBuddy 包内 CLI）⇒ 设置页「已保存」、
+#   终端注入 --model 时报 `400 model [...] service info not found`。
+#   修法：两套产品都写——独立 CLI 那份按原形状（对象），桌面端那份恒数组；
+#   读侧 catalog_ids 取两文件并集，漂移判据「任一落点在册」。
+#   关键词锚（版本钉 test_term_scroll_sensitivity 用）：双落点 / custom-local /
+#   service info not found / ~/.codebuddy/models.json
 
 # v0.13.198（2026-11-09）：仓库源改「标签页」呈现（用户：设置 github 和 github 项目都要是标签页分组，
 #   例如仓库名 gztxt 作为标签页名）。两处同源改动：

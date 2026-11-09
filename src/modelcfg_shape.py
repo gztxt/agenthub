@@ -37,9 +37,11 @@ MODEL_ARGV: Dict[str, str] = {
     "omp": "--model",
     # ── 2026-11-03 新增（codebuddy 入册，实测 `codebuddy --help`：
     #    `--model <model>  Model for the current session`）──
-    # ⚠ 它认的值是**本地清单里的 id**：provider 把 ~/.workbuddy/models.json 的条目并进
-    # 清单时加 `custom-local:` 前缀，但**原 id 同时进 aliases** ⇒ 实测
+    # ⚠ 它认的值是**本地清单里的 id**：provider 把 models.json 的条目并进清单时加
+    # `custom-local:` 前缀，但**原 id 同时进 aliases** ⇒ 实测
     # `--model alibaba/deepseek-v4.1-flash` 与 `--model custom-local:alibaba/…` 都真回包。
+    # 清单落点有两份（2026-11-09）：~/.codebuddy/models.json（独立 CLI，hub 终端用它）
+    # 与 ~/.workbuddy/models.json（桌面端/包内 CLI），两份都要有该 id。
     # 这里注入**裸 id**（与设置页存的形状一致，也与其它 agent 同口径）。
     "codebuddy": "--model",
     # ── 2026-11-04 新增（kimi-code，`kimi -m <alias>` 入册，实测 `kimi --help`）──
@@ -61,7 +63,7 @@ WRITE_MODE: Dict[str, str] = {
     # argv-only：无默认模型配置文件可落（见 _omp_read），hub 侧设置只经终端注入。
     "omp": "argv",
     # 2026-11-03：codebuddy 的清单条目**直写 CCR 的 provider/model ID**（落
-    # ~/.workbuddy/models.json）⇒ 与 "ccr" 同口径，清单闸门（catalog_ids）对它生效：
+    # ~/.codebuddy + ~/.workbuddy 两份 models.json）⇒ 与 "ccr" 同口径，清单闸门对它生效：
     # 存了不在 CCR 清单里的 ID ⇒ 注入后上游报 unknown model。
     "codebuddy": "ccr",
     # ── 2026-11-04 新增（kimi 写 ~/.kimi-code/config.toml，别名前缀 ccr/ = 与 CCR 同源）──

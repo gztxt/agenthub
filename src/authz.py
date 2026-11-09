@@ -1,0 +1,182 @@
+"""端点 → scope 声明表（P0-1：只声明，不执行）。
+
+为什么单独一张表：`writeauth.decide()` 现在只判「是否登录」，97 条写端点里 88 条
+登录即全权。P0 要把它改成「identity + scope」，但**改判定前必须先把每条端点的
+归属钉死**——否则改一行就是 97 条逐个猜。
+
+纪律（照 T3 Code 的 `satisfies Record<...>` 思路，Python 用测试兜底）：
+  · 新增任何写路由，必须在这里加一行；漏加则 `tests/test_authz_scopes.py` 失败；
+  · 这里删掉一行而对不上真实路由，同样失败（防「表里有、路由没了」的僵尸授权）；
+  · 本模块**当前不参与鉴权**。`write_gate` 仍是唯一闸门，行为零变化。
+    接 enforce 是 P0-2，届时先干跑再切。
+
+scope 边界（与 docs/HUB-AUTHZ-INVENTORY-20261109.md 一致）：
+  hub.task.write      起/停/重排任务（能拉起 agent）
+  hub.agent.write     agent 注册、对话、pty、UI 进程、会话改名
+  hub.memory.write    L1/L2/L3 与归档
+  hub.skill.write     技能调用/安装/卸载/商店登录
+  hub.catalog.write   参考库、卡片、KB、准入、动作面
+  hub.mcp.write       MCP server/ACL 管理与任意 call
+  hub.settings.write  模型/GitHub/偏好/设置导入
+  hub.ops.write       重启、杀进程、扫描、巡检、定时任务、审批
+  hub.user.admin      用户与凭据管理
+"""
+
+SCOPES = frozenset({
+    "hub.task.write",
+    "hub.agent.write",
+    "hub.memory.write",
+    "hub.skill.write",
+    "hub.catalog.write",
+    "hub.mcp.write",
+    "hub.settings.write",
+    "hub.ops.write",
+    "hub.user.admin",
+})
+
+#: 键 = (模块名不含 .py, HTTP 方法, 路由字面量)。路由里的 `{param}` 原样保留。
+#: 97 条 = 2026-11-09 源码实测；加/删端点必须同步本表。
+WRITE_ROUTE_SCOPES = {
+    ("actionplane", "POST", "/api/actions"): "hub.catalog.write",
+    ("actionplane", "POST", "/api/actions/{action_id}/decide"): "hub.catalog.write",
+    ("actionplane", "POST", "/api/actions/{action_id}/settle"): "hub.catalog.write",
+    ("admission", "POST", "/api/admission/scan"): "hub.catalog.write",
+    ("admission", "POST", "/api/admission/tickets"): "hub.catalog.write",
+    ("admission", "POST", "/api/admission/tickets/{slug}/{version}/stage"): "hub.catalog.write",
+    ("api_agents", "POST", "/api/agents"): "hub.agent.write",
+    ("api_agents", "POST", "/api/agents/detect"): "hub.agent.write",
+    ("api_agents", "DELETE", "/api/agents/{agent_id}"): "hub.agent.write",
+    ("api_agents", "POST", "/api/agents/{agent_id}/chat"): "hub.agent.write",
+    ("api_agents", "POST", "/api/agents/{agent_id}/chat/stream"): "hub.agent.write",
+    ("api_agents", "POST", "/api/agents/{agent_id}/ui-start"): "hub.agent.write",
+    ("api_agents", "POST", "/api/agents/{agent_id}/verify"): "hub.agent.write",
+    ("api_sessions", "DELETE", "/api/sessions/{session_id}"): "hub.agent.write",
+    ("api_sessions", "PATCH", "/api/sessions/{session_id}"): "hub.agent.write",
+    ("api_summarize", "POST", "/api/summarize"): "hub.ops.write",
+    ("api_system", "POST", "/api/system/restart"): "hub.ops.write",
+    ("api_vitals", "POST", "/api/vitals/sweep"): "hub.ops.write",
+    ("approvals", "POST", "/api/approvals/{aid}/approve"): "hub.ops.write",
+    ("approvals", "POST", "/api/approvals/{aid}/deny"): "hub.ops.write",
+    ("cloudcli", "POST", "/start"): "hub.agent.write",
+    ("cronjobs", "POST", "/api/jobs"): "hub.ops.write",
+    ("cronjobs", "DELETE", "/api/jobs/{jid}"): "hub.ops.write",
+    ("cronjobs", "PUT", "/api/jobs/{jid}"): "hub.ops.write",
+    ("cronjobs", "POST", "/api/jobs/{jid}/run"): "hub.ops.write",
+    ("ghsettings", "POST", "/api/settings/github/apply"): "hub.settings.write",
+    ("ghsettings", "POST", "/api/settings/github/clear"): "hub.settings.write",
+    ("ghsettings", "POST", "/api/settings/github/refresh"): "hub.settings.write",
+    ("ghsettings", "POST", "/api/settings/github/sources"): "hub.settings.write",
+    ("ghsettings", "DELETE", "/api/settings/github/sources/{sid}"): "hub.settings.write",
+    ("ghsettings", "PATCH", "/api/settings/github/sources/{sid}"): "hub.settings.write",
+    ("ghsettings", "POST", "/api/settings/github/test"): "hub.settings.write",
+    ("githubprojects", "POST", "/api/github/clone"): "hub.ops.write",
+    ("hook", "POST", "/telemetry/events/{source}"): "hub.ops.write",
+    ("intake", "POST", "/task"): "hub.task.write",
+    ("main", "POST", "/api/csp/report"): "hub.ops.write",
+    ("main", "POST", "/api/scan/run"): "hub.ops.write",
+    ("mcpgw", "POST", "/mcp/acl"): "hub.mcp.write",
+    ("mcpgw", "DELETE", "/mcp/acl/{acl_id}"): "hub.mcp.write",
+    ("mcpgw", "POST", "/mcp/call"): "hub.mcp.write",
+    ("mcpgw", "POST", "/mcp/servers"): "hub.mcp.write",
+    ("mcpgw", "POST", "/mcp/servers/probe"): "hub.mcp.write",
+    ("mcpgw", "DELETE", "/mcp/servers/{sid}"): "hub.mcp.write",
+    ("memory", "POST", "/api/memory/archive"): "hub.memory.write",
+    ("memory", "POST", "/api/memory/l1"): "hub.memory.write",
+    ("memory", "POST", "/api/memory/l1/batch"): "hub.memory.write",
+    ("memory", "DELETE", "/api/memory/l1/{mid}"): "hub.memory.write",
+    ("memory", "PUT", "/api/memory/l1/{mid}"): "hub.memory.write",
+    ("memory", "PUT", "/api/memory/l2"): "hub.memory.write",
+    ("memory", "POST", "/api/memory/l2/rebuild"): "hub.memory.write",
+    ("memory", "PUT", "/api/memory/l3"): "hub.memory.write",
+    ("modelcfg", "POST", "/api/settings/model/apply"): "hub.settings.write",
+    ("modelcfg", "POST", "/api/settings/model/undo"): "hub.settings.write",
+    ("modelcfg", "POST", "/api/settings/model/verify-live"): "hub.settings.write",
+    ("prefs", "PUT", "/api/prefs/{key}"): "hub.settings.write",
+    ("refscout", "DELETE", "/cards/{card_id}"): "hub.catalog.write",
+    ("refscout", "POST", "/cards/{card_id}/refresh"): "hub.catalog.write",
+    ("refscout", "DELETE", "/kb/probe"): "hub.catalog.write",
+    ("refscout", "POST", "/kb/probe"): "hub.catalog.write",
+    ("refscout", "POST", "/kb/promote"): "hub.catalog.write",
+    ("refscout", "POST", "/kb/test"): "hub.catalog.write",
+    ("refscout", "POST", "/scout"): "hub.catalog.write",
+    ("refscout", "POST", "/sources"): "hub.catalog.write",
+    ("refscout", "DELETE", "/sources/{sid}"): "hub.catalog.write",
+    ("resources", "POST", "/api/resources/kill"): "hub.ops.write",
+    ("settings_bundle", "POST", "/api/settings/import"): "hub.settings.write",
+    ("skill", "POST", "/auto"): "hub.skill.write",
+    ("skill", "POST", "/install"): "hub.skill.write",
+    ("skill", "POST", "/invoke"): "hub.skill.write",
+    ("skill", "DELETE", "/remove"): "hub.skill.write",
+    ("skill_assets", "POST", "/api/skill-assets/{slug}"): "hub.skill.write",
+    ("skill_assets", "POST", "/api/skill-assets/{slug}/transition"): "hub.skill.write",
+    ("skill_store", "POST", "/acquire"): "hub.skill.write",
+    ("skill_store", "POST", "/install"): "hub.skill.write",
+    ("skill_store", "POST", "/login"): "hub.skill.write",
+    ("skill_store", "POST", "/logout"): "hub.skill.write",
+    ("tasks", "DELETE", "/api/tasks/{run_id}"): "hub.task.write",
+    ("tasks", "POST", "/api/tasks/{run_id}/accept"): "hub.task.write",
+    ("tasks", "POST", "/api/tasks/{run_id}/cancel"): "hub.task.write",
+    ("tasks", "POST", "/api/tasks/{run_id}/pause"): "hub.task.write",
+    ("tasks", "POST", "/api/tasks/{run_id}/reject"): "hub.task.write",
+    ("tasks", "POST", "/api/tasks/{run_id}/resume"): "hub.task.write",
+    ("tasks", "POST", "/api/tasks/{run_id}/retry"): "hub.task.write",
+    ("tasks", "POST", "/api/tasks/{run_id}/start"): "hub.task.write",
+    ("tasks_dag", "POST", "/api/tasks/decompose"): "hub.task.write",
+    ("tasks_replan", "POST", "/api/tasks/{run_id}/replan"): "hub.task.write",
+    ("term", "POST", "/api/term/sessions"): "hub.agent.write",
+    ("term", "DELETE", "/api/term/sessions/{sid}"): "hub.agent.write",
+    ("users", "POST", "/api/users"): "hub.user.admin",
+    ("users", "POST", "/api/users/login"): "hub.user.admin",
+    ("users", "POST", "/api/users/logout"): "hub.user.admin",
+    ("users", "DELETE", "/api/users/{name}"): "hub.user.admin",
+    ("users", "POST", "/api/users/{name}/credentials"): "hub.user.admin",
+    ("users", "POST", "/api/users/{name}/password"): "hub.user.admin",
+    ("users", "POST", "/api/users/{name}/password-clear"): "hub.user.admin",
+    ("users", "PUT", "/api/users/{name}/perms"): "hub.user.admin",
+    ("users", "POST", "/api/users/{name}/revoke"): "hub.user.admin",
+}
+
+#: 不参与 scope 判定的写路由：与 `writeauth.EXEMPT_PREFIXES` 逐条对应。
+#: 登录/登出必须未登录可达；telemetry 由 hook.py 自带 Bearer/回环校验。
+#: 入口本身不走 scope，但它们签发的会话/产生的事件仍受各自通道约束。
+EXEMPT_WRITE_ROUTES = frozenset({
+    ("users", "POST", "/api/users/login"),
+    ("users", "POST", "/api/users/logout"),
+    ("hook", "POST", "/telemetry/events/{source}"),
+})
+
+#: 22 条有副作用的写路由：起进程、发外网、改全局配置、调 LLM 或重扫。
+#: P0-3 先只对这 22 条强制 scope，其余保持登录放行，降低回归面。
+SIDE_EFFECT_ROUTES = frozenset({
+    ("api_agents", "POST", "/api/agents/{agent_id}/chat"),
+    ("api_agents", "POST", "/api/agents/{agent_id}/chat/stream"),
+    ("api_agents", "POST", "/api/agents/{agent_id}/ui-start"),
+    ("api_summarize", "POST", "/api/summarize"),
+    ("api_system", "POST", "/api/system/restart"),
+    ("api_vitals", "POST", "/api/vitals/sweep"),
+    ("cloudcli", "POST", "/start"),
+    ("cronjobs", "POST", "/api/jobs/{jid}/run"),
+    ("ghsettings", "POST", "/api/settings/github/apply"),
+    ("githubprojects", "POST", "/api/github/clone"),
+    ("main", "POST", "/api/scan/run"),
+    ("mcpgw", "POST", "/mcp/call"),
+    ("modelcfg", "POST", "/api/settings/model/apply"),
+    ("resources", "POST", "/api/resources/kill"),
+    ("settings_bundle", "POST", "/api/settings/import"),
+    ("skill_assets", "POST", "/api/skill-assets/{slug}"),
+    ("tasks", "POST", "/api/tasks/{run_id}/start"),
+    ("tasks", "POST", "/api/tasks/{run_id}/retry"),
+    ("tasks", "POST", "/api/tasks/{run_id}/resume"),
+    ("tasks_dag", "POST", "/api/tasks/decompose"),
+    ("tasks_replan", "POST", "/api/tasks/{run_id}/replan"),
+    ("term", "POST", "/api/term/sessions"),
+})
+
+
+def scope_for(module: str, method: str, path: str):
+    """返回该写路由的 scope；未声明返回 None（测试会把它判成失败）。"""
+    return WRITE_ROUTE_SCOPES.get((module, method.upper(), path))
+
+
+def is_side_effect(module: str, method: str, path: str) -> bool:
+    return (module, method.upper(), path) in SIDE_EFFECT_ROUTES

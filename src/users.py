@@ -113,13 +113,33 @@ def resolve_token(provided: str) -> Tuple[Optional[dict], Optional[set], bool]:
     if not provided:
         return None, None, True
     rows = db.query("SELECT u.id, u.username, u.display, u.is_admin,"
-                    " c.id AS cred_id FROM user_credentials c JOIN users u ON u.id=c.user_id"
+                    " c.id AS cred_id, c.scopes FROM user_credentials c JOIN users u ON u.id=c.user_id"
                     " WHERE c.token_hash=? AND c.revoked_at IS NULL", (_sha(provided),))
     if rows:
         r = rows[0]
         perms = None if r["is_admin"] else _perm_set(r["id"])
         return r, perms, False
     return None, None, True
+
+
+def parse_scopes(raw):
+    """会话 scope 白名单解析（P0-2）。
+
+    None / 空值 / 非法 JSON ⇒ None = **沿用现行**（军规「新能力不换旧默认」）；
+    合法 JSON 数组 ⇒ frozenset，且只保留 authz.SCOPES 里的已知项（防注入/防漂移）。
+    `[]` 返回空 frozenset，与 None 语义不同：空集＝明确无任何写 scope（只读）。
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        import json
+        val = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(val, list):
+        return None
+    import authz
+    return frozenset(s for s in val if isinstance(s, str) and s in authz.SCOPES)
 
 
 # ── 浏览器会话 Cookie（2026-11-07 用户裁定：Web 端全量用户名+密码认证）──────

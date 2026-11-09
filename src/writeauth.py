@@ -249,6 +249,17 @@ async def write_gate(request, call_next):
                  else ("user:" + ureq["username"] if ureq else "user:anonymous"))
         request.state.actor = actor
         if verdict == "allow":
+            # P0-2 干跑（2026-11-09）：只算「若 enforce 会怎样」，绝不改变准入。
+            # 现阶段所有会话 scopes=NULL ⇒ 一律 legacy，先取真实分布，P0-3 才切 enforce。
+            try:
+                import authz
+                import users as _users_dry
+                _raw = ureq.get("scopes") if ureq else None
+                _tag, _need, _why = authz.dryrun_verdict(
+                    method, path, _users_dry.parse_scopes(_raw))
+            except Exception:  # noqa: BLE001 —— 观测面失败绝不打断业务
+                _tag, _need, _why = "error", None, "干跑解析异常"
+            print(f"[writegate][dryrun] {_tag} need={_need} {method} {path} —— {_why}")
             ask = approvals.ask_reason(path)
             if ask:
                 aid, tk = approvals.split_header(approval_header(request.headers.raw))

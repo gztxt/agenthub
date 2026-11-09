@@ -180,3 +180,72 @@ def scope_for(module: str, method: str, path: str):
 
 def is_side_effect(module: str, method: str, path: str) -> bool:
     return (module, method.upper(), path) in SIDE_EFFECT_ROUTES
+
+
+# ── 运行时反查（P0-2 干跑用）───────────────────────────────────────────────
+# 闸门手里只有 (method, path)，拿不到「模块名」；声明表按模块分键，故在这里
+# 折一张 path 索引。构建时若同一 (method, path) 在不同模块落到不同 scope，
+# 直接抛错——歧义必须显式消解，不许运行时随机挑一个。
+def _build_path_index():
+    out = {}
+    for (mod, method, path), sc in WRITE_ROUTE_SCOPES.items():
+        key = (method, path)
+        if key in out and out[key] != sc:
+            raise RuntimeError(f"scope 反查歧义：{key} → {out[key]} / {sc}")
+        out[key] = sc
+    return out
+
+
+SCOPE_BY_PATH = _build_path_index()
+
+import re  # noqa: E402 —— 本段专用；放这里避免动文件头
+
+
+def _compile_path(tpl: str):
+    """把 `/api/memory/l1/{mid}` 编译成正则；`{...}` 只吃一段非斜杠字符。"""
+    parts = re.split(r"(\{[^}]+\})", tpl)
+    pattern = "".join(r"[^/]+" if p.startswith("{") else re.escape(p) for p in parts)
+    return re.compile("^" + pattern + "$")
+
+
+#: 运行时 `request.url.path` 是**实际值**（/api/memory/l1/42），不是声明表里的
+#: 模板（/api/memory/l1/{mid}）；带参路由必须靠模板匹配，否则干跑全变 unscoped。
+#: 无参数的精确项排在前面，避免 `/api/agents/detect` 被 `{agent_id}` 吞掉。
+_PATH_PATTERNS = [
+    (m, _compile_path(p), sc)
+    for (m, p), sc in sorted(SCOPE_BY_PATH.items(), key=lambda kv: "{" in kv[0][1])
+]
+
+
+def scope_for_path(method: str, path: str):
+    """运行时按 (method, path) 反查所需 scope；未声明返回 None。
+
+    先精确命中，再按模板匹配（`/api/memory/l1/42` → `/api/memory/l1/{mid}`）。
+    """
+    m = method.upper()
+    exact = SCOPE_BY_PATH.get((m, path))
+    if exact:
+        return exact
+    for pm, rx, sc in _PATH_PATTERNS:
+        if pm == m and rx.match(path):
+            return sc
+    return None
+
+
+def dryrun_verdict(method: str, path: str, scopes):
+    """P0-2 干跑：只算「若 enforce 会怎样」，**绝不改变准入**。
+
+    返回 (tag, needed_scope, why)：
+      legacy       scopes is None ⇒ 沿用现行，会放行
+      would_allow  会话已持该 scope
+      would_deny   会话缺该 scope（干跑期仍放行，只记账）
+      unscoped     端点没有 scope 声明（正常不该发生，出现即要补表）
+    """
+    needed = scope_for_path(method, path)
+    if needed is None:
+        return "unscoped", None, "端点无 scope 声明"
+    if scopes is None:
+        return "legacy", needed, "NULL=沿用现行，会放行"
+    if needed in scopes:
+        return "would_allow", needed, "会话已持该 scope"
+    return "would_deny", needed, "会话缺该 scope（干跑不拒）"

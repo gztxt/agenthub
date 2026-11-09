@@ -320,6 +320,10 @@ def init_db(path: Path) -> None:
         # 2026-11-07 密码登录：存量 users 表补 pw_hash 列（旧库无此列时幂等补建；
         # 旧行 pw_hash='' 表示「未设密码、只能走 token」——诚实表达，不回填假密码。
         _add_column_if_missing(_conn, "users", "pw_hash", "TEXT NOT NULL DEFAULT ''")
+        # P0-2（2026-11-09）：会话 scope 白名单。NULL = 沿用现行（admin 全通 /
+        # 普通用户按 user_perms），非 NULL = JSON 数组形式的显式 scope 白名单。
+        # 存量行一律 NULL，不回填 —— 回填等于替历史编造授权。
+        _add_column_if_missing(_conn, "user_credentials", "scopes", "TEXT")
         _conn.commit()
 
 

@@ -228,3 +228,37 @@
 | B 新表 | `token_scopes(token_hash, scope, expires_at)` 多行 | 多一张表、多一次 join | 一 token 多 scope 且可单独过期（配对场景更干净） |
 
 建议 **A 先行**：现网 0 非管理员，NULL 语义能保证「升级零感知」；配对令牌落地时再把 B 作为增量，不返工。
+
+## 6. P0-2 落地状态（2026-11-09）：A 方案 = scopes 列 + 干跑
+
+**改动面（4 源文件 + 1 测试）**
+
+| 文件 | 改动 |
+|---|---|
+| `src/db.py` | `init_db` 幂等迁移 `user_credentials.scopes TEXT`；存量行 NULL，不回填 |
+| `src/users.py` | `resolve_token` SELECT 加 `c.scopes`；新增 `parse_scopes()`（None=沿用现行，`[]`=明确只读） |
+| `src/authz.py` | `SCOPE_BY_PATH` 索引 + 模板匹配 + `dryrun_verdict` 四态 |
+| `src/writeauth.py` | `write_gate` 的 allow 分支加干跑日志，**不改判定** |
+| `tests/test_scope_dryrun.py` | 20 条测试 |
+
+**全链路一次改完（生产者 / 入口 / 消费端 / 文档 / 测试）**
+- 生产者：`init_db` 加列，`issue_session` 不写 scopes ⇒ 存量与新会话一律 NULL；
+- 入口：`resolve_token` → `identity_of` 把 scopes 透传到 `ureq`；
+- 消费端：`write_gate` 读 `ureq["scopes"]` → `parse_scopes` → `dryrun_verdict` → 只 print；
+- 文档：本节；测试：`test_scope_dryrun.py`。
+
+**同类点修复（军规第 11 条）**：首版 `SCOPE_BY_PATH` 只按字面量 path 建 key，但运行时
+`request.url.path` 是实际值（`/api/memory/l1/42`），带参路由会被全判成 `unscoped`。已补
+模板编译 + 精确优先，并加 `test_all_declared_templates_resolve_with_concrete_id` 把 96 条
+声明逐条具体化反查，堵住复发。这是「发现 → 分析 → 全链路修复」的实例，不是只改报错那行。
+
+**验收证据**
+- L0 hermetic **4067 例全绿**（基线 4047，+20 为本轮新增），收集器对账 4147=4147；
+- 生产库副本（sqlite `backup()` 含 WAL，768MB）端到端：scopes 列存在、存量 3 行
+  `scopes=NULL`、`resolve_token` 空凭据不报错、二次 `init_db` 幂等、带参反查命中；
+- 活体零行为：`/health` 200、匿名写 401、`term_sessions=1`、进程 `ExecMainStartTimestamp`
+  未变（08:20:31）⇒ **未重启**；
+- 干跑日志要等重启后才出现（运行进程仍是 `420be83` 旧代码），这是预期，不是故障。
+
+**P0-3 及 P1–P4 的阻塞**：都要改判定 / 建表 / handler 并重启生产。当前 `term_sessions=1`
+（本会话），按生产单元重启军规，restart 会连坐杀掉活会话，须用户明确签字重启窗口。

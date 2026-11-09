@@ -73,6 +73,9 @@ class TestModelPassing(unittest.TestCase):
         os.environ["TASK_CLI_YOLO"] = "1"
         self.assertEqual(cli_agent._approve_flags("claude-code"),
                          ["--permission-mode", "bypassPermissions"])
+        # codebuddy 2.181.0 的 `-y` 不再全放行（HIGH/CRITICAL 仍问）⇒ 必须用 permission-mode
+        self.assertEqual(cli_agent._approve_flags("codebuddy"),
+                         ["--permission-mode", "bypassPermissions"])
         self.assertEqual(cli_agent._approve_flags("codex"), ["-s", "workspace-write"])
         self.assertEqual(cli_agent._approve_flags("hermes"), ["--yolo"])
         self.assertEqual(cli_agent._approve_flags("pi"), [], "pi 没有审批开关")

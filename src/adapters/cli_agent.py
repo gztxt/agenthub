@@ -171,9 +171,13 @@ SPECS: Dict[str, Dict[str, Any]] = {
     "pi": {"bin": "pi", "argv": _argv_pi, "clean": _clean_pi,
            "model_path": "ccr", "model_fallback": PI_DEFAULT_MODEL,
            "label": "pi（-p）"},
+    # ⚠ 不能用 `-y`：2.181.0 起它只跳过低风险，**HIGH/CRITICAL 仍会停下来问**
+    # （`--help` 原文 "HIGH/CRITICAL still ask"），非交互派发会卡住。
+    # `--permission-mode bypassPermissions` 两版(2.137.1/2.181.0)都支持且全量放行。
     "codebuddy": {"bin": CODEBUDDY_BIN,
                   "argv": _argv_codebuddy, "clean": _clean_text,
-                  "model_path": "native", "approve": ("-y",),
+                  "model_path": "native",
+                  "approve": ("--permission-mode", "bypassPermissions"),
                   "label": "CodeBuddy CLI（-p）"},
     "grok": {"bin": "grok", "argv": _argv_grok, "clean": _clean_text,
              "model_path": "ccr", "approve": ("--permission-mode", "bypassPermissions"),

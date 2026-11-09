@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import re
 import sqlite3
 import time
@@ -849,6 +850,49 @@ def supports(agent_id: str) -> bool:
     return agent_id in SESSION_STORES
 
 
+def _is_subagent_session(item: dict) -> bool:
+    """子代理/无头派发的会话：id 前缀 agent-/sub-，或显式 is_subagent 标记。
+    这类记录不是用户交互会话，不能出现在「历史会话」下拉里。"""
+    sid = str(item.get("id") or "")
+    return sid.startswith(("agent-", "sub-")) or bool(item.get("is_subagent"))
+
+
+def _same_workspace(rec_cwd, cwd) -> bool:
+    if not rec_cwd or not cwd:
+        return True
+    try:
+        return os.path.realpath(str(rec_cwd)) == os.path.realpath(str(cwd))
+    except OSError:
+        return True
+
+
+#: 子代理影子会话的典型落点：/tmp 影子树、/var/tmp、/dev/shm。
+#: 09-22 的「跳目录」裁定要求保留跨工程条目（别的项目目录仍然显示），
+#: 但临时目录里的会话不是用户工作区，续聊也只会在错误 cwd 起会话 ⇒ 单独挡掉。
+_TEMP_ROOTS = ("/tmp", "/var/tmp", "/dev/shm")
+
+
+def _is_temp_path(p) -> bool:
+    try:
+        rp = os.path.realpath(str(p))
+    except OSError:
+        rp = str(p)
+    return any(rp == r or rp.startswith(r + os.sep) for r in _TEMP_ROOTS)
+
+
+def _filter_history_items(items: List[dict], cwd: str) -> List[dict]:
+    """历史下拉过滤：剔除子代理会话与临时目录影子会话；跨工程目录保留（09-22 裁定）。"""
+    out: List[dict] = []
+    for i in items:
+        if _is_subagent_session(i):
+            continue
+        rc = i.get("cwd")
+        if rc and _is_temp_path(rc) and not _same_workspace(rc, cwd):
+            continue
+        out.append(i)
+    return out
+
+
 def list_history(agent_id: str, cwd: str, limit: int = 3) -> dict:
     st = SESSION_STORES.get(agent_id)
     if not st:
@@ -862,6 +906,7 @@ def list_history(agent_id: str, cwd: str, limit: int = 3) -> dict:
         items, note = st["fn"](cwd, limit, time.time())
     except Exception as e:  # noqa: BLE001
         items, note = [], f"历史读取失败：{type(e).__name__}"
+    items = _filter_history_items(items, cwd)
     items.sort(key=lambda x: x.get("ts") or 0, reverse=True)
     out = {"items": items[:limit], "cwd": cwd, "note": note}
     _CACHE[key] = (time.time(), out)

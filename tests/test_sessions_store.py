@@ -131,6 +131,23 @@ class TestTable(unittest.TestCase):
         self.assertEqual(ss._compress_path("C:\\Users\\gztxt\\x"), "C-Users-gztxt-x")
         self.assertEqual(ss._compress_path(""), "")
 
+    def test_history_filter_excludes_subagents_and_other_cwd(self):
+        """历史下拉只保留「本工作目录 + 非子代理」的会话。
+        2026-11-09 实测：/tmp 影子测试会话与 agent-* 子代理记录会混进 workspace 历史，
+        点「续聊」会在错误 cwd 起会话。"""
+        items = [
+            {"id": "agent-35c86453", "cwd": "/work/a"},
+            {"id": "sub-abc", "cwd": "/work/a"},
+            {"id": "373e4969-47e2-4aa4-bf59-a0ad09279726", "cwd": "/tmp/shadow"},
+            {"id": "01a1bf56-9b70-74f9-aa09-9ca45c4f4bec", "cwd": "/work/a"},
+            {"id": "11111111-1111-1111-1111-111111111111", "cwd": "/work/b"},
+        ]
+        got = ss._filter_history_items(items, "/work/a")
+        self.assertEqual([i["id"] for i in got],
+                         ["01a1bf56-9b70-74f9-aa09-9ca45c4f4bec",
+                          "11111111-1111-1111-1111-111111111111"],
+                         "子代理会话与 /tmp 影子会话必须剔除；跨工程目录保留（09-22 裁定）")
+
     def test_codebuddy_first_user_shape(self):
         """行形状是 `type=='message' and role=='user'`（**不是** claude 的 `type=='user'`）。
            这条钉死「为什么不能复用 `_first_user_text`」：喂它 claude 形状能出标题，

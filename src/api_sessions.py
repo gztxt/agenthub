@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 import db
 import export_batch                   # 导出取消息的批量 IN（L0 可测的纯函数层）
+import session_scope                   # 会话可见性口径（子代理会话不进历史下拉）
 import sessions_export as export_mod
 import writeauth                    # 导出端点按写端点同等鉴权（复用 decide 的 fail-closed）
 
@@ -29,11 +30,12 @@ def _now() -> str:
 @router.get("/api/sessions")
 async def list_sessions(agent_id: Optional[str] = None, limit: int = 20):
     sessions = []
+    # 子代理/派发会话（id 形如 task-<trace>-<task_id>）只供协同页审计，不进用户历史下拉
     sql = ("SELECT s.*, (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id=s.id) "
-           "AS messages FROM chat_sessions s")
+           "AS messages FROM chat_sessions s WHERE " + session_scope.user_sessions_where("s"))
     params: list = []
     if agent_id:
-        sql += " WHERE s.agent_id=?"
+        sql += " AND s.agent_id=?"
         params.append(agent_id)
     sql += " ORDER BY s.updated_at DESC LIMIT ?"
     params.append(limit)

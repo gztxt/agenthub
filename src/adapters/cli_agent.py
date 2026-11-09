@@ -71,7 +71,10 @@ def _argv_pi(p: str, m: Optional[str], x: List[str] = ()) -> List[str]:
 
 
 def _argv_codebuddy(p: str, m: Optional[str], x: List[str] = ()) -> List[str]:
-    a = ["-p", p, "--output-format", "text"] + list(x)
+    # --no-session-persistence：headless 派发/子代理调用不落会话文件，
+    # 否则每次派发都会在 <cwd 桶> 写一条会话，污染用户的「历史会话」下拉
+    # （2026-11-09 实测 /tmp 与 workspace 桶都混进过测试会话）。
+    a = ["-p", p, "--output-format", "text", "--no-session-persistence"] + list(x)
     return a + (["--model", m] if m else [])
 
 

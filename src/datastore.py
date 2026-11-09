@@ -249,6 +249,7 @@ async def list_sessions(agent_id: Optional[str] = None,
     逐路报 ok/count/ms —— 于是「会话从哪来」也是可解释的。
     """
     import db
+    import session_scope
     t0 = time.monotonic()
     backends: List[Dict[str, Any]] = []
     items: List[Dict[str, Any]] = []
@@ -256,11 +257,13 @@ async def list_sessions(agent_id: Optional[str] = None,
     # ① hub 自己的对话
     t1 = time.monotonic()
     try:
+        # 与 /api/sessions 同一口径：子代理/派发会话不进任何「会话历史」列表
         sql = ("SELECT s.*, (SELECT COUNT(*) FROM chat_messages m "
-               "WHERE m.session_id=s.id) AS messages FROM chat_sessions s")
+               "WHERE m.session_id=s.id) AS messages FROM chat_sessions s WHERE "
+               + session_scope.user_sessions_where("s"))
         params: list = []
         if agent_id:
-            sql += " WHERE s.agent_id=?"
+            sql += " AND s.agent_id=?"
             params.append(agent_id)
         sql += " ORDER BY s.updated_at DESC LIMIT ?"
         params.append(limit)

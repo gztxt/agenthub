@@ -50,6 +50,10 @@ class TestArgv(unittest.TestCase):
         self.assertEqual(cli_agent._argv_hermes("P", None), ["-z", "P"])
         self.assertEqual(cli_agent._argv_omp("P", None), ["-p", "P"])
         self.assertEqual(cli_agent._argv_cursor("P", None), ["-p", "P"])
+        # codebuddy headless 必须不落会话：否则每次派发都在 cwd 桶写一条，
+        # 污染用户「历史会话」下拉（2026-11-09）。
+        self.assertEqual(cli_agent._argv_codebuddy("P", None),
+                         ["-p", "P", "--output-format", "text", "--no-session-persistence"])
 
 
 class TestModelPassing(unittest.TestCase):

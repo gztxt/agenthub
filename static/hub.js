@@ -3320,6 +3320,57 @@ function termVisible() {
   const el = $('termEl');
   return !!(el && el.clientWidth && el.clientHeight);
 }
+/* ── 连接分级探测（借鉴 t3code connection-runtime 思路，只借逻辑不抄代码）──────────
+   本块 = 「命名常量 + 纯函数」：不读 DOM、不注册监听、加载时零副作用，
+   便于静态测试从源码断言，也便于 node -e 单独加载跑数值判据。
+   与运行时的耦合点（visibilitychange 探测 / 退避计数 / offline 守卫）在下方函数里标注。
+   纯块起止用 conn-probe:pure-begin / pure-end 包住，供 tests/test_conn_probe.py 抽取。 */
+/* conn-probe:pure-begin */
+const CONN_PROBE_LAN_MS = 3000;         // LAN 直连：轻量探测超时 3s
+const CONN_PROBE_TUNNEL_MS = 15000;     // 隧道 / Tailscale：轻量探测超时 15s
+const CONN_RC_MAX_MS = 300000;          // 退避上限：5 分钟（抖动后也不超过）
+const CONN_RC_JITTER_RATIO = 0.2;      // 抖动幅度 ±20%
+
+/* 判连接来源档：内网/LAN 直连 vs 隧道/外网。纯函数，只吃入参 host，不读 location。
+   - localhost / 127.0.0.1 / ::1 / .local / 10.* / 172.16-31.* / 192.168.* / 169.254.* / fc00::/7 ⇒ LAN
+   - *.ts.net / *.tailnet / tailscale 域名 / Tailscale 100.64/10 CGNAT / 其余公网域名 ⇒ 隧道 */
+function connIsTunnelHost(host) {
+  const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return false;
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1') return false;
+  if (h.endsWith('.local')) return false;
+  if (/^10\./.test(h) || /^192\.168\./.test(h) || /^169\.254\./.test(h) ||
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h)) return false;
+  if (/^f[cd][0-9a-f]{2}:/i.test(h)) return false;            // IPv6 ULA fc00::/7
+  if (h.endsWith('.ts.net') || h.endsWith('.tailnet') || /(^|\.)tailscale/.test(h)) return true;
+  // 其余（含公网域名、Tailscale 100.64/10 CGNAT 段）一律按隧道档
+  return true;
+}
+
+/* 按连接来源选分级探测超时：LAN 3s / 隧道 15s。纯函数。 */
+function pickProbeTimeoutMs(host) {
+  return connIsTunnelHost(host) ? CONN_PROBE_TUNNEL_MS : CONN_PROBE_LAN_MS;
+}
+
+/* 保留现有指数退避档位（TERM_RC_DELAYS）作为基数，补「抖动 + 5 分钟硬上限」。
+   纯函数：baseMs / rand 都是入参（运行时 rand=Math.random，测试给固定值便于复现）。 */
+function pickBackoffMs(baseMs, rand) {
+  const r = (typeof rand === 'number' && isFinite(rand)) ? Math.min(1, Math.max(0, rand)) : 0.5;
+  const jitter = 1 + (r * 2 - 1) * CONN_RC_JITTER_RATIO;   // ±20%
+  return Math.round(Math.min(Math.max(0, baseMs) * jitter, CONN_RC_MAX_MS));
+}
+
+/* 离线守卫（纯函数）：offline 时暂停重试计数，不把离线期间的失败累计进退避。 */
+function connOnline(nav) { return !(nav && nav.onLine === false); }
+function connRetryAllowed(online) { return online !== false; }
+function connNextAttempt(attempt, online) {
+  return connRetryAllowed(online) ? (attempt | 0) + 1 : (attempt | 0);
+}
+/* conn-probe:pure-end */
+
+/* 前台探测定时器（运行时状态，非纯块）：与心跳定时器一样，同一时刻只许有一条。 */
+let termProbeTimer = null;
+
 /* 尺寸意图（B2）：claim = 「我是主人，按我的尺寸来」；update = 「我只是几何变了」。
    服务端对非所有者的 update 一律静默忽略 ⇒ 后台手机端偷不走 PTY 尺寸。
    force（连接建立 / 重连 / 点芯片 / 自愈）一律 claim：那是用户主动动作，
@@ -3376,6 +3427,7 @@ function termIsHb(text) {
 function termHbStop() {
   if (termHbTimer) { clearInterval(termHbTimer); termHbTimer = null; }
   if (termHbDeadline) { clearTimeout(termHbDeadline); termHbDeadline = null; }
+  if (termProbeTimer) { clearTimeout(termProbeTimer); termProbeTimer = null; }
   termHbLastReply = 0; termHbLastSend = 0; termHbBaseline = 0;
 }
 function termHbSend(ws) {
@@ -3411,15 +3463,16 @@ function termHbTimeout() {
 }
 function termHbReply(ws) {
   if (!termSockOpen(ws)) return;
+  if (termProbeTimer) { clearTimeout(termProbeTimer); termProbeTimer = null; }  // 轻量探测已回执：撤掉探测定时器
   termHbLastReply = Date.now();
   termRcAttempt = 0;        // 退避只在这里清零：真往返过 = 链路确实通了
   termInputWarned = false;
   termToastClear();         // 「正在重连」那条提示到此结案
   termHbArm();              // 每一次回执都把 30s 看门狗拨回原点
 }
-function termHbFail(ws) {
+function termHbFail(ws, deadMs) {
   termHbStop();
-  termNotice('[心跳超时：' + Math.round(TERM_HB_DEAD_MS / 1000) + 's 无回执，判定链路半开——主动断开重连]');
+  termNotice('[心跳超时：' + Math.round((deadMs || TERM_HB_DEAD_MS) / 1000) + 's 无回执，判定链路半开——主动断开重连]');
   try { ws.close(); } catch (e) {}
   /* 半开时浏览器可能迟迟不派发 onclose，重连不能干等它；termRcTimer 有则不重复排 */
   termScheduleReconnect(ws);
@@ -3432,8 +3485,10 @@ function termScheduleReconnect(ws) {
   if (ws && termWs !== ws) return;        // 迟到的旧事件不驱动重连
   if (termRcTimer) return;                // 同一条线只许排一次（防重入：visibility/online/close 同时进来）
   if (!termSid) return;                   // 已解绑 / 会话已结束 ⇒ 不复活用户已经离开的会话
-  const delay = TERM_RC_DELAYS[Math.min(termRcAttempt, TERM_RC_DELAYS.length - 1)];
-  termRcAttempt++;
+  const online = connIsOnline();          // 离线守卫：navigator.onLine === false ⇒ 暂停重试计数
+  const base = TERM_RC_DELAYS[Math.min(termRcAttempt, TERM_RC_DELAYS.length - 1)];  // 保留现有指数退避档位
+  const delay = pickBackoffMs(base, Math.random());   // 补抖动 + 5 分钟硬上限
+  termRcAttempt = connNextAttempt(termRcAttempt, online);  // offline：不推进计数（离线失败不累计进退避）
   const stRc = $('termStatus');
   if (stRc) { stRc.className = 'term-status st-rc'; const txRc = $('termStatusTxt'); if (txRc) txRc.textContent = '重连中（第 ' + termRcAttempt + ' 次，' + Math.round(delay / 1000) + 's 后）'; }
   termNotice('[连接中断——自动重连中，第 ' + termRcAttempt + ' 次（' + Math.round(delay / 1000) + 's 后）]');
@@ -3469,7 +3524,32 @@ function termLinkWake() {
   if (termHbTimer && Date.now() - (termHbLastReply || termHbBaseline) >= TERM_HB_DEAD_MS) termHbFail(ws);
 }
 window.addEventListener('online', termLinkWake);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) termLinkWake(); });
+
+/* 连接来源的在线判据：navigator.onLine === false ⇒ 离线（离线守卫的取数口）。 */
+function connIsOnline() {
+  return connOnline(typeof navigator !== 'undefined' ? navigator : null);
+}
+
+/* 回前台先探测：visibilitychange 变可见时不立刻全量重连，先在现有 socket 上发一帧
+   hb 轻量探测，按连接来源分级等回执（LAN 3s / 隧道 15s）——只有探测超时才走全量重连。
+   离线（navigator.onLine === false）或链路已断时跳过探测，交回 termLinkWake 原路；
+   重试预算的离线暂停由 termScheduleReconnect 内的 connNextAttempt 保证。 */
+function termProbeThenWake() {
+  if (!termSid) return;
+  const ws = termWs;
+  if (!connIsOnline() || !ws || ws.readyState !== 1) { termLinkWake(); return; }
+  const since = termHbLastReply;
+  termHbSend(ws);
+  if (termProbeTimer) { clearTimeout(termProbeTimer); termProbeTimer = null; }
+  const probeMs = pickProbeTimeoutMs(typeof location !== 'undefined' ? location.hostname : '');
+  termProbeTimer = setTimeout(() => {
+    termProbeTimer = null;
+    if (!termSockOpen(ws)) return;           // 期间已换绑/断开：交给原事件
+    if (termHbLastReply !== since) return;   // 探测窗口内来了新回执 ⇒ 链路通，不重连
+    termHbFail(ws, probeMs);                // 无回执 ⇒ 判定半开，才走全量重连
+  }, probeMs);
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) termProbeThenWake(); });
 
 /* 连接中反馈：终端区顶部一条 2px 走马灯。不往缓冲区写字，回放到了自然被盖掉。 */
 function termConnecting(on, ws) {

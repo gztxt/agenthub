@@ -83,6 +83,8 @@ def embed_proxy_targets() -> List[Dict[str, object]]:
                     # pi-web 的文档页不认 Basic（middleware 只对 /api 取 Authorization），
                     # 必须补一枚服务端算出的会话 Cookie，否则 "/" 恒跳 /login。
                     "session_cookie": "pi_web_session" if p["id"] == "pi" else "",
+                    # 只对该 agent 放开桥的监听面（其余仍按上游可达面判，见 listen_host_for）
+                    "bridge_public": bool(p.get("bridge_public")),
                     # 按 Host 判来源的上游（dsh 的 /api 围栏只认 loopback / 绑定地址 /
                     # --trusted-host）。别的宿主用 Host 拼绝对跳转地址，跟着改写会把
                     # 浏览器送到上游内网地址 ⇒ 只点名 dsh，不做成默认。
@@ -442,6 +444,12 @@ PROFILES: List[dict] = [
     {"id": "pi", "name": "Pi Agent", "kind": "agent",
      "detect": {"proc": [r"next-server", r"(^|/)pi( |$)"], "systemd": ["pi-web"]},
      "cli": None, "port": 30141, "ui": "http://127.0.0.1:30141",
+     # 2026-11-11 用户裁定「不要搞两套登录」：pi 的登录统一到 hub。
+     # pi-web 自身口令停用、只绑回环（见 pi-web.service）；浏览器入口（嵌入/新窗口）
+     # 一律走 hub 桥，桥对外监听、身份只认 hub 会话 ⇒ 全链只有一个登录页。
+     # 为什么必须 bridge_public：桥的内网面由 listen_host_for 判（上游 127.0.0.1 ⇒ 锁回环），
+     # 不显式放开，手机/局域网从桥进不来，只能回落到 pi 自己的登录页。
+     "bridge_public": True,
      "terminal": {"cmd": "pi", "cwd": "/fs/1000/ftp/技术文档"},
      "chat": None,
      # 2026-10-24 按需拉起：pi-web + pi-web-relay 两单元 stop+disable，
@@ -1064,7 +1072,11 @@ def entries_for(p: dict, status: str) -> List[dict]:
                 es.append(_ui_entry("embed", "嵌入会话",
                                     _embed_proxy_url(p["id"], ui),
                                     pin=False))
-            es.append(_ui_entry("open", "新窗口", ui))
+            # bridge_public 的 agent：新窗口也走桥，否则用户开 / :30141 会落到它自己的
+            # 登录页（pi 实测：/api 401 带 WWW-Authenticate ⇒ 原生 Basic 弹窗 + /login
+            # 密码框，两个登录面，正是用户报障的形态）。
+            es.append(_ui_entry("open", "新窗口",
+                                _embed_proxy_url(p["id"], ui) if p.get("bridge_public") else ui))
         if p.get("terminal") and status in ("running", "installed", "stopped"):
             es.append({"type": "term", "label": "终端", "agent": p["id"]})
         if p.get("chat"):

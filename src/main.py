@@ -1551,10 +1551,15 @@ async def startup():
                 # 否则经桥把 claude-mem/qoder 这类无鉴权面板抬到局域网 = 凭空扩攻击面。
                 px = embed_proxy_mod.EmbedProxy(
                     "桥:%s" % t["id"], t["host"], int(t["port"]),
-                    listen_host=embed_proxy_mod.listen_host_for(
-                        int(t["port"]), os.getenv("EMBED_PROXY_HOST", config.host),
-                        upstream_host=str(t.get("host") or ""),
-                        start=t.get("start")),
+                    # bridge_public：登录统一到 hub 的 agent（pi）要能被手机/局域网访问，
+                    # 否则桥锁回环 ⇒ 前端把 127.0.0.1 换成当前主机后恒 ERR_CONNECTION_REFUSED。
+                    # 桥本身仍由 hub 会话把门（hub_auth），放开的是可达面不是鉴权。
+                    listen_host=((os.getenv("EMBED_PROXY_HOST", config.host))
+                                 if t.get("bridge_public") else
+                                 embed_proxy_mod.listen_host_for(
+                                     int(t["port"]), os.getenv("EMBED_PROXY_HOST", config.host),
+                                     upstream_host=str(t.get("host") or ""),
+                                     start=t.get("start"))),
                     listen_port=port, keys=True,
                     auth_secret=str(t.get("secret") or ""),
                     basic_user=str(t.get("basic_user") or "hub"),

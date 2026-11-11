@@ -47,13 +47,15 @@ from typing import Dict, List, Optional, Tuple
 UI_RECIPES: Dict[str, dict] = {
     "cloudcli": {"url": "http://127.0.0.1:3010", "port": 3010,
                  "start": {"unit": "cloudcli"}, "label": "CloudCLI"},
-    # `bind` 是给桥判监听面的静态声明（pi-web unit 的 ExecStart 实测为
-    # `--hostname 0.0.0.0 --port 30141`）。unit 式起法读不到命令行 ⇒ 不声明的话
-    # 桥会退回「此刻连不连得上」的运行时探测，而 pi 是按需拉起、hub 启动时通常停着
-    # ⇒ 桥被永久锁在回环，局域网/Tailscale 打开原生界面恒 ERR_CONNECTION_REFUSED
-    # （2026-11-02 报障；同因 dsh 已于 v0.13.18x 改判）。
+    # `bind` 是给桥判监听面的静态声明（pi-web unit 的 ExecStart 为
+    # `--hostname 127.0.0.1 --port 30141`，2026-11-11 起登录统一到 hub 桥）。
+    # unit 式起法读不到命令行 ⇒ 不声明的话桥会退回「此刻连不连得上」的运行时探测。
+    # 注意：pi 的外部可达面**不再由这里决定**——画像里的 bridge_public 让它显式对外，
+    # 这里只如实声明上游自己的绑定面，免得两处说法打架。
     "pi":       {"url": "http://127.0.0.1:30141", "port": 30141,
-                 "start": {"unit": "pi-web", "bind": "0.0.0.0"}, "label": "Pi Web"},
+                 # 2026-11-11：pi-web 只绑回环（登录统一到 hub 桥），声明随之改回环，
+                 # 否则 listen_host_for 会把它当「上游本来就对 LAN 开放」而放开桥。
+                 "start": {"unit": "pi-web", "bind": "127.0.0.1"}, "label": "Pi Web"},
     "dsh":      {"port": 3080, "start": {"unit": "dsh"}, "label": "dsh"},
     # qwenpaw 的「界面地址」是 hub 注入代理 :3103（进程内常驻），**不是**后端。
     # 探活必须打真后端 :8088，否则停着的后端永远显示成活的（判例见 267 卡）。

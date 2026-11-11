@@ -121,6 +121,25 @@ class AgentInfo:
         return asdict(self)
 
 
+def host_ui_entries(p: dict, ui: dict) -> list:
+    """dict 形态 ui（独立 Web 宿主，如 cloudcli :3010）的原生界面入口。
+
+    2026-11-11 用户裁定「所有原生界面复用同一套 hub 登录」：嵌入与「↗UI」新窗口
+    **都**经 hub 桥。旧实现只有 embed 过桥、open 直连原地址 ⇒ 独立浏览器绕过 hub
+    会话，cloudcli 自带的 JWT 登录就成了第二套登录。没有桥的 id 原样返回。
+    """
+    import profiles
+    start = profiles.ui_start_for(p["id"])
+    out = []
+    for etype, label in (("embed", "原生会话"), ("open", "↗UI")):
+        e = {"type": etype, "label": label,
+             "url": profiles._embed_proxy_url(p["id"], ui["url"])}
+        if start:
+            e["start"] = start
+        out.append(e)
+    return out
+
+
 class AgentDiscovery:
     def __init__(self, config, db=None):
         self.config = config
@@ -169,17 +188,10 @@ class AgentDiscovery:
             if isinstance(ui, dict):
                 ui_alive = self._sync_check_port(ui.get("port"))
                 # v0.13.152：带「启动原生界面」的拉起描述（与 string-ui 同口径），
-                # 停着的宿主由前端覆盖层按钮按需起，不是让用户去敲 systemctl。
-                _st = profiles.ui_start_for(p["id"])
-                _ui_es = []
-                for _t, _lbl in (("embed", "原生会话"), ("open", "↗UI")):
-                    # 只有嵌入形态过桥代理（⌘K）：新窗口直连原地址，不解代理
-                    _u = profiles._embed_proxy_url(p["id"], ui["url"]) if _t == "embed" else ui["url"]
-                    _e = {"type": _t, "label": _lbl, "url": _u}
-                    if _st:
-                        _e["start"] = _st
-                    _ui_es.append(_e)
-                entries = (_ui_es + entries)
+                # 停着的宿主由前端覆盖层按钮按需起，不是让用户去敲 systemctl
+                # （start 现由 host_ui_entries() 统一挂到两个入口上）。
+                # 规则集中在 host_ui_entries()：两种入口都走 hub 桥，别在这里再写一遍。
+                entries = (host_ui_entries(p, ui) + entries)
                 if ui_alive and status in ("installed", "stopped"):
                     status = "running"
                 endpoint = ui["url"] if ui_alive else (p.get("panel") or "")

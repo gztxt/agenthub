@@ -79,12 +79,19 @@ def embed_proxy_targets() -> List[Dict[str, object]]:
                     # pi-web 走同一机制，但用户名固定 "pi" 且口令文件是本机生成的。
                     "secret": p.get("bridge_secret")
                               or (PI_WEB_SECRET_FILE if p["id"] == "pi" else ""),
-                    "basic_user": "pi" if p["id"] == "pi" else "hub",
+                    "basic_user": (p.get("bridge_basic_user")
+                                   or ("pi" if p["id"] == "pi" else "hub")),
                     # pi-web 的文档页不认 Basic（middleware 只对 /api 取 Authorization），
                     # 必须补一枚服务端算出的会话 Cookie，否则 "/" 恒跳 /login。
                     "session_cookie": "pi_web_session" if p["id"] == "pi" else "",
-                    # 只对该 agent 放开桥的监听面（其余仍按上游可达面判，见 listen_host_for）
-                    "bridge_public": bool(p.get("bridge_public")),
+                    # 上游自带登录、但能离线铸造会话 Cookie 的 agent（codebuddy）
+                    "upstream_cookie_file": str(p.get("bridge_cookie_file") or ""),
+                    # 2026-11-11 用户裁定：这套规则复用到**所有**原生界面。
+                    # 凡是浏览器入口（agent 的 ui / service 的 panel），无论嵌入还是新窗口，
+                    # 都必须经 hub 桥 ⇒ 桥自己是唯一鉴权面。因此桥要能在用户实际访问
+                    # 的那张网卡上被连到（main.py 据此决定监听面），不能锁死在回环。
+                    # 放开的安全前提由 main.py 保证：仅 hub_auth=1 时生效。
+                    "browser_entry": True,
                     # 按 Host 判来源的上游（dsh 的 /api 围栏只认 loopback / 绑定地址 /
                     # --trusted-host）。别的宿主用 Host 拼绝对跳转地址，跟着改写会把
                     # 浏览器送到上游内网地址 ⇒ 只点名 dsh，不做成默认。
@@ -446,10 +453,9 @@ PROFILES: List[dict] = [
      "cli": None, "port": 30141, "ui": "http://127.0.0.1:30141",
      # 2026-11-11 用户裁定「不要搞两套登录」：pi 的登录统一到 hub。
      # pi-web 自身口令停用、只绑回环（见 pi-web.service）；浏览器入口（嵌入/新窗口）
-     # 一律走 hub 桥，桥对外监听、身份只认 hub 会话 ⇒ 全链只有一个登录页。
-     # 为什么必须 bridge_public：桥的内网面由 listen_host_for 判（上游 127.0.0.1 ⇒ 锁回环），
-     # 不显式放开，手机/局域网从桥进不来，只能回落到 pi 自己的登录页。
-     "bridge_public": True,
+     # 一律走 hub 桥，身份只认 hub 会话 ⇒ 全链只有一个登录页。
+     # 2026-11-11 第二批：该规则已推广到**所有**原生界面（见 embed_proxy_targets 的
+     # browser_entry / main.py 的监听面），pi 不再是特例。
      "terminal": {"cmd": "pi", "cwd": "/fs/1000/ftp/技术文档"},
      "chat": None,
      # 2026-10-24 按需拉起：pi-web + pi-web-relay 两单元 stop+disable，
@@ -570,6 +576,12 @@ PROFILES: List[dict] = [
     {"id": "codebuddy", "name": "CodeBuddy Code", "kind": "agent",
      "detect": {"proc": [r"(^|/)codebuddy( |$)"]},
      "cli": None, "port": 35431, "ui": "http://127.0.0.1:35431",
+     # 2026-11-11「所有原生界面复用 hub 登录」：:35431 自带一个 Login 密码页
+     # （Tip: password is displayed when the server starts）。它的
+     # `?password=xxx` 会种 gateway_session，且该值由口令确定性推导 ⇒ 生成一次
+     # 存 ~/.config/codebuddy-web.secret（0600，内容即完整 Cookie），桥逐请求代发，
+     # 用户不再看到第二套登录。口令变更需重跑生成（见 agent-knowledge/337）。
+     "bridge_cookie_file": os.path.expanduser("~/.config/codebuddy-web.secret"),
      # 终端入口走 CODEBUDDY_CLI（默认 ~/.local/bin/codebuddy，2.181.0）：绝对路径
      # 对服务进程 PATH 与 term.py 的 `which(cmd[0])` 都是最稳口径。
      "terminal": {"cmd": CODEBUDDY_CLI, "cwd": "/fs/1000/ftp/技术文档"},
@@ -664,7 +676,13 @@ PROFILES: List[dict] = [
      "detect": {"proc": [r"gotty"]},
      "cli": None, "port": 12700, "ui": None,
      "panel": "http://127.0.0.1:12700", "panel_auth": "basic",
-     "desc": "系统级 Web 终端 :12700（Basic 鉴权→iframe 弹不出登录框，仅新窗口）"},
+     # 2026-11-11「所有原生界面复用 hub 登录」：以前 Basic 面板默认不出桥，
+     # 新窗口直连会弹原生 Basic 框（第二套登录）。补上 bridge_secret 让桥代注入
+     # Basic，卡片入口改由 hub_session 把门。用户名取自 gotty 启动的 -c 凭据，
+     # 口令只落 ~/.config/gotty.secret（0600，不进代码/日志）。
+     "bridge_secret": os.path.expanduser("~/.config/gotty.secret"),
+     "bridge_basic_user": "gztxt",
+     "desc": "系统级 Web 终端 :12700（桥代注入 Basic，入口只认 hub 登录）"},
     {"id": "tdai", "name": "TDAI Memory", "kind": "memory",
      "detect": {"docker": ["tdai-memory-core"], "proc": []},
      "cli": None, "port": 8420, "ui": None, "panel": None,
@@ -677,7 +695,10 @@ PROFILES: List[dict] = [
      "detect": {"docker": ["chromium"]},
      "cli": None, "port": 3000, "ui": None,
      "panel": "http://127.0.0.1:3000", "panel_auth": "basic",
-     "desc": "无头浏览器服务 :3000（nginx Basic 鉴权→仅新窗口）"},
+     # 2026-11-11 例外（显式写明，不是静默漏掉）：容器当前未运行、且本机找不到
+     # nginx Basic 口令文件 ⇒ 无法给桥生成 bridge_secret，故仍保留直连新窗口。
+     # 若日后启用，按 gotty 的方式补口令文件 + bridge_secret 即可并入统一登录。
+     "desc": "无头浏览器服务 :3000（容器未运行/无口令文件，暂未接入 hub 登录桥）"},
     {"id": "ai_manager", "name": "AI Manager (Trim)", "kind": "service",
      "detect": {"proc": [r"/usr/trim/bin/ai_manager"]},
      "cli": None, "port": None, "ui": None, "panel": None,
@@ -1072,18 +1093,23 @@ def entries_for(p: dict, status: str) -> List[dict]:
                 es.append(_ui_entry("embed", "嵌入会话",
                                     _embed_proxy_url(p["id"], ui),
                                     pin=False))
-            # bridge_public 的 agent：新窗口也走桥，否则用户开 / :30141 会落到它自己的
-            # 登录页（pi 实测：/api 401 带 WWW-Authenticate ⇒ 原生 Basic 弹窗 + /login
-            # 密码框，两个登录面，正是用户报障的形态）。
-            es.append(_ui_entry("open", "新窗口",
-                                _embed_proxy_url(p["id"], ui) if p.get("bridge_public") else ui))
+            # 2026-11-11 用户裁定「把这套规则复用到所有原生界面的 agent」：
+            # 嵌入与新窗口**都**走 hub 桥。直连上游地址会绕过 hub 鉴权（无鉴权面板直接
+            # 敞开、带 Basic/自有登录的面板弹第二套登录框）。没有桥的 id（如 qwenpaw，
+            # 它的 ui 本身就是 hub 的 hub_auth 注入代理 :3103）原样保留，语义等价。
+            es.append(_ui_entry("open", "新窗口", _embed_proxy_url(p["id"], ui),
+                                pin=False))
         if p.get("terminal") and status in ("running", "installed", "stopped"):
             es.append({"type": "term", "label": "终端", "agent": p["id"]})
         if p.get("chat"):
             es.append({"type": "chat", "label": "对话", "agent": p["id"]})
     else:
         if p.get("panel"):
-            es.append({"type": "open", "label": "打开面板", "url": p["panel"],
+            # 同 agent 口径：新窗口也走桥（没桥的 id 原样保留，不静默改地址）。
+            # 典型收益：proxy-panel 的 401+WWW-Authenticate 不再弹原生 Basic 框，
+            # 由桥按 hub_session 把门并代补 Authorization。
+            es.append({"type": "open", "label": "打开面板",
+                       "url": _embed_proxy_url(p["id"], p["panel"]),
                        "probe_port": panel_port(p)})
             # Basic 鉴权面板默认不生成 embed：浏览器禁止跨源 iframe 内弹认证框，嵌入必然 401 白屏。
             # 例外（2026-11-02）：画像声明了 `bridge_secret` ⇒ 由 hub 的桥自出登录页并代补

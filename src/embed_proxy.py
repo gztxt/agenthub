@@ -722,6 +722,24 @@ def listen_host_for(port: int, default: str = "0.0.0.0", *,
     return default if _upstream_lan_reachable(port) else "127.0.0.1"
 
 
+def listen_host_for_browser(target: dict, default: str, hub_auth: bool) -> str:
+    """浏览器入口的桥监听面（2026-11-11 用户裁定「所有原生界面复用 hub 登录」）。
+
+    只要 **hub 会话把门**（hub_auth=1），就把桥放到 default（EMBED_PROXY_HOST，
+    本机是 0.0.0.0）——否则独立浏览器/手机从桥进不来，只能回落到上游自己的登录面，
+    等于把「一套登录」的承诺作废。上游原本只绑回环（qoder/claude-mem 等）也照放：
+    此时唯一的入口是带 hub 鉴权的桥，反而比裸端口更安全。
+
+    ⚠ hub_auth=0（旧排障形态）时桥自己只认一个共享口令，绝不能跟着对外，
+    退回 listen_host_for 的保守判据。
+    """
+    if hub_auth and target.get("browser_entry"):
+        return default
+    return listen_host_for(int(target["port"]), default,
+                           upstream_host=str(target.get("host") or ""),
+                           start=target.get("start"))
+
+
 def _listen_addrs(port: int) -> set:
     """该端口此刻处于 LISTEN 的本地地址（/proc/net/tcp{,6} 的十六进制原文）。"""
     addrs = set()
@@ -785,7 +803,8 @@ class EmbedProxy:
                  auth_secret: str = "", title: str = "",
                  rewrite_authority: bool = False,
                  hub_auth: bool = True, hub_port: int = 3102,
-                 perm: str = "", basic_user: str = "hub", session_cookie: str = ""):
+                 perm: str = "", basic_user: str = "hub", session_cookie: str = "",
+                 upstream_cookie_file: str = ""):
         self.name = name
         self.upstream = (upstream_host, int(upstream_port))
         self.listen = (listen_host, int(listen_port))
@@ -798,6 +817,9 @@ class EmbedProxy:
         self.basic_user = (basic_user or "hub").strip() or "hub"
         # 非空 ⇒ 桥按该 Cookie 名自行铸造上游会话（pi-web：文档页只认 Cookie）。
         self.session_cookie = (session_cookie or "").strip()
+        # 上游自带登录、但口令可离线铸造会话（codebuddy :35431 的 gateway_session）：
+        # 文件里放完整 `name=value`，桥逐请求代发 ⇒ 用户只登 hub，不碰上游登录页。
+        self.upstream_cookie_file = (upstream_cookie_file or "").strip()
         # 非空 ⇒ 这个桥要求登录用户在 agenthub 里被授权该模块（agent 级鉴权）。
         # 管理员 perms=None 直接放行；普通用户 perms 不含该键 ⇒ 403（2026-11-08）。
         self.perm = (perm or "").strip()
@@ -845,6 +867,13 @@ class EmbedProxy:
         与 .next 里 `p(a,b)` / `web-auth/route` 的算法逐字一致（30 天有效）。
         只在 `session_cookie` 非空时生成；口令缺失则不发，宁失败也不放行。
         """
+        if self.upstream_cookie_file:
+            try:
+                with open(self.upstream_cookie_file, encoding="utf-8") as fh:
+                    return fh.read().strip().encode()
+            except OSError:
+                # 文件缺失 ⇒ 不发，宁可让上游弹它自己的登录页也不伪造值
+                return b""
         name, s = self.session_cookie, self._secret()
         if not name or not s:
             return b""

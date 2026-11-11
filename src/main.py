@@ -1521,6 +1521,9 @@ async def startup():
     cronjobs_mod.start_engine()
     # 外框统一注入代理（用户 09-20 方案 b）：:3103 → qwenpaw :8088，HTML 出栈前插 <style>。
     # 起不来也不能影响 hub 本体：裹 try/except，顶多外框不统一（嵌入视图仍直连可用）。
+    # 2026-11-11：所有原生界面的唯一鉴权面 = hub 会话。桥的监听面与放行判据同源，
+    # 统一读一次，避免 EMBED_UNIFY 代理与各 ⌘K 桥各读一次 env 造成口径漂移。
+    _embed_hub_auth = (os.getenv("EMBED_HUB_AUTH", "1") == "1")
     if profiles_mod.EMBED_UNIFY:
         try:
             qp = next((p for p in profiles_mod.PROFILES if p.get("id") == "qwenpaw"), None)
@@ -1529,7 +1532,7 @@ async def startup():
                     "QwenPaw", "127.0.0.1", qp["port"],
                     listen_host=os.getenv("EMBED_PROXY_HOST", config.host),
                     listen_port=profiles_mod.EMBED_PROXY_PORT,
-                    hub_auth=(os.getenv("EMBED_HUB_AUTH", "1") == "1"),
+                    hub_auth=_embed_hub_auth,
                     hub_port=config.port, perm="qwenpaw")
                 await _embed_proxy.start()
         except Exception as e:
@@ -1547,26 +1550,23 @@ async def startup():
             for t in profiles_mod.embed_proxy_targets():
                 if port == profiles_mod.EMBED_PROXY_PORT:
                     port += 1
-                # 监听面跟上游对齐（listen_host_for）：上游只绑回环的，桥也只绑回环。
-                # 否则经桥把 claude-mem/qoder 这类无鉴权面板抬到局域网 = 凭空扩攻击面。
+                # 监听面：所有浏览器入口的桥都由 hub 会话把门 ⇒ 必须能在用户实际访问
+                # 的网卡上被连到（手机/局域网/Tailscale）。旧判据跟上游绑定位对齐，
+                # 会把只绑回环的面板（qoder/claude-mem）的桥永久锁在 127.0.0.1，
+                # 前端再把回环换成当前主机 ⇒ 恒 ERR_CONNECTION_REFUSED。
+                # 放开的是「可达面」，不是「鉴权」：hub_auth=0 时 helper 自动退回保守判据。
                 px = embed_proxy_mod.EmbedProxy(
                     "桥:%s" % t["id"], t["host"], int(t["port"]),
-                    # bridge_public：登录统一到 hub 的 agent（pi）要能被手机/局域网访问，
-                    # 否则桥锁回环 ⇒ 前端把 127.0.0.1 换成当前主机后恒 ERR_CONNECTION_REFUSED。
-                    # 桥本身仍由 hub 会话把门（hub_auth），放开的是可达面不是鉴权。
-                    listen_host=((os.getenv("EMBED_PROXY_HOST", config.host))
-                                 if t.get("bridge_public") else
-                                 embed_proxy_mod.listen_host_for(
-                                     int(t["port"]), os.getenv("EMBED_PROXY_HOST", config.host),
-                                     upstream_host=str(t.get("host") or ""),
-                                     start=t.get("start"))),
+                    listen_host=embed_proxy_mod.listen_host_for_browser(
+                        t, os.getenv("EMBED_PROXY_HOST", config.host), _embed_hub_auth),
                     listen_port=port, keys=True,
                     auth_secret=str(t.get("secret") or ""),
                     basic_user=str(t.get("basic_user") or "hub"),
                     session_cookie=str(t.get("session_cookie") or ""),
+                    upstream_cookie_file=str(t.get("upstream_cookie_file") or ""),
                     title=str(t.get("name") or t["id"]),
                     rewrite_authority=bool(t.get("rewrite_host")),
-                    hub_auth=(os.getenv("EMBED_HUB_AUTH", "1") == "1"),
+                    hub_auth=_embed_hub_auth,
                     hub_port=config.port,
                     # agent 级授权：普通用户必须被勾选该模块，否则 403（管理员放行）。
                     perm=str(t["id"]))

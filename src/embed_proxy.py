@@ -168,10 +168,12 @@ def _cookie_has(header: bytes, name: str, token: str) -> bool:
 def _hub_session_ok(header: bytes):
     """请求是否带着**有效的 hub 登录 Cookie**（`hub_session`）。
 
-    返回 `(ok, perms)`：
-      - `(False, None)` 未登录 / 用户库不可用（fail-closed）；
-      - `(True, None)` 管理员（perms=None ⇒ 全放行）；
-      - `(True, set)` 普通用户，set 是其在 agenthub「用户授权」里勾选的模块。
+    返回 `(ok, perms, who)`：
+      - `(False, None, "")` 未登录 / 用户库不可用（fail-closed）；
+      - `(True, None, "gztxt")` 管理员（perms=None ⇒ 全放行）；
+      - `(True, set, "name")` 普通用户，set 是其在 agenthub「用户授权」里勾选的模块。
+
+    `who` 只用于审计日志（2026-11-11「加桥审计日志」），**绝不回显 token**。
 
     为什么桥不自己再要一次口令（2026-11-07 用户裁定「在 agenthub 打开无需再登录，
     浏览器直接打开才要验证」）：Cookie 是 host-only、**不按端口隔离**，所以 hub
@@ -194,16 +196,25 @@ def _hub_session_ok(header: bytes):
                 continue
             tok = v.decode(errors="replace")
             if not tok:
-                return False, None
+                return False, None, ""
             try:
                 import users as _users
                 row, perms, compat = _users.resolve_token(tok)
                 if not (row and not compat):
-                    return False, None
-                return True, perms
+                    return False, None, ""
+                return True, perms, str(row.get("username") or "")
             except Exception:  # noqa: BLE001 —— 用户库不可用一律当未登录（fail-closed）
-                return False, None
-    return False, None
+                return False, None, ""
+    return False, None, ""
+
+
+def _peer_of(writer) -> str:
+    """客户端地址（审计用）。取不到就写 "?"，绝不让日志本身抛异常。"""
+    try:
+        p = writer.get_extra_info("peername")
+        return str(p[0]) if p else "?"
+    except Exception:  # noqa: BLE001
+        return "?"
 
 
 def _host_of(header: bytes) -> str:
@@ -856,13 +867,21 @@ class EmbedProxy:
             return
         method, path = _req_line(header)
         if self.hub_auth:
-            _ok, _perms = _hub_session_ok(header)
+            _res = _hub_session_ok(header)          # 3 元组；旧桩只回 2 元组也兼容
+            _ok, _perms = _res[0], _res[1]
+            _who = _res[2] if len(_res) > 2 else ""
+            # 审计（2026-11-11 用户要求「加桥审计日志」）：只记对端、用户名、方法与路径，
+            # **绝不记 Cookie/token**。放行只记文档/顶层请求，静态资源不刷屏；拒绝按面记。
+            _peer = _peer_of(writer)
+            _p = path.decode(errors="replace") or "/"
             doc_like = (method == b"GET" and (b"text/html" in header.lower()
                                               or path == b"/" or bool(_HTML_PATH.search(path))))
             # agent 级授权：管理员 perms=None 放行；普通用户必须被勾选了该模块。
             # 未授权一律 403（页面/接口都不给半截），别回落到上游（2026-11-08）。
             if _ok and self.perm and _perms is not None and self.perm not in _perms:
-                log.info("[%s] 403 未授权模块 %s（listen :%d）", self.name, self.perm, self.listen[1])
+                log.info("[%s] 403 未授权 user=%s peer=%s %s %s（缺模块 %s）",
+                         self.name, _who or "?", _peer, method.decode(errors="replace"),
+                         _p, self.perm)
                 if doc_like and not _is_upgrade(header):
                     await self._send(writer, 403, _forbidden_page(self.title, self.perm))
                 else:
@@ -882,8 +901,20 @@ class EmbedProxy:
                         "Content-Length: 0\r\nCache-Control: no-store\r\n"
                         "Connection: close\r\n\r\n" % loc).encode())
                 else:
+                    if _p.startswith("/api/"):
+                        log.info("[%s] 401 未登录 peer=%s %s %s", self.name, _peer,
+                                 method.decode(errors="replace"), _p)
+                    else:
+                        log.debug("[%s] 401 未登录(静态) peer=%s %s", self.name, _peer, _p)
                     await self._send(writer, 401, b"login required (AgentHub)")
+                    return
+                log.info("[%s] 302 未登录 peer=%s %s %s -> hub 登录页",
+                         self.name, _peer, method.decode(errors="replace"), _p)
                 return
+            if doc_like:
+                log.info("[%s] 放行 user=%s peer=%s %s %s -> 上游 %s:%s",
+                         self.name, _who or "?", _peer, method.decode(errors="replace"),
+                         _p, self.upstream[0], self.upstream[1])
             await _handle(reader, writer, self.upstream, self.extra,
                           pre_header=header, auth=self._auth_header(),
                           rewrite_authority=self.rewrite_authority,

@@ -14,7 +14,11 @@
 """
 import pathlib
 import re
+import sys
 import unittest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _js_min import strip_comments  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 TPL = REPO / "templates" / "index.html"
@@ -29,7 +33,7 @@ MAX_INLINE_STYLE = 119_000
 MAX_SCRIPT_SRC = 7
 MAX_STYLESHEET = 1
 MAX_INLINE_ONCLICK = 86
-MAX_SETINTERVAL = 17
+MAX_SETINTERVAL = 11   # 剥注释后的真实调用数（2026-11-12 实测 11；注释里的字样不算）
 MAX_SHARDS = 16
 
 
@@ -74,7 +78,7 @@ class TestFrontendBudget(unittest.TestCase):
                              "（AGENTS §4.2：inline onclick 会旁路委托）" % (n, MAX_INLINE_ONCLICK))
 
     def test_polling_budget(self):
-        n = sum(p.read_text(encoding="utf-8").count("setInterval") for p in SHARDS)
+        n = sum(strip_comments(p.read_text(encoding="utf-8")).count("setInterval") for p in SHARDS)
         self.assertLessEqual(n, MAX_SETINTERVAL,
                              "setInterval 出现 %d 次 > 预算 %d —— 先并进统一调度器（T6）"
                              % (n, MAX_SETINTERVAL))

@@ -202,9 +202,11 @@ hub.js」文案；③ `s.onerror` 兜底（`:3744`）。故上文「16 个零改
 | 基线 `python3 -m unittest tests.test_hubjs_split -v` | 5/5 OK（0.176s） | §9 要求的开工前基线已留证 |
 | `git status --short` | 仅 `?? docs/REFLEX-FRONTEND-EVAL-20261112.md` | 清场处置见下 |
 
-> **本轮施工边界**：裁决定稿 + 前置清场 + worktree 隔离区就绪；**不改 15 个生产分片、不重启**。
-> 原因：`term_sessions=4` 下无法做生产复验，且 P2 需分批逐点回归（L0 全量 + 36 闸门 + L1）。
-> 第一刀从 worktree 内的 `tests/test_hubjs_split.py` 双轨改造开始，改完逐点验证再铺开分片。
+> **施工进度（2026-11-12）**：裁决定稿 + 前置清场 + worktree 就绪 ✅；
+> 第一刀 `tests/test_hubjs_split.py` 双轨改造 ✅（5 → 11 断言，分支 `wt/t5esm`，未合入 master）；
+> L0 全量 `ran=4205 skipped=0 failures=0 errors=0`，收集器对账 `unittest=4287 = pytest=4287`，
+> 与主仓基线 4199 相比正好 +6（新增的模块图断言）。
+> **仍未动 15 个生产分片、未重启**（`term_sessions=4`，生产复验须显式 `HUB_RESTART_FORCE=1`）。
 
 风险与回滚：ESM 化会同时动 15 个文件与模板加载方式 ⇒ 必须串行一人完成，且在 worktree 里做完再合。
 回滚开关：index.html 保留 `?legacy=1` 走旧 `hub.js`（长期保留，不删）；
@@ -257,8 +259,13 @@ P2 之前不动测试契约；P2 之后 T7 才有意义（否则预算无从设�
 - **未跑 Lighthouse / 未做真机端侧测量**：本文件所有体积数字来自服务端 `curl`，
   **渲染耗时、LCP、移动端解析成本均未测**。T3/T4 的验收判据里要求补端侧实测，
   这条不可省——按本仓判例，服务端全绿不能证明前端正常（AGENTS §4.3）。
-- **36/12/6 是静态盘点，未逐个跑过**：只统计了「哪些文件引用产物」，未验证「保留产物后
-  36 个是否真的全绿」。开工前最小基线已跑（`tests.test_hubjs_split` 5/5 OK），
-  但**完整 `unittest discover` 基线仍未跑**，须在动分片前补跑并留证。
+- **36 个闸门的回归口径**：L0 侧 **19 个文件 / 220 用例**已随 `run_tests.sh hermetic`
+  全量跑绿（`ran=4205 / 0 fail / 0 error / 0 skip`）；L1 侧 15 个 `verify_*` **本轮未跑** ——
+  它们探的是运行中的 :3102 服务，与本轮改的 `tests/test_hubjs_split.py` **零 import 依赖**
+  （实测 grep 引用者为 0），且其中 6 个依赖的 `_hub_extract.py` 本轮未改（`git diff --stat` 为空）。
+  要跑 L1 需已登录浏览器环境 + 生产重启，受 `term_sessions=4` 护栏限制。
+- **worktree 缺 `venv` 会让 L0 假红**：首跑 `ran=2135 errors=198`，根因是隔离区无 `venv/`
+  ⇒ `run_tests.sh` 回落系统 python3（缺 `websockets`）且部分测试硬编码 `_REPO/venv/bin/python`。
+  处置：`ln -s <主仓>/venv venv` 后复跑即 4205 绿。这是 worktree 的既存结构问题，与本次改动无关。
 - **未评估替代框架**（Astro / htmx / Alpine / Svelte）：本文件只回答「Reflex 是否合适」。
   若后续要选型，应单独立项并同台比较。

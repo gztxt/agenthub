@@ -505,11 +505,20 @@ PROFILES: List[dict] = [
     # 前端 NO_TERM 同步清空（判例 253 的机制保留，只去掉 dsh 成员）。
     {"id": "dsh", "name": "DSH", "kind": "agent",
      "detect": {"systemd": ["dsh"], "proc": [r"(^|/)dsh( |$)"]},
-     "cli": "dsh", "port": 3080, "ui": "http://192.168.5.102:3080",
-     # 2026-10-30 改判：**不再** pin_host。dsh 拒绝通配地址、只 bind
-     # `DSH_HOST=192.168.5.102`，原先用 ui_pin_host 冻结地址来躲「127.0.0.1 访问 hub
-     # 时被改写成回环地址 ⇒ ERR_CONNECTION_REFUSED」——副作用是 tailnet 用户永远
-     # 拿到 `192.168.5.102` 字面量，而 tailnet 侧没有 192.168.5.0/24 子网路由
+     # 2026-11-12（用户令「agenthub 自适应」）：卡片种子地址改用**回环**。
+     # 为什么：dsh 只绑一张具体网卡（拒绝通配），而该网卡地址由启动器每次按默认
+     # 路由现算（2026-11-12 改，见 dshctl/dshctl.sh 的 dsh_detect_lan_ip）。把
+     # `192.168.5.102` 写进卡片 = 换网段后既不在 own_addrs 里（lanUrl 不再改写）、
+     # 桥的上游也指向失效地址，而 hub 自己不会因为换网自动重启。
+     # 回环是唯一恒定的入口：dsh-lo（127.0.0.1:3080 → 现算上游）常驻转发，且
+     # 01-core-boot.js 的 lanUrl 把 127.0.0.1 改写成 location.hostname ⇒ 局域网/
+     # tailnet/本机三种访问都能落到各自的前端单元上。dsh 的 /api 围栏也认回环
+     # （实测 Host: 127.0.0.1:3080 换 cookie 后 /api/config 回 404 = 已过围栏）。
+     "cli": "dsh", "port": 3080, "ui": "http://127.0.0.1:3080",
+     # 2026-10-30 改判：**不再** pin_host。dsh 拒绝通配地址、只 bind 一张具体网卡
+     # （地址自 2026-11-12 起由启动器按默认路由现算，不再写死），原先用 ui_pin_host
+     # 冻结地址来躲「127.0.0.1 访问 hub 时被改写成回环地址 ⇒ ERR_CONNECTION_REFUSED」
+     # ——副作用是 tailnet 用户永远拿到局域网字面量，而 tailnet 侧没有该子网路由
      # ⇒ ERR_CONNECTION_TIMED_OUT（2026-10-30 用户报障）。
      # 正确形态是**三网各一层 socat**（dsh-lo / dsh-ts4 / dsh-ts6，全部 PartOf=dsh.service），
      # 让 lanUrl 的改写结果在任何网络都能落地：只有能连上的地址才配被改写。

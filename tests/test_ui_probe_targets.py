@@ -2,9 +2,11 @@
 
 判据（每条都对应一个真实故障形态，不是为覆盖而覆盖）：
 
-1. **绑定地址必须被探**：dsh 拒绝通配地址，只监听 `192.168.5.102:3080`，回环永远拒连。
-   旧实现只探 `127.0.0.1`/`::1` ⇒ `/ui-status` 恒 `ready=false`，前端覆盖层一直盖着
-   「原生界面未运行，正在拉起…」，用户看到的是「原生界面起不来」（服务其实 active）。
+1. **绑定地址必须被探**：dsh 拒绝通配地址，只绑一张具体网卡（地址 2026-11-12 起由
+   启动器按默认路由现算，hub 写不出字面量）。旧实现只探 `127.0.0.1`/`::1` 而当时
+   回环拒连 ⇒ `/ui-status` 恒 `ready=false`，前端覆盖层一直盖着「原生界面未运行，
+   正在拉起…」，用户看到的是「原生界面起不来」（服务其实 active）。
+   现形态：回环有 dsh-lo 常驻转发，绑定面另按当前出口地址补进候选。
 2. **`probe` 优先于 `url`**：qwenpaw 的 `url` 是 hub 进程内代理 :3103（hub 活着它就
    listening），拿它判活等于永远「活的」；真后端在 `probe`（:8088）。
 3. **不能只认死地址**：判活是「任一路通即就绪」，任一路都不通才判未运行。
@@ -24,18 +26,38 @@ def _fake_port_open(open_set):
 
 
 class TestUiTargets(unittest.TestCase):
-    def test_dsh_probes_its_bind_address_not_only_loopback(self):
+    def test_dsh_probes_loopback_and_current_bind_address(self):
+        """2026-11-12 改判：dsh 的绑定地址由启动器按默认路由现算，写不出字面量。
+
+        回环重新可用（dsh-lo 常驻转发 127.0.0.1:3080 → 现算上游），但探活**不能只靠
+        回环**：dsh-lo 被停用 / 未安装时，dsh 仍直连绑定地址 → 只探回环会把活的判成死的。
+        """
         p = profiles.get_profile("dsh")
         spec = profiles.ui_start_for("dsh")
-        targets = api_agents._ui_targets("dsh", spec, p)
-        self.assertIn(("192.168.5.102", 3080), targets,
-                      "dsh 只监听 LAN IP，漏掉它 ⇒ ui-status 恒 false（2026-10-25 报障）")
+        with mock.patch.object(api_agents.embed_proxy, "_lan_ip", return_value="10.1.2.3"):
+            targets = api_agents._ui_targets("dsh", spec, p)
+        self.assertIn(("127.0.0.1", 3080), targets,
+                      "回环由 dsh-lo 转发，必须探")
+        self.assertIn(("10.1.2.3", 3080), targets,
+                      "当前默认路由出口地址是真正的绑定面，漏掉它 ⇒ 只有 dsh-lo 挂了就误判未运行")
         # 关键回归：后端只在绑定地址上活着时，must be ready
         with mock.patch.object(api_agents.vitals_mod, "port_open",
-                               _fake_port_open({("192.168.5.102", 3080)})):
+                               _fake_port_open({("10.1.2.3", 3080)})), \
+             mock.patch.object(api_agents.embed_proxy, "_lan_ip", return_value="10.1.2.3"):
             ready, host, port = api_agents._ui_ready("dsh", spec, p)
         self.assertTrue(ready)
-        self.assertEqual((host, port), ("192.168.5.102", 3080))
+        self.assertEqual((host, port), ("10.1.2.3", 3080))
+
+    def test_dsh_ready_when_only_loopback_answers(self):
+        """dsh-lo 在听、dsh 本体还在起：回环通即就绪（否则覆盖层盖住正常启动过程）。"""
+        p = profiles.get_profile("dsh")
+        spec = profiles.ui_start_for("dsh")
+        with mock.patch.object(api_agents.vitals_mod, "port_open",
+                               _fake_port_open({("127.0.0.1", 3080)})), \
+             mock.patch.object(api_agents.embed_proxy, "_lan_ip", return_value="10.1.2.3"):
+            ready, host, port = api_agents._ui_ready("dsh", spec, p)
+        self.assertTrue(ready)
+        self.assertEqual((host, port), ("127.0.0.1", 3080))
 
     def test_qwenpaw_probe_wins_over_proxy_url(self):
         p = profiles.get_profile("qwenpaw")

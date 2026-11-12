@@ -23,6 +23,7 @@ from pydantic import BaseModel
 import appstate
 import capabilities
 import db
+import embed_proxy
 import modelcfg
 import profiles as profiles_mod
 import vitals as vitals_mod
@@ -222,12 +223,13 @@ async def unregister_agent(agent_id: str):
 def _ui_targets(agent_id: str, spec: Optional[dict], p: dict) -> List[tuple]:
     """探活目标 `[(host, port), …]`，按可信度排序、去重保序。
 
-    为什么不能只看回环：**dsh 拒绝通配地址**（只能 `--host 192.168.5.102`），
-    它的 3080 **不监听 127.0.0.1** ⇒ 回环探活恒失败。2026-10-25 实测后果：
-    服务 `active`、iframe 已 200、卡片地址带 token 全对，但 `/ui-status` 恒回
-    `ready=false` ⇒ 前端覆盖层一直盖着「原生界面未运行，正在拉起…」，
-    用户看到的就是「dsh 原生界面起不来了」（v0.13.153 引入 ui-status 时的回归，
-    此前用的是浏览器侧 `_embedAlive`，能连通所以一直是好的）。
+    为什么不能只看回环：**dsh 拒绝通配地址**（只能绑一张具体网卡），2026-10-25 时
+    它的 3080 **不监听 127.0.0.1** ⇒ 回环探活恒失败。当时实测后果：服务 `active`、
+    iframe 已 200、卡片地址带 token 全对，但 `/ui-status` 恒回 `ready=false` ⇒ 前端
+    覆盖层一直盖着「原生界面未运行，正在拉起…」，用户看到的就是「dsh 原生界面起不
+    来了」（v0.13.153 引入 ui-status 时的回归）。
+    2026-11-12 起回环也有 dsh-lo 常驻转发（127.0.0.1:3080 → 现算上游），回环重新
+    可用；绑定地址是现算的、这里写不出字面量 ⇒ 另在下面补当前出口地址作为候选。
 
     配方里的 `probe` 优先于 `url`：qwenpaw 的 `url` 是 hub 进程内代理 :3103
     （hub 活着它就永远 listening），拿它探活会把停着的后端显示成活的，
@@ -266,6 +268,17 @@ def _ui_targets(agent_id: str, spec: Optional[dict], p: dict) -> List[tuple]:
     if port and not recipe.get("probe"):
         out.append(("127.0.0.1", int(port)))
         out.append(("::1", int(port)))
+    # dsh 的绑定地址自 2026-11-12 起由启动器按默认路由现算（不再写死），hub 这边
+    # 拿不到字面量。回环那一跳由 dsh-lo 常驻转发，正常够用；把**当前出口地址**
+    # 也补进来，守住「dsh-lo 没装/被停用、但 dsh 仍直连绑定地址」的形态 ——
+    # 否则活的 dsh 会被判成未运行（2026-10-25 报障的同一种假死）。
+    if agent_id == "dsh" and port:
+        try:
+            bind_ip = embed_proxy._lan_ip()
+        except Exception:  # noqa: BLE001  探测失败只少一个候选，不影响判活
+            bind_ip = ""
+        if bind_ip:
+            out.append((bind_ip, int(port)))
     seen = set()
     uniq = []
     for t in out:

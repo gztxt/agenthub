@@ -74,6 +74,8 @@ class HiddenGuards(unittest.TestCase):
         (CORE, "pollHealth", "/health"),
         (NAV, "updateBadges", None),
         (ACT, "loadActivity", None),
+        # T6（2026-11-12）：6s 的 tasks/jobs/chat 轮询是最后一个缺隐藏守卫的常驻点
+        (NAV, "pollPageBits", None),
     ]
 
     def test_each_poller_guards_on_document_hidden(self):

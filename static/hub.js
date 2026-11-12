@@ -10229,7 +10229,12 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
   loadAgents(); updateBadges(); pollHealth();
 });
-setInterval(() => {
+/* 2026-11-12（T6）：页面隐藏时早退 —— 与 loadAgents/pollHealth/updateBadges/loadActivity
+   同一纪律（守卫在函数体内，不动 setInterval 周期字面量）。停在 tasks/jobs/chat 页的
+   后台标签原先每 6s 仍打 3 个端点，是这条纪律唯一的漏网点。
+   ⚠ 周期只有 6s：切回前台最多等一个周期，不另加 visibilitychange 补拉。 */
+function pollPageBits() {
+  if (document.hidden) return;
   if (document.getElementById('page-tasks').classList.contains('on')) {
     loadRuns(); loadRunCounts();
     /* 2026-11-03 用户报「鼠标焦点被抢 / 点哪儿都跳到详细信息」：
@@ -10243,7 +10248,8 @@ setInterval(() => {
   // 只看 termPane 的 on 不够：整块 page-chat 被 display:none 藏起来时它仍是 on，白轮询
   if (document.getElementById('page-chat').classList.contains('on')
       && document.getElementById('termPane').classList.contains('on')) termRefreshList();
-}, 6000);
+}
+setInterval(pollPageBits, 6000);
 loadAgents();
 /* v0.13.40：两个多选源的 option 是模板里写死的（memFedSrcs / kbRoutes），boot 期
    一次性挂芯片行即可；instTo 的 option 由 loadSkills 每次重写 ⇒ 在那边重挂。

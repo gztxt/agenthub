@@ -582,14 +582,43 @@ class TestStarHideQuartet(unittest.TestCase):
 @tiers.host_only
 class TestLivePrecisionOnHost(unittest.TestCase):
     """L1 host：真机上的精度收紧结果——用户点名「79 个肯定错」，这条就是验收线。
-    count 必须 ≤ 50（真实项目约 42~45）；无 /tmp 前缀；无 .git 文件 worktree 路径；
-    每条 path 盘上真实存在（杀幽灵）。"""
+
+    2026-11-12 校准（判例 agent-knowledge/341）：旧判据把「数量 ≤50」当成精度，
+    但 50 是 2026-09 时点的真机基线（≈42~45 + 余量）。11 月真机项目自然涨到 51，
+    写死的绝对数就把「合法增长」误报成「精度回退」——实测 51 条全真实存在、
+    无 /tmp 前缀、无 .git 文件 worktree 路径、剔除量如实上报，即**精度本身没坏**，
+    坏的是判据用数量代理精度，且基线没随真机刷新。
+
+    只把 50 调大 = 放宽验收线 = 掩盖，故本次同时加一条**比旧判据更严**的机械断言：
+    结果里零条命中排除闸（BACKUP_SEG_RE / ARCHIVED / <根>/work / 夹具根 / /tmp）。
+    这是「排除有没有漏」的直接判据，与项目总数无关——哪怕总数没超，漏一条就红。
+    数量预算只作粗哨兵：红时必须先用 _excluded_leaks() 分辨「新增真项目」还是
+    「排除漏网」，不得直接调这个数（判据：agent-knowledge/341 §红时处置）。
+    """
+
+    #: 真机项目数预算（2026-11-12 实测 51 条 + 9 余量）。**不是**精度判据本身。
+    LIVE_COUNT_BUDGET = 60
+
+    def _excluded_leaks(self, projects):
+        """结果里命中排除闸的条目 = 精度回退的直接证据。
+
+        消费端复用生产者的同一函数 `_under_excluded`（口径一处定义，不许各写一份）。
+        """
+        return [p["path"] for p in projects
+                if lp._under_excluded(p["path"], lp.ROOTS,
+                                      extra_prefixes=(lp.L0_FIXTURE_ROOT,))]
 
     def test_live_result_is_precise(self):
         d = lp._list_projects()
         self.assertTrue(d["ok"])
-        self.assertLessEqual(d["count"], 50,
-                             f"本机真实项目不该超过 50，实得 {d['count']}（精度又回退？）")
+        # ① 主判据：零排除漏网（漏一条就红，与总数无关）
+        leaks = self._excluded_leaks(d["projects"])
+        self.assertEqual([], leaks, "排除闸漏网（精度回退）: %s" % leaks[:3])
+        # ② 粗哨兵：数量预算（校准后的基线，不是精度本身）
+        self.assertLessEqual(
+            d["count"], self.LIVE_COUNT_BUDGET,
+            "真机项目 %d 条超过预算 %d；先跑 _excluded_leaks() 分辨是新增真项目"
+            "还是排除漏网，不许直接调数" % (d["count"], self.LIVE_COUNT_BUDGET))
         for p in d["projects"]:
             path = p["path"]
             self.assertTrue(os.path.isdir(path), f"幽灵目录混入: {path}")
@@ -598,6 +627,18 @@ class TestLivePrecisionOnHost(unittest.TestCase):
             self.assertFalse(g.is_file(),
                              f"worktree（.git 文件）混入主列表: {path}")
         self.assertGreater(d["dropped_count"], 0, "剔除量必须如实上报（信封口径）")
+
+    def test_excluded_leaks_detector_is_not_vacuous(self):
+        """反例证明 ① 不是空断言：/tmp 与 .bak- 形态必须被检出，真项目不被误杀。"""
+        fake = [{"path": "/tmp/ghost-repo"},
+                {"path": "/fs/1000/ftp/技术文档/foo.bak-20261112-x"},
+                {"path": "/fs/1000/ftp/技术文档/agenthub"}]
+        leaks = self._excluded_leaks(fake)
+        self.assertIn("/tmp/ghost-repo", leaks, "/tmp 混入必须被检出")
+        self.assertTrue(any("foo.bak" in x for x in leaks),
+                        "后缀式整仓拷贝必须被检出（v0.13.178 同形态）")
+        self.assertNotIn("/fs/1000/ftp/技术文档/agenthub", leaks,
+                         "点名根内的真项目不许被误杀")
 
 
 class TestTier(unittest.TestCase):

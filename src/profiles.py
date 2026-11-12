@@ -92,10 +92,13 @@ def embed_proxy_targets() -> List[Dict[str, object]]:
                     # 的那张网卡上被连到（main.py 据此决定监听面），不能锁死在回环。
                     # 放开的安全前提由 main.py 保证：仅 hub_auth=1 时生效。
                     "browser_entry": True,
-                    # 按 Host 判来源的上游（dsh 的 /api 围栏只认 loopback / 绑定地址 /
-                    # --trusted-host）。别的宿主用 Host 拼绝对跳转地址，跟着改写会把
-                    # 浏览器送到上游内网地址 ⇒ 只点名 dsh，不做成默认。
-                    "rewrite_host": p["id"] == "dsh"})
+                    # 按 Host 判来源的上游：dsh 的 /api 围栏只认 loopback / 绑定地址 /
+                    # --trusted-host；CCR 本体实测也只认 127.0.0.1:3458（其它 Host 403），
+                    # 原先靠 ccr-web-lan socat → 13458 的 Host 改写反代才能打开。
+                    # 现在 ccr 的种子地址也改成回环，就由桥统一改写 Host 到上游 authority。
+                    # 别的宿主用 Host 拼绝对跳转地址，跟着改写会把浏览器送到上游内网地址
+                    # ⇒ 只点名 dsh / ccr，不做成默认。
+                    "rewrite_host": p["id"] in ("dsh", "ccr")})
     return out
 
 
@@ -657,7 +660,13 @@ PROFILES: List[dict] = [
     {"id": "ccr", "name": "CCR Gateway", "kind": "gateway",
      "detect": {"proc": [r"claude-code-router", r"ccr( |$)", "MainThread"]},
      "proc_cwd_hint": "/home/gztxt/.ccr",
-     "cli": None, "port": 3456, "ui": None, "panel": "http://192.168.5.102:3458/?ccr_web_token=ccr-web-fixed-token-gztxt-2026",
+     # 2026-11-12（用户令「IP 段自动判定、不写死硬地址」）：面板种子地址改用回环，
+     # 由前端 lanUrl 无条件改写成 location.hostname ⇒ 换网段后卡片仍指向当前
+     # 访问主机上的 3458 前端（LAN/ts4/ts6 各一层 socat）。原来写死
+     # 192.168.5.102:3458，换网段后既不在 own_addrs（lanUrl 不再改写）、
+     # 桥上游也指向失效地址。配合 embed_proxy_targets 的 rewrite_host
+     #（CCR 本体的 Host 围栏实测只认 127.0.0.1:3458，其它 Host 一律 403）。
+     "cli": None, "port": 3456, "ui": None, "panel": "http://127.0.0.1:3458/?ccr_web_token=ccr-web-fixed-token-gztxt-2026",
      "desc": "Claude↔多模型路由网关 :3456/3457/3458（生命线，只观测）"},
     {"id": "ccpocket", "name": "CCPocket Bridge", "kind": "gateway",
      "detect": {"systemd": ["ccpocket-bridge"]},

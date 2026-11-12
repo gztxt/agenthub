@@ -378,10 +378,20 @@ class TestUpstreamCookie(unittest.TestCase):
 
 
 class TestTargets(unittest.TestCase):
-    def test_only_dsh_asks_for_rewrite(self):
+    def test_only_host_fenced_upstreams_ask_for_rewrite(self):
+        """只有「按 Host 判来源」的上游才要求改写，目前是 dsh / ccr。
+
+        - dsh：/api 围栏只认 loopback / 绑定地址 / --trusted-host（2026-11-04）。
+        - ccr：本体只认 127.0.0.1:3458，其它 Host 一律 403（2026-11-12 实测
+          `Host: 192.168.5.102:3200` / `100.117.232.62:3200` → 403；原来靠
+          ccr-web-lan socat → 13458 的 Host 改写反代才能打开）。面板种子地址
+          改成回环后，必须由桥改写 Host 才过得去围栏。
+        其它宿主用 Host 拼绝对跳转地址，跟着改写会把浏览器送到上游内网地址。
+        """
         flags = {t["id"]: t.get("rewrite_host") for t in profiles.embed_proxy_targets()}
         self.assertTrue(flags.get("dsh"), "dsh 的 /api 围栏依赖 bind 地址，必须改写")
-        others = [k for k, v in flags.items() if k != "dsh" and v]
+        self.assertTrue(flags.get("ccr"), "ccr 本体只认 127.0.0.1:3458，必须改写")
+        others = [k for k, v in flags.items() if k not in ("dsh", "ccr") and v]
         self.assertEqual(others, [], "别家按 Host 拼绝对地址，不能被默认改写")
 
 

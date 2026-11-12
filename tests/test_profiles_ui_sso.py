@@ -32,9 +32,16 @@ class AllUISingleLogin(unittest.TestCase):
             t["id"]: "http://127.0.0.1:%d" % (3200 + i)
             for i, t in enumerate(profiles.embed_proxy_targets())
         }
+        # L0 必须 hermetic（2026-11-12 补桩）：dsh 的 embed/open 地址含**进程级随机
+        # token**（`profiles._dsh_web_url` 现读活服务 journal）。不打桩 ⇒ 结果随
+        # 「dsh 服务当下跑没跑」漂移——实测 dsh 活着本用例必红、停着假绿（本机
+        # pre-commit 被它拦下才暴露）。桩成 None＝「取不到 token」的明确降级态。
+        self._orig_dsh_url = profiles._dsh_web_url
+        profiles._dsh_web_url = lambda: None
 
     def tearDown(self):
         profiles.EMBED_PROXY_MAP = self._orig
+        profiles._dsh_web_url = self._orig_dsh_url
 
     def test_every_bridge_target_is_a_browser_entry(self):
         targets = profiles.embed_proxy_targets()
@@ -56,6 +63,22 @@ class AllUISingleLogin(unittest.TestCase):
             for typ in ("embed", "open"):
                 self.assertEqual(es[typ]["url"], expected,
                                  "%s 的 %s 入口绕过了 hub 桥" % (p["id"], typ))
+
+    def test_dsh_live_token_survives_the_bridge(self):
+        """带 token 的 dsh 实时地址过桥：桥前缀不变、token 不丢（不变量③同款语义）。
+
+        生产里 dsh 活着时 `_dsh_web_url` 返回带 token 的地址；本用固定值钉住
+        「不绕过桥」与「token 不丢（丢了即 401 白屏）」两个方向。
+        """
+        profiles._dsh_web_url = lambda: "http://127.0.0.1:3080?token=fixedtok123"
+        p = [x for x in profiles.PROFILES if x["id"] == "dsh"][0]
+        es = {e["type"]: e for e in profiles.entries_for(p, "running")}
+        base = profiles.EMBED_PROXY_MAP["dsh"] + "/"
+        for typ in ("embed", "open"):
+            self.assertTrue(es[typ]["url"].startswith(base),
+                            "%s 的 %s 入口绕过了 hub 桥" % (p["id"], typ))
+            self.assertIn("token=fixedtok123", es[typ]["url"],
+                          "%s 的 token 在过桥时丢了" % p["id"])
 
     def test_dict_ui_both_entrances_go_through_bridge(self):
         for p in profiles.PROFILES:

@@ -9,6 +9,8 @@
 - 判定没跑成（关闭/超短/幻觉摘录/两序不一致/队列忙）⇒ **完全旧行为**；
 - 提位只在**同桶**内发生（跨桶会把设计参考顶成实现参考）。
 """
+import importlib
+import os
 import pathlib
 import sys
 import unittest
@@ -168,6 +170,73 @@ class TestAcceptDecision(unittest.TestCase):
         d2 = chain_judge.accept_decision(False, {"ok": False, "label": None})
         self.assertFalse(d2["accept"])
         self.assertFalse(d2["review"])
+
+    # ── 影子档（2026-11-12，CHAIN_JUDGE=shadow）：判定照算，处置零影响 ──
+
+    def test_shadow_off_topic_does_not_block(self):
+        d = chain_judge.accept_decision(True, {"ok": True, "label": "off_topic"},
+                                        shadow=True)
+        self.assertTrue(d["accept"])
+        self.assertEqual(d["status"], "success")
+        self.assertFalse(d["review"], "影子不得制造人工复核")
+        self.assertTrue(d["would_block"], "不拦归不拦，「本会拦」必须可查")
+
+    def test_shadow_manual_accept_still_submitted_without_review(self):
+        d = chain_judge.accept_decision(False, {"ok": True, "label": "off_topic"},
+                                        shadow=True)
+        self.assertFalse(d["accept"])
+        self.assertEqual(d["status"], "submitted")
+        self.assertFalse(d["review"])
+        self.assertTrue(d["would_block"])
+
+    def test_shadow_completed_has_no_would_block(self):
+        d = chain_judge.accept_decision(True, {"ok": True, "label": "completed"},
+                                        shadow=True)
+        self.assertTrue(d["accept"])
+        self.assertFalse(d.get("would_block"))
+
+    def test_shadow_none_follows_module_mode(self):
+        """shadow=None 取模块档位；默认 off ⇒ 与 enforce 语义一致（不出现影子键）。"""
+        d = chain_judge.accept_decision(True, {"ok": True, "label": "off_topic"})
+        self.assertFalse(d["accept"])
+        self.assertTrue(d["review"])
+
+
+class TestShadowMode(unittest.TestCase):
+    """CHAIN_JUDGE 三档解析（reload 现取档位；测完恢复生产档）。"""
+
+    def _mode(self, val):
+        old = os.environ.get("CHAIN_JUDGE")
+        os.environ["CHAIN_JUDGE"] = val
+        try:
+            importlib.reload(chain_judge)
+            return chain_judge.MODE, chain_judge.ENABLED, chain_judge.SHADOW
+        finally:
+            if old is None:
+                os.environ.pop("CHAIN_JUDGE", None)
+            else:
+                os.environ["CHAIN_JUDGE"] = old
+            importlib.reload(chain_judge)
+
+    def test_off_values(self):
+        for v in ("0", "false", "off", "no"):
+            mode, enabled, shadow = self._mode(v)
+            self.assertEqual(mode, "off")
+            self.assertFalse(enabled)
+            self.assertFalse(shadow)
+
+    def test_shadow_value(self):
+        mode, enabled, shadow = self._mode("shadow")
+        self.assertEqual(mode, "shadow")
+        self.assertTrue(enabled, "影子档判定照跑（跑不跑与拦不拦是两件事）")
+        self.assertTrue(shadow)
+
+    def test_enforce_values(self):
+        for v in ("1", "true", "on", "yes", ""):
+            mode, enabled, shadow = self._mode(v)
+            self.assertEqual(mode, "enforce")
+            self.assertTrue(enabled)
+            self.assertFalse(shadow)
 
 
 class TestPromote(unittest.TestCase):

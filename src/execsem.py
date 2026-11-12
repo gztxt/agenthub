@@ -59,6 +59,11 @@ SOURCES: Tuple[str, ...] = (
     # 那是「决策要不要再拆一轮」，这是「收尸」。也不并进 task_exec：那里记的是子任务
     # 自己的执行结果，收尸是 run 级的清理，混进去会让「子任务成功率」被清理事件污染。
     "task_run",
+    # 2026-11-12 影子档两路（借 TokenEconomizer shadow；「只多说话不改行为」的留证）。
+    # 为什么不并进 task_exec：影子事件落进子任务成功率，会让「判定/选型质量对照」
+    # 冒充「执行成败」（同 task_replan/task_plan 不并的口径）。
+    "chain_judge_shadow",  # 主链判定影子：off_topic 若在 enforce 档本会拦下
+    "dispatch_shadow",     # 派发权重影子：历史三维权重会推荐谁（选型不动）
 )
 
 #: 跨 source 的执行结果语义闭集（**结果怎样**）。
@@ -107,6 +112,12 @@ STATUS_MAP: Dict[str, Dict[str, str]] = {
                    "not_found": "failed", "invalid_request": "failed",
                    "server": "failed", "timeout": "failed", "network": "failed",
                    "unknown": "failed"},
+    # 2026-11-12 影子档两路。chain_judge_shadow 的 would_block 同 mcp_acl_shadow 的
+    # would_deny 口径（观测到「本会拦」而未拦 = degraded）；no_block＝判了且无需拦。
+    # dispatch_shadow 的 would_pick 同 action.requested 口径：登记**不是结果** ⇒ skipped，
+    # 不许让「建议数」冒充「成功数」。
+    "chain_judge_shadow": {"would_block": "degraded", "no_block": "ok"},
+    "dispatch_shadow": {"would_pick": "skipped"},
 }
 
 

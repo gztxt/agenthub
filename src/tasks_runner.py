@@ -491,6 +491,21 @@ async def _verify_and_settle(run_id: str, row: dict, result: dict, attempts_done
         # 处置折成纯函数（`chain_judge.accept_decision`），L0 才能把「方向」钉死：
         # 判成 off_topic 只降级不丢弃；判定没跑成 = 旧行为。
         decision = chain_judge.accept_decision(_tiers.AUTO_ACCEPT, jv)
+        if decision.get("shadow"):
+            # 影子档留证（2026-11-12，source=chain_judge_shadow，与 mcp_acl_shadow 同款
+            # 纪律）：would_block=若在 enforce 档本会拦下；处置本身零影响。
+            try:
+                db.log_profile_event("chain_judge_shadow", row["agent_id"],
+                                      "would_block" if decision.get("would_block")
+                                      else "no_block",
+                                      int(jv.get("ms") or 0),
+                                      trace_id=row["trace_id"],
+                                      detail={"task": row["task_id"],
+                                              "judge": (jv.get("label") if jv.get("ok")
+                                                        else "unjudged"),
+                                              "auto_accept": bool(_tiers.AUTO_ACCEPT)})
+            except Exception:  # noqa: BLE001 — 留证失败不得带上处置
+                pass
         need_review = decision["review"]
         if decision["accept"]:
             db.execute("UPDATE tasks SET status='success',output=?,duration_ms=?,spent_ms=?,"
@@ -520,6 +535,7 @@ async def _verify_and_settle(run_id: str, row: dict, result: dict, attempts_done
                                      "auto_accept": _tiers.AUTO_ACCEPT and not need_review,
                                      "judge": jv.get("label") if jv.get("ok") else "unjudged",
                                      "judge_ok": bool(jv.get("ok")),
+                                     "judge_shadow": bool(decision.get("shadow")),
                                      "judge_ms": jv.get("ms")})
     else:
         gaps = "; ".join("%s: %s" % (g["id"], g["detail"]) for g in verdict["gaps"])

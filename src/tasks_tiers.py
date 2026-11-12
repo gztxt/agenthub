@@ -339,11 +339,58 @@ def _plan_tiers(items: List[dict], pool: set) -> tuple:
     清单取不到（网关挂/无凭据）时 `checked=False` ⇒ 不注入任何模型，
     原因写 `catalog_unavailable`。这里绝不"给个默认值凑合"——
     那会把「不知道」伪装成「选过了」。
+
+    2026-11-12 起附带影子留证（`_shadow_dispatch_note`）：plan 完成后把「历史权重
+    会推荐谁」记进 profile_events，选型一字不动——A/B 数据通道，不是选型输入。
     """
     import tiercfg as tierlib
     ids, checked = _catalog_snapshot()
-    return tierlib.plan(items, catalog=ids, checked=checked, ccr_agents=_ccr_model_agents(),
+    out = tierlib.plan(items, catalog=ids, checked=checked, ccr_agents=_ccr_model_agents(),
                         pool=pool)
+    _shadow_dispatch_note(items, pool)
+    return out
+
+
+def _shadow_dispatch_note(items: Optional[List[dict]], pool: Optional[set]) -> None:
+    """影子派发留证（2026-11-12，借 TokenEconomizer shadow；只多说话不改选型）。
+
+    dispatch_weights 自述「权重直接接管选型需要先跑 A/B，这条写进
+    PENDING-TASKS」——本函数就是那条 A/B 的**数据通道**：在 `_plan_tiers` 之后，
+    把历史三维权重（质量 Wilson 下界/p50/每成功一次 token）对每个子任务族的
+    建议位记进 `profile_events`（source=`dispatch_shadow`，status=`would_pick`，
+    detail 带 suggested/actual 对照面）。跑一段时间后，suggested 与 actual 的
+    成绩差即 A/B 证据，届时再裁接管与否。
+
+    纪律：
+    - **零选型影响**：只读历史、只写事件，items 原样返回（L0 有逐字节断言）；
+    - suggest 无证据（返回 None）⇒ 不记事件（「没有够格的证据」不是一条建议）；
+    - 任何异常 ⇒ 静默跳过（增强层降级口径同 `_catalog_snapshot`——绝不带倒选型）；
+    - 整表只读一次（`_by_family` 注入），不按子任务重复扫库。
+    """
+    if not items:
+        return
+    try:
+        import dispatch_weights
+        pool_ids = {str(a) for a in (pool or set())}
+        table = dispatch_weights._by_family(30)
+        for it in items:
+            tid = str(it.get("task_id") or it.get("id") or "")
+            family = dispatch_weights.task_family(
+                {"task_id": tid, "files": it.get("files"),
+                 "prompt": str(it.get("prompt") or "")})
+            sug = dispatch_weights.suggest(pool_ids, family, by_family=table)
+            if sug:
+                db.log_profile_event(
+                    "dispatch_shadow", str(it.get("agent_id") or "-"), "would_pick", 0,
+                    detail={"task": tid, "family": family,
+                            "suggested_agent": sug.get("agent_id"),
+                            "suggested_model": sug.get("model"),
+                            "actual_agent": it.get("agent_id"),
+                            "actual_model": it.get("model_planned") or it.get("model"),
+                            "suggested_quality": sug.get("quality"),
+                            "suggested_n": sug.get("n")})
+    except Exception:  # noqa: BLE001 — 影子是增强，绝不带倒选型（同 _catalog_snapshot）
+        pass
 
 
 def escalate_target(agent_id: str, model_choice: Optional[str], attempts: Any,

@@ -749,7 +749,13 @@ def collect(module: str, keywords: List[str], lang: str, min_stars: int, fresh_d
     ranked.sort(key=_order_key)
     lj = chain_judge.pick_candidate(('模块 %s；关键词 %s' % (module, '、'.join(keywords[:8]))).strip(), [{'name': r['repo'], 'desc': r['desc']} for r in ranked[:4]])
     if lj.get('ok'):
-        lj['moved'] = chain_judge.promote_within_bucket(ranked, int(lj['index']))
+        if chain_judge.SHADOW:
+            # 影子档（2026-11-12）：判定照算但**不改序**——would-promote 只随 meta 留证；
+            # 与 mcpgw effect=shadow / CHAIN_JUDGE=shadow 同一纪律：只多说话不改行为。
+            lj['shadow'] = True
+            lj['moved'] = False
+        else:
+            lj['moved'] = chain_judge.promote_within_bucket(ranked, int(lj['index']))
         for r in ranked:
             if r['repo'] == lj.get('picked'):
                 r['local_judge'] = {'picked': True, 'moved': lj['moved'], 'confidence': lj.get('confidence'), 'ms': lj.get('ms'), 'model': lj.get('model')}

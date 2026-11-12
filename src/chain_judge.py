@@ -34,14 +34,14 @@
 上面那张 1.5b 的表是**换后端之前**的实测，保留作
 「为什么不用 choice 原语」的依据；换成 flash 后位置偏置**没有重测**，所以
 `pick_candidate` 仍然跑「正序/倒序各一次、一致才采信」，不靠模型自觉。
-`CHAIN_JUDGE` 默认仍为 0：这条链没有做质量对照，开关只作预备。
+`CHAIN_JUDGE` 默认仍为 0；shadow 档（2026-11-12）＝ 判定照跑攒质量对照、处置零影响。
 
 ## 纪律
 
 1. **永不抛**：调用点在主链上，`tasks.py` 外层 `except` 会把任何异常记成 `failed`。
 2. **输入硬截断**：任务 400 字、产物 1500 字、候选 4 条 × 描述 120 字（ctx 4096）。
 3. **统计不另建**：成功/失败都写回 `local_judge`（计数、连续失败告警、`/api/vitals` 可见）。
-4. **可关可回滚**：`CHAIN_JUDGE=0`。
+4. **可关可回滚**：`CHAIN_JUDGE=0`（off）/ `shadow`（只算不落地）/ `1`（enforce）。
 5. **单飞**：Ollama 串行，进程内信号量 + `CHAIN_JUDGE_QUEUE_WAIT`，等不到就不判。
 """
 import json
@@ -55,13 +55,24 @@ from typing import Any, Dict, List, Optional
 import local_judge
 import remote_judge
 
-#: 主链判定总开关。**默认关（`"0"`）**——这条链没做过质量对照，只作预备。
-#: 2026-10-28 核实：本行此前写「默认开——否则又回到『接了但从不调用』的休眠态」，
-#: 与下一行代码方向相反。注释说开、代码是关，恰恰把那个休眠态掩盖了：线上
+#: 主链判定模式三档（2026-11-12 增 shadow，借 TokenEconomizer 的影子设计：
+#: 决策照算、证据照记、处置零影响——与 `mcpgw` ACL 的 `effect=shadow` 同一纪律）：
+#:   off（默认）＝ 旧 `CHAIN_JUDGE=0` 行为，不判（这条链没做过质量对照，只作预备）；
+#:   shadow     ＝ 判定照跑、judge_json/profile_events 照记，但 off_topic 不拦、
+#:                pick_candidate 不改序——先攒质量对照数据，再决定是否 enforce；
+#:   enforce    ＝ 旧行为（`CHAIN_JUDGE=1`）：off_topic 转人工复核。
+#: 2026-10-28 核实：本注释块此前写「默认开——否则又回到『接了但从不调用』的休眠态」，
+#: 与代码方向相反。注释说开、代码是关，恰恰把那个休眠态掩盖了：线上
 #: `local_judge.status().calls=0`、`data/agents.db` 的 `tasks.judge_json` 全为 NULL。
-#: 要启用须显式 `CHAIN_JUDGE=1` 并重启 hub；启用前先读判例 250 §4（四个落点里
-#: 模型零决策权，质量不是瓶颈）。
-ENABLED = os.getenv("CHAIN_JUDGE", "0").strip().lower() not in ("0", "false", "off", "no")
+#: 要启用须显式 `CHAIN_JUDGE=shadow|1` 并重启 hub；enforce 前先读判例 250 §4（四个
+#: 落点里模型零决策权，质量不是瓶颈）——shadow 档正是补那条质量对照的安全路径。
+_RAW_MODE = os.getenv("CHAIN_JUDGE", "0").strip().lower()
+MODE = ("shadow" if _RAW_MODE == "shadow"
+        else ("off" if _RAW_MODE in ("0", "false", "off", "no") else "enforce"))
+#: 判定链是否**跑**（shadow 也跑——「跑不跑」与「影不影响处置」是两件事）。
+ENABLED = MODE != "off"
+#: 影子档：跑了但对处置零影响（`accept_decision` 与 refscout 改序都看它）。
+SHADOW = MODE == "shadow"
 #: 单次超时。实测 1.5~3.7s，45s 只是兜底（Ollama 冷加载 / 别的活占着）。
 TIMEOUT_S = float(os.getenv("CHAIN_JUDGE_TIMEOUT", "45"))
 #: 产物短于此长度不值得判（「完成」两个字复述不出证据）。
@@ -218,7 +229,8 @@ def _ask_pick(q: str, cands: List[Dict[str, str]],
     return i if 0 <= i < len(cands) else None
 
 
-def accept_decision(auto_accept: bool, judge: Dict[str, Any]) -> Dict[str, Any]:
+def accept_decision(auto_accept: bool, judge: Dict[str, Any],
+                    shadow: Optional[bool] = None) -> Dict[str, Any]:
     """把「自动接受开关 + 判定结果」折成处置。**纯函数**，便于 L0 钉死方向。
 
     返回 `{accept, status, review, reason}`：
@@ -226,8 +238,21 @@ def accept_decision(auto_accept: bool, judge: Dict[str, Any]) -> Dict[str, Any]:
     - `accept=False` ⇒ 走 `submitted`（AUTO_ACCEPT 关，或判定说答非所问）；
     - `review=True`  ⇒ 其中「判定拦下」的那一种，`reason` 必须落库，否则复核的人
       会把「模型认为答非所问」误读成「verifier 失败」。
+
+    影子档（2026-11-12，`shadow=True`）：判定照算但**对处置零影响**——off_topic
+    不拦（与「未判成 off_topic」同一处置、不制造人工复核），另附 `would_block`
+    供调用方留证（`profile_events` 的 `chain_judge_shadow`）；enforce 档照旧拦。
+    灰度是**选择进入**的：`shadow=None` 取模块档位（`CHAIN_JUDGE` 环境值）。
     """
+    if shadow is None:
+        shadow = SHADOW
     off = bool(judge.get("ok") and judge.get("label") == "off_topic")
+    if shadow:
+        if auto_accept:
+            return {"accept": True, "status": "success", "review": False, "reason": None,
+                    "shadow": True, "would_block": off}
+        return {"accept": False, "status": "submitted", "review": False, "reason": None,
+                "shadow": True, "would_block": off}
     if auto_accept and not off:
         return {"accept": True, "status": "success", "review": False, "reason": None}
     if not off:

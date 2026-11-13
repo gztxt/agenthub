@@ -31,6 +31,7 @@ import tempfile
 import time
 sys.path.insert(0, "/fs/1000/ftp/技术文档/agenthub/tests")
 from _cdp_min import CDP, launch_chrome, page_target     # noqa: E402
+from _hub_inject import inject_hub                       # noqa: E402
 
 ROOT = "/fs/1000/ftp/技术文档/agenthub"
 BASE, PORT = "http://127.0.0.1:3102", int(sys.argv[1]) if len(sys.argv) > 1 else 9405
@@ -84,6 +85,8 @@ c.on_paused = lambda x: on_paused(x, c)      # ★同一条连接既 enable 又�
 
 def load(url=BASE + "/?diag=1", tries=10):
     c.send("Page.navigate", url=url)
+    time.sleep(1.5)   # 等 body 就绪：navigate 后立即 appendChild 会因 body=null 静默失败
+    inject_hub(c, wait_ms=5000)
     prev, t = None, ""
     for _ in range(tries):
         time.sleep(1.5)

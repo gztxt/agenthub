@@ -57,7 +57,16 @@ ESM 化**不是必要条件**。实测 `01-core-boot.js` 顶层**零跨片调用
 1. `static/hub/00-loader.js`：`ensureShard(name)` + 首屏 4 片按序注入（经典脚本，非 module）
 2. 模板 `loadHub()` 改注入 loader；`?legacy=1` 仍走 `static/hub.js`（长期契约）
 3. 9 个延迟片的调用点改 `ensureShard(...).then(fn)`，并保留 `typeof fn === 'function'` 兜底
-4. 逐片验证（页面 200 + 该页功能探针）+ 闸门数据源同步
+4. **逐片验证 + 闸门数据源同步**，五类判据缺一不可：
+   - **加载链路**：首屏 4 片按序各 200；`typeof window.go/renderNav/renderChatSide === 'function'`；
+     `?diag=1` 的符号阶梯 30 项全为 1（现成探针复用，不新写）。
+   - **延迟触发**：进 assets/kb/tasks 页时 Network 只新增 **1 个** shard 请求；二次进页 **0 新增**
+     （promise 缓存）；404/网络失败不白屏（`typeof fn === 'function'` 兜底 + toast）。
+   - **功能等价**：9 个延迟页各一条行为断言（assets 列表非空 / kb 表有行 / tasks 有运行记录 /
+     jobs 有计数 / telemetry 有事件 / 本地项目与 GitHub 各非空 / workbench 有任务 / botboy 有投影）。
+   - **闸门同步**：约 40 条读模板或产物的断言改数据源后全绿；`test_hubjs_split.py` 逐字节轨
+     继续守 legacy `hub.js`；`test_frontend_budget.py` 的 bundle 上限按新首屏下调（否则预算失效）。
+   - **回退**：`?legacy=1` 走 `hub.js`，抽样 3 页对比 DOM 节点数与改造前一致（长期契约的验收点）。
 
 ## 施工顺序（原 ESM 方案，已被上节取代，保留归档）
 

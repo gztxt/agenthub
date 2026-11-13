@@ -5,7 +5,7 @@
 "端侧到底卡在哪一步"变成可复制文本的通道。**通道本身失效 = 永远拿不到事实**，
 所以它必须自带红绿对照：
 
-  绿：正常加载 ⇒ 面板存在、`异常清单: 无`、go 与遮罩出口均为 function、navTree 有 3 子项
+  绿：正常加载 ⇒ 面板存在、`异常清单: 无`、go 与遮罩出口均为 function、navTree 有 4 子项
   红：人为掐断 /static/hub.js（模拟 APP 里 JS 取不到 / 被代理换成 HTML）
       ⇒ 面板必须精确报「资源加载失败」+ go=undefined + navTree子项=0
       ⇒ 且**实测证伪/证实一件事**：JS 不跑时 `侧栏collapsed=false` ⇒ 抽屉停在展开态遮住正文
@@ -18,6 +18,7 @@ CDP 纪律（本轮踩过的真坑）：`Fetch` 域是**按 session 启用**的�
 import json, re, sys, tempfile, time
 sys.path.insert(0, "/fs/1000/ftp/技术文档/agenthub/tests")
 from _cdp_min import CDP, launch_chrome, page_target
+from _hub_inject import inject_hub
 
 BASE, PORT = "http://127.0.0.1:3102", int(sys.argv[1]) if len(sys.argv) > 1 else 9392
 TXT = "document.getElementById('diagBox') ? document.getElementById('diagBox').textContent : '<<无面板>>'"
@@ -77,6 +78,7 @@ c.send("Emulation.setDeviceMetricsOverride", width=390, height=844, deviceScaleF
 def nav(url, wait=4.0):
     c.send("Page.navigate", url=url)
     time.sleep(wait)
+    inject_hub(c)          # 登录闸适配（2026-11-13）：导航后重新注入 hub.js
     return c.eval(TXT) or ""
 
 
@@ -92,7 +94,7 @@ chk("hub.js 标签带版本号", "v=" in f.get("hub.js标签", ""), f.get("hub.j
 chk("go 函数存在（已解析）", f.get("go函数") == "function", f.get("go函数", ""))
 chk("遮罩出口存在（initSidebar 跑过）", f.get("initSidebar跑过(遮罩出口)") == "function",
     f.get("initSidebar跑过(遮罩出口)", ""))
-chk("navTree 有 3 个分组", f.get("navTree子项") == "3", f.get("navTree子项", ""))
+chk("navTree 有 4 个分组", f.get("navTree子项") == "4", f.get("navTree子项", ""))
 chk("侧栏已收起（窄屏默认图标条）", f.get("侧栏collapsed") == "true", f.get("侧栏collapsed", ""))
 chk("异常清单为「无」", "异常清单: 无" in f["_raw"], "")
 # v0.13.13：localStorage 守卫的可观测行（端侧自证“存储是不是被禁了”）
@@ -123,7 +125,7 @@ print("\n== 不带 ?diag：面板不应存在 ==")
 c.send("Fetch.disable")
 t3 = nav(BASE + "/")
 chk("无 diag 参数时面板不存在", t3 == "<<无面板>>", t3[:40])
-chk("正常页仍渲染 3 个分组", str(c.eval("document.getElementById('navTree').children.length")) == "3", "")
+chk("正常页仍渲染 4 个分组", str(c.eval("document.getElementById('navTree').children.length")) == "4", "")
 
 proc.kill()
 bad = res.count(False)

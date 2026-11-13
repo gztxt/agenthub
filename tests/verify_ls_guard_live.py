@@ -8,7 +8,7 @@
   A 绿  健康存储：点导航 + 点实体 → __lsDiag.fails==0，且 hub.page 真的写进去了
         （守卫不许把功能做没：写路径必须仍然通）
   B 红→绿  Storage.prototype.setItem 抛 QuotaExceededError
-        新字节：页面照常渲染（go=function、navTree=3、窄屏 collapsed=true），
+        新字节：页面照常渲染（go=function、navTree=4、窄屏 collapsed=true），
                 __lsDiag.fails>0 且 lastErr 里带 QuotaExceededError
   C 红→绿  整个 window.localStorage 取值就抛（隐私模式 / WebView 禁 DOM Storage）
         新字节：同上，且面板那行 `localStorage键=` 自己也不能把 probe() 带崩
@@ -30,6 +30,7 @@ import time
 
 sys.path.insert(0, "/fs/1000/ftp/技术文档/agenthub/tests")
 from _cdp_min import CDP, launch_chrome, page_target
+from _hub_inject import inject_hub
 
 BASE = "http://127.0.0.1:3102"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9427
@@ -142,6 +143,7 @@ def reload_with(sab, wait=4.0):
         sid[sab] = r.get("identifier")
     c.send("Page.navigate", url=BASE + "/?cb=%s%d" % (sab, time.time()))
     time.sleep(wait)
+    inject_hub(c)          # 登录闸适配（2026-11-13）：导航后重新注入 hub.js（Fetch fulfill 仍会替换它为红侧字节）
     return st(c)
 
 
@@ -182,7 +184,7 @@ def pick_nav():
 
 print("\n== A 绿：健康存储，走真实交互（展开系统分组→点一个系统页） ==")
 a = reload_with("none")
-chk("A 页面正常渲染", a.get("goType") == "function" and a.get("navTree") == 3,
+chk("A 页面正常渲染", a.get("goType") == "function" and a.get("navTree") == 4,
     "go=%s navTree=%s" % (a.get("goType"), a.get("navTree")))
 g1 = center('button[data-group="system"]') or center('button[data-group]')
 if g1:
@@ -214,7 +216,7 @@ chk("R 旧字节：异常冒出 window（启动链被打断的直接证据）",
     any("SecurityError" in str(x) for x in (r_.get("log") or [])),
     json.dumps(r_.get("log", [])[:2], ensure_ascii=False)[:130])
 chk("R 旧字节：菜单没能渲染出来（导航数据链路断在第 02 片顶层）",
-    (r_.get("navTree") if isinstance(r_.get("navTree"), int) else 0) < 3,
+    (r_.get("navTree") if isinstance(r_.get("navTree"), int) else 0) < 4,
     "go=%s navTree=%s" % (r_.get("goType"), r_.get("navTree")))
 S["swap"] = False
 
@@ -223,7 +225,7 @@ b = reload_with("quota")
 print("   实测：%s" % json.dumps(b, ensure_ascii=False)[:300])
 diag_b = b.get("lsDiag") or {}
 chk("B 启动链存活（go=function）", b.get("goType") == "function", "go=%s" % b.get("goType"))
-chk("B 菜单照常渲染（navTree=3）", b.get("navTree") == 3, "navTree=%s" % b.get("navTree"))
+chk("B 菜单照常渲染（navTree=4）", b.get("navTree") == 4, "navTree=%s" % b.get("navTree"))
 chk("B 窄屏默认态不受影响（collapsed=true）",
     b.get("narrow") is True and b.get("collapsed") is True,
     "narrow=%s collapsed=%s" % (b.get("narrow"), b.get("collapsed")))
@@ -237,7 +239,7 @@ print("\n== C 新字节 + 取 localStorage 就抛（隐私模式/WebView 禁存�
 cc = reload_with("blocked", wait=4.5)
 print("   实测：%s" % json.dumps(cc, ensure_ascii=False)[:300])
 diag_c = cc.get("lsDiag") or {}
-chk("C 启动链存活", cc.get("goType") == "function" and cc.get("navTree") == 3,
+chk("C 启动链存活", cc.get("goType") == "function" and cc.get("navTree") == 4,
     "go=%s navTree=%s" % (cc.get("goType"), cc.get("navTree")))
 chk("C 回落到窄屏默认图标条（collapsed=true）", cc.get("collapsed") is True,
     "collapsed=%s" % cc.get("collapsed"))

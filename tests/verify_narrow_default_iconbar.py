@@ -21,6 +21,7 @@ import time
 
 sys.path.insert(0, "/fs/1000/ftp/技术文档/agenthub/tests")
 from _cdp_min import CDP, launch_chrome, page_target
+from _hub_inject import inject_hub
 
 BASE = "http://127.0.0.1:3102"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9417
@@ -100,6 +101,7 @@ c.send("Emulation.setDeviceMetricsOverride", width=W, height=H,
 def nav(url, wait=3.5):
     c.send("Page.navigate", url=url)
     time.sleep(wait)
+    inject_hub(c)          # 登录闸适配（2026-11-13）：导航后重新注入 hub.js；jsdead 阶段的注入会被 Fetch 掐断，blocked 语义不变
 
 
 def jsdead(url, wait=5.0):

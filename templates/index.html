@@ -3759,26 +3759,29 @@
                                 function () { return { ok: false, d: {} }; });
         }).then(function (x) {
           if (!x.ok || !x.d || !x.d.username) throw new Error('登录失败：用户名或密码错误（或被限速）');
-          /* 2026-11-07：服务端已种 HttpOnly 会话 Cookie，前端不再存任何 token */
-          localStorage.setItem('hub.login.user', x.d.username);
+          /* 2026-11-07：服务端已种 HttpOnly 会话 Cookie，前端不再存任何 token。
+             2026-11-13：storage 三处访问全部兜底 —— 登录闸引导脚本先于 hub.js 守卫执行，
+             隐私模式/禁存储下裸调用会未捕获冒到 window（ls_guard_live C 臂实抓）。 */
+          try { localStorage.setItem('hub.login.user', x.d.username); } catch (e) {}
           afterLogin();
         }).catch(function (e) { fail(e.message || '登录失败'); });
       });
 
       /* 已登录判定只看 Cookie 会话：/api/users/whoami 返回 username 即放行。
          2026-11-07：不再读 localStorage token —— 刷新不会因本地凭据残留/丢失而假死。 */
-      var known = (localStorage.getItem('hub.login.user') || '').trim();
+      var known = '';
+      try { known = (localStorage.getItem('hub.login.user') || '').trim(); } catch (e) {}
       if (known) uEl.value = known;
       fetch('/api/users/whoami', { credentials: 'same-origin' })
         .then(function (r) { if (!r.ok) throw new Error('no-session'); return r.json(); })
         .then(function (d) {
           if (!d || !d.username) throw new Error('no-session');
-          localStorage.setItem('hub.login.user', d.username);
+          try { localStorage.setItem('hub.login.user', d.username); } catch (e) {}
           if (nextUrl()) { afterLogin(); return; }
           loadHub();
         })
         .catch(function () {
-          localStorage.removeItem('hub.term.token');
+          try { localStorage.removeItem('hub.term.token'); } catch (e) {}
           err.textContent = '';
           uEl.focus();
         });

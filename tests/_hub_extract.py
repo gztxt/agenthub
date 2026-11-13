@@ -30,8 +30,11 @@ def extract_function(src, name):
 
 
 def extract_line(src, prefix):
-    """抽单行（如 `const TERM_QUERY_OSC = [...]`）。"""
-    m = re.search(r"^%s.*$" % re.escape(prefix), src, re.M)
+    """抽单行（如 `const TERM_QUERY_OSC = [...]`）。
+
+    行首允许空白缩进：`let termMouseLive` 这类声明在 02 分片里带 1 空格缩进，
+    顶格锚定会假性「抽不到」（2026-11-13 verify_stream_decode 实抓）。"""
+    m = re.search(r"^[ \t]*%s.*$" % re.escape(prefix), src, re.M)
     return m.group(0) if m else None
 
 

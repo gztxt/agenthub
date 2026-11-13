@@ -35,7 +35,31 @@
 `api`、`go`、`escapeHtml`、`lsGet`、`toast`、`lsSet`、`ico`、`loadAgents`、`gotoChat`、
 `termHeaders`、`termConnect`、`initSidebar`
 
-## 施工顺序（每步可独立验收）
+## 路线修正（2026-11-13 实测）
+
+ESM 化**不是必要条件**。实测 `01-core-boot.js` 顶层**零跨片调用**（0 命中），38 个跨片符号引用
+全部在函数体内（切页/事件触发才执行）⇒ **按片延迟加载即可达成体积目标**，且不必改 15 片的作用域语义
+（ESM 化会让顶层 `function` 不再挂 `window`，`onclick=` 与 587 个全局符号都要桥接，风险面远大于收益）。
+
+**首屏必需 vs 可延迟**（依据：`01` 的 38 符号依赖矩阵 + `go()` 调用点）：
+
+- 必需：`01`（自身）、`05`（`go()` 每页调 `renderNav` / `navItemHtml`）、
+  `02`（`renderChatSide` / `renderModeBar`）、`03`（classroom 卡片与登录模态）
+- 可延迟：`04`（13 个符号，全部切页才用）、`06`、`07`、`09`、`10`、`11`、`12`、`14`、`15`
+
+**预期收益**：首屏 4 片 ≈ 344 KB 原始 / ≈100 KB br（现 723 KB / 214 KB）⇒ **-53%**。
+
+**代价（为什么仍需专项 2 周）**：模板注入方式改 + 9 个片的调用点改异步（`ensureShard().then()`）
++ 约 40 条闸门改数据源（与 T3 同量级：T3 只外提 CSS 就产生 40 条红）。
+任何单点增量都会撞「逐字节 + 36 个产物闸门」，所以仍是**全有或全无**，只是实现方式从 ESM 换成延迟加载。
+
+**修正后的 4 步**：
+1. `static/hub/00-loader.js`：`ensureShard(name)` + 首屏 4 片按序注入（经典脚本，非 module）
+2. 模板 `loadHub()` 改注入 loader；`?legacy=1` 仍走 `static/hub.js`（长期契约）
+3. 9 个延迟片的调用点改 `ensureShard(...).then(fn)`，并保留 `typeof fn === 'function'` 兜底
+4. 逐片验证（页面 200 + 该页功能探针）+ 闸门数据源同步
+
+## 施工顺序（原 ESM 方案，已被上节取代，保留归档）
 
 1. **收敛核心层**：新建 `static/hub/00-core-api.js`（ESM），把 12 个符号及其私有依赖搬进去并 `export`。
    ⚠ 此步必须**同时**切换加载方式为 `<script type="module">` —— `import` 在经典脚本里是语法错，

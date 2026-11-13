@@ -21,6 +21,11 @@
    ⇒ 预热导航一旦把 hub.js 缓存下来，后续导航 Chrome **连请求都不发** ⇒ Fetch 无事件
    可拦 ⇒ 红况静默变绿。故：开 `about:blank` → 装拦截 + `Network.setCacheDisabled`
    → 才做首次导航，并把「拦截命中次数 ≥1」本身做成一条判据。
+④ 红臂重定向（2026-11-13 用户裁定 A）：固定历史提交（RED_SHA=8067801）的旧 JS
+   在当前 4 分组 DOM 上抛的是别的异常、initSidebar 反而跑过 ⇒ 已无法复现当年事故。
+   红臂改为「当前 hub.js + 顶部一个语法错」的定向篡改：整段脚本不解析（注意不能用
+   throw，函数声明提升会让阶梯仍全 1），红况 navTree=0 / 阶梯 :0 / collapsed=false，
+   绿况真身全绿。红绿对照验证「探针能判红也能判绿」，不再依赖历史版本与钉死的行号。
 """
 import base64
 import re
@@ -35,7 +40,13 @@ from _hub_inject import inject_hub                       # noqa: E402
 
 ROOT = "/fs/1000/ftp/技术文档/agenthub"
 BASE, PORT = "http://127.0.0.1:3102", int(sys.argv[1]) if len(sys.argv) > 1 else 9405
-RED_SHA = "8067801"          # 最后一个仍带 TDZ 的 hub.js（md5 0e6e0613）
+#: 红臂素材（2026-11-13 用户裁定 A）：当前产物 + 顶部一个语法错，使整段脚本不解析。
+#: 原 RED_SHA=8067801 是 10-30 的历史版本，在当前 4 分组 DOM 上抛的是别的异常
+#: （实测 hub.js:2150、initSidebar 反而跑过）⇒ 红臂假红、闸门失去灵敏度。
+#: ⚠ 不能用 `throw` 制造红况：顶层 function 声明在编译阶段就提升并挂到 window，
+#: 实测「throw 在第一行」时符号阶梯仍全 1 ⇒ 阶梯判据假绿。只有整段不解析才能让
+#: 顶层声明全部失效（navTree=0 / 阶梯 :0 / collapsed=false），红绿才真正取反。
+BREAK_HEAD = 'var __red_break__ = ;  // 红对照：故意语法错，整段脚本不解析\n'
 PHONE_KEYS = {"hub.term.token": "SEED-TOKEN-FOR-ACCIDENT-PATH", "hub.hist": "claude",
               "hub.page": "chat", "hub.nav.open": "agents", "hub.chat.pick": "claude"}
 DRIVE = ("(function(){try{window.histLoad('claude');return 'DRIVE-OK';}"
@@ -55,9 +66,12 @@ def field(t, k):
     return m.group(1).strip() if m else None
 
 
-RED_SRC = subprocess.run(["git", "show", RED_SHA + ":static/hub.js"], cwd=ROOT,
-                         capture_output=True, text=True).stdout
-chk("红基线素材可取（钉在 %s）" % RED_SHA, RED_SRC.count("let _navHtml") == 1, "%d 字符" % len(RED_SRC))
+with open(ROOT + "/static/hub.js", "rb") as f:
+    CUR_SRC = f.read()
+MUTANT_SRC = BREAK_HEAD.encode("utf-8") + CUR_SRC
+chk("红臂素材基于当前产物（顶部语法错篡改）",
+    MUTANT_SRC.startswith(BREAK_HEAD.encode("utf-8")) and len(CUR_SRC) > 100000,
+    "%d + %d 字节" % (len(BREAK_HEAD), len(CUR_SRC)))
 
 PROFILE = tempfile.mkdtemp(prefix="hub_tdz_cold_")
 proc = launch_chrome("about:blank", PORT, PROFILE, 392, 768)
@@ -76,7 +90,7 @@ def on_paused(params, cli):
     cli.send("Fetch.fulfillRequest", requestId=rid, responseCode=200,
              responseHeaders=[{"name": "content-type", "value": "text/javascript; charset=utf-8"},
                               {"name": "cache-control", "value": "no-store"}],
-             body=base64.b64encode(RED_SRC.encode("utf-8")).decode("ascii"))
+             body=base64.b64encode(MUTANT_SRC).decode("ascii"))
 
 
 c.send("Fetch.enable", patterns=[{"urlPattern": "*static/hub.js*"}])
@@ -97,7 +111,7 @@ def load(url=BASE + "/?diag=1", tries=10):
     return t
 
 
-print("\n== 红：拦截先于首次导航，把仍带 TDZ 的版本喂进页面 ==")
+print("\n== 红：拦截先于首次导航，把「当前产物 + 顶部语法错篡改」喂进页面 ==")
 # 冷启动判据：此刻还在 about:blank（该 origin 根本无权访问 localStorage）⇒ 证明
 # 这是全新档案，红况看到的 hub.js 一定来自本次拦截、而非任何历史缓存。
 chk("冷档案：首次导航前停在 about:blank",
@@ -114,10 +128,12 @@ for ln in tr.splitlines():
         print("   | " + ln[:98])
 raw = tr.replace("\n", " ")
 chk("★拦截真的命中 hub.js（红况成立的前提）", len(hits) >= 1, "命中 %d 次" % len(hits))
-chk("红况复现 `_navHtml` TDZ（与手机同一条）",
-    "Cannot access '_navHtml' before initialization" in raw, "")
+chk("红况报出未捕获 JS 异常（启动链断裂的证据）", "JS异常" in raw, "")
+# 原判据钉「抛点 = 手机回传的 1907」：那是 09-23 那版产物的行号，随 DOM/产物演进必然
+# 失效（实测历史红字节在当前 DOM 上抛在 hub.js:2150）。改为只要求**异常带行号**，
+# 与「initSidebar 从未跑过」一起证明启动链断在顶层，而不是面板自己伪造的绿。
 mred = re.search(r"hub\.js:(\d+):(\d+)", tr)
-chk("红况抛点 = 手机回传的 1907", bool(mred) and mred.group(1) == "1907",
+chk("红况异常带行号（启动链断在顶层）", bool(mred),
     "实测 hub.js:%s" % (mred.group(1) if mred else "?"))
 chk("红况菜单空白（navTree子项=0）", field(tr, "navTree子项") == "0", field(tr, "navTree子项") or "")
 chk("红况 initSidebar 从未跑过", field(tr, "initSidebar跑过(遮罩出口)") == "undefined",

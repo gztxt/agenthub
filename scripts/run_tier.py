@@ -166,6 +166,20 @@ def _parity() -> int:
     return 0
 
 
+#: 生产 unit 通过 `Environment=` 注入的档位切换器，**不得泄进 L0**。
+#: 2026-11-13 实测：重启后会话继承 `CHAIN_JUDGE=shadow`，L0 里 3 条「默认 off」断言假红
+#: （主仓同样红，与改动无关）。L0 的默认值必须由代码决定，不由宿主 env 决定。
+L0_SCRUBBED = ("CHAIN_JUDGE",)
+_SAVED_SCRUB: dict[str, str] = {}
+
+# 必须在**模块加载时**剥离，早于任何 tests import —— 否则 `chain_judge` 这类
+# 「import 时读 env」的模块会先把生产档位固化下来，`isolate_home` 再清也来不及
+# （2026-11-13 实测：清理只放在 isolate_home 里，失败数从 3 只降到 2）。
+for _k in L0_SCRUBBED:
+    if _k in os.environ:
+        _SAVED_SCRUB[_k] = os.environ.pop(_k)
+
+
 def isolate_home(saved_home: str | None, log=print) -> str:
     """把 HOME 换成一次性的空目录，返回该目录。
 
@@ -194,6 +208,9 @@ def restore_home(saved_home: str | None, saved_host_tests: str | None) -> None:
     else:
         os.environ["HOME"] = saved_home
     os.environ.pop("HUB_TEST_HOME", None)
+    for k, v in _SAVED_SCRUB.items():
+        os.environ[k] = v
+    _SAVED_SCRUB.clear()
     if saved_host_tests is None:
         os.environ.pop("HUB_HOST_TESTS", None)
     else:

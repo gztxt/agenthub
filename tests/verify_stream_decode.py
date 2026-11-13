@@ -33,6 +33,7 @@ CHROME = (os.environ.get("HUB_CHROME") or shutil.which("chromium")
 
 WANT = [
     ("line", "let termMouseLive = false;"),
+    ("line", "const termMouseWant = new Set();"),
     ("line", "let termDecoder = new TextDecoder();"),
     ("line", "let termScanTail = '';"),
     ("line", "const TERM_MOUSE_MODES ="),
@@ -42,6 +43,16 @@ WANT = [
     ("fn", "termDecodeReset"),
     ("fn", "termDecodeFrame"),
 ]
+
+# 被测函数的外部依赖桩：这些是运行时全局状态/缓存副作用，不属于被测代码本身。
+# termSid 置空 ⇒ termScanMouseMode 的缓存分支短路（本探针只测扫描/解码，不测缓存）。
+# 被测函数仍由 _hub_extract 原样抽取，桩只是让它们能在最小页里独立执行。
+STUBS = r"""
+var termSid = '';
+var termSidAgent = '';
+var termBracketed = false;
+function termWantCachePut() {}
+"""
 
 BODY = r"""
 function bytesOf(s) { return new TextEncoder().encode(s); }
@@ -94,7 +105,7 @@ def main():
         for m_ in miss:
             print("     ", m_[:60])
         return 2
-    html = HX.build_page("\n".join(parts), BODY)
+    html = HX.build_page("\n".join(parts) + "\n" + STUBS, BODY)
     with tempfile.TemporaryDirectory() as td:
         shutil.copytree(VENDOR, Path(td) / "vendor")
         page = Path(td) / "sd.html"

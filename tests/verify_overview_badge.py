@@ -24,6 +24,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _cdp_min import CDP, launch_chrome, page_target      # noqa: E402
+from _hub_inject import inject_hub                        # noqa: E402
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:3199"
 CDP_PORT = int(os.getenv("HUB_PROBE_CDP_PORT", "9431"))
@@ -111,7 +112,10 @@ def session(url, profile, kill_js=False):
         cdp = CDP(page_target(CDP_PORT, tries=60),
                   on_paused=lambda p: on_paused(p, cdp, state), on_event=on_dialog)
         cdp.send("Network.setCacheDisabled", cacheDisabled=True)
-        cdp.send("Fetch.enable", patterns=[{"urlPattern": "*", "requestStage": "Request"}])
+        # 只对 kill_js 对照开拦截：非对照 session 全量放行毫无作用，却会把
+        # _hub_inject 注入的 hub.js 请求暂停住 ⇒ 页面拿不到 JS、全格 _missing。
+        if kill_js:
+            cdp.send("Fetch.enable", patterns=[{"urlPattern": "*", "requestStage": "Request"}])
         cdp.send("Page.enable")
         # 新 profile 必须先喂 token 并短路 prompt，否则 renderer 挂死
         cdp.send("Page.addScriptToEvaluateOnNewDocument", source="""
@@ -122,6 +126,9 @@ def session(url, profile, kill_js=False):
         """)
         cdp.send("Page.navigate", url=url)
         time.sleep(4)
+        # 登录闸适配（2026-11-13）：未登录页面不注入 hub.js ⇒ 侧栏/总览 DOM 全 _missing。
+        # kill_js=True 时注入产生的请求被 failRequest 掐断，JS 死亡对照语义保持。
+        inject_hub(cdp)
         return cdp
     except Exception:
         proc.terminate()

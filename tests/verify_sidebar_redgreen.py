@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _cdp_min import CDP, launch_chrome, old_hub_bytes, page_target   # noqa: E402
+from _hub_inject import inject_hub   # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 BASE = next((a for a in sys.argv[1:] if a.startswith("http")), "http://127.0.0.1:3102")
@@ -68,6 +69,10 @@ def run(serve_old, old_body):
            deviceScaleFactor=2, mobile=True)
     state["hits"] = 0
     c.send("Page.reload", ignoreCache=True)
+    time.sleep(1.0)
+    # 登录闸适配（2026-11-13）：未登录页面不发 hub.js ⇒ 拦截 0 次空转。
+    # 注入产生请求：红臂被 fulfill 成旧字节、绿臂放行真身 —— 原语义完全保持。
+    inject_hub(c)
     d = None
     for _ in range(24):
         time.sleep(0.5)

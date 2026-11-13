@@ -24,6 +24,8 @@ from urllib.parse import quote as _q
 
 PORT = int(os.getenv("CDP_PORT", "9333"))
 BASE = os.getenv("HUB_BASE", "http://127.0.0.1:3199")   # 默认影子；打生产需显式覆盖
+sys.path.insert(0, "/fs/1000/ftp/技术文档/agenthub/tests")
+from _hub_inject import inject_hub   # noqa: E402
 FAILS = []
 
 # 期望深底板：templates/index.html 的 --term-* token（2026-09-22 用户裁定，参考 grok 原生观感）
@@ -145,6 +147,19 @@ def main():
                 ready = evj(READY_JS)
                 if ready.get("rs") == "complete" and ready.get("sheets", 0) > 0:
                     break
+            # 登录闸适配（2026-11-13）：未登录页面不注入 hub.js ⇒ ensureTerm 不存在。
+            # 用 _hub_inject.inject_hub（gate 隐藏 + token URL + 轮询就绪），等价已登录页面。
+            # 该探针自管 CDP：send(method, params) 签名与 _cdp_min 的 c.eval 不同，用 shim 适配。
+            class _EvShim:
+                eval = staticmethod(ev)
+            ok = inject_hub(_EvShim(), wait_ms=15000,
+                            ready_js="typeof window.ensureTerm==='function'")
+            print("   [dbg] inject_hub=%r ensureTerm=%r scripts=%r gate=%r" % (
+                ok, ev("typeof window.ensureTerm"),
+                ev("document.querySelectorAll('script[src*=hub]').length"),
+                ev("!!document.getElementById('loginGate')")))
+            if ok:
+                ready = evj(READY_JS)   # 注入后重取：注入前的快照里 ensureTerm 尚不存在
             check("V0 页面真加载（非空白页，hub.js 已就位）",
                   ready.get("rs") == "complete" and ready.get("sheets", 0) > 0
                   and ready.get("hasEnsure") == "function",

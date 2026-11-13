@@ -208,8 +208,9 @@ def restore_home(saved_home: str | None, saved_host_tests: str | None) -> None:
     else:
         os.environ["HOME"] = saved_home
     os.environ.pop("HUB_TEST_HOME", None)
-    for k, v in _SAVED_SCRUB.items():
-        os.environ[k] = v
+    # 不还原：CHAIN_JUDGE 这类档位由代码默认值决定，L1 段也不需要宿主 env
+    # （实测 L1 在无 CHAIN_JUDGE 下 82 例全绿；还原成 shadow 会让 all 档 L1 假红，
+    #  2026-11-13 push 被拦即此因）。
     _SAVED_SCRUB.clear()
     if saved_host_tests is None:
         os.environ.pop("HUB_HOST_TESTS", None)

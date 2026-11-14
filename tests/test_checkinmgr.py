@@ -152,6 +152,43 @@ class ProbePath(unittest.TestCase):
             a = ck.build_probe_argv(m, token="tcFAKE")
             self.assertNotIn("aia_bridge.py", a[-1])
 
+
+class RelayChannel(unittest.TestCase):
+    """v0.13.203：A 机走「经 B 跳板」通道 —— NAS→A 的 DERP 数据面不通而 B→A 实测通。"""
+    RELAY = {"name": "A", "channel": "relay", "target": "WIN-20260130XPI",
+             "user": "Administrator"}
+
+    def test_relay_wraps_inner_ssh_in_encodedcommand(self):
+        a = ck.build_argv(self.RELAY, "health", False)
+        self.assertEqual(a[0], "ssh")
+        self.assertIn("Mac@192.168.5.99", a)          # 外层跳板 = B 机
+        self.assertTrue(any("EncodedCommand" in x for x in a))
+        # 内层在 b64 里：解码后应含 tailcat ProxyCommand 与目标用户
+        import base64
+        b64 = next(x.split()[-1] for x in a if "EncodedCommand" in x)
+        inner = base64.b64decode(b64).decode("utf-16-le")
+        self.assertIn("tailcat.exe", inner)
+        self.assertIn("Administrator@127.0.0.1", inner)
+        self.assertIn("health", inner)
+
+    def test_relay_probe_uses_echo_not_bridge(self):
+        a = ck.build_probe_argv(self.RELAY, token="tcFAKE")
+        import base64
+        b64 = next(x.split()[-1] for x in a if "EncodedCommand" in x)
+        inner = base64.b64decode(b64).decode("utf-16-le")
+        self.assertNotIn("aia_bridge.py", inner)
+        self.assertIn("echo " + ck._PROBE_OK, inner)
+
+    def test_relay_without_token_rejected(self):
+        import tempfile, unittest.mock as um
+        with um.patch.object(ck, "_token_for", return_value=""):
+            with self.assertRaises(ValueError):
+                ck.build_argv(self.RELAY, "health", False)
+
+    def test_seeds_a_is_relay(self):
+        a = next(s for s in ck.SEEDS if s["name"] == "WIN-20260130XPI")
+        self.assertEqual(a["channel"], "relay")
+
     def test_bad_target_or_user_rejected(self):
         with self.assertRaises(ValueError):
             ck.build_probe_argv({"channel": "tailcat", "target": "WIN; rm"},

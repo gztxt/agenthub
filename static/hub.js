@@ -12661,16 +12661,38 @@ function ckGuide(reason) {
   return g[reason] || '';
 }
 
+function ckDate(ts) {
+  if (!ts) return '—';
+  var d = new Date(ts * 1000), p = function (n) { return String(n).padStart(2, '0'); };
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
 function ckDataSummary(r) {
-  // 最近一次 run 的 results/healths/totals 摘要（三态：没数据 ≠ 空团队）
+  // 最近一次 run 的平台明细：平台 / 状态 / 本次积分 / 消息 + 执行日期 + 账户总积分。
+  // v0.13.203 用户裁定：重复签到（already）本次积分恒显示 0 —— 重复领取不重复计分。
   var d = r && r.data;
-  if (!d) return '';
+  if (!r || !d) return '';
   var res = (d.data && d.data.results) || [];
   if (!res.length) return '<div class="hint">本次无平台结果（bridge 未返回 results）</div>';
-  var okc = res.filter(function (x) { return x.success; }).length;
-  return '<div class="hint">签到 ' + okc + '/' + res.length + ' 成功 · ' +
-    res.map(function (x) { return escapeHtml(String(x.platform)) + ':' +
-      escapeHtml(String(x.status)); }).join(' · ') + '</div>';
+  var rows = res.map(function (x) {
+    var st = String(x.status || '');
+    // already 强制 0（不信任上游字段）；成功取 credits；失败 0
+    var cr = (st === 'already') ? 0 : (Number(x.credits) || 0);
+    var label = st === 'already' ? '今日已签' : (st === 'success' ? '签到成功'
+               : (st === 'skipped' ? '跳过' : '失败'));
+    var crTxt = (x.success || st === 'already') ? ('+' + cr + ' 分') : '0 分';
+    return '<div>' + escapeHtml(String(x.platform)) + ' · ' + label +
+      ' · <b>' + crTxt + '</b>' +
+      (x.message ? ' <span class="hint">' +
+        escapeHtml(String(x.message).slice(0, 48)) + '</span>' : '') +
+      '</div>';
+  }).join('');
+  var tot = ((d.data && d.data.totals) || [])
+    .filter(function (t) { return t.available && t.total != null; })
+    .map(function (t) { return escapeHtml(String(t.platform)) + ' ' + t.total + ' 分'; })
+    .join(' · ');
+  return '<div class="hint">' + escapeHtml(ckDate(r.ts)) + ' 执行</div>' + rows +
+    (tot ? '<div class="hint">总积分：' + tot + '</div>' : '');
 }
 
 function ckMachineCard(m, last) {

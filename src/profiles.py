@@ -721,6 +721,22 @@ PROFILES: List[dict] = [
      "detect": {"proc": [r"/usr/trim/bin/ai_manager"]},
      "cli": None, "port": None, "ui": None, "panel": None,
      "desc": "Trim NAS 系统自带 AI 管理服务（root）"},
+
+    # 2026-11-13 用户令「安装 filebrowser + 加文件管理子菜单」。
+    # 单登录=hub：上游跑 noauth（无登录页）且只绑 127.0.0.1:8082，open/embed 都经
+    # hub 桥把门（未登录 302 到 :3102/?next=…），不允许出现第二套登录。
+    # 只读 + 路径白名单：根圈死在 /fs/1000/ftp/技术文档，id=1 用户写权限全削
+    # （UPGRADE-PLAN-REVIEW-20261031.md:94 裁决：任意路径读写绕过 writeauth 边界）。
+    # 不设 panel_auth/bridge_secret ⇒ embed_proxy_targets 自动建桥目标、entries_for
+    # 同出 open+embed。kind=file 由前端 NAV_SUB_KINDS 的「文件管理」子分组收。
+    # 常驻 service（非 agent，不受「agent 不长驻」军规）：面板按钮带 probe_port，
+    # 停了按钮会消失，故 filebrowser.service 为 enable + Restart=always 常驻。
+    {"id": "filebrowser", "name": "文件管理", "kind": "file",
+     "detect": {"systemd": ["filebrowser"], "proc": [r"(^|/)filebrowser( |$)"]},
+     "cli": None, "port": 8082, "ui": None,
+     "panel": "http://127.0.0.1:8082",
+     "desc": "filebrowser v2.63.23 只读文件浏览 :8082（noauth 无登录页，入口经 hub 桥"
+             "统一 hub 登录；根=/fs/1000/ftp/技术文档，写权限已削；常驻 service）"},
 ]
 
 # 系统 Shell 终端卡（①"使用原生终端"；env 可关）

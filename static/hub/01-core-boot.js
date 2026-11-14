@@ -722,6 +722,8 @@ function go(page) {
   if (page === 'assets') loadAssets();   // P4 资产面板（只读门面聚合，07-asset-panel.js）
   // v0.13.170：Botboy 页每次进页都重读（state.json 是活文件），由 14-botboy.js 负责渲染
   if (page === 'botboy') loadBotboy(false);
+  // v0.13.201：积分签到页每次进页重读（机器清单/执行流水是活数据），由 17-checkin.js 渲染
+  if (page === 'checkin') loadCheckin(false);
 }
 
 function fillAgentSelect(sel, withAuto) {

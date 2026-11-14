@@ -474,11 +474,12 @@ function cmdGo(sel) {
 const NAV_GROUPS = { agents: 'AGENTS', infra: '基础设施', system: '系统', settings: '设置' };
 const NAV_ICONS = { agents: 'hubmark', infra: 'server', system: 'sliders', settings: 'settings' };   // 收起成图标条时仍可辨认（sprite id）
 const NAV_ORDER = ['agents', 'infra', 'system', 'settings'];
-const NAV_SUB_KINDS = [['gateway', '网关'], ['service', '服务'], ['tool', '工具'], ['memory', '记忆']];
+const NAV_SUB_KINDS = [['gateway', '网关'], ['service', '服务'], ['tool', '工具'], ['memory', '记忆'], ['file', '文件管理']];
 const SYS_PAGES = [['ports', '端口', 'share'], ['telemetry', '遥测', 'activity'], ['memory', '记忆中心', 'database'],
                    ['skills', '技能中心', 'zap'], ['kb', '知识库', 'book'],
                    ['mcp', 'MCP服务器', 'wrench'], ['jobs', '定时', 'clock'], ['tasks', '协同', 'flow'],
-                   ['assets', '资产', 'layers'], ['botboy', 'Botboy', 'message']];
+                   ['assets', '资产', 'layers'], ['botboy', 'Botboy', 'message'],
+                   ['checkin', '积分签到', 'star']];
 /* v0.13.47：运行日志页删除，内容并入设置→日志。
    v0.13.170：Botboy = DS Bot 团队面板（只读投影 ~/.dsh/bot/state.json）。
    图标用现成的 message —— sprite 里没有 bot/robot 图形，ico() 对不存在的 id
@@ -494,7 +495,7 @@ const SET_PAGES = [['settings-model', '模型', 'cpu'], ['settings-github', 'Git
 const PAGE_LABELS = { classroom: '总览', chat: '统一对话', tasks: '协同', jobs: '定时',
                       memory: '记忆中心', skills: '技能中心', kb: '知识库', mcp: 'MCP服务器', ports: '端口', telemetry: '遥测',
                       assets: '资产', localprojects: '本机项目', github: 'GitHub 项目', resources: '资源监控',
-                      botboy: 'Botboy',
+                      botboy: 'Botboy', checkin: '积分签到',
                       'settings-model': '设置 · 模型', 'settings-github': '设置 · GitHub',
                       'settings-token': '设置 · 认证状态',
                       'settings-logs': '设置 · 日志',

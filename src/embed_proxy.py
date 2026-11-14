@@ -88,6 +88,12 @@ _END = b"\r\n\r\n"
 _HDR_SPLIT = re.compile(rb"\r?\n")
 _HTML_PATH = re.compile(rb"\.html?$", re.I)
 _ENC = re.compile(rb"^content-encoding:\s*(?P<v>[^\r\n]+)\r?$", re.I | re.M)
+# 响应侧 Content-Type：只有 HTML 文档才允许注入外框脚本。
+# 2026-11-13 判例：filebrowser 打包下载 /api/raw/?files=...&algo=zip 是 window.open
+# 顶层导航，Accept 含 text/html 且路径末段无扩展名 ⇒ 被 _is_document 误判成 SPA 文档，
+# 42MB 的 application/zip 被读回内存并往里插 528 字节 <style>/<script> ⇒ 解压 CRC 全错、
+# 文件不全。判据用上游真实 Content-Type，不靠猜 URL，覆盖所有非 HTML 响应（下载/PDF/图片/API）。
+_CT = re.compile(rb"^content-type:\s*(?P<v>[^\r\n]+)\r?$", re.I | re.M)
 _STATUS = re.compile(rb"^HTTP/\d(?:\.\d)? (?P<code>\d{3})")
 
 # ── Basic 鉴权面板的「桥内登录」（2026-11-02，PT-20261102 报障）──────────
@@ -464,6 +470,28 @@ async def _document(writer: asyncio.StreamWriter, head_line: bytes, header: byte
         writer.close()
         return
     rh, rb = raw.split(_END, 1)
+    # ── 2026-11-13 通用护栏：只有 HTML 文档才允许注入外框脚本 ──
+    # _is_document 只看请求（GET + Accept 含 text/html + 路径末段无扩展名），而下载用的
+    # window.open 顶层导航，请求头与 SPA 文档几乎一样 ⇒ 请求侧无法可靠区分。旧逻辑把
+    # 上游回的 application/zip（42MB）整份读回再 _inject，往二进制里插 528 字节
+    # <style>/<script> ⇒ 中央目录偏移全错、解压 CRC 失败、文件不全（journal 铁证：
+    # 「[embed] 文档注入 … 42632954 bytes (注入 528)」）。
+    # 判据改用上游**真实 Content-Type**：非 text/html 一律原样透传完整 raw（保留 chunked
+    # 帧 / Content-Length / Content-Disposition），不注入、不解帧、不重算头，字节零改动。
+    # 覆盖所有上游的下载 / zip / tar / PDF / 图片 / API JSON，不是某个产品的特例补丁。
+    m_ct = _CT.search(rh)
+    if not m_ct or b"text/html" not in m_ct.group("v").lower():
+        log.info("[embed] 非 HTML 响应(%s)原样透传(不注入): %s",
+                 (m_ct.group("v").decode(errors="replace").strip()
+                  if m_ct else "无 content-type"),
+                 head_line.decode(errors="replace")[:48])
+        writer.write(raw)   # raw 已含头+正文与结尾空行，别补 _END
+        try:
+            await writer.drain()
+        except (ConnectionError, OSError):
+            pass
+        writer.close()
+        return
     if re.search(rb"^transfer-encoding:\s*chunked", rh, re.I | re.M):
         # 剥头前先解帧：下面会把 transfer-encoding 摘掉并回 Content-Length，
         # 不解码就等于把 chunk 长度行当正文交给浏览器（见 _dechunk 注释）。

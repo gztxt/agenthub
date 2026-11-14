@@ -135,6 +135,77 @@ class TestChunked(unittest.TestCase):
         self.assertTrue(body.endswith(b"</html>"), "末尾不得残留终止块 `0`")
 
 
+    # ── PT-20261113-01 回归：只有 HTML 文档才注入，二进制响应一律字节零改动 ──
+    # 反例：filebrowser 打包下载 /api/raw/?files=…&algo=zip 是 window.open 顶层导航，
+    # _is_document 误判为 SPA 文档，42MB 的 application/zip 被插 528 字节 <style>
+    # ⇒ zip CRC 全错、解压失败。修复：按上游真实 Content-Type，非 HTML 原样透传。
+
+    @staticmethod
+    def _run_document(resp_head: bytes, body: bytes, extra: bytes = b"<script>K</script>") -> bytes:
+        import asyncio
+
+        async def run():
+            up_r = asyncio.StreamReader()
+            # 模拟 chunked 流式响应：body 按一块发，末尾终止块
+            up_r.feed_data(resp_head + b"\r\n\r\n"
+                           + ("%x" % len(body)).encode() + b"\r\n" + body + b"\r\n"
+                           b"0\r\n\r\n")
+            up_r.feed_eof()
+            w = _FakeWriter()
+            await embed_proxy._document(
+                w, b"GET /api/raw/?files=x&algo=zip HTTP/1.1",
+                b"\r\nAccept: text/html", _FakeWriter(), up_r,
+                b"", b"127.0.0.1:8082", extra)
+            return bytes(w.buf)
+
+        return asyncio.run(run())
+
+    def test_zip_binary_untouched(self):
+        # 构造一个真的含 </head> 字面量的合法 zip（小 zip 恰好不含锚点就测不出这个 bug）
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("index.html", "<html><head></head><body>" + "A" * 200 + "</body></html>")
+        zip_bytes = buf.getvalue()
+        extra = b"<script>INJECT</script>"
+        raw = self._run_document(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\n"
+            b"Content-Disposition: attachment; filename=x.zip\r\n"
+            b"Transfer-Encoding: chunked", zip_bytes, extra)
+        # 原样透传：不含注入字节、不含被重算的 Content-Length、chunked 帧还在
+        self.assertNotIn(extra, raw, "二进制响应绝不能被注入 bridge 脚本")
+        self.assertIn(b"transfer-encoding: chunked", raw.lower(),
+                      "原样透传必须保留上游 chunked 帧，交给浏览器自己解")
+        self.assertIn(b"content-disposition", raw.lower(), "下载响应头不能丢")
+        # 解帧后的正文必须逐字节等于原始 zip
+        _, framed = raw.split(b"\r\n\r\n", 1)
+        decoded = embed_proxy._dechunk(framed)
+        self.assertIsNotNone(decoded)
+        self.assertEqual(decoded, zip_bytes, "zip 字节必须零改动，否则解压 CRC 失败")
+        self.assertTrue(zipfile.is_zipfile(io.BytesIO(decoded)))
+
+    def test_pdf_and_octet_stream_untouched(self):
+        for ct in (b"application/pdf", b"application/octet-stream", b"image/png"):
+            raw = self._run_document(
+                b"HTTP/1.1 200 OK\r\nContent-Type: " + ct, b"PK\x03\x04BINARYDATA")
+            self.assertNotIn(b"<script>K</script>", raw,
+                             "非 HTML(%s) 不应注入" % ct.decode())
+
+    def test_missing_content_type_untouched(self):
+        raw = self._run_document(b"HTTP/1.1 200 OK", b"SOME BYTES </head> more")
+        self.assertNotIn(b"<script>K</script>", raw,
+                         "缺 Content-Type 时保守起见不注入")
+
+    def test_html_still_injects(self):
+        # 护栏不能误伤真正的 SPA 文档
+        html = b"<html><head></head><body>ok</body></html>"
+        raw = self._run_document(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+            b"Transfer-Encoding: chunked", html)
+        self.assertIn(b"<script>K</script></head>", raw, "HTML 文档仍须注入")
+
+
     def test_host_must_stay_client_value(self):
         """两侧 Host 必须一致：dsh 用 Host 签发/校验 cookie 的 authority。
 

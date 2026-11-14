@@ -3219,6 +3219,45 @@
                 </div>
             </div>
         </section>
+        <!-- 积分签到（v0.13.201）：A/B 两机 AIAutomator 远程管理只读投影 + 受控触发 -->
+        <section class="page sys" id="page-checkin">
+            <div class="sp">
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>积分签到 · 机器管理</h3>
+                        <div class="sp-r">
+                            <button class="btn sm ghost" data-ck="refresh" title="重读机器清单与流水"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
+                        </div>
+                    </div>
+                    <div class="sp-tools">
+                        <div class="toolbar">
+                            <span class="hint" id="ckStatus">未加载</span>
+                        </div>
+                    </div>
+                    <div class="sp-bd" style="padding-top:0"><div class="hint" id="ckHint">进页自动读一次机器清单；触发执行默认 plan（dry，不签到不通知）。</div></div>
+                    <div class="sp-note">机器清单只读投影 tailcat <code>connect-targets.tsv</code>；登录态/凭据只在各 Windows 机本地，hub 不回传不落库。远程执行串行（tailcat 单连接）。A/B 机各自保留 Windows 计划任务每日 08:00 自主签到，本页只做查看 + 手动补签。</div>
+                </div>
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>已安装机器</h3>
+                        <div class="sp-r"><span class="hint" id="ckMachineCount">–</span></div>
+                    </div>
+                    <div class="sp-bd"><div class="sp-grid" id="ckMachines"><div class="hint">未加载</div></div></div>
+                </div>
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>最近执行流水</h3>
+                        <div class="sp-r"><span class="hint">最新在上 · offline / unreadable / 正常 三态分开</span></div>
+                    </div>
+                    <div class="sp-bd box flush tscroll">
+                        <table>
+                            <thead><tr><th style="width:130px">时间</th><th style="width:190px">机器</th><th style="width:90px">命令</th><th style="width:80px">模式</th><th>结果</th></tr></thead>
+                            <tbody id="ckRuns"><tr><td colspan="5" class="hint">未加载</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
         <!-- 设置 · 模型（v0.13.43：设置子菜单改成手风琴 → 正文出页，不再有抽屉）
              内容与 v0.13.41 的面板一致，只是外套换成系统页统一骨架 .sp/.sp-card。 -->
         <section class="page sys" id="page-settings-model">
@@ -3710,7 +3749,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=33bda151';
+      var HUB_SRC = '/static/hub.js?v=e60e3698';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

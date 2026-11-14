@@ -51,7 +51,7 @@ SHARDS = sorted((ROOT / "static" / "hub").glob("[0-9][0-9]-*.js"))
 SHARDS_AFTER_RED = ["07-asset-panel.js", "09-local-projects.js",
                     "10-github-projects.js", "11-resources.js", "12-activity.js",
                     "13-term-touch.js", "14-botboy.js", "15-workbench.js",
-                    "16-events-panel.js"]
+                    "16-events-panel.js", "17-checkin.js"]
 HUBJS = ROOT / "static" / "hub.js"   # 产物也一起纳入零丢行断言
 HUB = ROOT / "static" / "hub.js"
 TPL = ROOT / "templates" / "index.html"
@@ -301,7 +301,7 @@ class TestLsGuardStatic(unittest.TestCase):
                           "07-asset-panel.js", "09-local-projects.js",
                           "10-github-projects.js", "11-resources.js", "12-activity.js",
                           "13-term-touch.js", "14-botboy.js", "15-workbench.js",
-                          "16-events-panel.js"],
+                          "16-events-panel.js", "17-checkin.js"],
                          "分片清单变了 ⇒ 逐文件计数与红基线要一起核")
 
     def test_R1_no_bare_localStorage_in_shards(self):

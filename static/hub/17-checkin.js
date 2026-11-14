@@ -80,8 +80,16 @@ function ckDate(ts) {
 function ckDataSummary(r) {
   // 最近一次 run 的平台明细：平台 / 状态 / 本次积分 / 消息 + 执行日期 + 账户总积分。
   // v0.13.203 用户裁定：重复签到（already）本次积分恒显示 0 —— 重复领取不重复计分。
-  var d = r && r.data;
-  if (!r || !d) return '';
+  // 两种入参形状都要接住（实测坑）：机器卡传的是流水 DB 行（数据在 payload JSON 串里），
+  // 实时返回才有 r.data —— 只认后者会让明细整块静默消失（正是用户报的「没有显示积分」）。
+  if (!r) return '';
+  var d = r.data;
+  if (!d && typeof r.payload === 'string') {
+    try { d = JSON.parse(r.payload).data; } catch (e) { d = null; }
+  } else if (!d && r.payload && typeof r.payload === 'object') {
+    d = r.payload.data;
+  }
+  if (!d) return '<div class="hint">本次结果无平台明细（payload 缺 data）</div>';
   var res = (d.data && d.data.results) || [];
   if (!res.length) return '<div class="hint">本次无平台结果（bridge 未返回 results）</div>';
   var rows = res.map(function (x) {

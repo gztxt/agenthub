@@ -12652,9 +12652,9 @@ function ckResultLine(r) {
 /* reason → 可操作指引（三层分开，别把「控制面通但 22 不通」说成「机器离线」） */
 function ckGuide(reason) {
   var g = {
-    'data-plane-down': '控制面 ping 通、但 ssh/22 数据面不可达：在 A 机确认 tailcat 已 <code>--serve=22</code> 且 OpenSSH Server 在运行（控制台 [14] 重新上报）。',
-    'control-plane-down': 'tailcat ping 不通：机器离线或 DERP 中继不可达，确认 A 机联网并运行 tailcat 服务。',
-    'bridge-missing': '远端没有 aia_bridge.py：该机 AIAutomator 未部署成功，需重传分发包并用 Python tarfile 解包。',
+    'data-plane-down': '实测证据链：控制面 ping 通、token 最新、该机 serve/sshd 正常（B→A 通道通），唯独 NAS→该机拨号不通 ⇒ 多为该机 tailcat <code>--allow</code> 白名单缺 NAS nodekey（重新部署后易丢）。在**该机控制台跑一次 [14]**（主动拉取 allowlist 上线自愈），或用 [9] 热更新授权；恢复后 hub 直连即可用。',
+    'control-plane-down': 'tailcat ping 不通：机器离线或 DERP 中继不可达，确认该机联网并运行 tailcat 服务。',
+    'bridge-missing': '远端没有 aia_bridge.py：该机 AIAutomator 未部署成功（通道已通才会到这一步），需重传分发包并用 Python tarfile 解包。',
     'timeout': '执行超时：单次探测已绕过重试；若仍超时多为中继链路慢，检查 DERP 路径。',
     'spawn-error': '本地命令起不来，检查 hub 侧 tailcat/ssh 是否在 PATH。'
   };

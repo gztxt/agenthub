@@ -240,7 +240,14 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.202"
+    CURRENT_VERSION = "0.13.203"
+    #: v0.13.203：本轮改的是「A 机改走经 B 跳板 relay 通道」，不是终端滚动；版本钉照常跟版本号走。
+    #: 学到的：用户报「机器明明在线」时先怀疑自己的链路不是机器 —— 一条数据面路径不通
+    #: 不等于对端不在线（DERP 路径可达性按客户端×服务端组合各自成立）；文件全文 hash
+    #: 和提取后 token 的 hash 不能互比（输入口径不同）。
+    VERSION_ROOT_CAUSES["0.13.203"] = (
+        "relay", "经 B 跳板", "EncodedCommand", "DERP 绕行",
+    )
     #: v0.13.202：本轮改的是「积分签到探测失败修复」，不是终端滚动；版本钉照常跟版本号走。
     #: 学到的：ping 通不等于端口可转发 —— 控制面（DERP pong）与数据面（ssh/22）必须分层判；
     #: 超时预算要覆盖下游重试（do_connect 8×20s），否则上层先 kill 会把真实 stderr 吞成 timeout；

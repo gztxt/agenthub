@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -72,9 +73,18 @@ _PROBE_OK = "AIA_PROBE_OK"
 SEEDS = (
     {"name": "DESKTOP-QUU9CJT", "channel": "lan", "host": "192.168.5.99",
      "user": "Mac", "target": "DESKTOP-QUU9CJT", "note": "B 机 · LAN 免密 SSH"},
-    {"name": "WIN-20260130XPI", "channel": "tailcat", "host": "",
-     "user": "Administrator", "target": "WIN-20260130XPI", "note": "A 机 · tailcat 隧道"},
+    {"name": "WIN-20260130XPI", "channel": "relay", "host": "",
+     "user": "Administrator", "target": "WIN-20260130XPI",
+     "note": "A 机 · 经 B 跳板（NAS→A 的 DERP 数据面不通，B→A 实测通）"},
 )
+
+#: v0.13.203 实测定案：NAS→A 的 tailcat 数据面 `Dial: context deadline exceeded`
+# （控制面 ping 通、token 最新、A 机 serve/sshd 正常 —— B→A 同款通道 21s 通），
+# 唯独 NAS 起的拨号不通 ⇒ A 机改走「经 B 跳板」：外层 LAN SSH 到 B，内层在 B 上
+# 用 tailcat ProxyCommand ssh 到 A（EncodedCommand 包内层，避开 Windows cmd 引号嵌套）。
+# B 是固定跳板（拓扑非凭据）；A 机 token 只出现在进程参数/b64 里，不落库不回传。
+RELAY_VIA = {"host": "192.168.5.99", "user": "Mac"}
+_RELAY_CONNECT_TIMEOUT = 30      # B 上 tailcat→A 的握手超时（实测 21s 全链路）
 
 #: 单连接争用（SCRIPT-README §38）：同一时刻只允许一条远程执行
 _run_lock = threading.Lock()
@@ -210,6 +220,31 @@ def _consume_fresh_token(m: Dict[str, Any]) -> bool:
     return _token_for(m) == fresh
 
 
+def _relay_argv(m: Dict[str, Any], remote_cmd: str) -> List[str]:
+    """经 B 跳板连目标机：外层 LAN SSH → B 上 tailcat ProxyCommand ssh → 目标。
+
+    内层命令包在 PowerShell EncodedCommand（UTF-16LE）里，避开 Windows cmd 的
+    双层引号嵌套（实测路径）。token 只进 b64/进程参数，不落库不回传。
+    """
+    token = _token_for(m)
+    if not token:
+        raise ValueError("no tailcat token for relay")
+    user = m.get("user") or "Administrator"
+    if not _NAME_RE.match(user):
+        raise ValueError("bad user")
+    target = m.get("target") or "relay"
+    inner = ('ssh -o "ProxyCommand=C:\\tailcat\\tailcat.exe %s 22" '
+             '-o "HostKeyAlias=tc-%s" -o StrictHostKeyChecking=accept-new '
+             '-o BatchMode=yes -o ConnectTimeout=%d %s@127.0.0.1 "%s"'
+             % (token, target, _RELAY_CONNECT_TIMEOUT, user, remote_cmd))
+    ps = "$ProgressPreference='SilentlyContinue'\n" + inner + "\nexit 0\n"
+    b64 = base64.b64encode(ps.encode("utf-16-le")).decode()
+    return ["ssh", "-o", "BatchMode=yes", "-o",
+            "ConnectTimeout=%d" % _CONNECT_TIMEOUT,
+            "%s@%s" % (RELAY_VIA["user"], RELAY_VIA["host"]),
+            "powershell -NoProfile -EncodedCommand %s" % b64]
+
+
 def build_argv(m: Dict[str, Any], cmd: str, dry: bool) -> List[str]:
     """组装 argv（shell=False）。命令与机器名都已校验，用户输入不进 shell。"""
     if cmd not in CMDS:
@@ -219,6 +254,10 @@ def build_argv(m: Dict[str, Any], cmd: str, dry: bool) -> List[str]:
     remote = ("echo %s" % _PROBE_OK) if cmd == "probe" else (
         "python %s %s" % (BRIDGE, " ".join(
             [cmd] + (["--dry"] if cmd == "run" and dry else []))))
+    if m.get("channel") == "relay":
+        if not _NAME_RE.match(m.get("target", "")):
+            raise ValueError("bad target")
+        return _relay_argv(m, remote)
     if m.get("channel") == "tailcat":
         if not _NAME_RE.match(m.get("target", "")):
             raise ValueError("bad target")
@@ -240,7 +279,11 @@ def build_probe_argv(m: Dict[str, Any], token: str = "") -> List[str]:
     一次握手就知道通不通。LAN 直连；tailcat 走 ProxyCommand 单次（DERP 实测 ~11s 出结论）。
     """
     remote = "echo %s" % _PROBE_OK
-    if m.get("channel") != "tailcat":
+    if m.get("channel") == "relay":
+        if not _NAME_RE.match(m.get("target", "")):
+            raise ValueError("bad target")
+        return _relay_argv(m, remote)
+    if m.get("channel") not in ("tailcat", "relay"):
         host, user = m.get("host", ""), m.get("user", "")
         if not re.match(r"^[A-Za-z0-9._:-]{1,128}$", host or ""):
             raise ValueError("bad host")
@@ -338,10 +381,10 @@ def run_remote(m: Dict[str, Any], cmd: str, mode: str) -> Dict[str, Any]:
     if mode not in ("plan", "exec"):
         raise HTTPException(400, "mode must be plan|exec")
     dry = (mode == "plan") or (cmd != "run")
-    control = _ping_control_plane(m) if m.get("channel") == "tailcat" else None
+    control = _ping_control_plane(m) if m.get("channel") in ("tailcat", "relay") else None
     # 探测走单次轻量 argv（绕过 do_connect 8 次重试），其余走通用 argv
     argv = build_probe_argv(m) if cmd == "probe" else build_argv(m, cmd, dry)
-    timeout = _PROBE_TIMEOUT + 6 if cmd == "probe" else _RUN_TIMEOUT
+    timeout = (_RELAY_CONNECT_TIMEOUT + 8 if m.get("channel") == "relay" else _PROBE_TIMEOUT + 6) if cmd == "probe" else _RUN_TIMEOUT
     refreshed = False
     with _run_lock:                      # 单连接争用：绝不并发
         for attempt in (1, 2):
@@ -381,7 +424,7 @@ def run_remote(m: Dict[str, Any], cmd: str, mode: str) -> Dict[str, Any]:
                         res["stderr"] = err
             # v0.13.203 自愈：连接失败且归档里存在与 tsv 不同的 token（Windows 端
             # 重新上报后 tsv 落后）⇒ 用 tailcat 既有 --add 覆盖注册并重试一次。
-            if res.get("ok") or m.get("channel") != "tailcat" or attempt == 2:
+            if res.get("ok") or m.get("channel") not in ("tailcat", "relay") or attempt == 2:
                 break
             if _consume_fresh_token(m):
                 refreshed = True

@@ -128,8 +128,16 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.202"
+VERSION = "0.13.203"
 
+# v0.13.203（2026-11-14）：积分签到 A 机改走「经 B 跳板」relay 通道。
+#   根因终局（用户判断正确：A 机确实在线）：token 未过期（提取口径纠正后 tsv==最新上报）、
+#   A 机 serve/sshd 正常（B→A tailcat 数据面 21s 实测通），唯独 NAS→A 的 DERP 拨号
+#   Dial timeout ⇒ 新增 channel=relay：外层 LAN SSH 到 B、内层 B 上 tailcat ProxyCommand
+#   到目标（EncodedCommand 避开 cmd 引号嵌套）。连带实修 _extract_reported_token 两行
+#   文件口径、_consume_fresh_token 用 --add 覆盖注册 + 失败自愈重试一次。
+#   端到端：A 机 probe relay 通道 reachable 20.8s（原 NAS 直连恒 offline）。
+#   关键词锚：relay / 经 B 跳板 / EncodedCommand / DERP 绕行。
 # v0.13.202（2026-11-14）：积分签到「探测失败」全链路修复（用户报 A 机无法通过隧道连接）。
 #   根因分层取证：A 机 tailcat ping 控制面通（pong 3.4s via DERP）、但单次 ssh 数据面
 #   `Dial: context deadline exceeded` / `kex_exchange_identification` / UNKNOWN port 65535

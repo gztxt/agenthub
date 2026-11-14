@@ -1,3 +1,33 @@
+## v0.13.203 — 积分签到 A 机改走「经 B 跳板」通道：DERP 数据面实测绕行（2026-11-14）
+
+> 用户反馈：「A 机还是不通 探测失败 **实际上 A 机是正常连接上线了的**」。用户判断正确，
+> 前轮「数据面不通=A 机侧问题」的结论被推翻。
+
+- **根因终局（三次证伪后收敛）**：① tailcat ping 控制面通（pong via DERP）；② token 未过期
+  —— 22:31 `--scan` 已消费 21:46 上报（`check_incoming` 对**已注册目标**同样 `save_target`
+  覆盖），提取口径按两行文件（L1=user/L2=token）字符串比对，tsv 现值 == 最新上报
+  （前轮拿「文件全文 hash ≠ token hash」对比属**口径错误**，纠正）；③ **B→A 的 tailcat
+  数据面实测通**（B 机 EncodedCommand 内 `ProxyCommand=tailcat.exe <tok> 22` ssh，21s 返
+  `B_TO_A_OK`）——A 机 serve/sshd/token 全部正常。⇒ **唯独 NAS→A 这一条 DERP 拨号
+  `Dial: context deadline exceeded`**，属中继路径问题；B→A 可用即绕行方案成立。
+- **修复 = 新增 `relay` 通道**：外层 LAN SSH 到 B（`RELAY_VIA` 常量，拓扑非凭据），内层在
+  B 上 `ProxyCommand=tailcat.exe <token> 22` ssh 到目标，包 PowerShell `EncodedCommand`
+  （UTF-16LE，避开 Windows cmd 双层引号）。token 只进 b64/进程参数，不落库不回传。
+  `SEEDS` A 机 `channel: tailcat→relay`；`_seed` 改 upsert（channel/拓扑随 SEEDS 刷新，
+  `enabled` 保留用户态）；`_ping_control_plane`/超时/自愈重试条件均含 relay。
+- **连带实修两个口径 bug**：`_extract_reported_token()` 按 tailcat 同款逻辑解析上报文件
+  （直接 strip 全文会把 L1 的 `Administrator` 拼进 token）；`_consume_fresh_token()` 改用
+  tailcat 既有 `--add` 覆盖注册（`--scan` 的静默消费依赖 check_incoming，对已注册目标
+  虽会覆盖，但归档比 tsv 落后时自愈更直接）；失败自动消费+重试一次（token 无落后时实测
+  不触发，防误操作）。
+- **端到端实测**：relay 通道 A 机 probe `ok=True reason=reachable` **20.8s**（此前 NAS 直连
+  恒 offline/timeout），控制面 pong 339ms；L0 29 例全绿（`RelayChannel` 5 例：EncodedCommand
+  解码断言内层 tailcat/用户/echo、无 token 拒绝、SEEDS 断言）。
+- **A 机补部署**（经 B 跳板）：NAS scp→B（LAN 秒传）→ B 上 scp 经 tailcat 隧道→A →
+  A 上 `python C:\aia_unpack.py`（tarfile）解包 → bridge probe 验证。
+- **保留 tailcat 直连通道代码**（`channel=tailcat` 不删）：DERP 路径恢复后可切回，relay 是
+  数据面路由选择不是替代品。
+
 ## v0.13.202 — 积分签到「A 机探测失败」全链路修复：分层诊断 + 超时对齐（2026-11-14）
 
 > 用户报障：「局域网 B 机正常连接上线、探测显示正常、签到显示正常；A 机无法通过隧道连接、

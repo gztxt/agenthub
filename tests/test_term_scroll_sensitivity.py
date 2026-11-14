@@ -240,7 +240,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.200"
+    CURRENT_VERSION = "0.13.201"
+    #: v0.13.201：本轮改的是「积分签到远程管理」，不是终端滚动；版本钉照常跟版本号走。
+    #: 学到的：装上一个工具 ≠ 打通链路 —— 引擎已返回结构化 dict，CLI 却只 print 人读文本；
+    #: Windows 控制台 GBK 会把中文直出打乱；A/B 机不该另立机器清单写者（只读投影）。
+    VERSION_ROOT_CAUSES["0.13.201"] = (
+        "积分签到", "connect-targets.tsv", "ensure_ascii", "三态",
+    )
     #: v0.13.200：本轮改的是「MCP服务器源/发现/编排」，不是终端滚动；版本钉照常跟版本号走。
     #: 学到的：**目录站不等于可调用的服务**（mcp.so 无公开读 API），
     #: 「配置管理页已经存在」也不等于「agent 会自动调用」（/mcp/call 全仓零调用点）。

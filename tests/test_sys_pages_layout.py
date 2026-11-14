@@ -41,8 +41,9 @@ SHARD15 = _REPO / "static" / "hub" / "15-workbench.js"
 
 #: 系统菜单（左栏「系统」手风琴）下的全部子菜单页 —— 本次重排的对象
 SYS_PAGES = ("ports", "telemetry", "memory", "skills", "kb",
-             "mcp", "tasks", "jobs", "assets", "botboy")   # v0.13.47：runlog 页删除，并入设置→日志
+             "mcp", "tasks", "jobs", "assets", "botboy", "checkin")   # v0.13.47：runlog 页删除，并入设置→日志
                                                           # v0.13.170：botboy（DS Bot 团队只读投影）
+                                                          # v0.13.201：checkin（积分签到远程管理）
 
 #: 单表/单列表页：表格必须在限高盒（.sp-bd.box + .tscroll）里，sticky 表头才有滚动容器
 TABLE_PAGES = ("ports", "jobs", "tasks")

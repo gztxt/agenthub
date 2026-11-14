@@ -112,6 +112,7 @@ import ghsettings as ghsettings_mod  # GitHub 地址/key/落点（v0.13.42：设
 import hublog as hublog_mod        # 日志中心（v0.13.46：设置→日志子菜单，journald + 操作事件聚合）
 import api_dataset as api_dataset_mod  # P0-1：数据集/经验库只读门面（无写端点）
 import botboy as botboy_mod         # v0.13.170：DS Bot 团队只读概览（读 ~/.dsh/bot/state.json）
+import checkinmgr as checkin_mod    # v0.13.201：积分签到远程管理（A/B 两机 AIAutomator 只读投影 + 受控触发）
 import meta as meta_mod             # P4：GET /api/meta 协议能力协商（只读）
 
 # C2（2026-10-12）：领域路由从本文件抽成独立 module —— main 只留组装职责。
@@ -127,8 +128,22 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.200"
+VERSION = "0.13.201"
 
+# v0.13.201（2026-11-14）：系统菜单新增「积分签到」子页，远程管理 A/B 两机 AIAutomator。
+#   根因与已定判：AIAutomator 是 Windows 专用（登录态取自官方桌面客户端登录态文件、
+#   调度走 PowerShell 计划任务），本机 Linux 实跑 `run daily --dry` 5/5 failed ⇒ Linux 只作
+#   管理面、A/B 作执行面。机器清单只读投影 tailcat connect-targets.tsv，不复制不改写
+#   （281 卡：只读不是客气，是正确性，另立写者会造漂移）。数据面走 Windows 侧
+#   contrib/aia_bridge.py：engine.run_task() 本就返回结构化 dict，bridge 用 sentinel 包
+#   JSON 输出、ensure_ascii=True 绕开 Windows OEM/GBK 控制台乱码，hub 解析 JSON 而不正则
+#   解析人读文本。三态（offline / unreadable / ok-空）分开渲染，绝不把故障吞成空列表。
+#   通道 LAN SSH 主 + tailcat 兜底，执行一律串行（tailcat --serve 单连接争用）。凭据只在
+#   各 Windows 机本地，hub 不回传不落库。关键词锚：积分签到 / connect-targets.tsv /
+#   ensure_ascii / 三态。
+#   实测边界：B 机（DESKTOP-QUU9CJT）全链路打通（源码分发 + bridge probe + dry-run +
+#   计划任务 Ready）；A 机（WIN-20260130XPI）tailcat 隧道连续 3 轮 banner timeout，
+#   属基础设施瞬态，按「探活最多 2 次」停手标注，未假绿。
 # v0.13.200（2026-11-10）：系统菜单「工具」改名并扩为「MCP服务器」统一管理页
 #   （用户：按任务在源里搜合适的 MCP 服务器 → 添加 → 测试 → 调用，只要结果）。
 #   ① 根因：hub 的 6 家 chat adapter 全无 tools 参数，`/mcp/call` 此前只被前端
@@ -885,6 +900,7 @@ app.include_router(cloudcli_mod.router)
 app.include_router(localprojects_mod.router)
 app.include_router(resources_mod.router)
 app.include_router(botboy_mod.router)          # v0.13.170：/api/botboy/overview（只读）
+app.include_router(checkin_mod.router)          # v0.13.201：/api/checkin/*（积分签到远程管理）
 app.include_router(github_mod.router)
 app.include_router(prefs_mod.router)
 app.include_router(modelcfg_mod.router)

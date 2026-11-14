@@ -59,6 +59,10 @@ WRITE_ROUTE_SCOPES = {
     ("api_vitals", "POST", "/api/vitals/sweep"): "hub.ops.write",
     ("approvals", "POST", "/api/approvals/{aid}/approve"): "hub.ops.write",
     ("approvals", "POST", "/api/approvals/{aid}/deny"): "hub.ops.write",
+    # v0.13.201：积分签到远程管理（3 条写路由：机器元数据 upsert / 停用 / 远程触发）
+    ("checkinmgr", "POST", "/api/checkin/machines"): "hub.ops.write",
+    ("checkinmgr", "DELETE", "/api/checkin/machines/{name}"): "hub.ops.write",
+    ("checkinmgr", "POST", "/api/checkin/run"): "hub.ops.write",
     ("cloudcli", "POST", "/start"): "hub.agent.write",
     ("cronjobs", "POST", "/api/jobs"): "hub.ops.write",
     ("cronjobs", "DELETE", "/api/jobs/{jid}"): "hub.ops.write",
@@ -165,6 +169,8 @@ SIDE_EFFECT_ROUTES = frozenset({
     ("api_summarize", "POST", "/api/summarize"),
     ("api_system", "POST", "/api/system/restart"),
     ("api_vitals", "POST", "/api/vitals/sweep"),
+    # v0.13.201：远程触发签到会起 ssh/隧道进程并访问外网，属副作用
+    ("checkinmgr", "POST", "/api/checkin/run"),
     ("cloudcli", "POST", "/start"),
     ("cronjobs", "POST", "/api/jobs/{jid}/run"),
     ("ghsettings", "POST", "/api/settings/github/apply"),

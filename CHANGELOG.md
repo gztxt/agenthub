@@ -1,3 +1,48 @@
+## v0.13.201 — 系统菜单新增「积分签到」子页：远程管理 A/B 两机 AIAutomator（2026-11-14）
+
+> 用户需求：「请安装到 A机 B机，在 agenthub 系统菜单下面增加子菜单 积分签到，管理已安装的机器，
+> 可以通过系统子菜单 积分签到 功能模块进行远程管理」；裁定「按推荐值开工 后续优化迭代」。
+> 台账 `PENDING-TASKS.md` PT-20261114-01。源码归档 `技术文档/AIAutomator/`（HEAD bbe47bd, MIT）。
+
+- **评估取证**：AIAutomator（github.com/mcvea/AIAutomator）是 **Windows 10/11 专用**每日积分签到
+  工具，5 平台（WorkBuddy / MiniMax Code / TraeWork / 百度搭子 DuMate / LobsterAI）；登录态取自
+  本机官方桌面客户端文件、调度走 PowerShell 计划任务。本机 Linux 实跑 `run daily --dry` 5/5
+  failed（无 Windows 登录态）⇒ **Linux 只作管理面，A/B 作执行面**。`engine.run_task()` 本就返回
+  结构化 dict（`automator/engine.py:432`），但 CLI 只 print 人读文本 ⇒ 数据面走新增
+  `contrib/aia_bridge.py`（sentinel 包 JSON + `ensure_ascii=True` 绕开 GBK 控制台乱码），
+  不正则解析人读文本（281 卡判据）。
+- **通道（D1）**：B=`DESKTOP-QUU9CJT`(Mac, 192.168.5.99) LAN 免密 SSH 实测通；
+  A=`WIN-20260130XPI`(Administrator) 无 LAN DNS，走 tailcat `--target ... --exec`。
+  tailcat 已有 `connect-targets.tsv` / `--scan` / `--exec`；已知边界 `tailcat --serve` 单连接
+  ⇒ **执行一律串行**（`checkinmgr._run_lock`）。零新增凭据（复用 `~/.ssh/id_ed25519` 与 tailcat token）。
+- **部署（阶段 1）**：B 机全链路实测打通 —— 源码分发到 `C:\AIAutomator`、bridge `probe` 返回
+  `aia_head=bbe47bd`、`run daily --dry` 返回 5 平台结构化结果（WorkBuddy「今日已签到·连签 44 天·
+  总积分 4400·剩 27 天」，其余 4 平台如实标「未配置登录态」）、计划任务 `AIAutomatorDaily`
+  `exists=true state=Ready`（08:00）。**A 机 tailcat 隧道连续 3 轮 `banner exchange timeout`，
+  属基础设施瞬态，按「探活最多 2 次」停手如实标注，未假绿** —— 后续迭代项。
+- **全链路修复的两个真 bug（发现即分析同类点）**：① Windows 控制台 GBK 把中文直出打乱 ⇒
+  bridge 改 `ensure_ascii=True`，A/B 两机同源一次改完；② A 机 PowerShell 无 `tar` ⇒ 分发
+  改 `contrib/aia_unpack.py`（Python `tarfile`，两机同构），不依赖系统 tar。
+- **后端**：新增 `src/checkinmgr.py`（纯逻辑 `parse_bridge` 五态 / `build_argv` 命令白名单 +
+  注入防护 argv `shell=False` / `run_remote` 串行执行 / 两张表 `checkin_machines`、`checkin_runs`），
+  读 2 写 3 共 5 路由（`mode=plan` 默认 dry，`exec` 才真签到）。机器清单**只读投影** tsv，
+  hub 只存启用态与流水，不复制、不改写、不回传任何登录态。三种「没有」分开渲染
+  （offline / unreadable / ok-空）。
+- **同源闸门**：`authz.WRITE_ROUTE_SCOPES` +3、`SIDE_EFFECT_ROUTES` +1；`test_authz_scopes`
+  105→108 / 27→28；`test_scope_dryrun` 104→107；`test_ls_guard` 两处 `SHARDS_AFTER_RED`
+  + `17-checkin.js`；`test_sys_pages_layout` `SYS_PAGES` +checkin；`test_term_scroll_sensitivity`
+  `CURRENT_VERSION` + `VERSION_ROOT_CAUSES["0.13.201"]`；前端 6 落点（SYS_PAGES / PAGE_LABELS /
+  `#page-checkin` / go() 钩子 / 新分片 / `build_hubjs.sh`）。新增 L0 `tests/test_checkinmgr.py`。
+  前端预算 `MAX_SHARDS` 保持 16 不放宽（16 分片仍在上限内）—— 计数类钉死。
+- **验证**：`venv/bin/python -m pytest` 关键 9 闸门 + 新 L0 **100 passed**；`hub.js` 重建
+  `?v=` 内容派生 md5 已同步。**未重启生产**：改了 `src/*.py`，生效须按重启军规
+  `scripts/hub-restart.sh --reason` 的签字窗口（`term_sessions > 0` 时禁 restart）；
+  主 checkout 另有 6 条未提交改动（另一会话 embed zip 修复，含 `05-chat-and-history.js` /
+  `templates/index.html`），本改动建在 worktree `agenthub-wt-aia`（分支 `wt/aia`），
+  合并由集成者按语义处理，不代落盘。
+- **非目标**：不在 Linux 本机跑签到；不把 Windows 登录态同步到 NAS；不改 CCR、不动 tailcat
+  服务生命周期；不做代他人批量签到；不加「立即签到」假按钮（缺登录态的平台如实标未配置）。
+
 ## v0.13.200 — 系统菜单新增「MCP服务器」：源 → 发现 → 安装 → 测试 → 调用 → 持久化（2026-11-10）
 
 > 用户需求：「系统菜单添加一个 MCP 服务器子菜单，可以添加源，agent 根据任务在源里

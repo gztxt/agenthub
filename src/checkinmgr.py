@@ -47,6 +47,7 @@ import db
 router = APIRouter(tags=["checkin"])
 
 TAILCAT_TSV = Path.home() / ".config" / "tailcat" / "connect-targets.tsv"
+TAILCAT_INCOMING = Path.home() / ".config" / "tailcat" / "incoming"
 TC_CONNECT = "/fs/1000/ftp/技术文档/tailcat/tailcat-connect.sh"
 BRIDGE = r"C:\AIAutomator\contrib\aia_bridge.py"
 BEGIN = "===AIA_JSON_BEGIN==="
@@ -59,6 +60,7 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _CONNECT_TIMEOUT = 8        # LAN 直连 ssh ConnectTimeout
 _PROBE_TIMEOUT = 12         # 探测单次总超时（快速失败，不进 do_connect 重试）
 _PING_TIMEOUT = 10          # tailcat ping 控制面探测超时（DERP 中转实测 3.4s）
+_SCAN_TIMEOUT = 45          # --scan 静默消费新上报的超时（含 ping 各目标）
 #: do_connect 内部 8 次重试 × ConnectTimeout=20 + 7×sleep 3 ≈ 181s；
 #: hub 超时必须覆盖它，否则先 kill 会把真实 stderr 吞成 timeout（v0.13.202 修复）
 _RUN_TIMEOUT = 200
@@ -145,6 +147,67 @@ def _token_for(m: Dict[str, Any]) -> str:
     except (OSError, UnicodeDecodeError):
         pass
     return ""
+
+
+def _extract_reported_token(path) -> str:
+    """按 tailcat check_incoming 的提取逻辑解析上报文件（可能两行：user 行 + token 行）。
+
+    与 tailcat-connect.sh 同口径：L1 合法用户名且 L2 以 tc 开头 ⇒ token=extract(L2)；
+    否则 token=extract(L1)。extract = `tc[A-Za-z0-9_-]{20,}` 首个匹配。
+    直接把全文当 token 是错的（实测文件 L1=Administrator / L2=token）。
+    """
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    first = lines[0] if lines else ""
+    second = lines[1] if len(lines) > 1 else ""
+    if re.fullmatch(r"[A-Za-z0-9._-]{1,32}", first) and second.startswith("tc"):
+        src = second
+    else:
+        src = first
+    m = re.search(r"tc[A-Za-z0-9_-]{20,}", src)
+    return m.group(0) if m else ""
+
+
+def _incoming_token(target: str) -> str:
+    """读 tailcat 收件箱里该目标**最新上报**的 token（未消费的）。无则空串。"""
+    if not _NAME_RE.match(target or ""):
+        return ""
+    return _extract_reported_token(TAILCAT_INCOMING / ("%s.token" % target))
+
+
+def _archived_token(target: str) -> str:
+    """读已归档（.processed）的上报 token —— Windows 端 [14] 重新上报后这里的最新。"""
+    if not _NAME_RE.match(target or ""):
+        return ""
+    return _extract_reported_token(TAILCAT_INCOMING / ".processed" / ("%s.token" % target))
+
+
+def _consume_fresh_token(m: Dict[str, Any]) -> bool:
+    """归档里存在与 tsv 不同的该目标 token 时，用 tailcat 既有 `--add` 覆盖注册。
+
+    v0.13.203 实测修正：`check_incoming`/`--scan` 的静默消费**只对「提取出的 token ≠ tsv」
+    场景有效**，而首次取证时误把「上报文件全文 hash ≠ tsv token hash」当成 token 过期
+    （输入口径不同：文件含 user 行）。真实判据 = 按提取逻辑取 token 串后与 tsv 字符串比对。
+    Windows 端重新上报（控制台 [14]）后归档文件是最新权威；tsv 落后时用脚本自带
+    `--add <name> <token> <user>` 原子覆盖（save_target 幂等），不绕过 tailcat 机制。
+    返回是否真的更新了 tsv。
+    """
+    target = m.get("target", "")
+    fresh = _archived_token(target) or _incoming_token(target)
+    if not fresh or fresh == _token_for(m):
+        return False
+    user = m.get("user") or ""
+    if not _NAME_RE.match(user or ""):
+        return False
+    try:
+        subprocess.run(["bash", TC_CONNECT, "--add", target, fresh, user],
+                       capture_output=True, text=True, timeout=_SCAN_TIMEOUT,
+                       shell=False)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return _token_for(m) == fresh
 
 
 def build_argv(m: Dict[str, Any], cmd: str, dry: bool) -> List[str]:
@@ -279,40 +342,54 @@ def run_remote(m: Dict[str, Any], cmd: str, mode: str) -> Dict[str, Any]:
     # 探测走单次轻量 argv（绕过 do_connect 8 次重试），其余走通用 argv
     argv = build_probe_argv(m) if cmd == "probe" else build_argv(m, cmd, dry)
     timeout = _PROBE_TIMEOUT + 6 if cmd == "probe" else _RUN_TIMEOUT
+    refreshed = False
     with _run_lock:                      # 单连接争用：绝不并发
-        try:
-            p = subprocess.run(argv, capture_output=True, text=True,
-                                timeout=timeout, shell=False)
-        except subprocess.TimeoutExpired as e:
-            raw = e.stderr or ""
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8", "replace")
-            res = {"ok": False, "state": "offline", "reason": "timeout",
-                   "error": "执行超时 %ds（探测单次 / 执行需覆盖 do_connect 重试）" % timeout,
-                   "stderr": str(raw)[-300:]}
-        except OSError as e:
-            res = {"ok": False, "state": "offline", "reason": "spawn-error",
-                   "error": "spawn: %s" % e}
-        else:
-            err = (p.stderr or "").strip()[-400:]
-            if cmd == "probe":
-                ok = p.returncode == 0 and _PROBE_OK in (p.stdout or "")
-                if ok:
-                    res = {"ok": True, "state": "ok", "reason": "reachable",
-                           "data": {"probe": _PROBE_OK, "channel": m.get("channel"),
-                                    "via_control": (control or {}).get("detail", "")[:120]}}
-                else:
+        for attempt in (1, 2):
+            try:
+                p = subprocess.run(argv, capture_output=True, text=True,
+                                    timeout=timeout, shell=False)
+            except subprocess.TimeoutExpired as e:
+                raw = e.stderr or ""
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", "replace")
+                res = {"ok": False, "state": "offline", "reason": "timeout",
+                       "error": "执行超时 %ds（探测单次 / 执行需覆盖 do_connect 重试）" % timeout,
+                       "stderr": str(raw)[-300:]}
+            except OSError as e:
+                res = {"ok": False, "state": "offline", "reason": "spawn-error",
+                       "error": "spawn: %s" % e}
+                break
+            else:
+                err = (p.stderr or "").strip()[-400:]
+                if cmd == "probe":
+                    ok = p.returncode == 0 and _PROBE_OK in (p.stdout or "")
+                    if ok:
+                        res = {"ok": True, "state": "ok", "reason": "reachable",
+                               "data": {"probe": _PROBE_OK, "channel": m.get("channel"),
+                                        "via_control": (control or {}).get("detail", "")[:120]}}
+                    else:
+                        reason, human = _classify_failure(p.returncode, p.stderr, p.stdout, control)
+                        res = {"ok": False, "state": "offline", "reason": reason,
+                               "error": human, "stderr": err}
+                elif p.returncode != 0 and BEGIN not in (p.stdout or ""):
                     reason, human = _classify_failure(p.returncode, p.stderr, p.stdout, control)
                     res = {"ok": False, "state": "offline", "reason": reason,
                            "error": human, "stderr": err}
-            elif p.returncode != 0 and BEGIN not in (p.stdout or ""):
-                reason, human = _classify_failure(p.returncode, p.stderr, p.stdout, control)
-                res = {"ok": False, "state": "offline", "reason": reason,
-                       "error": human, "stderr": err}
-            else:
-                res = parse_bridge(p.stdout or "")
-                if err:
-                    res["stderr"] = err
+                else:
+                    res = parse_bridge(p.stdout or "")
+                    if err:
+                        res["stderr"] = err
+            # v0.13.203 自愈：连接失败且归档里存在与 tsv 不同的 token（Windows 端
+            # 重新上报后 tsv 落后）⇒ 用 tailcat 既有 --add 覆盖注册并重试一次。
+            if res.get("ok") or m.get("channel") != "tailcat" or attempt == 2:
+                break
+            if _consume_fresh_token(m):
+                refreshed = True
+                argv = build_probe_argv(m) if cmd == "probe" else build_argv(m, cmd, dry)
+                continue
+            break
+    if refreshed:
+        res["token_refreshed"] = True
     res["control"] = control
     res.setdefault("reason", "ok" if res["ok"] else "unknown")
     rid = uuid.uuid4().hex[:12]

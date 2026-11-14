@@ -79,10 +79,17 @@ class BuildArgv(unittest.TestCase):
         self.assertNotIn("--dry", a[-1])
 
     def test_tailcat_channel(self):
-        a = ck.build_argv({"channel": "tailcat", "target": "WIN-20260130XPI"}, "probe", False)
+        # 通用命令（非 probe）走 tailcat-connect.sh --target；v0.13.202 起 probe 改走单次探测
+        a = ck.build_argv({"channel": "tailcat", "target": "WIN-20260130XPI"}, "health", False)
         self.assertEqual(a[:3], ["bash", ck.TC_CONNECT, "--target"])
         self.assertIn("WIN-20260130XPI", a)
-        self.assertIn("probe", a[-1])
+        self.assertIn("health", a[-1])
+
+    def test_probe_is_lightweight_echo_not_bridge(self):
+        # 探测不依赖 bridge（A 机未部署时也该能测通道）
+        a = ck.build_argv(self.LAN, "probe", False)
+        self.assertTrue(a[-1].endswith("echo " + ck._PROBE_OK))
+        self.assertNotIn("aia_bridge.py", a[-1])
 
     def test_cmd_whitelist(self):
         self.assertIn("run", ck.CMDS)
@@ -116,6 +123,81 @@ class Seeds(unittest.TestCase):
         blob = repr(ck.SEEDS).lower()
         for word in ("token", "password", "secret", "app_secret", "api_key", "auth.json"):
             self.assertNotIn(word, blob)
+
+
+class ProbePath(unittest.TestCase):
+    """v0.13.202：探测走单次轻量 ssh，绕过 do_connect 8 次重试。"""
+    LAN = {"name": "B", "channel": "lan", "host": "192.168.5.99", "user": "Mac"}
+    TAIL = {"name": "A", "channel": "tailcat", "target": "WIN-20260130XPI",
+            "user": "Administrator"}
+
+    def test_lan_probe_single_ssh(self):
+        a = ck.build_probe_argv(self.LAN)
+        self.assertEqual(a[0], "ssh")
+        self.assertIn("Mac@192.168.5.99", a)
+        self.assertTrue(a[-1].endswith("echo " + ck._PROBE_OK))
+
+    def test_tailcat_probe_single_ssh_via_proxycommand(self):
+        a = ck.build_probe_argv(self.TAIL, token="tcFAKE_TOKEN_FOR_TEST_ONLY")
+        self.assertEqual(a[0], "ssh")
+        self.assertTrue(any("ProxyCommand=tailcat" in x for x in a))
+        self.assertIn("Administrator@127.0.0.1", a)
+        self.assertTrue(any("HostKeyAlias=tc-WIN-20260130XPI" in x for x in a))
+        # 关键：不经过 tailcat-connect.sh（它内部 8 次重试会把探测拖到 181s）
+        self.assertNotIn(ck.TC_CONNECT, a)
+        self.assertNotIn("bash", a)
+
+    def test_probe_never_runs_bridge(self):
+        for m in (self.LAN, self.TAIL):
+            a = ck.build_probe_argv(m, token="tcFAKE")
+            self.assertNotIn("aia_bridge.py", a[-1])
+
+    def test_bad_target_or_user_rejected(self):
+        with self.assertRaises(ValueError):
+            ck.build_probe_argv({"channel": "tailcat", "target": "WIN; rm"},
+                                token="tcFAKE")
+        with self.assertRaises(ValueError):
+            ck.build_probe_argv({"channel": "tailcat", "target": "WIN",
+                                 "user": "Admin && evil"}, token="tcFAKE")
+
+
+class ClassifyFailure(unittest.TestCase):
+    """三种失败按 reason 归类，不再一律 offline+timeout。"""
+
+    def test_data_plane_down(self):
+        # A 机实测 stderr：ping 通但 22 端口不通
+        reason, human = ck._classify_failure(
+            255, "Dial: context deadline exceeded\nkex_exchange_identification: "
+                 "Connection closed by remote host\nConnection closed by UNKNOWN port 65535",
+            "", {"ok": True, "detail": "pong via DERP"})
+        self.assertEqual(reason, "data-plane-down")
+        self.assertIn("ssh/22", human)
+
+    def test_control_plane_down(self):
+        reason, _ = ck._classify_failure(255, "some other error", "",
+                                         {"ok": False, "detail": "ping timeout"})
+        self.assertEqual(reason, "control-plane-down")
+
+    def test_bridge_missing(self):
+        reason, human = ck._classify_failure(
+            1, "", "python: can't open file 'C:\\AIAutomator\\contrib\\aia_bridge.py'", None)
+        self.assertEqual(reason, "bridge-missing")
+        self.assertIn("未部署", human)
+
+    def test_plain_ssh_failure(self):
+        reason, _ = ck._classify_failure(1, "mystery", "", None)
+        self.assertEqual(reason, "ssh-failed")
+
+
+class TimeoutAlignment(unittest.TestCase):
+    """hub 超时必须覆盖 do_connect 8 次重试（8×20+7×3≈181s），否则先 kill 吞错误。"""
+
+    def test_run_timeout_covers_retry_budget(self):
+        self.assertGreaterEqual(ck._RUN_TIMEOUT, 185)
+
+    def test_probe_timeout_is_short(self):
+        self.assertLess(ck._PROBE_TIMEOUT, 20)
+        self.assertLess(ck._PING_TIMEOUT, ck._PROBE_TIMEOUT + 5)
 
 
 if __name__ == "__main__":

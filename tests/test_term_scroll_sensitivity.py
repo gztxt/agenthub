@@ -240,7 +240,14 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.201"
+    CURRENT_VERSION = "0.13.202"
+    #: v0.13.202：本轮改的是「积分签到探测失败修复」，不是终端滚动；版本钉照常跟版本号走。
+    #: 学到的：ping 通不等于端口可转发 —— 控制面（DERP pong）与数据面（ssh/22）必须分层判；
+    #: 超时预算要覆盖下游重试（do_connect 8×20s），否则上层先 kill 会把真实 stderr 吞成 timeout；
+    #: 探测别依赖被测应用本身（没部署 bridge 时 probe 该测通道而非测文件）。
+    VERSION_ROOT_CAUSES["0.13.202"] = (
+        "数据面", "DERP", "data-plane-down", "单次探测", "reason",
+    )
     #: v0.13.201：本轮改的是「积分签到远程管理」，不是终端滚动；版本钉照常跟版本号走。
     #: 学到的：装上一个工具 ≠ 打通链路 —— 引擎已返回结构化 dict，CLI 却只 print 人读文本；
     #: Windows 控制台 GBK 会把中文直出打乱；A/B 机不该另立机器清单写者（只读投影）。

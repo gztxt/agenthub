@@ -56,8 +56,14 @@ END = "===AIA_JSON_END==="
 CMDS = ("probe", "list", "health", "credits", "totals", "run")
 #: 机器名：tailcat 目标名形如 DESKTOP-QUU9CJT / WIN-20260130XPI
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-_CONNECT_TIMEOUT = 8
-_RUN_TIMEOUT = 120
+_CONNECT_TIMEOUT = 8        # LAN 直连 ssh ConnectTimeout
+_PROBE_TIMEOUT = 12         # 探测单次总超时（快速失败，不进 do_connect 重试）
+_PING_TIMEOUT = 10          # tailcat ping 控制面探测超时（DERP 中转实测 3.4s）
+#: do_connect 内部 8 次重试 × ConnectTimeout=20 + 7×sleep 3 ≈ 181s；
+#: hub 超时必须覆盖它，否则先 kill 会把真实 stderr 吞成 timeout（v0.13.202 修复）
+_RUN_TIMEOUT = 200
+#: 探测成功标记：probe 测的是「通道能否执行一条命令」，不依赖 bridge 是否已部署
+_PROBE_OK = "AIA_PROBE_OK"
 
 #: 种子（来源：connect-targets.tsv + ~/.ssh/config，均为拓扑非凭据）。
 #: 只登记「哪台装了 AIAutomator 且归 hub 管」；token/user 仍从 tsv 现读，不落库。
@@ -129,12 +135,27 @@ def _machines() -> List[Dict[str, Any]]:
 
 
 # ── 远程执行层（纯逻辑，可 L0 单测） ────────────────────────────────────────
+def _token_for(m: Dict[str, Any]) -> str:
+    """从 tailcat connect-targets.tsv 读该目标 token（只读；不落库、不回传、不进日志）。"""
+    try:
+        for line in TAILCAT_TSV.read_text(encoding="utf-8").splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2 and parts[0] == m.get("target", ""):
+                return parts[1].strip()
+    except (OSError, UnicodeDecodeError):
+        pass
+    return ""
+
+
 def build_argv(m: Dict[str, Any], cmd: str, dry: bool) -> List[str]:
     """组装 argv（shell=False）。命令与机器名都已校验，用户输入不进 shell。"""
     if cmd not in CMDS:
         raise ValueError("cmd not allowed: %s" % cmd)
-    args = [cmd] + (["--dry"] if (cmd == "run" and dry) else [])
-    remote = "python %s %s" % (BRIDGE, " ".join(args))
+    # probe 测「通道能否跑一条命令」→ echo，不依赖 bridge 是否已部署
+    # （旧版 probe 跑 python aia_bridge.py，A 机未部署时必然失败并被超时吞掉）。
+    remote = ("echo %s" % _PROBE_OK) if cmd == "probe" else (
+        "python %s %s" % (BRIDGE, " ".join(
+            [cmd] + (["--dry"] if cmd == "run" and dry else []))))
     if m.get("channel") == "tailcat":
         if not _NAME_RE.match(m.get("target", "")):
             raise ValueError("bad target")
@@ -147,6 +168,79 @@ def build_argv(m: Dict[str, Any], cmd: str, dry: bool) -> List[str]:
     return ["ssh", "-o", "BatchMode=yes", "-o",
             "ConnectTimeout=%d" % _CONNECT_TIMEOUT,
             "%s@%s" % (user, host), remote]
+
+
+def build_probe_argv(m: Dict[str, Any], token: str = "") -> List[str]:
+    """探测专用：单次轻量 ssh，**绕过 tailcat-connect.sh 的 8 次重试**。
+
+    do_connect 每次 ConnectTimeout=20 × 8 次会让一次探测拖到 ~181s；探测只需
+    一次握手就知道通不通。LAN 直连；tailcat 走 ProxyCommand 单次（DERP 实测 ~11s 出结论）。
+    """
+    remote = "echo %s" % _PROBE_OK
+    if m.get("channel") != "tailcat":
+        host, user = m.get("host", ""), m.get("user", "")
+        if not re.match(r"^[A-Za-z0-9._:-]{1,128}$", host or ""):
+            raise ValueError("bad host")
+        if not _NAME_RE.match(user or ""):
+            raise ValueError("bad user")
+        return ["ssh", "-o", "BatchMode=yes", "-o",
+                "ConnectTimeout=%d" % _CONNECT_TIMEOUT,
+                "%s@%s" % (user, host), remote]
+    target = m.get("target", "")
+    if not _NAME_RE.match(target):
+        raise ValueError("bad target")
+    token = token or _token_for(m)
+    if not token:
+        raise ValueError("no tailcat token for probe")
+    user = m.get("user") or "Administrator"
+    if not _NAME_RE.match(user):
+        raise ValueError("bad user")
+    known_hosts = str(Path.home() / ".config" / "tailcat" / "known_hosts")
+    alias = "tc-%s" % target       # 每目标独立 host key 条目，避免串味（SCRIPT-README §36）
+    return ["ssh", "-o", "ProxyCommand=tailcat %s 22" % token,
+            "-o", "HostKeyAlias=%s" % alias,
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "UserKnownHostsFile=%s" % known_hosts,
+            "-o", "BatchMode=yes", "-o", "ConnectTimeout=%d" % _PROBE_TIMEOUT,
+            "%s@127.0.0.1" % user, remote]
+
+
+def _ping_control_plane(m: Dict[str, Any]) -> Dict[str, Any]:
+    """控制面探测：tailcat ping（DERP/直连），与 ssh 数据面**解耦**。
+
+    v0.13.202 实测：A 机 ping 3.4s via DERP 成功，ssh/22 却 Dial timeout。
+    ping 通只说明「机器在线」，不代表 22 端口可转发 —— 两层必须分开报，
+    否则一个笼统 offline 无法定位（用户报「探测显示失败」却无从下手）。
+    """
+    token = _token_for(m)
+    if not token:
+        return {"ok": False, "detail": "connect-targets.tsv 无此目标 token"}
+    try:
+        p = subprocess.run(
+            ["tailcat", "ping", "-timeout", "%ds" % _PING_TIMEOUT, token],
+            capture_output=True, text=True, timeout=_PING_TIMEOUT + 5, shell=False)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "detail": "ping 超时 %ds" % _PING_TIMEOUT}
+    except OSError as e:
+        return {"ok": False, "detail": "ping 起不来: %s" % e}
+    out = ((p.stdout or "") + (p.stderr or "")).strip()
+    ok = p.returncode == 0 and "pong" in out.lower()
+    return {"ok": ok, "detail": out[-240:] or ("ping rc=%d" % p.returncode)}
+
+
+def _classify_failure(rc: int, stderr: str, stdout: str,
+                      control: Optional[Dict[str, Any]]) -> tuple:
+    """把底层 stderr 归成**可操作**的 reason，而不是一个笼统 offline。"""
+    s, so = (stderr or "").lower(), (stdout or "").lower()
+    if any(k in s + so for k in ("can't open file", "no such file", "not found", "找不到")):
+        return "bridge-missing", "远端未找到 aia_bridge.py（该机 AIAutomator 未部署/路径不符）"
+    if any(k in s for k in ("dial:", "kex_exchange_identification", "banner exchange",
+                            "unknown port 65535", "connection closed", "connection refused",
+                            "connection timed out")):
+        return "data-plane-down", "ssh/22 数据面不可达：tailcat 隧道 ping 通，但 22 端口未转发或 sshd 未起"
+    if control is not None and not control.get("ok"):
+        return "control-plane-down", "tailcat ping 不通（机器离线/中继不可达）"
+    return "ssh-failed", "ssh 退出码 %d" % rc
 
 
 def parse_bridge(text: str) -> Dict[str, Any]:
@@ -170,35 +264,67 @@ def parse_bridge(text: str) -> Dict[str, Any]:
 
 
 def run_remote(m: Dict[str, Any], cmd: str, mode: str) -> Dict[str, Any]:
-    """串行执行一次，落流水。返回归一信封（ok/state/data/error）。"""
+    """串行执行一次，落流水。返回归一信封（ok/state/reason/error/control/data）。
+
+    v0.13.202 分层修复：先判控制面（tailcat ping），再走单次轻量探测或带重试的执行；
+    超时分层（探测短、执行覆盖 do_connect 重试）；失败按 reason 归类并回传底层 stderr，
+    不再把「控制面通但 22 端口不通」压成一个笼统的 timeout。
+    """
     if cmd not in CMDS:
         raise HTTPException(400, "cmd must be one of %s" % (list(CMDS),))
     if mode not in ("plan", "exec"):
         raise HTTPException(400, "mode must be plan|exec")
     dry = (mode == "plan") or (cmd != "run")
-    argv = build_argv(m, cmd, dry)
+    control = _ping_control_plane(m) if m.get("channel") == "tailcat" else None
+    # 探测走单次轻量 argv（绕过 do_connect 8 次重试），其余走通用 argv
+    argv = build_probe_argv(m) if cmd == "probe" else build_argv(m, cmd, dry)
+    timeout = _PROBE_TIMEOUT + 6 if cmd == "probe" else _RUN_TIMEOUT
     with _run_lock:                      # 单连接争用：绝不并发
         try:
             p = subprocess.run(argv, capture_output=True, text=True,
-                                timeout=_RUN_TIMEOUT, shell=False)
-        except subprocess.TimeoutExpired:
-            res = {"ok": False, "state": "offline", "error": "timeout"}
+                                timeout=timeout, shell=False)
+        except subprocess.TimeoutExpired as e:
+            raw = e.stderr or ""
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", "replace")
+            res = {"ok": False, "state": "offline", "reason": "timeout",
+                   "error": "执行超时 %ds（探测单次 / 执行需覆盖 do_connect 重试）" % timeout,
+                   "stderr": str(raw)[-300:]}
         except OSError as e:
-            res = {"ok": False, "state": "offline", "error": "spawn: %s" % e}
+            res = {"ok": False, "state": "offline", "reason": "spawn-error",
+                   "error": "spawn: %s" % e}
         else:
-            if p.returncode != 0 and not (p.stdout or "").find(BEGIN) >= 0:
-                res = {"ok": False, "state": "offline",
-                       "error": "ssh-rc=%d %s" % (p.returncode, (p.stderr or "")[-300:])}
+            err = (p.stderr or "").strip()[-400:]
+            if cmd == "probe":
+                ok = p.returncode == 0 and _PROBE_OK in (p.stdout or "")
+                if ok:
+                    res = {"ok": True, "state": "ok", "reason": "reachable",
+                           "data": {"probe": _PROBE_OK, "channel": m.get("channel"),
+                                    "via_control": (control or {}).get("detail", "")[:120]}}
+                else:
+                    reason, human = _classify_failure(p.returncode, p.stderr, p.stdout, control)
+                    res = {"ok": False, "state": "offline", "reason": reason,
+                           "error": human, "stderr": err}
+            elif p.returncode != 0 and BEGIN not in (p.stdout or ""):
+                reason, human = _classify_failure(p.returncode, p.stderr, p.stdout, control)
+                res = {"ok": False, "state": "offline", "reason": reason,
+                       "error": human, "stderr": err}
             else:
                 res = parse_bridge(p.stdout or "")
+                if err:
+                    res["stderr"] = err
+    res["control"] = control
+    res.setdefault("reason", "ok" if res["ok"] else "unknown")
     rid = uuid.uuid4().hex[:12]
     try:
         _ensure_tables()
         db.execute("INSERT INTO checkin_runs(id,machine,cmd,mode,state,ok,payload,error,ts) "
                    "VALUES(?,?,?,?,?,?,?,?,?)",
                    (rid, m["name"], cmd, mode, res["state"], 1 if res["ok"] else 0,
-                    json.dumps(res.get("data") or {}, ensure_ascii=False)[:8000],
-                    str(res.get("error") or "")[:500], int(time.time())))
+                    json.dumps({"data": res.get("data") or {}, "reason": res["reason"],
+                                "control": control}, ensure_ascii=False)[:8000],
+                    ("[%s] %s" % (res["reason"], res.get("error") or ""))[:500],
+                    int(time.time())))
     except Exception:  # noqa: BLE001 — 流水写失败不影响本次结果
         pass
     return {**res, "machine": m["name"], "cmd": cmd, "mode": mode, "dry": dry,
@@ -218,7 +344,8 @@ def api_overview():
     ms = _machines()
     try:
         _ensure_tables()
-        rows = db.query("SELECT machine, state, ok, ts FROM checkin_runs ORDER BY ts DESC LIMIT 200")
+        rows = db.query("SELECT machine, state, ok, ts, error, payload FROM checkin_runs "
+                        "ORDER BY ts DESC LIMIT 200")
     except Exception:  # noqa: BLE001
         rows = []
     last: Dict[str, Any] = {}

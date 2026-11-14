@@ -128,7 +128,22 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.201"
+VERSION = "0.13.202"
+
+# v0.13.202（2026-11-14）：积分签到「探测失败」全链路修复（用户报 A 机无法通过隧道连接）。
+#   根因分层取证：A 机 tailcat ping 控制面通（pong 3.4s via DERP）、但单次 ssh 数据面
+#   `Dial: context deadline exceeded` / `kex_exchange_identification` / UNKNOWN port 65535
+#   ⇒ ping 通 ≠ ssh/22 可转发，属 A 机 Windows 侧 tailcat --serve=22 / sshd 未就绪（基础设施层）。
+#   代码层 4 个真 bug 把「可诊断的失败」压成「一个笼统 timeout」：
+#   ① probe 竟跑 python aia_bridge.py（A 机未部署 bridge 必失败）⇒ 改轻量 echo 单次探测；
+#   ② do_connect 8 次重试 ~181s > hub _RUN_TIMEOUT=120 ⇒ 先 kill 吞错误 ⇒ 探测绕过重试、
+#      单次 ProxyCommand，_RUN_TIMEOUT 提到 200 覆盖执行重试预算；
+#   ③ 失败一律 offline ⇒ 加控制面 ping 分层 + reason 归类（data-plane-down / control-plane-down
+#      / bridge-missing / timeout）+ 回传底层 stderr；
+#   ④ overview.last 不带 error、前端不显示 ⇒ 带出 error/payload.reason + 可操作指引。
+#   关键词锚：数据面 / DERP / data-plane-down / 单次探测 / reason。
+#   端到端实测：B 机 ok=True reachable 0.5s；A 机 reason=data-plane-down 21.5s（原 timeout 120s+）。
+#   诚实边界：A 机数据面本身仍不通（基础设施层），hub 侧可诊断但修不了，需 A 机操作控制台。
 
 # v0.13.201（2026-11-14）：系统菜单新增「积分签到」子页，远程管理 A/B 两机 AIAutomator。
 #   根因与已定判：AIAutomator 是 Windows 专用（登录态取自官方桌面客户端登录态文件、

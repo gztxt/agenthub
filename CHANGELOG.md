@@ -1,3 +1,38 @@
+## v0.13.202 — 积分签到「A 机探测失败」全链路修复：分层诊断 + 超时对齐（2026-11-14）
+
+> 用户报障：「局域网 B 机正常连接上线、探测显示正常、签到显示正常；A 机无法通过隧道连接、
+> 探测显示失败，请根据详细的运行日志修复优化」。生产已重启到 v0.13.201（restart.log 21:36 allow）。
+
+- **根因分层取证（不猜）**：`checkin_runs` 流水 A 机 2 条均 `state=offline error=timeout`；
+  手动底层探针 `tailcat-connect.sh --target WIN-20260130XPI --exec` hang 满 200s 被 kill；
+  `tailcat ping` → **`pong 3.42s via DERP(tok)` 控制面通**；单次 ssh →
+  `Dial: context deadline exceeded` / `kex_exchange_identification: Connection closed` /
+  `UNKNOWN port 65535` rc=255 **数据面不通**；两个 token 均完整 106 字符（非截断）。
+  ⇒ **ping 通 ≠ ssh/22 可转发**。A 机走 DERP 中继（非局域网，印证「任意 Windows 用 tailcat
+  连中转服务器」场景），`tailcat <token> 22` 拨不到 A 机 sshd ⇐ 属 **A 机 Windows 侧
+  `tailcat --serve=22` / OpenSSH Server 未就绪（基础设施层）**，hub 侧修不了、如实标注。
+- **代码层 4 个真 bug（全链路一次改完，不缝补）**：
+  ① `probe` 原跑 `python aia_bridge.py probe`，A 机未部署 bridge 必失败 ⇒ 改**轻量 echo 单次探测**，
+  测「通道能否执行命令」而非测应用；新增 `build_probe_argv()` 走单次 ssh + ProxyCommand，
+  **绕过 `do_connect` 8 次重试**。
+  ② `do_connect` 8×(ConnectTimeout=20)+7×sleep 3 ≈ 181s > hub `_RUN_TIMEOUT=120` ⇒ 上层先 kill
+  把真实 stderr 吞成 `timeout` ⇒ `_RUN_TIMEOUT` 200 覆盖执行重试预算；探测独立 `_PROBE_TIMEOUT=12`。
+  ③ 所有失败一律 `offline` ⇒ 新增 `_ping_control_plane()` 控制面分层 + `_classify_failure()`
+  reason 归类（`data-plane-down` / `control-plane-down` / `bridge-missing` / `timeout` /
+  `spawn-error` / `ssh-failed`）+ 回传底层 stderr 尾部，落 `checkin_runs.error` 与 `payload.reason`。
+  ④ `overview.last` 不选 error、前端 `ckResultLine` 不显示 ⇒ 带出 `error`/`payload`，
+  前端渲染 reason + error 明细 + `ckGuide()` 可操作指引（按 reason 给 A 机处理步骤）。
+- **端到端实测（TestClient 真路由 + 真远程）**：B 机 `ok=True reason=reachable` 0.5s；
+  A 机从 `timeout`(120s+) 变 **`data-plane-down` 21.5s**，带「ssh/22 数据面不可达：22 端口未转发
+  或 sshd 未起」+ 底层 stderr 明细 + 控制面 ping 结果。分层判据正确（stderr 更具体时优先数据面，
+  不退化成 control-plane-down）。
+- **测试**：新增 L0 `ProbePath` / `ClassifyFailure` / `TimeoutAlignment`（探测不依赖 bridge、
+  单次 ProxyCommand 不经 tailcat-connect.sh、注入防护、四种 reason、超时覆盖 181s 重试预算）；
+  关键 10 闸门 **118 passed**。
+- **诚实边界**：A 机数据面本身仍不通（基础设施层），本次修复让失败**可诊断、可操作**，
+  不假绿成「已连上」。A 机需在 Windows 侧确认 tailcat `--serve=22` 与 OpenSSH Server 在运行
+  （控制台 `[14]` 重新上报），或改走 `no-auth-ssh`；隧道恢复后再补部署 bridge 与计划任务。
+
 ## v0.13.201 — 系统菜单新增「积分签到」子页：远程管理 A/B 两机 AIAutomator（2026-11-14）
 
 > 用户需求：「请安装到 A机 B机，在 agenthub 系统菜单下面增加子菜单 积分签到，管理已安装的机器，

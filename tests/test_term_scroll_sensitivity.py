@@ -240,7 +240,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.204"
+    CURRENT_VERSION = "0.13.205"
+    #: v0.13.205：本轮改的是「多账号导入与扫码登录态」，不是终端滚动；版本钉照常跟版本号走。
+    #: 学到的：CLI 能跑 ≠ Web 能跑 —— 参数集是按 CLI 写的，多传一个开关就 exit 2；
+    #: 同一解密 helper 服务多个字段时必须传字段路径，写死会把 refreshToken 解成 accessToken。
+    VERSION_ROOT_CAUSES["0.13.205"] = (
+        "account-error", "扫码登录态", "auth.refreshToken", "点路径",
+    )
     #: v0.13.204：本轮改的是「积分签到多账号入口」，不是终端滚动；版本钉照常跟版本号走。
     #: 学到的：功能在上游存在 ≠ 用户能用 —— CLI-only 的容量在 Web 产品里等于没有；
     #: 敏感参数走 stdin 而不是 argv，是「不回传凭据」之外的第二个边界。

@@ -128,8 +128,17 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.204"
+VERSION = "0.13.205"
 
+# v0.13.205（2026-11-16）：多账号三个实测缺陷修复（用户试运行后报「导入失败 / WorkBuddy 是扫码」）。
+#   ① account-import 被错误附加 --stdin（只有 send/add/remove 接受），远端 argparse 以
+#      exit 2 退出，hub 归类成 ssh-failed ⇒ 修正参数并补测试；
+#   ② WorkBuddy 登录实际是微信扫码，新增「导入扫码后的客户端登录态」：读 desktop.info →
+#      WorkBuddy.exe 内存解密 accessToken/refreshToken → 落 auths；手机号+短信保留为备用；
+#   ③ 解密 helper 的字段路径原先写死 auth.accessToken，导入 refreshToken/nickname 全拿回
+#      accessToken ⇒ 改按点路径解密，导入后 refreshToken 与 accessToken 实为不同值（已验）。
+#   业务失败（客户端未登录）改用 reason=account-error，不再伪装成通道故障。
+#   关键词锚：account-error / 扫码登录态 / auth.refreshToken / 点路径。
 # v0.13.204（2026-11-16）：积分签到多账号 —— 用户报「只能签到当前登录的账号」的正面修复。
 #   根因不是签到引擎不支持：上游 WorkBuddy/TraeWork 早已支持 auths/ 逐账号展开，但凭据库为
 #   空时会回退桌面单账号，而此前只有 Windows CLI 能添加账号 ⇒ hub 侧没有入口，用户看到的就是

@@ -300,7 +300,9 @@ def build_account_argv(m: Dict[str, Any], action: str, platform: str = "") -> Li
     remote = "python %s %s" % (BRIDGE, action)
     if platform:
         remote += " --platform " + platform
-    if action != "accounts":
+    # 只有带敏感参数的动作才有 --stdin；accounts / account-import 不接受该开关
+    # （v0.13.205 实测：多传 --stdin 会让远端 argparse 以 exit 2 退出，被误报成 ssh-failed）
+    if action in ("account-send", "account-add", "account-remove"):
         remote += " --stdin"
     return _wrap_remote(m, remote)
 
@@ -353,7 +355,9 @@ def run_account(m: Dict[str, Any], action: str, platform: str = "",
                 if err:
                     res["stderr"] = err
     res["control"] = control
-    res.setdefault("reason", "ok" if res["ok"] else "unknown")
+    # 账号类失败（登录态缺失 / 验证码错）是业务失败，不是通道故障：单独给 reason，
+    # 免得 UI 把「客户端未登录」显示成 ssh 通道问题。
+    res.setdefault("reason", "ok" if res["ok"] else "account-error")
     _log_account_run(m, action, res)
     return {**res, "machine": m["name"], "action": action, "platform": platform,
             "ts": int(time.time())}

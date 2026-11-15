@@ -169,10 +169,14 @@ class Accounts(unittest.TestCase):
         self.assertNotIn("phone", blob)
         self.assertNotIn("code", blob)
 
-    def test_accounts_list_argv_has_no_stdin(self):
+    def test_accounts_and_import_have_no_stdin(self):
+        # v0.13.205：多传 --stdin 会让远端 argparse exit 2，被误报成 ssh-failed
         a = ck.build_account_argv(self.LAN, "accounts", "traework")
         self.assertTrue(a[-1].endswith("accounts --platform traework"))
         self.assertNotIn("--stdin", a[-1])
+        b = ck.build_account_argv(self.LAN, "account-import", "workbuddy")
+        self.assertTrue(b[-1].endswith("account-import --platform workbuddy"))
+        self.assertNotIn("--stdin", b[-1])
 
     def test_action_and_platform_whitelist(self):
         with self.assertRaises(ValueError):

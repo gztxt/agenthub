@@ -194,12 +194,18 @@ function ckAccRender(name, r) {
     if (!items.length) html += '<div class="hint">· 凭据库为空</div>';
     else items.forEach(function (it) { html += ckAccRow(plat, it, name); });
     if (plat === 'workbuddy') {
-      html += '<div class="sp-r" style="margin-top:4px;flex-wrap:wrap;gap:4px">' +
-        '<input class="inp" data-acc-phone placeholder="手机号" style="width:120px;padding:4px 8px">' +
+      // WorkBuddy 登录是微信扫码：扫码在官方客户端完成，hub 只导入扫码后的登录态；
+      // 手机号+短信是备用方式（用户要求两条都要）。
+      html += '<div class="sp-r" style="margin-top:4px;gap:6px">' +
+        '<button class="btn sm" data-ck="acc-import" data-name="' + escapeHtml(name) +
+        '" data-plat="workbuddy">导入扫码后的客户端登录态</button>' +
+        '<span class="hint">先在客户端用微信扫码登录</span></div>' +
+        '<div class="sp-r" style="margin-top:4px;flex-wrap:wrap;gap:4px">' +
+        '<input class="inp" data-acc-phone placeholder="手机号（备用）" style="width:120px;padding:4px 8px">' +
         '<button class="btn sm ghost" data-ck="acc-send" data-name="' + escapeHtml(name) + '">发送验证码</button>' +
         '<input class="inp" data-acc-code placeholder="短信验证码" style="width:100px;padding:4px 8px">' +
         '<button class="btn sm" data-ck="acc-add" data-name="' + escapeHtml(name) + '">添加</button></div>' +
-        '<div class="hint">每个手机号单独添加一次；当前登录账号也要加，否则凭据库非空后它不再被签。</div>';
+        '<div class="hint">扫码账号：在客户端逐个扫码后回这里点导入；手机号是备用方式。凭据库非空后桌面账号不再自动叠加，当前账号也要导入/添加。</div>';
     } else {
       html += '<div class="sp-r" style="margin-top:4px">' +
         '<button class="btn sm ghost" data-ck="acc-import" data-name="' + escapeHtml(name) +

@@ -1,3 +1,21 @@
+## v0.13.205 — 多账号实测缺陷修复：WorkBuddy 扫码导入 + import 参数 bug（2026-11-16）
+
+> 用户试运行后反馈：「导入已登录账号失败」「workbuddy 是微信扫码 不是手机号」「手机号和扫码都要」。
+
+- **① `account-import` 误带 `--stdin`**：该开关只用于 send/add/remove，远端 argparse 遇未知参数
+  直接 exit 2，hub 归类成 `ssh-failed` ⇒ 用户看到的是「导入失败」而不是真实原因。已修正并加
+  回归断言（`account-import` 的 argv 不得含 `--stdin`）。
+- **② WorkBuddy 是微信扫码登录**：新增「导入扫码后的客户端登录态」——扫码在官方客户端完成，
+  hub 读 `workbuddy-desktop.info`，用 WorkBuddy.exe 内存解密 accessToken/refreshToken 后
+  按 `auths/workbuddy-<uid>.json` 落盘；手机号+短信保留为备用入口（两条都要）。
+- **③ 解密 helper 字段路径写死**：`_decrypt_field_via_helper` 始终传 `auth.accessToken`，导致
+  导入 refreshToken / nickname 时全部拿回 accessToken（实测 refreshToken 被写成了 accessToken 值）。
+  改为按点路径解密；重导后两 token 长度 1570/1571、内容不同，昵称正确解析为「向前冲」。
+- **④ 业务失败不再伪装成通道故障**：账号登录态缺失等失败改用 `reason=account-error`。
+- **实测**：B 机导入当前账号成功（`accounts=1`），`run --dry` 显示 `WorkBuddy·向前冲 already`
+  （多账号分支已生效，无「凭据库为空」告警）；A 机 bridge 已更新，导入如实报「未找到 WorkBuddy
+  客户端运行时」（A 机没装客户端）；TraeWork 导入失败的真实原因是客户端未登录，现原样显示。
+- **边界**：更多账号仍需在客户端逐个扫码登录后点导入（凭据库非空后桌面账号不再自动叠加）。
 ## v0.13.204 — 积分签到多账号：账号管理搬进 hub（WorkBuddy 短信 / TraeWork 导入）（2026-11-16）
 
 > 用户反馈：「积分签到 多用户签到功能还是缺失 只能签到当前登录的账号」。

@@ -748,6 +748,25 @@ function fillAgentSelect(sel, withAuto) {
  *   ③ 其它 host（外站链接、真远程机器）原样返回。
  * SELF_ADDRS 为空（接口未返回 / ip 命令不可用）时退化为只做 ①。
  */
+/* 端口避让表（2026-11-15，被控端控制台 v3.6）。
+ *
+ * 经 tailcat 隧道从 Windows 访问 hub 时，本机某个端口可能已被别的程序占用（3000/8080/8088
+ * 都是常见占用面），控制台会把该端口映射到另一个本地端口，并用 ?pmap=3201:13201,...[原始:实际]
+ * 告知本页。**只参与「卡片地址 → 浏览器地址」的端口改写**；hub 自己的 API / WebSocket 仍走
+ * location.host（控制台改的是 hub 入口端口本身，与本表无关）。
+ * 没有 pmap（局域网直连、老控制台）⇒ 空表，行为与改动前逐字节一致。 */
+let PORT_MAP = (function () {
+  const m = {};
+  try {
+    const q = (typeof location !== 'undefined' && location.search) || '';
+    (new URLSearchParams(q).get('pmap') || '').split(',').forEach(function (pair) {
+      const a = pair.split(':');
+      const from = parseInt(a[0], 10), to = parseInt(a[1], 10);
+      if (from >= 1 && to >= 1 && from <= 65535 && to <= 65535 && from !== to) m[from] = to;
+    });
+  } catch (e) { /* 老浏览器没有 URLSearchParams ⇒ 不避让，退回改动前行为 */ }
+  return m;
+})();
 let SELF_ADDRS = [];
 function _selfHost(cur) {
   /* location.hostname 在部分浏览器对 IPv6 带方括号，统一成可拼进 URL 的形式 */
@@ -758,11 +777,19 @@ function lanUrl(url) {
   if (!url) return url;
   const cur = _selfHost(location.hostname);
   if (!cur) return url;
-  return url.replace(/^(https?:\/\/)(\[[0-9a-fA-F:]+\]|[^\/:?#]+)/, function (m, scheme, host) {
+  const out = url.replace(/^(https?:\/\/)(\[[0-9a-fA-F:]+\]|[^\/:?#]+)/, function (m, scheme, host) {
     const bare = host.replace(/^\[|\]$/g, '');
     if (bare === '127.0.0.1' || bare === 'localhost' || bare === '::1') return scheme + cur;
     if (SELF_ADDRS.indexOf(bare) >= 0) return scheme + cur;
     return m;
+  });
+  /* ② 端口避让：只改「本机自有地址」的端口 —— 外站链接哪怕端口巧合也一个字节都不动 */
+  return out.replace(/^(https?:\/\/)(\[[^\]]+\]|[^\/:?#]+):(\d+)/, function (m, scheme, host, port) {
+    if (host !== cur) return m;
+    const from = parseInt(port, 10);
+    const to = (typeof PORT_MAP !== 'undefined' && PORT_MAP[from]) || 0;
+    if (!to || to === from) return m;
+    return scheme + host + ':' + to;
   });
 }
 

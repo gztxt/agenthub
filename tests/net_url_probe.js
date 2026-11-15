@@ -34,15 +34,16 @@ function grab(name) {
 
 const body = grab('_selfHost') + '\n' + grab('lanUrl');
 // SELF_ADDRS 在源文件里是顶层 let；这里用同名参数注入，语义等价（同一份函数体）。
+// PORT_MAP 同理（2026-11-15 端口避让）：源文件里是顶层 let，这里按参数注入。
 const factory = new Function(
-  'SELF_ADDRS', 'location',
+  'SELF_ADDRS', 'location', 'PORT_MAP',
   body + '\nreturn lanUrl;'
 );
 
 const cases = JSON.parse(casesJson);
 const out = [];
 for (const c of cases) {
-  const fn = factory(c.self || [], { hostname: c.host });
+  const fn = factory(c.self || [], { hostname: c.host }, c.pmap || {});
   const got = fn(c.url);
   out.push({ url: c.url, host: c.host, want: c.want, got: got, ok: got === c.want });
 }

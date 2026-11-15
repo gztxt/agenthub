@@ -35,6 +35,14 @@ function initCheckin() {
       if (confirm('立即在 ' + name + ' 上执行每日签到？接口幂等（已签只提示），但仍会访问各平台官方接口。'))
         ckRun(name, 'run', 'exec');
     }
+    if (act === 'accts') { ckAccLoad(name, true); return; }
+    if (act === 'acc-send') { ckAccSend(name); return; }
+    if (act === 'acc-add') { ckAccAdd(name); return; }
+    if (act === 'acc-import') { ckAccImport(name, b.dataset.plat || 'traework'); return; }
+    if (act === 'acc-del') {
+      if (confirm('删除账号 ' + (b.dataset.label || '') + ' 的本地凭据？删除后该账号不再自动签到。'))
+        ckAccDel(name, b.dataset.plat || '', b.dataset.uid || '');
+    }
   });
 }
 
@@ -113,6 +121,204 @@ function ckDataSummary(r) {
     (tot ? '<div class="hint">总积分：' + tot + '</div>' : '');
 }
 
+/* v0.13.204 多账号（用户报「只能签当前登录的账号」的正面修复）：
+ * - 账号列表 / 短信添加 / 导入本机登录态 / 删除 全部搬进 hub，不必再到 Windows 命令行；
+ * - WorkBuddy = 手机号 + 短信码逐账号 add；TraeWork = 导入本机客户端登录态；
+ * - 凭据库为空时明确告警（上游会回退桌面单账号），绝不静默；
+ * - DuMate / LobsterAI / MiniMax 上游没有多账号能力，也必须写明，而不是不显示。
+ * 读账号要起一次 ssh/隧道进程，按需点击读取（不随进页自动拉）。
+ */
+var ckAccBusy = {};
+var ckAccName = { workbuddy: 'WorkBuddy', traework: 'TraeWork' };
+
+function ckAccBox(name) {
+  return document.querySelector('.ck-acc[data-acc-for="' + name + '"]');
+}
+
+function ckAccInner(r) {
+  var d = r && r.data;
+  return (d && d.data) || null;   // bridge 外层 {ok,data:{...}} → 内层
+}
+
+function ckAccStateLine(ma) {
+  if (!ma) return '<span class="hint">未知</span>';
+  if (ma.error) return '<span class="s-badge error"></span>' + escapeHtml(ma.error);
+  var n = ma.accounts || 0;
+  var head = ma.effective
+    ? '<span class="s-badge running"></span>多账号已开启 · ' + n + ' 个账号'
+    : '<span class="s-badge error"></span>多账号未开启（只签当前登录账号）';
+  if (ma.effective && n === 0)
+    head += ' · <b>凭据库为空，正在回退签当前登录账号</b>';
+  return head;
+}
+
+function ckAccRow(plat, it, name) {
+  var meta = [];
+  if (it.label) meta.push(it.label);
+  if (it.uid_masked) meta.push('UID ' + it.uid_masked);
+  if (it.days_left != null) meta.push('剩余 ' + it.days_left + ' 天');
+  if (it.expired) meta.push('已过期');
+  if (it.disabled) meta.push('已失效需重登');
+  var del = it.uid ? ' <button class="btn sm ghost" data-ck="acc-del" data-name="' +
+    escapeHtml(name) + '" data-plat="' + escapeHtml(plat) + '" data-uid="' +
+    escapeHtml(it.uid) + '" data-label="' + escapeHtml(it.label || it.uid_masked) +
+    '">删除</button>' : '';
+  return '<div class="hint">· ' + escapeHtml(meta.join(' · ') || '(无展示名)') + del + '</div>';
+}
+
+function ckAccRender(name, r) {
+  var box = ckAccBox(name);
+  if (!box) return;
+  var st = box.querySelector('[data-acc-status]');
+  var body = box.querySelector('[data-acc-body]');
+  if (!r || !r.ok) {
+    if (st) st.innerHTML = '<span class="s-badge error"></span>读取失败';
+    if (body) body.innerHTML = '<div class="hint">' + escapeHtml((r && (r.error || r.reason)) || '未知错误') +
+      (r && r.reason ? ' <code>' + escapeHtml(r.reason) + '</code>' : '') + '</div>';
+    return;
+  }
+  var inner = ckAccInner(r);
+  if (!inner) {
+    if (st) st.innerHTML = '<span class="s-badge error"></span>unreadable';
+    if (body) body.innerHTML = '<div class="hint">bridge 未返回账号数据（版本漂移或远端未更新到 v0.13.204）</div>';
+    return;
+  }
+  if (st) st.innerHTML = r.cached ? '<span class="hint">缓存 ' + (r.age || 0) + ' 秒前</span>'
+    : '<span class="hint">已读取</span>';
+  var html = '';
+  ['workbuddy', 'traework'].forEach(function (plat) {
+    var ma = (inner.multi_account || {})[plat];
+    var items = (inner.accounts || {})[plat] || [];
+    html += '<div style="margin-top:8px"><div class="hint"><b>' + ckAccName[plat] + '</b> · ' +
+      ckAccStateLine(ma) + '</div>';
+    if (!items.length) html += '<div class="hint">· 凭据库为空</div>';
+    else items.forEach(function (it) { html += ckAccRow(plat, it, name); });
+    if (plat === 'workbuddy') {
+      html += '<div class="sp-r" style="margin-top:4px;flex-wrap:wrap;gap:4px">' +
+        '<input class="inp" data-acc-phone placeholder="手机号" style="width:120px;padding:4px 8px">' +
+        '<button class="btn sm ghost" data-ck="acc-send" data-name="' + escapeHtml(name) + '">发送验证码</button>' +
+        '<input class="inp" data-acc-code placeholder="短信验证码" style="width:100px;padding:4px 8px">' +
+        '<button class="btn sm" data-ck="acc-add" data-name="' + escapeHtml(name) + '">添加</button></div>' +
+        '<div class="hint">每个手机号单独添加一次；当前登录账号也要加，否则凭据库非空后它不再被签。</div>';
+    } else {
+      html += '<div class="sp-r" style="margin-top:4px">' +
+        '<button class="btn sm ghost" data-ck="acc-import" data-name="' + escapeHtml(name) +
+        '" data-plat="traework">导入本机登录态</button></div>' +
+        '<div class="hint">只导入本机客户端当前登录账号；其他账号需在该机浏览器登录（端口 17388）。</div>';
+    }
+    html += '</div>';
+  });
+  html += '<div class="hint" style="margin-top:8px">DuMate / LobsterAI / MiniMax 上游不支持多账号，只签当前登录账号。</div>';
+  if (body) body.innerHTML = html;
+}
+
+async function ckAccLoad(name, refresh) {
+  if (ckAccBusy[name]) return;
+  ckAccBusy[name] = true;
+  var box = ckAccBox(name);
+  var st = box && box.querySelector('[data-acc-status]');
+  if (st) st.innerHTML = '<span class="hint">读取中（要起一次远程进程）…</span>';
+  try {
+    var r = await api('/api/checkin/accounts?name=' + encodeURIComponent(name) +
+      (refresh ? '&refresh=1' : ''));
+    ckAccRender(name, r);
+  } catch (e) {
+    if (st) st.innerHTML = '<span class="s-badge error"></span>读取失败';
+    var body = box && box.querySelector('[data-acc-body]');
+    if (body) body.innerHTML = '<div class="hint">' + escapeHtml(e.message || String(e)) + '</div>';
+  } finally {
+    ckAccBusy[name] = false;
+  }
+}
+
+function ckAccNote(name, html) {
+  var box = ckAccBox(name);
+  var st = box && box.querySelector('[data-acc-status]');
+  if (st) st.innerHTML = html;
+}
+
+function ckAccCtx(name) {
+  var box = ckAccBox(name);
+  return {
+    phone: box && box.querySelector('[data-acc-phone]'),
+    code: box && box.querySelector('[data-acc-code]')
+  };
+}
+
+function ckAccBridgeMsg(r, fallback) {
+  var d = r && r.data && r.data.data;
+  return (d && (d.message || (d.account && d.account.label))) || fallback;
+}
+
+async function ckAccSend(name) {
+  var c = ckAccCtx(name);
+  var phone = (c.phone && c.phone.value || '').trim();
+  if (!/^1[3-9]\d{9}$/.test(phone)) { toast('请输入 11 位大陆手机号', 'err'); return; }
+  ckAccNote(name, '<span class="hint">发送验证码中…</span>');
+  try {
+    var r = await api('/api/checkin/accounts/send-code', { method: 'POST',
+      body: JSON.stringify({ name: name, platform: 'workbuddy', phone: phone }) });
+    if (!r.ok) throw new Error(r.error || r.reason || '发送失败');
+    var msg = ckAccBridgeMsg(r, '验证码已发送');
+    ckAccNote(name, '<span class="s-badge running"></span>' + escapeHtml(msg));
+    toast(msg, 'ok');
+  } catch (e) {
+    ckAccNote(name, '<span class="s-badge error"></span>发送失败：' + escapeHtml(e.message || String(e)));
+    toast('发送失败：' + (e.message || String(e)), 'err');
+  }
+}
+
+async function ckAccAdd(name) {
+  var c = ckAccCtx(name);
+  var phone = (c.phone && c.phone.value || '').trim();
+  var code = (c.code && c.code.value || '').trim();
+  if (!/^1[3-9]\d{9}$/.test(phone)) { toast('请输入 11 位大陆手机号', 'err'); return; }
+  if (!/^\d{4,8}$/.test(code)) { toast('请输入短信验证码', 'err'); return; }
+  ckAccNote(name, '<span class="hint">登录并保存凭据中…</span>');
+  try {
+    var r = await api('/api/checkin/accounts/add', { method: 'POST',
+      body: JSON.stringify({ name: name, platform: 'workbuddy', phone: phone, code: code }) });
+    if (!r.ok) throw new Error(r.error || r.reason || '添加失败');
+    if (c.code) c.code.value = '';
+    ckAccNote(name, '<span class="s-badge running"></span>已添加，正在刷新…');
+    toast('账号已添加', 'ok');
+    ckAccLoad(name, true);
+  } catch (e) {
+    ckAccNote(name, '<span class="s-badge error"></span>添加失败：' + escapeHtml(e.message || String(e)));
+    toast('添加失败：' + (e.message || String(e)), 'err');
+  }
+}
+
+async function ckAccImport(name, plat) {
+  ckAccNote(name, '<span class="hint">读取本机客户端登录态…</span>');
+  try {
+    var r = await api('/api/checkin/accounts/import', { method: 'POST',
+      body: JSON.stringify({ name: name, platform: plat }) });
+    if (!r.ok) throw new Error(r.error || r.reason || '导入失败');
+    ckAccNote(name, '<span class="s-badge running"></span>已导入，正在刷新…');
+    toast('已导入本机登录态', 'ok');
+    ckAccLoad(name, true);
+  } catch (e) {
+    ckAccNote(name, '<span class="s-badge error"></span>导入失败：' + escapeHtml(e.message || String(e)));
+    toast('导入失败：' + (e.message || String(e)), 'err');
+  }
+}
+
+async function ckAccDel(name, plat, uid) {
+  ckAccNote(name, '<span class="hint">删除凭据中…</span>');
+  try {
+    var r = await api('/api/checkin/accounts/remove', { method: 'POST',
+      body: JSON.stringify({ name: name, platform: plat, uid: uid }) });
+    if (!r.ok) throw new Error(r.error || r.reason || '删除失败');
+    ckAccNote(name, '<span class="s-badge running"></span>已删除，正在刷新…');
+    toast('账号已删除', 'ok');
+    ckAccLoad(name, true);
+  } catch (e) {
+    ckAccNote(name, '<span class="s-badge error"></span>删除失败：' + escapeHtml(e.message || String(e)));
+    toast('删除失败：' + (e.message || String(e)), 'err');
+  }
+}
+
 function ckMachineCard(m, last) {
   var reg = m.registered ? '' : '<span class="hint">（tailcat 清单里已无此机）</span>';
   var dis = m.enabled ? '' : '<span class="hint">（已停用）</span>';
@@ -131,6 +337,13 @@ function ckMachineCard(m, last) {
       '<button class="btn sm" data-ck="exec" data-name="' + escapeHtml(m.name) + '"' +
         (m.enabled ? '' : ' disabled') + '>立即签到</button>' +
     '</div>' + ckDataSummary(r) +
+    '<div class="ck-acc" data-acc-for="' + escapeHtml(m.name) + '">' +
+      '<div class="sp-r" style="margin-top:8px;gap:6px">' +
+        '<button class="btn sm ghost" data-ck="accts" data-name="' + escapeHtml(m.name) + '">多账号</button>' +
+        '<span class="hint" data-acc-status>未读取</span>' +
+      '</div>' +
+      '<div data-acc-body></div>' +
+    '</div>' +
     '</div>';
 }
 

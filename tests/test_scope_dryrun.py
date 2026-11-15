@@ -49,7 +49,8 @@ class BScopeByPath(unittest.TestCase):
         # /install 同时出现在 skill.py 与 skill_store.py，但两者同属 skill.write
         # ⇒ 98 key（P3 事件出口 chat/events + interrupt 各 +1）。
         # PT-20261110-01：新增 6 条 MCP 源/安装/编排写路由，路径互不撞 ⇒ 104。
-        self.assertEqual(len(authz.SCOPE_BY_PATH), 107)
+        # v0.13.204：新增 4 条积分签到多账号写路由 ⇒ 111。
+        self.assertEqual(len(authz.SCOPE_BY_PATH), 111)
 
     def test_known_and_unknown(self):
         self.assertEqual(authz.scope_for_path("put", "/api/memory/l3"), "hub.memory.write")

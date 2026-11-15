@@ -63,6 +63,11 @@ WRITE_ROUTE_SCOPES = {
     ("checkinmgr", "POST", "/api/checkin/machines"): "hub.ops.write",
     ("checkinmgr", "DELETE", "/api/checkin/machines/{name}"): "hub.ops.write",
     ("checkinmgr", "POST", "/api/checkin/run"): "hub.ops.write",
+    # v0.13.204：多账号管理（短信发码 / 添加 / 导入本机登录态 / 删除）
+    ("checkinmgr", "POST", "/api/checkin/accounts/send-code"): "hub.ops.write",
+    ("checkinmgr", "POST", "/api/checkin/accounts/add"): "hub.ops.write",
+    ("checkinmgr", "POST", "/api/checkin/accounts/import"): "hub.ops.write",
+    ("checkinmgr", "POST", "/api/checkin/accounts/remove"): "hub.ops.write",
     ("cloudcli", "POST", "/start"): "hub.agent.write",
     ("cronjobs", "POST", "/api/jobs"): "hub.ops.write",
     ("cronjobs", "DELETE", "/api/jobs/{jid}"): "hub.ops.write",
@@ -158,8 +163,8 @@ EXEMPT_WRITE_ROUTES = frozenset({
     ("hook", "POST", "/telemetry/events/{source}"),
 })
 
-#: 27 条有副作用的写路由：起进程、发外网、改全局配置、调 LLM 或重扫。
-#: P0-3 先只对这 27 条强制 scope，其余保持登录放行，降低回归面。
+#: 32 条有副作用的写路由：起进程、发外网、改全局配置、调 LLM 或重扫。
+#: P0-3 只对这些强制 scope，其余保持登录放行，降低回归面。
 SIDE_EFFECT_ROUTES = frozenset({
     ("api_agents", "POST", "/api/agents/{agent_id}/chat"),
     ("api_agents", "POST", "/api/agents/{agent_id}/chat/stream"),
@@ -171,6 +176,11 @@ SIDE_EFFECT_ROUTES = frozenset({
     ("api_vitals", "POST", "/api/vitals/sweep"),
     # v0.13.201：远程触发签到会起 ssh/隧道进程并访问外网，属副作用
     ("checkinmgr", "POST", "/api/checkin/run"),
+    # v0.13.204：多账号管理会登录第三方、发短信、写/删远端凭据，全部有副作用
+    ("checkinmgr", "POST", "/api/checkin/accounts/send-code"),
+    ("checkinmgr", "POST", "/api/checkin/accounts/add"),
+    ("checkinmgr", "POST", "/api/checkin/accounts/import"),
+    ("checkinmgr", "POST", "/api/checkin/accounts/remove"),
     ("cloudcli", "POST", "/start"),
     ("cronjobs", "POST", "/api/jobs/{jid}/run"),
     ("ghsettings", "POST", "/api/settings/github/apply"),

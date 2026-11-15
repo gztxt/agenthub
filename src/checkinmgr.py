@@ -245,15 +245,8 @@ def _relay_argv(m: Dict[str, Any], remote_cmd: str) -> List[str]:
             "powershell -NoProfile -EncodedCommand %s" % b64]
 
 
-def build_argv(m: Dict[str, Any], cmd: str, dry: bool) -> List[str]:
-    """组装 argv（shell=False）。命令与机器名都已校验，用户输入不进 shell。"""
-    if cmd not in CMDS:
-        raise ValueError("cmd not allowed: %s" % cmd)
-    # probe 测「通道能否跑一条命令」→ echo，不依赖 bridge 是否已部署
-    # （旧版 probe 跑 python aia_bridge.py，A 机未部署时必然失败并被超时吞掉）。
-    remote = ("echo %s" % _PROBE_OK) if cmd == "probe" else (
-        "python %s %s" % (BRIDGE, " ".join(
-            [cmd] + (["--dry"] if cmd == "run" and dry else []))))
+def _wrap_remote(m: Dict[str, Any], remote: str) -> List[str]:
+    """把远端命令包进对应通道（LAN SSH / tailcat / relay）。三种通道共用一处。"""
     if m.get("channel") == "relay":
         if not _NAME_RE.match(m.get("target", "")):
             raise ValueError("bad target")
@@ -270,6 +263,100 @@ def build_argv(m: Dict[str, Any], cmd: str, dry: bool) -> List[str]:
     return ["ssh", "-o", "BatchMode=yes", "-o",
             "ConnectTimeout=%d" % _CONNECT_TIMEOUT,
             "%s@%s" % (user, host), remote]
+
+
+def build_argv(m: Dict[str, Any], cmd: str, dry: bool) -> List[str]:
+    """组装 argv（shell=False）。命令与机器名都已校验，用户输入不进 shell。"""
+    if cmd not in CMDS:
+        raise ValueError("cmd not allowed: %s" % cmd)
+    # probe 测「通道能否跑一条命令」→ echo，不依赖 bridge 是否已部署
+    # （旧版 probe 跑 python aia_bridge.py，A 机未部署时必然失败并被超时吞掉）。
+    remote = ("echo %s" % _PROBE_OK) if cmd == "probe" else (
+        "python %s %s" % (BRIDGE, " ".join(
+            [cmd] + (["--dry"] if cmd == "run" and dry else []))))
+    return _wrap_remote(m, remote)
+
+
+# ── 多账号管理（v0.13.204）：WorkBuddy 短信 / TraeWork 桌面导入 ──────────────
+ACCOUNT_PLATFORMS = ("workbuddy", "traework")
+ACCOUNT_ACTIONS = ("accounts", "account-send", "account-add", "account-import",
+                   "account-remove")
+#: 敏感参数（手机号 / 短信码 / UID）只走 stdin，不上命令行 —— 远端进程列表也看不到。
+_ACCOUNT_TIMEOUT = 90
+_acct_cache: Dict[str, tuple] = {}          # machine → (ts, data)；列表 30s 内复用
+_ACCOUNT_CACHE_TTL = 30
+_sms_last: Dict[str, int] = {}              # machine|phone → ts；60s 冷却防连点
+
+
+def build_account_argv(m: Dict[str, Any], action: str, platform: str = "") -> List[str]:
+    """多账号命令 argv。action 与 platform 都来自固定枚举，用户输入绝不进 shell。"""
+    if action not in ACCOUNT_ACTIONS:
+        raise ValueError("account action not allowed: %s" % action)
+    if action == "accounts":
+        if platform and platform not in ACCOUNT_PLATFORMS:
+            raise ValueError("bad platform")
+    elif platform not in ACCOUNT_PLATFORMS:
+        raise ValueError("bad platform")
+    remote = "python %s %s" % (BRIDGE, action)
+    if platform:
+        remote += " --platform " + platform
+    if action != "accounts":
+        remote += " --stdin"
+    return _wrap_remote(m, remote)
+
+
+def _log_account_run(m: Dict[str, Any], action: str, res: Dict[str, Any]) -> None:
+    """账号操作也入流水（审计）；payload 只含脱敏数据，手机号/验证码绝不落库。"""
+    rid = uuid.uuid4().hex[:12]
+    try:
+        _ensure_tables()
+        db.execute("INSERT INTO checkin_runs(id,machine,cmd,mode,state,ok,payload,error,ts) "
+                   "VALUES(?,?,?,?,?,?,?,?,?)",
+                   (rid, m["name"], action, "account", res["state"], 1 if res["ok"] else 0,
+                    json.dumps({"data": res.get("data") or {}, "reason": res.get("reason")},
+                               ensure_ascii=False)[:8000],
+                    ("[%s] %s" % (res.get("reason"), res.get("error") or ""))[:500],
+                    int(time.time())))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def run_account(m: Dict[str, Any], action: str, platform: str = "",
+                payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """执行一次账号操作，归一信封（ok/state/reason/error/data）。"""
+    argv = build_account_argv(m, action, platform)
+    timeout = _RELAY_CONNECT_TIMEOUT + _ACCOUNT_TIMEOUT if m.get("channel") == "relay" \
+        else _ACCOUNT_TIMEOUT
+    control = _ping_control_plane(m) if m.get("channel") in ("tailcat", "relay") else None
+    body = json.dumps(payload or {}, ensure_ascii=False)
+    with _run_lock:                      # 单连接争用：与签到执行共用一把锁
+        try:
+            p = subprocess.run(argv, input=body, capture_output=True, text=True,
+                               timeout=timeout, shell=False)
+        except subprocess.TimeoutExpired as e:
+            raw = e.stderr or ""
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", "replace")
+            res = {"ok": False, "state": "offline", "reason": "timeout",
+                   "error": "账号操作超时 %ds" % timeout, "stderr": str(raw)[-300:]}
+        except OSError as e:
+            res = {"ok": False, "state": "offline", "reason": "spawn-error",
+                   "error": "spawn: %s" % e}
+        else:
+            err = (p.stderr or "").strip()[-400:]
+            if p.returncode != 0 and BEGIN not in (p.stdout or ""):
+                reason, human = _classify_failure(p.returncode, p.stderr, p.stdout, control)
+                res = {"ok": False, "state": "offline", "reason": reason,
+                       "error": human, "stderr": err}
+            else:
+                res = parse_bridge(p.stdout or "")
+                if err:
+                    res["stderr"] = err
+    res["control"] = control
+    res.setdefault("reason", "ok" if res["ok"] else "unknown")
+    _log_account_run(m, action, res)
+    return {**res, "machine": m["name"], "action": action, "platform": platform,
+            "ts": int(time.time())}
 
 
 def build_probe_argv(m: Dict[str, Any], token: str = "") -> List[str]:
@@ -522,6 +609,123 @@ def api_machine_disable(name: str):
     _ensure_tables()
     db.execute("UPDATE checkin_machines SET enabled=0 WHERE name=?", (name,))
     return {"ok": True, "name": name, "enabled": False}
+
+
+# ── 多账号端点 ────────────────────────────────────────────────────────────
+_PHONE_RE = re.compile(r"^1[3-9]\d{9}$")
+_SMS_RE = re.compile(r"^\d{4,8}$")
+_UID_RE = re.compile(r"^[0-9A-Za-z_.@-]{1,128}$")
+
+
+def _account_machine(name: str) -> Dict[str, Any]:
+    m = _by_name(name)
+    if not m:
+        raise HTTPException(404, "machine not registered: %s" % name)
+    if not m["enabled"]:
+        raise HTTPException(409, "machine disabled: %s" % name)
+    return m
+
+
+def _platform(v: str) -> str:
+    if v not in ACCOUNT_PLATFORMS:
+        raise HTTPException(400, "platform must be one of %s" % (list(ACCOUNT_PLATFORMS),))
+    return v
+
+
+@router.get("/api/checkin/accounts")
+def api_accounts(name: str, platform: str = "", refresh: int = 0):
+    """账号清单（脱敏）。列表要起一次远程进程，30s 内复用缓存；refresh=1 强刷。"""
+    m = _account_machine(name)
+    if platform:
+        _platform(platform)
+    now = int(time.time())
+    hit = _acct_cache.get(name)
+    if not refresh and hit and now - hit[0] < _ACCOUNT_CACHE_TTL:
+        return {**hit[1], "cached": True, "age": now - hit[0]}
+    res = run_account(m, "accounts", platform)
+    if res.get("ok"):
+        _acct_cache[name] = (now, res)
+    return {**res, "cached": False}
+
+
+class AccountSendIn(BaseModel):
+    name: str = Field(..., max_length=64)
+    platform: str = Field("workbuddy")
+    phone: str = Field(..., max_length=20)
+
+
+@router.post("/api/checkin/accounts/send-code")
+def api_account_send(body: AccountSendIn):
+    m = _account_machine(body.name)
+    platform = _platform(body.platform)
+    phone = body.phone.strip()
+    if not _PHONE_RE.match(phone):
+        raise HTTPException(400, "手机号格式不对（11 位大陆手机号）")
+    key = "%s|%s" % (body.name, phone)
+    now = int(time.time())
+    last = _sms_last.get(key) or 0
+    if now - last < 60:
+        raise HTTPException(429, "验证码刚发过，请 %d 秒后再试" % (60 - (now - last)))
+    res = run_account(m, "account-send", platform, {"phone": phone})
+    if res.get("ok"):
+        _sms_last[key] = now
+    return res
+
+
+class AccountAddIn(BaseModel):
+    name: str = Field(..., max_length=64)
+    platform: str = Field("workbuddy")
+    phone: str = Field(..., max_length=20)
+    code: str = Field(..., max_length=12)
+
+
+@router.post("/api/checkin/accounts/add")
+def api_account_add(body: AccountAddIn):
+    m = _account_machine(body.name)
+    platform = _platform(body.platform)
+    phone, code = body.phone.strip(), body.code.strip()
+    if not _PHONE_RE.match(phone):
+        raise HTTPException(400, "手机号格式不对（11 位大陆手机号）")
+    if not _SMS_RE.match(code):
+        raise HTTPException(400, "验证码格式不对（4~8 位数字）")
+    res = run_account(m, "account-add", platform, {"phone": phone, "code": code})
+    if res.get("ok"):
+        _acct_cache.pop(body.name, None)
+    return res
+
+
+class AccountImportIn(BaseModel):
+    name: str = Field(..., max_length=64)
+    platform: str = Field("traework")
+
+
+@router.post("/api/checkin/accounts/import")
+def api_account_import(body: AccountImportIn):
+    m = _account_machine(body.name)
+    platform = _platform(body.platform)
+    res = run_account(m, "account-import", platform)
+    if res.get("ok"):
+        _acct_cache.pop(body.name, None)
+    return res
+
+
+class AccountRemoveIn(BaseModel):
+    name: str = Field(..., max_length=64)
+    platform: str = Field("workbuddy")
+    uid: str = Field(..., max_length=128)
+
+
+@router.post("/api/checkin/accounts/remove")
+def api_account_remove(body: AccountRemoveIn):
+    m = _account_machine(body.name)
+    platform = _platform(body.platform)
+    uid = body.uid.strip()
+    if not _UID_RE.match(uid):
+        raise HTTPException(400, "bad uid")
+    res = run_account(m, "account-remove", platform, {"uid": uid})
+    if res.get("ok"):
+        _acct_cache.pop(body.name, None)
+    return res
 
 
 class RunIn(BaseModel):

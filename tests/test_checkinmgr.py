@@ -153,6 +153,58 @@ class ProbePath(unittest.TestCase):
             self.assertNotIn("aia_bridge.py", a[-1])
 
 
+class Accounts(unittest.TestCase):
+    """v0.13.204 多账号：命令固定枚举 + 敏感参数只走 stdin，绝不进 argv。"""
+    LAN = {"name": "B", "channel": "lan", "host": "192.168.5.99", "user": "Mac"}
+    RELAY = {"name": "A", "channel": "relay", "target": "WIN-20260130XPI",
+             "user": "Administrator"}
+
+    def test_lan_account_argv_shape(self):
+        a = ck.build_account_argv(self.LAN, "account-add", "workbuddy")
+        self.assertEqual(a[0], "ssh")
+        self.assertIn("Mac@192.168.5.99", a)
+        self.assertTrue(a[-1].endswith("account-add --platform workbuddy --stdin"))
+        # 手机号/验证码不在 argv（走 stdin）
+        blob = " ".join(a)
+        self.assertNotIn("phone", blob)
+        self.assertNotIn("code", blob)
+
+    def test_accounts_list_argv_has_no_stdin(self):
+        a = ck.build_account_argv(self.LAN, "accounts", "traework")
+        self.assertTrue(a[-1].endswith("accounts --platform traework"))
+        self.assertNotIn("--stdin", a[-1])
+
+    def test_action_and_platform_whitelist(self):
+        with self.assertRaises(ValueError):
+            ck.build_account_argv(self.LAN, "account-add; rm -rf /", "workbuddy")
+        with self.assertRaises(ValueError):
+            ck.build_account_argv(self.LAN, "account-add", "dumate")
+        with self.assertRaises(ValueError):
+            ck.build_account_argv(self.LAN, "accounts", "workbuddy; id")
+
+    def test_relay_wraps_account_command(self):
+        import base64
+        a = ck.build_account_argv(self.RELAY, "account-send", "workbuddy")
+        b64 = next(x.split()[-1] for x in a if "EncodedCommand" in x)
+        inner = base64.b64decode(b64).decode("utf-16-le")
+        self.assertIn("account-send", inner)
+        self.assertIn("--stdin", inner)
+
+    def test_phone_sms_uid_validators(self):
+        for ok in ("13800138000", "19912345678"):
+            self.assertTrue(ck._PHONE_RE.match(ok))
+        for bad in ("1234", "1380013800", "138001380001", "abc", "13800138000; id"):
+            self.assertFalse(ck._PHONE_RE.match(bad))
+        for ok in ("1234", "123456", "12345678"):
+            self.assertTrue(ck._SMS_RE.match(ok))
+        for bad in ("", "12", "123456789", "12ab"):
+            self.assertFalse(ck._SMS_RE.match(bad))
+        for ok in ("abcdEF12", "u_1.a-b", "1234567890"):
+            self.assertTrue(ck._UID_RE.match(ok))
+        for bad in ("../etc/passwd", "a/b", "a b", "a;b", ""):
+            self.assertFalse(ck._UID_RE.match(bad))
+
+
 class RelayChannel(unittest.TestCase):
     """v0.13.203：A 机走「经 B 跳板」通道 —— NAS→A 的 DERP 数据面不通而 B→A 实测通。"""
     RELAY = {"name": "A", "channel": "relay", "target": "WIN-20260130XPI",

@@ -1,3 +1,28 @@
+## v0.13.204 — 积分签到多账号：账号管理搬进 hub（WorkBuddy 短信 / TraeWork 导入）（2026-11-16）
+
+> 用户反馈：「积分签到 多用户签到功能还是缺失 只能签到当前登录的账号」。
+
+- **根因（不是签到引擎缺能力）**：上游 AIAutomator 的 WorkBuddy / TraeWork 早已支持
+  `auths/` 逐账号展开，但**凭据库为空时回退桌面单账号**；而添加账号此前只有 Windows
+  CLI（`wb_accounts.py add` 要收短信 / `trae_accounts.py add` 要桌面端），hub 侧没有
+  任何入口 ⇒ 用户能看到的唯一行为就是「只签当前登录的账号」。A/B 两机实测
+  `multi_account.effective=true` 但 `accounts=0`，与报障完全吻合。
+- **hub 侧新增**：积分签到页每台机器增加「多账号」面板 —— 账号列表（脱敏 UID / 昵称 /
+  剩余天数 / 失效态）、WorkBuddy「手机号 + 短信验证码」添加、TraeWork「导入本机登录态」、
+  删除账号；凭据库为空时明确告警，DuMate / LobsterAI / MiniMax 写明上游不支持多账号。
+- **bridge 侧新增**：`accounts` / `account-send` / `account-add` / `account-import` /
+  `account-remove` 五个子命令，输出仍走 sentinel ASCII JSON；**手机号、短信码、UID
+  只走 stdin（`--stdin`）**，不进远端进程命令行；回传仅脱敏 UID，不含任何 token。
+- **端点与鉴权**：`GET /api/checkin/accounts`（30s 缓存，避免每次进页起隧道）+
+  4 条写路由（send-code / add / import / remove）全部登记 `hub.ops.write` 与副作用集；
+  手机号/验证码/UID 三重格式校验，发码 60s 冷却。
+- **部署与实测**：新包（95,208 B）经 LAN 落 B 机；A 机经 B 跳板 scp → `aia_unpack.py`
+  解包 → 两侧 `accounts` 均 `ok=true`、`accounts=0` 如实回传；relay 下 stdin 传递
+  已用 `account-remove --stdin` 负向实测（错误是「账号不存在」而非「uid 为空」）。
+- **L0**：4250 例 0 失败 0 跳过；新增 `Accounts` 5 例（argv 形状 / 枚举白名单 /
+  relay 内层 / 三个校验器 / 敏感参数不在 argv）。
+- **边界**：多账号真正生效仍需用户在页面里逐个添加账号（短信码须本人接收）；
+  hub 新端点要生产重启后才可用。
 ## v0.13.203 — 积分签到 A 机改走「经 B 跳板」通道：DERP 数据面实测绕行（2026-11-14）
 
 > 用户反馈：「A 机还是不通 探测失败 **实际上 A 机是正常连接上线了的**」。用户判断正确，

@@ -128,8 +128,15 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.203"
+VERSION = "0.13.204"
 
+# v0.13.204（2026-11-16）：积分签到多账号 —— 用户报「只能签到当前登录的账号」的正面修复。
+#   根因不是签到引擎不支持：上游 WorkBuddy/TraeWork 早已支持 auths/ 逐账号展开，但凭据库为
+#   空时会回退桌面单账号，而此前只有 Windows CLI 能添加账号 ⇒ hub 侧没有入口，用户看到的就是
+#   「只能签当前登录的账号」。本版把账号列表 / 短信添加 / 导入本机登录态 / 删除搬进积分签到
+#   页（WorkBuddy 手机号+短信码；TraeWork 导入本机登录态），凭据库为空时明确告警；敏感参数
+#   （手机号、短信码、UID）走 bridge stdin，不进远端进程命令行，bridge 只回传脱敏 UID。
+#   关键词锚：多账号 / auths/ / --stdin / 凭据库。
 # v0.13.203（2026-11-14）：积分签到 A 机改走「经 B 跳板」relay 通道。
 #   根因终局（用户判断正确：A 机确实在线）：token 未过期（提取口径纠正后 tsv==最新上报）、
 #   A 机 serve/sshd 正常（B→A tailcat 数据面 21s 实测通），唯独 NAS→A 的 DERP 拨号

@@ -3235,7 +3235,7 @@
                         </div>
                     </div>
                     <div class="sp-bd" style="padding-top:0"><div class="hint" id="ckHint">进页自动读一次机器清单；触发执行默认 plan（dry，不签到不通知）。</div></div>
-                    <div class="sp-note">机器清单只读投影 tailcat <code>connect-targets.tsv</code>；登录态/凭据只在各 Windows 机本地，hub 不回传不落库。远程执行串行（tailcat 单连接）。A/B 机各自保留 Windows 计划任务每日 08:00 自主签到，本页只做查看 + 手动补签。</div>
+                    <div class="sp-note">机器清单只读投影 tailcat <code>connect-targets.tsv</code>；登录态/凭据只在各 Windows 机本地，hub 不回传不落库（多账号面板也只回传脱敏账号名）。远程执行串行（tailcat 单连接）。A/B 机各自保留 Windows 计划任务每日 08:00 自主签到，本页做查看、手动补签与多账号管理（WorkBuddy 短信添加 / TraeWork 导入本机登录态）。</div>
                 </div>
                 <div class="sp-card">
                     <div class="sp-hd">
@@ -3705,7 +3705,7 @@
           + '符号阶梯=' + ['mdInline', 'openOverlay', 'renderHomeStats', 'passEye', 'logQDebounced', 'logPageGo', 'settingsDelegates',
                           'termToast', 'termWriteReplay', 'termFindBind', 'termFontStep', 'startMemoryEdit', 'memQDebounced',
                           'skillQDebounced', 'renderSkillInvocations', 'kbQDebounced', 'telRangeSet', 'dagZoom', 'navItemHtml', 'histHtml', 'navRow',
-                          'renderNav', 'navAccKeydown', 'initSidebar', 'lpQDebounced', 'lpClearFilter', 'ghQDebounced', 'ghClearFilter', 'termTouchBind', 'bbRender']
+                          'renderNav', 'navAccKeydown', 'initSidebar', 'lpQDebounced', 'lpClearFilter', 'ghQDebounced', 'ghClearFilter', 'termTouchBind', 'bbRender', 'ckMachineCard']
               .map(function (k) { return k + ':' + (typeof window[k] === 'function' ? 1 : 0); }).join(' ') + '\n'
           + (L.length ? '异常清单(前8):\n' + L.slice(0, 8).join('\n') : '异常清单: 无');
       }
@@ -3749,7 +3749,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=08afa126';
+      var HUB_SRC = '/static/hub.js?v=bf71b683';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

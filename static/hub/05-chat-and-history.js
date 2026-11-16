@@ -474,7 +474,7 @@ function cmdGo(sel) {
 const NAV_GROUPS = { agents: 'AGENTS', infra: '基础设施', system: '系统', settings: '设置' };
 const NAV_ICONS = { agents: 'hubmark', infra: 'server', system: 'sliders', settings: 'settings' };   // 收起成图标条时仍可辨认（sprite id）
 const NAV_ORDER = ['agents', 'infra', 'system', 'settings'];
-const NAV_SUB_KINDS = [['gateway', '网关'], ['service', '服务'], ['tool', '工具'], ['memory', '记忆'], ['file', '文件管理']];
+const NAV_SUB_KINDS = [['gateway', '网关'], ['service', '服务'], ['tool', '工具'], ['memory', '记忆'], ['file', '文件管理'], ['convert', '文件转换']];
 const SYS_PAGES = [['ports', '端口', 'share'], ['telemetry', '遥测', 'activity'], ['memory', '记忆中心', 'database'],
                    ['skills', '技能中心', 'zap'], ['kb', '知识库', 'book'],
                    ['mcp', 'MCP服务器', 'wrench'], ['jobs', '定时', 'clock'], ['tasks', '协同', 'flow'],

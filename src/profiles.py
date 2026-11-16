@@ -737,6 +737,20 @@ PROFILES: List[dict] = [
      "panel": "http://127.0.0.1:8082",
      "desc": "filebrowser v2.63.23 只读文件浏览 :8082（noauth 无登录页，入口经 hub 桥"
              "统一 hub 登录；根=/fs/1000/ftp/技术文档，写权限已削；常驻 service）"},
+
+    # 2026-11-17 用户裁定 B：Filee 只有桌面 GUI + CLI、无 HTTP 端口，故自建本地转换
+    # Web 服务（scripts/fileconv_web.py，只绑 127.0.0.1:8085、noauth），入口全部经
+    # hub 桥把门（未登录 302 到 :3102/?next=…），全站只一套登录。
+    # 不设 panel_auth/bridge_secret ⇒ embed_proxy_targets() 自动建桥目标、entries_for
+    # 同出 open+embed。kind=convert 由前端 NAV_SUB_KINDS 的「文件转换」子分组收。
+    # 常驻 service（非 agent，不受「agent 不长驻」军规）：面板按钮带 probe_port，
+    # 停了按钮会消失，故 fileconv-web.service 为 enable + Restart=always 常驻。
+    {"id": "fileconv", "name": "文件转换", "kind": "convert",
+     "detect": {"systemd": ["fileconv-web"], "proc": [r"fileconv_web\.py"]},
+     "cli": None, "port": 8085, "ui": None,
+     "panel": "http://127.0.0.1:8085",
+     "desc": "Filee v2.5.0（MIT）本地文件转换 :8085：上传→filee convert→下载；"
+             "noauth 无登录页，入口经 hub 桥统一 hub 登录；270 格式离线转换，常驻 service"},
 ]
 
 # 系统 Shell 终端卡（①"使用原生终端"；env 可关）

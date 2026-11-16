@@ -136,3 +136,11 @@ Cloudflare Tunnel 发布、Skill 共享库、L1 自动提取（Hook 采集→LLM
    - 一句话：**杀自己的 Agent 可以，杀别人的服务不行。**
 2. telemetry/hook 带鉴权选项——上游零鉴权的补课
 3. 凭据仅在 .env(0600) 与 jcode env 文件，不引入机器名派生加密反模式
+
+## 外部项目引入记录
+
+- **KnifeLemon/Filee v2.5.0**（MIT，https://github.com/KnifeLemon/Filee ，2026-11-17 引入）
+  - 来源包 `Filee-2.5.0-linux-x64.tar.gz`，`sha256=ada7ee9cbb00452d93e58813543f223e53d362f9f6389ab83ad938d2a5264900`（上游 `SHA256SUMS.txt` 校验通过）。
+  - 落位 `/vol1/1000/filee/`（运行时资产，不进 git）；CLI 软链 `~/.local/bin/filee`。
+  - 引入理由：Filee 只有桌面 GUI + CLI、无 HTTP 端口，而 hub 的 panel/embed 入口要求 URL+端口 ⇒ 自建 `scripts/fileconv_web.py` 把 `filee convert` 包成本地转换服务（只绑 127.0.0.1:8085、noauth、走 hub 桥单登录），挂「基础设施 → 文件转换」子菜单。
+  - 许可证：MIT（宽松许可，`LICENSE` 原文在上游仓库）。

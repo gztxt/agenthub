@@ -1,3 +1,14 @@
+## v0.13.206 — 前端瘦身 + 备份/退役服务清理（2026-11-20）
+
+> 用户令：「实际没用的 UI 按实际情况删除」「备份保留最新 2 个」「清理装过但用不了的测试工具/服务」「推 Git」「不能破坏运行」。
+
+- **删三页**：遥测 / 资产 / Botboy —— 21 天 journal 实测调用 0 / 0（仅门面点检）/ 1 次；同步删 `07-asset-panel.js`、`14-botboy.js`、菜单项、`go()` 钩子、首页「遥测」按钮与相关闸门；端口页保留（排障用），移出首页动作区。
+- **删死代码**：设置→模型页 11-17 已删，但 `01-core-boot.js` 仍留 23 个只依赖已不存在 DOM 的函数/常量（500+ 行）；保留终端在用的 `loadSetAgents/modelMetaFromValue/modelConfirmPaid/modelOptionLabel`。侧栏搜索残留（`#navSearch` 已不在模板）一并删除。
+- **菜单对齐**：后端 `MODULE_SYS/MODULE_SET/ICONS/LABELS` 与前端 `SYS_PAGES/SET_PAGES` 逐项一致（补 `checkin` / `settings-restart`，去 `telemetry/assets/botboy/settings-model/settings-token`）；`menu_items` 已删项置 `enabled=0`。
+- **清理**：`hub.db` 僵尸库归档（16 表全 0 行）；9 个退役 `ccr*.service` 单元归档、6 个孤儿 socat/代理进程停止（3456/3458/13458 释放，magpie :3425 不动）；坏 MCP 条目 `hub-demo`（指向不存在的旧路径）删除；`work/` 测试产物 6.9 GiB → 28 KiB；备份按家族保留最新 2 份（删 125 个旧件）。
+- **闸门**：`node --check` + `test_hubjs_split/test_tdz_order/test_ls_guard/test_dom_structure/test_models_billing` 等 179 例全绿；修正 `test_tdz_order` 函数体切片 off-by-one。
+- **已知红（非本次引入，HEAD 基线同样红）**：`test_modelcfg` 6 例（本机已切 magpie，用例仍钉 ccr :3456）、`test_skill_weights` 2 例（fixture 写死 2026-10-20，窗口已滑过）、等共 12F/3E。推前闸门按 `scripts/prepush.sh` 的既定逃生口 `--no-verify` 放行，此处留痕。
+
 ## v0.13.205 — 多账号实测缺陷修复：WorkBuddy 扫码导入 + import 参数 bug（2026-11-16）
 
 > 用户试运行后反馈：「导入已登录账号失败」「workbuddy 是微信扫码 不是手机号」「手机号和扫码都要」。

@@ -51,9 +51,8 @@ AUTO_CLOSE_ON = {
 PAGE_IDS = [
     "page-classroom", "page-chat", "page-localprojects", "page-github",
     "page-resources", "page-memory", "page-tasks", "page-jobs", "page-mcp",
-    "page-ports", "page-telemetry", "page-skills", "page-kb", "page-assets",
-    "page-settings-model", "page-settings-github", "page-settings-token",
-    "page-settings-logs",
+    "page-ports", "page-skills", "page-kb",
+    "page-settings-github", "page-settings-logs",
 ]
 
 

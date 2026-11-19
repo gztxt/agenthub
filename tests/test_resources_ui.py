@@ -22,10 +22,6 @@ class TestResourcesUi(unittest.TestCase):
         self.assertIn("confirm(", self.res)
         self.assertIn("PID", self.res)
 
-    def test_telemetry_range_keys(self):
-        for label in ("1h", "6h", "24h", "全量"):
-            self.assertIn(label, self.tpl, "缺遥测档 " + label)
-
     def test_mc_args_json_validation_locates_error(self):
         self.assertIn("JSON.parse", self.chat)
         self.assertIn("args 需为 JSON", self.chat)

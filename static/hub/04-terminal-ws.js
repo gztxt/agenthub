@@ -2946,46 +2946,6 @@ function renderPorts() {
     '<td>' + (r.agent ? '<span class="tag agent">' + escapeHtml(r.agent) + '</span>' : '') + '</td></tr>').join('');
 }
 
-/* ── 遥测 ─────────────────────────────────────────── */
-
-/* Task9 遥测范围档：JS 变量（不落盘），默认 24h；档位只改事件条数上限 */
-var telRange = '24h';
-function telRangeSet(r) {
-  telRange = r;
-  var hint = $('telRangeHint');
-  if (hint) hint.textContent = 'Token 聚合 · 范围 ' + r;
-  loadTelemetry();
-}
-async function loadTelemetry() {
-  $('curlExample').textContent =
-    '# Claude/pi 等 Agent 会话结束后上报用量（同 session 重报=覆盖）\n' +
-    "curl -X POST http://" + location.hostname + ":3102/telemetry/events/claude \\\n" +
-    "  -H 'Content-Type: application/json' \\\n" +
-    "  -d '{\"session_id\":\"abc123\",\"event\":\"session_usage\",\"cwd\":\"/path/proj\",\n" +
-    "       \"usage\":{\"input_tokens\":1088,\"output_tokens\":256,\"cached_tokens\":1024},\n" +
-    "       \"usage_scope\":\"session\"}'";
-  try {
-    const u = await api('/telemetry/usage/summary');
-    const rows = Object.entries(u.by_source || {});
-    $('usageTable').innerHTML = rows.length ?
-      '<table><thead><tr><th>来源</th><th>会话</th><th>输入</th><th>输出</th><th>缓存命中</th></tr></thead><tbody>' +
-      rows.map(([k, v]) => '<tr><td><b>' + k + '</b></td><td>' + v.sessions + '</td><td>' + v.input_tokens + '</td><td>' + v.output_tokens + '</td><td>' + v.cached_tokens + '</td></tr>').join('') +
-      '</tbody></table>' : '<div class="hint">暂无 session_usage 数据</div>';
-    const prof = u.profile || [];
-    $('profTable').innerHTML = prof.length ?
-      '<table><thead><tr><th>来源</th><th>对象</th><th>次数</th><th>成功率</th><th>均耗时</th><th>峰值</th></tr></thead><tbody>' +
-      prof.map(p => '<tr><td>' + p.source + '</td><td><b>' + escapeHtml(p.subject) + '</b></td><td>' + p.calls +
-        '</td><td>' + (p.success_rate >= 99 ? ico('check-circle', 'xs') : p.success_rate >= 80 ? ico('circle', 'xs') : ico('alert', 'xs')) + ' ' + p.success_rate + '%</td>' +
-        '<td>' + p.avg_ms + 'ms</td><td>' + (p.max_ms || '-') + 'ms</td></tr>').join('') + '</tbody></table>'
-      : '<div class="hint">暂无画像数据（对话/指挥官/DAG/定时执行后自动生成）</div>';
-    const telLimit = ({ '1h': 20, '6h': 50, '24h': 100, 'all': 200 })[telRange] || 100;
-    const e = await api('/telemetry/events?limit=' + telLimit);
-    $('eventTable').innerHTML = '<table><thead><tr><th>时间</th><th>来源</th><th>会话</th><th>事件</th></tr></thead><tbody>' +
-      (e.events || []).map(x => '<tr><td>' + (x.created_at || '').slice(5, 16).replace('T', ' ') + '</td><td>' + escapeHtml(x.source) + '</td><td style="font-family:var(--font-mono);font-size:var(--fs-sm)">' + escapeHtml((x.session_id || '').slice(0, 14)) + '</td><td>' + escapeHtml(x.event) + '</td></tr>').join('') +
-      '</tbody></table>';
-  } catch (err) { toast(err.message, 'err'); }
-}
-
 /* ── S2 自动扫描 ──────────────────────────────────── */
 
 async function runScan() {

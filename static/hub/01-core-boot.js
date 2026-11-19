@@ -231,10 +231,9 @@ let AGENTS = [], PORTS = [], portsLoaded = false, skillsLoaded = false, kbLoaded
 var lpLoaded = false;
 /* v0.13.31 GitHub 页同型：声明同样只在 01 一处（理由见上）。 */
 var ghLoaded = false;
-/* v0.13.43 设置三页懒加载标志：go() 在 06 分片顶层就会跑（可能早于 01 里
-   settingsModelsLoad 之外的一些初始化），故同样用 var 提升规避 TDZ —— 与
-   lpLoaded / ghLoaded 同一条纪律；真值在 go() 里首次进页时才置。 */
-var setModelPageLoaded = false;
+/* v0.13.43 设置页懒加载标志：go() 在 06 分片顶层就会跑（可能早于 01 里
+   其它初始化），故同样用 var 提升规避 TDZ —— 与 lpLoaded / ghLoaded 同一条
+   纪律；真值在 go() 里首次进页时才置。2026-11-17 模型页删除后去掉 setModelPageLoaded。 */
 var setGithubPageLoaded = false;
 var setLogsPageLoaded = false;   // v0.13.46：日志页（进页才拉，日志量级大不能每次导航都拉）
 /* 2026-10-25：setMemPageLoaded 随「设置 · 记忆存储」页一并删除（并入记忆中心折叠块）。 */
@@ -700,18 +699,18 @@ function go(page) {
   if (page === 'kb' && !kbLoaded) { kbLoaded = true; loadKbStatus(); kbBrowse(); }
   if (page === 'localprojects' && !lpLoaded) { lpLoaded = true; loadLocalProjects(); }   // v0.13.30 本机项目页（09 分片）
   if (page === 'github' && !ghLoaded) { ghLoaded = true; loadGithubRepos(); }   // v0.13.31 GitHub 项目页（10 分片）
-  // v0.13.43 设置三页：与系统页同口径，进页才拉（模型清单 / GitHub 现值）
-  if (page === 'settings-model' && !setModelPageLoaded) { setModelPageLoaded = true; settingsModelsLoad(); }
+  // v0.13.43 设置页：与系统页同口径，进页才拉（GitHub 现值）
   if (page === 'settings-github' && !setGithubPageLoaded) { setGithubPageLoaded = true; settingsGithubLoad(); }
   if (page === 'settings-logs' && !setLogsPageLoaded) { setLogsPageLoaded = true; settingsLogsLoad(); }
   /* 2026-11-07 用户授权页：每次进页都重读（用户/token 可能随时被其他 admin 改） */
   if (page === 'settings-users') { usersPanelLoad(); }
   /* 2026-11-07 模型计量页：每次进页都重读（计量数据随调用实时增长） */
   if (page === 'settings-modelcalls') { mclPanelLoad(); }
+  /* 2026-11-17 重启页：每次进页都重读状态（版本/活会话/是否待重启） */
+  if (page === 'settings-restart') { settingsRestartStatus(); }
   /* 2026-10-25：settings-memory 页已并入「记忆中心」（#page-memory 的本机旧层折叠块），
      不再有独立的进页钩子 —— 折叠块展开时才由 mxLegacyToggle() 拉 L1/L2/L3。 */
   if (page === 'ports' && !portsLoaded) { portsLoaded = true; loadPorts(); }
-  if (page === 'telemetry') loadTelemetry();
   if (page === 'resources' && !resLoaded) { resLoaded = true; loadResources(); }
   // v0.13.47：原运行日志页的进页钩子随页面一并删除（内容并入设置→日志）
   if (page === 'chat') renderChatSide();
@@ -719,9 +718,6 @@ function go(page) {
   if (page === 'tasks') enterTasksPage();
   if (page === 'jobs') { fillAgentSelect($('jobAgent'), false); loadJobs(); }
   if (page === 'mcp') { loadMcp(); loadAcl(); }
-  if (page === 'assets') loadAssets();   // P4 资产面板（只读门面聚合，07-asset-panel.js）
-  // v0.13.170：Botboy 页每次进页都重读（state.json 是活文件），由 14-botboy.js 负责渲染
-  if (page === 'botboy') loadBotboy(false);
   // v0.13.201：积分签到页每次进页重读（机器清单/执行流水是活数据），由 17-checkin.js 渲染
   if (page === 'checkin') loadCheckin(false);
 }
@@ -844,6 +840,10 @@ async function loadAgents() {
        口径未变：异常仍由 countBadAgents 单点判定（test_health_verdict_single_source 钉住）。 */
     const errs = countBadAgents(AGENTS);
     $('hErrors').innerHTML = errs ? '<span class="hdot r" title="启动异常的 Agent（vitals 实测结论）">异常 ' + errs + '</span>' : '';
+    /* 2026-11-17：设置→模型页删除后，SET_AGENTS 不再有进页钩子填充。
+       终端模型选择器（04-terminal-ws.js:149/186）读它的 value_prefix（opencode 的 ccr/ 前缀），
+       故数据加载上移到启动链路，与页面解耦；空值不影响其它 agent（前缀默认 ''）。 */
+    loadSetAgents();
   } catch (e) {
     // 服务重启窗口容忍瞬时失败；连续 ≥2 次才报（避免误报）。
     // 2026-10-08：原先这里的 setHealthDot('r', …) 随健康灯一起摘掉了——
@@ -961,6 +961,23 @@ async function restartHub(ev) {
   }
   if (back) { toast('agenthub 已重启'); setTimeout(() => location.reload(), 600); }
   else { toast('重启后 90s 内未恢复，请检查服务', 'err'); btn.disabled = false; btn.textContent = old; }
+}
+
+/* 设置→重启页：读 /health 显示当前版本/活会话/代码新鲜度。
+   与顶栏「需重启」同源数据，失败不抛错（页内说明已覆盖含义）。 */
+async function settingsRestartStatus() {
+  const box = $('rstStatus');
+  if (!box) return;
+  try {
+    const d = await api('/health');
+    const ver = (d && d.version) || '?';
+    const sess = (d && d.term_sessions) || 0;
+    const need = d && (d.needs_restart === true || d.code_stale === true);
+    box.innerHTML = '版本 <b>' + escapeHtml(String(ver)) + '</b> · 活会话 <b>' + sess +
+      '</b> · 代码 <b>' + (need ? '待重启生效' : '已同步') + '</b>';
+  } catch (e) {
+    box.textContent = '读不到 /health（服务可能正在重启）';
+  }
 }
 
 /* 模型层情报（rt_state）→ 短标。它只影响副标文案，永远不影响「可用」。 */
@@ -1116,140 +1133,41 @@ async function verifyAgent(id) {
    登录闸门保护，浏览器请求自带 HttpOnly 会话 Cookie，不再收任何口令。 */
 
 
-/* ── 设置 → 模型子菜单（v0.13.41）──────────────────────────────────────
-   交互两步：先选 agent，再选该 agent 要用的 CCR 模型；保存前给 diff 预览，
-   保存直接走登录态（HttpOnly Cookie），不再收口令。
-   三条纪律：
-     ① **不新增浮层**：v0.13.43 起三个子页是 main 里的 section.page（抽屉已拆），
-        切换由左侧手风琴 + go(page) 完成 —— 比"抽屉内切 section"更彻底：压根没有浮层；
-     ② **不用 inline onclick**：一切走三个设置页上的同一委托 settingsDelegates()
-        （inline 会旁路委托，把"导航即清浮层"那类收场逻辑整段跳过）；
-     ③ **档位判定读当前值、不读存档**：进哪个子页由点击决定，不写 localStorage
-        （跨 origin 分叉那条不变量的同款要求）。 */
+/* ── 设置（2026-11-20）──────────────────────────────────────────────
+   设置→模型页已于 2026-11-17 删除；本文件的 SET_AGENTS 只剩一个消费点：
+   终端模型选择器读它的 value_prefix（opencode 用 ccr/ 前缀）。 */
 let SET_AGENTS = [];          // /api/settings/models 的 agents 段
-let SET_AGENT = '';           // 当前选中的 agent（不落盘）
-let SET_MODELS = null;        // /api/models 缓存（60s）
-let SET_DIFF = null;          // 最近一次预览结果（保存时复用同一个 model 值）
-/* 设置页 select 的「上一个合法值」：付费档取消确认时回滚到这里。
-   必须是**渲染后实际选中的值**，不能假设是 agent 的 hub_model —— 清单外补项、
-   前缀形状都会让两者不同（v0.13.86 的教训）。 */
-let SET_MODEL_PREV = '';
-let SET_DRIFT = [];           // 配置文件漂移体检（v0.13.85：此前后端算了但前端从不显示）
-/* v0.13.85：写入模式文案的单一真相源，与后端 WRITE_MODE 一一对应。
-   ccr   = 该字段直接吃 CCR 的 provider/model ID
-   native= 该字段只认本家原生模型名（qoder 实测拒绝 CCR ID）
-   argv  = 无默认配置文件可落，只能靠拉起终端时注入 --model */
-const SET_WRITE_MODE = {
-  ccr: { label: 'CCR 模型 ID', hint: '此 agent 的模型字段直接接受 CCR 的 provider/model ID。' },
-  native: { label: '本家原生模型名', hint: '此 agent 的模型字段只认本家原生名（如 Qwen3.8-Max），' +
-    'CCR 模型不写进该字段，只经终端 --model 注入生效。' },
-  argv: { label: '仅终端注入', hint: '此 agent 无默认模型配置文件，只有 hub 拉起的终端会带 --model。' },
-  none: { label: '不支持设置', hint: '该 agent 不在模型设置范围内。' },
-};
-/* 设置页 id —— 委托与 go() 懒加载共用这一份清单，别再各处写字面量 */
-const SET_PAGE_IDS = ['page-settings-model', 'page-settings-github', 'page-settings-token',
-                      'page-settings-logs', 'page-settings-users', 'page-settings-modelcalls'];   // 2026-11-07：用户授权页 + 模型计量页
 
-async function settingsModelsLoad(force) {
-  const box = $('setAgentList');
-  if (!box) return;
-  if (!SET_AGENTS.length || force) {
+/* 设置页 id —— 委托与 go() 懒加载共用这一份清单，别再各处写字面量 */
+const SET_PAGE_IDS = ['page-settings-github',
+                      'page-settings-logs', 'page-settings-users', 'page-settings-modelcalls', 'page-settings-restart'];   // 重启页手动触发 /api/system/restart
+
+/* 2026-11-17：设置→模型页删除后，SET_AGENTS 的加载从页面解耦到启动链路。
+   终端模型选择器读它的 value_prefix（opencode 用 ccr/ 前缀），这是唯一仍在的消费点。 */
+let setAgentsLoading = null;
+async function loadSetAgents(force) {
+  if (setAgentsLoading && !force) return setAgentsLoading;
+  setAgentsLoading = (async () => {
     try {
       const d = await api('/api/settings/models');
       SET_AGENTS = d.agents || [];
-      SET_DRIFT = d.drift || [];
-      settingsRouterRender(d.ccr || {});
-    } catch (e) {
-      box.innerHTML = '<span class="hint">agent 清单加载失败：' + escapeHtml(e.message) + '</span>';
-      return;
-    }
-  }
-  const drifted = new Set(SET_DRIFT.map(x => x.id));
-  box.innerHTML = SET_AGENTS.map(a => {
-    const off = !a.writable;
-    const why = a.reason || a.note || '不可设置';
-    /* tip 用成分行拼装：provider 只在它真是"provider"时才说（v0.13.85 前 grok 的
-       provider 字段串位显示成模型 ID，tip 就变成了 "provider alibaba/xxx" 这种误导）。 */
-    const lines = [];
-    if (off) {
-      lines.push(why);
-    } else {
-      const wm = SET_WRITE_MODE[a.write_mode || 'argv'] || SET_WRITE_MODE.argv;
-      lines.push((a.name || a.id) + ' · 字段认：' + wm.label);
-      lines.push('文件现值：' + (a.current || '（未读到）') +
-        (a.provider ? '（provider ' + a.provider + '）' : ''));
-      lines.push('hub 侧：' + (a.hub_model || '（未设置）'));
-      /* v0.13.164：把「会失效的风险」提前到列表里 —— 用户点进去之前就该知道
-         这个设置在这个 agent 上到底能不能生效。 */
-      const eff = a.effective || {};
-      if ((a.argv_effective || []).length) lines.push('实际注入：' + a.argv_effective.join(' '));
-      if (eff.catalog && eff.catalog.checked && eff.catalog.ok === false) {
-        lines.push('⚠ 该模型已不在 CCR 在册清单（' + eff.catalog.size + ' 条）');
-      }
-      (eff.warnings || []).forEach(w => lines.push('⚠ ' + w));
-      if (a.files && a.files.length) lines.push(a.files.join('\n'));
-      if (drifted.has(a.id)) {
-        const d = SET_DRIFT.find(x => x.id === a.id) || {};
-        lines.push('⚠ 检测到配置漂移：' + JSON.stringify(d.owned || {}));
-      }
-    }
-    return '<button class="btn sm' + (a.id === SET_AGENT ? ' on' : '') +
-      (drifted.has(a.id) ? ' drift' : '') + '" type="button"' +
-      ' data-settings-agent="' + escapeHtml(a.id) + '"' +
-      (off ? ' aria-disabled="true"' : '') +
-      ' title="' + escapeHtml(lines.join('\n')) + '">' + escapeHtml(a.name || a.id) +
-      (drifted.has(a.id) ? ' ⚠' : '') + '</button>';
-  }).join('') || '<span class="hint">无可用 agent</span>';
-  settingsDriftRender();
+    } catch (e) { /* 终端 value_prefix 取不到时按空串兜底，不阻断启动 */ }
+  })();
+  return setAgentsLoading;
 }
+
+
 
 /* v0.13.85：漂移体检结果必须**在页面上出现**。
    此前 /api/settings/models 一直在算 drift（后端 drift_report），前端却一个字都没渲染
-   ⇒ 「CCR 重启把 claude 的 env 改回旧模型」这类问题在界面上完全不可见，
+   ⇒ 「网关/客户端改写 agent 的 env 模型」这类问题在界面上完全不可见，
    与"体检全绿"无从区分。这里把它摆到明面上；只读，不提供写回按钮
    （写回属共享配置写入，走既有的 repair_drift + 用户授权，不在本页扩张）。 */
-function settingsDriftRender() {
-  const box = $('setDriftBox');
-  if (!box) return;
-  if (!SET_DRIFT.length) {
-    box.className = 'hint';
-    box.textContent = '配置漂移体检：' + SET_AGENTS.length + ' 个 agent 的配置文件现值与 hub 侧一致。';
-    return;
-  }
-  box.className = '';
-  box.innerHTML = '<div class="set-drift"><div class="set-diff-hd">⚠ ' + SET_DRIFT.length +
-    ' 个 agent 的配置文件现值与 hub 侧不一致（常见原因：CCR 重启会重写 claude 的 env 三兄弟）</div>' +
-    SET_DRIFT.map(d => '<div class="set-diff-row"><div class="k">' + escapeHtml(d.id) +
-      '（hub 侧 ' + escapeHtml(d.hub_model || '') + '）</div>' +
-      Object.keys(d.owned || {}).map(k => '<div class="v">' + escapeHtml(k) + ' = ' +
-        escapeHtml((d.owned || {})[k]) + '</div>').join('') + '</div>').join('') +
-    '<div class="hint" style="margin-top:6px">只读展示：写回配置属共享配置写入，由后端漂移巡检按 hub 侧现值修复（带时间戳备份）。</div></div>';
-}
 
-function settingsRouterRender(ccr) {
-  const box = $('setCcrRouter');
-  if (!box) return;
-  const r = ccr.router || {};
-  const keys = Object.keys(r);
-  if (!keys.length) { box.textContent = ccr.note || '未读到 CCR 配置'; return; }
-  box.innerHTML = '<div class="set-router">' + keys.map(k =>
-    '<span class="k">' + escapeHtml(k) + '</span><span class="v">' + escapeHtml(r[k]) + '</span>').join('') +
-    '</div><div class="hint" style="margin-top:6px">只读：CCR 属三方互斥保护面，且运行中写 config.json 会被运行态覆盖。</div>';
-}
 
-function settingsPickAgent(id) {
-  const a = SET_AGENTS.find(x => x.id === id);
-  if (!a || !a.writable) return;
-  SET_AGENT = id;
-  SET_DIFF = null;
-  settingsModelsLoad();                       // 重渲染选中态
-  $('setModelStep').style.display = 'block';
-  $('setDiffBox').style.display = 'none';
-  /* v0.13.45：不再在这里把保存按钮置灰 —— 置灰的按钮不派发 click，用户点它
-     得不到任何反馈（日志里连请求都没有），正是第二轮报障的形态。 */
-  settingsAgentMeta(a);
-  settingsModelOptions(a);
-}
+
+
+
 
 /* ── 模型计费标记（判定在后端 `api_models.model_billing`，这里只渲染）──
    为什么要有：CCR 清单里免费与付费混在同一个 vendor 分组里，
@@ -1280,84 +1198,7 @@ function modelConfirmPaid(mid, m, confirmFn) {
   return !!yes;
 }
 
-async function settingsModelOptions(a) {
-  const sel = $('setModelSel');
-  if (!sel) return;
-  const fresh = !SET_MODELS || (Date.now() - (SET_MODELS._ts || 0) > 60000);
-  if (fresh) {
-    sel.innerHTML = '<option value="">模型清单加载中…</option>';
-    try {
-      const d = await api('/api/models');
-      SET_MODELS = { models: d.models || [], groups: d.groups || {}, _ts: Date.now() };
-    } catch (e) {
-      sel.innerHTML = '<option value="">模型清单加载失败</option>';
-      return;
-    }
-  }
-  // 未设 hub 侧时以 agent 现值预选；两项都没有则「默认（网关路由）」= 空值
-  const cur = a.hub_model || a.current || '';
-  /* v0.13.86：**选项值必须是该 agent 字段真正要的形状**。
-     用户的准则是「原生 + 插入，插入要精确」—— 而"精确"从下拉这一层就要成立：
-     后端 CCR 清单给的是裸 ID（alibaba/qwen3.8-max），opencode 的字段收的却是
-     `ccr/<裸 ID>`（官方 Models 页：格式即 provider/model；本机 `opencode models ccr`
-     逐行皆 `ccr/…`）。改前这里直接拿裸 ID 当 value ⇒ 用户点任何一个都必然被 409 拒
-     （报「没有 provider alibaba」，指向也错），而 qoder 那一栏更狠：13 个 CCR ID 全部
-     必然 400。根因不是"没做校验"，是**下拉把不可写的值摆成了可选项**。
-     现在：value_prefix 由后端随接口透出（单一真相源，前端不自己拼前缀）；
-     models 非空的 agent（native 型）改成摆它自己的原生清单，且不再摆 CCR 分组。 */
-  const prefix = a.value_prefix || '';
-  const native = a.models || [];
-  const wm = SET_WRITE_MODE[a.write_mode || 'argv'] || SET_WRITE_MODE.argv;
-  /* v0.13.85：空值这一项改名为「撤销 hub 侧默认（不注入 --model）」。
-     原名「默认（网关路由）」容易被读成"把该 agent 的配置也改成网关路由"，
-     而清空**只**撤销 hub 注入、不动任何配置文件（见后端 preview_clear 的说明）。
-     这个语义差别必须写在选项里，否则用户会以为配置被还原了。 */
-  let html = '<option value="">撤销 hub 侧默认（不再注入 --model）</option>';
-  /* 现值不在清单里（清单外模型 / qoder 那种原生名）时**补一项**：不补的话
-     select 会落回第一项"撤销"，于是"当前值"在界面上被抹掉 —— 用户会以为已经清空了。
-     补进来只是**显示**，不代表该值可写（写入校验仍在后端）。 */
-  let extra = '';
-  const known = new Set(native.concat((SET_MODELS.models || []).map(m => prefix + m.id)));
-  if (cur && !known.has(cur)) {
-    extra = '<optgroup label="当前值（不在可写清单内）">' +
-      '<option value="' + escapeHtml(cur) + '" selected>' + escapeHtml(cur) + '</option></optgroup>';
-  }
-  if (native.length) {
-    /* native 型（qoder）：只摆它认的原生名。摆 CCR 清单等于摆一排必然被拒的选项。 */
-    html += '<optgroup label="' + escapeHtml(wm.label) + '（本家清单）">' +
-      native.map(nm => '<option value="' + escapeHtml(nm) + '"' +
-        (nm === cur ? ' selected' : '') + '>' + escapeHtml(nm) + '</option>').join('') +
-      '</optgroup>';
-  } else {
-    const g = SET_MODELS.groups || {};
-    Object.keys(g).forEach(gk => {
-      html += '<optgroup label="' + escapeHtml(gk) + '">' + g[gk].map(mid => {
-        const m = (SET_MODELS.models || []).find(x => x.id === mid);
-        const val = prefix + mid;                 // ← 精确：值等于该字段要的形状
-        const label = modelOptionLabel(mid, m);   // 前置 [免费]/[付费]，值不变
-        return '<option value="' + escapeHtml(val) + '"' + (val === cur ? ' selected' : '') + '>' +
-          escapeHtml(label) + '</option>';
-      }).join('') + '</optgroup>';
-    });
-    const grouped = new Set(Object.keys(g).flatMap(k => g[k]));
-    const rest = (SET_MODELS.models || []).filter(m => !grouped.has(m.id));
-    if (rest.length) {
-      html += '<optgroup label="其他">' + rest.map(m => {
-        const val = prefix + m.id;
-        return '<option value="' + escapeHtml(val) + '"' + (val === cur ? ' selected' : '') + '>' +
-          escapeHtml(modelOptionLabel(m.id, m)) + '</option>';
-      }).join('') + '</optgroup>';
-    }
-  }
-  /* 顺序：撤销项固定第一（与改前「默认（网关路由）」同位，位置不飘），
-     其后才是「当前值不在清单内」的补项，再是各 provider 分组。
-     ⚠ 补项必须带 selected 才能被选中 —— 位置不决定选中态，属性才决定。 */
-  sel.innerHTML = html + extra;
-  /* 记下渲染后的合法值：用户选到付费档又拒绝确认时，回滚到这里（§4.2 ③
-     「遮罩/浮层单一出口」同理 —— 取消必须真的回到原值，不能停在半选态）。 */
-  SET_MODEL_PREV = sel.value || '';
-  settingsModelHint(a);
-}
+
 
 /* v0.13.86：下拉下方的一行口径说明。存在的理由：write_mode 的三类语义里，
    只有 argv 型（claude 之外那些「无配置文件可落」的）需要提醒"只影响 hub 拉起的会话"；
@@ -1382,49 +1223,9 @@ function modelMetaFromValue(val, a, models) {
   return { id: m ? m.id : mid, m: m || null };
 }
 
-/* 设置页：选到付费档先确认；取消则**真的回到上一个值**（停在下拉里不算取消）。 */
-$('setModelSel')?.addEventListener?.('change', function () {
-  const sel = $('setModelSel');
-  if (!sel) return;
-  const a = SET_AGENTS.find(x => x.id === SET_AGENT) || null;
-  const meta = modelMetaFromValue(sel.value, a, (SET_MODELS || {}).models);
-  if (!meta) { SET_MODEL_PREV = sel.value || ''; settingsModelHint(a); return; }
-  if (!modelConfirmPaid(meta.id, meta.m)) {
-    sel.value = SET_MODEL_PREV;
-    toast('已取消：' + meta.id + ' 按量计费', 'err');
-    return;
-  }
-  SET_MODEL_PREV = sel.value;
-  settingsModelHint(a);
-  /* Task11：选模型后自动预览 diff（保存前必须看到改了啥） */
-  settingsPreviewModel();
-});
 
-function settingsModelHint(a) {
-  const el = $('setModelHint');
-  if (!el) return;
-  if (!a) { el.textContent = ''; return; }
-  const wm = SET_WRITE_MODE[a.write_mode || 'argv'] || SET_WRITE_MODE.argv;
-  const bits = [wm.hint];
-  if (a.value_prefix) {
-    bits.push('选项值按该 agent 要求的形状拼成 ' + a.value_prefix + '<CCR 模型 ID>（官方格式 provider/model）。');
-  }
-  if ((a.models || []).length) {
-    bits.push('原生清单由 hub 内置（以 `qodercli --list-models` 为准），会随版本变化。');
-  }
-  /* 计费档必须实时跟着下拉走：这是「保存后会一直生效」的设置，
-     用户需要在下笔前就看到自己在选免费还是付费。 */
-  const meta = modelMetaFromValue(setSelectedModel(), a, (SET_MODELS || {}).models);
-  let tag = '';
-  if (meta) {
-    tag = modelIsFree(meta.m)
-      ? '<span class="stale-tag" style="color:var(--muted);border-color:var(--border)">免费</span> '
-      : '<span class="stale-tag">付费·按量</span> ';
-  }
-  el.innerHTML = tag + escapeHtml(bits.join(''));
-}
 
-function setSelectedModel() { return $('setModelSel') ? $('setModelSel').value : ''; }
+
 /* password 框显示/隐藏切换（GitHub PAT 等）：原生细节，只改 type 属性，不用新依赖 */
 function passEye(btn, id) {
   const inp = $(id);
@@ -1433,275 +1234,41 @@ function passEye(btn, id) {
   btn.textContent = inp.type === 'password' ? '显示' : '隐藏';
 }
 
-async function settingsPreviewModel() {
-  if (!SET_AGENT) return toast('先选一个 agent', 'err');
-  /* v0.13.85：空值是合法目标（撤销 hub 侧默认），不再 early-return ——
-     原先这里 `if (!model) return toast(...)` 让「撤销」那一项连预览都点不出来。 */
-  const model = setSelectedModel();
-  const box = $('setDiffBox');
-  try {
-    SET_DIFF = await api('/api/settings/model/preview?agent_id=' + encodeURIComponent(SET_AGENT) +
-      '&model=' + encodeURIComponent(model));
-  } catch (e) {
-    SET_DIFF = null; box.style.display = 'none';
-    settingsRenderError('预览失败', e);
-    return toast('预览失败：' + e.message, 'err');
-  }
-  const wm = SET_WRITE_MODE[SET_DIFF.write_mode || 'argv'] || SET_WRITE_MODE.argv;
-  if (SET_DIFF.mode === 'clear') {
-    /* 清空必须把「配置文件不动」写在最显眼处：用户点这一项时最常见的预期是
-       "把 agent 配置也还原成默认"，而实际语义只是"hub 不再注入 --model"。 */
-    box.innerHTML = '<div class="set-diff"><div class="set-diff-hd">将撤销 hub 侧默认模型</div>' +
-      '<div class="set-diff-row"><div class="v">hub 侧：' +
-      escapeHtml(SET_DIFF.hub_model_from || '（未设置）') + ' → （无）</div>' +
-      '<div class="v">' + escapeHtml(SET_DIFF.note || '') + '</div>' +
-      '<div class="v">不写任何配置文件，因此没有备份、也不会有 diff。</div></div></div>';
-    box.style.display = 'block';
-    $('setApplyBtn').disabled = false;
-    return;
-  }
-  const files = SET_DIFF.files || [];
-  box.innerHTML = '<div class="set-diff">' +
-    '<div class="set-diff-hd">将写入 ' + files.length + ' 个文件（保存时自动时间戳备份）' +
-    '｜字段认：' + escapeHtml(wm.label) + '</div>' +
-    files.map(f => '<div class="set-diff-row"><div class="k">' + escapeHtml(f.file) + '</div>' +
-      (f.changes || []).map(c => '<div class="v">' + escapeHtml(c.where) + '：' +
-        escapeHtml(c.from || '（空）') + ' → ' + escapeHtml(c.to) + '</div>').join('') +
-      /* v0.13.44：预览就把「这个文件现在写不动」摆在明面上（chattr +i / 只读挂载），
-         别等保存时才用一句 4 秒就消失的 toast 告诉用户。 */
-      (f.writable === false ? '<div class="v">注意：该文件当前不可写，直接保存会被拒' +
-        '（常见是被设了不可变属性，需先解除）</div>' : '') + '</div>').join('') +
-    '</div>' + (SET_DIFF.argv && SET_DIFF.argv.length
-      ? '<div class="hint" style="margin-top:6px">hub 拉起终端时追加：' + escapeHtml(SET_DIFF.argv.join(' ')) + '</div>'
-      : '<div class="hint" style="margin-top:6px">此 agent 不注入 --model（无白名单 flag），' +
-        '仅写配置文件。</div>');
-  box.style.display = 'block';
-  $('setApplyBtn').disabled = false;
-}
+
 
 /* 保存结果必须**常驻在页内**：09-27 报障「保存并不能生效」的真身是——保存其实成功
    了，但页面只闪一条 4 秒的 toast，状态行与下拉全都停在保存前的样子，用户据此判定
    没生效。所以成功要把落盘清单 + 备份路径写出来，失败要把 HTTP 状态与原因写出来，
    两样都不许只靠 toast。 */
-function settingsRenderApplied(d) {
-  const box = $('setDiffBox');
-  if (!box) return;
-  const applied = d.applied || [];
-  if (d.mode === 'clear') {
-    box.innerHTML = '<div class="set-diff"><div class="set-diff-hd">已生效：' +
-      escapeHtml(d.agent_id) + ' 的 hub 侧默认模型已撤销</div>' +
-      '<div class="set-diff-row"><div class="v">' + escapeHtml(d.note || '') + '</div>' +
-      '<div class="v">该 agent 自己的配置文件未被改动（无备份产生）。</div></div></div>';
-    box.style.display = 'block';
-    return;
-  }
-  box.innerHTML = '<div class="set-diff"><div class="set-diff-hd">已生效：' +
-    escapeHtml(d.agent_id) + ' → ' + escapeHtml(d.model) +
-    (d.argv && d.argv.length ? '（新开终端追加 ' + escapeHtml(d.argv.join(' ')) + '）' : '') +
-    '</div>' +
-    applied.map(a => '<div class="set-diff-row"><div class="k">' + escapeHtml(a.file) + '</div>' +
-      (a.changes || []).map(c => '<div class="v">' + escapeHtml(c.where) + '：' +
-        escapeHtml(c.from || '（空）') + ' → ' + escapeHtml(c.to) + '</div>').join('') +
-      '<div class="v">备份：' + escapeHtml(a.backup) + '</div></div>').join('') +
-    '<div class="v">已开着的会话不受影响，新开终端才带这个模型。</div></div>';
-  box.style.display = 'block';
-}
 
-function settingsRenderError(prefix, e) {
-  const box = $('setDiffBox');
-  if (!box) return;
-  box.innerHTML = '<div class="set-diff"><div class="set-diff-hd">' + escapeHtml(prefix) + '</div>' +
-    '<div class="set-diff-row"><div class="v">' + escapeHtml(e.message || String(e)) + '</div>' +
-    (e.http ? '<div class="v">HTTP ' + escapeHtml(String(e.http)) + '</div>' : '') +
-    '</div></div>';
-  box.style.display = 'block';
-}
 
-async function settingsApplyModel() {
-  /* v0.13.45：保存按钮不再有"未预览就禁用"的状态。09-27 第二轮报障（手机
-     192.168.5.99 来访）日志里只有 GET /api/settings/models 与 /api/models，
-     **连一条 preview/apply 请求都没有** ⇒ 用户是选完模型直接点保存，而 disabled
-     按钮不派发 click ⇒ 委托收不到、toast 也不弹，全程零反馈，"保存不了"就此成立。
-     所以：保存自己负责补齐预览（一次点击走完），按钮只在**保存进行中**才禁用。 */
-  if (!SET_AGENT) {
-    settingsRenderError('保存未执行', new Error('先在上面的列表里选一个 agent'));
-    return toast('先选一个 agent', 'err');
-  }
-  /* v0.13.85：model 允许为空 —— 空值 = 下拉里的「撤销 hub 侧默认（不再注入 --model）」。
-     此前这里用 `if (!model)` 直接 return + toast「先选一个模型」，于是那一项**永远存不了**
-     （后端 validate_model("") 也会 400）。现在空值是合法动作，由后端 preview_clear/
-     clear_model 处理。 */
-  const model = setSelectedModel();
-  if (!SET_DIFF || SET_DIFF.model !== model) {
-    await settingsPreviewModel();              // 自动补预览；失败时里面已渲染 + toast
-    if (!SET_DIFF || SET_DIFF.model !== model) return;
-  }
 
-  const btn = $('setApplyBtn');
-  if (btn) btn.disabled = true;                // 只防连点，保存完立刻恢复
-  try {
-    const d = await api('/api/settings/model/apply', {
-      method: 'POST', noToken: true,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent_id: SET_AGENT, model: model })
-    });
-    if (d.mode === 'clear') {
-      toast(SET_AGENT + '：已撤销 hub 侧默认模型（配置文件未改动）', 'ok');
-    } else {
-      const nb = (d.applied || []).length;
-      toast(SET_AGENT + ' 模型已设为 ' + model + (nb ? '（备份 ' + nb + ' 份）' : '（未改配置文件）'), 'ok');
-    }
-    SET_AGENTS = [];
-    SET_DIFF = null;
-    await settingsModelsLoad(true);
-    settingsRefreshMeta(model);               // 用重载后的真值刷新状态行（不是拿入参糊一个）
-    /* v0.13.164：保存后立刻做一次静态自证，把「写入成功」升级成「四条判据全过」。
-       只报 200 不叫生效 —— 清单里没这个 ID / 该 agent 不注入，界面必须当场说出来。 */
-    try {
-      const v = await api('/api/settings/model/verify?agent_id=' + encodeURIComponent(SET_AGENT));
-      if (d.mode === 'clear') settingsRenderApplied(d); else settingsRenderVerify(v, false, d.applied);
-    } catch (e) {
-      settingsRenderApplied(d);               // 验证本身失败不推翻保存结果
-    }
-  } catch (e) {
-    settingsRenderError('保存失败', e);
-    toast('保存失败：' + e.message, 'err');
-  } finally {
-    if (btn) btn.disabled = false;            // 保存完必须恢复可点，否则第二次就"点不动"
-  }
-}
+
+
 
 /* v0.13.164：执行逻辑自证。
    用户反复报"设置好了没用"，而页面原来只有"已生效"三个字 —— 那三个字的唯一依据是
    HTTP 200。现在把四条判据（落点/清单/注入/通道）逐条摆出来，错了就指出哪一条错。
    live=true 会真打一次网关（付费模型计费）。 */
-async function settingsVerifyModel(live) {
-  if (!SET_AGENT) return toast('先选一个 agent', 'err');
 
-  const box = $('setDiffBox');
-  try {
-    const v = live
-      ? await api('/api/settings/model/verify-live', {
-          method: 'POST', noToken: true,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ agent_id: SET_AGENT })
-        })
-      : await api('/api/settings/model/verify?agent_id=' + encodeURIComponent(SET_AGENT));
-    settingsRenderVerify(v, live);
-  } catch (e) {
-    settingsRenderError('验证失败', e);
-    toast('验证失败：' + e.message, 'err');
-  }
-}
 
-function settingsRenderVerify(v, live, applied) {
-  const box = $('setDiffBox');
-  if (!box) return;
-  const bad = v.verdict !== 'ok';
-  const rows = (v.checks || []).map(c => {
-    const mark = c.ok === true ? '✓' : (c.ok === false ? '✗' : '·');
-    const style = c.ok === false ? ' style="color:var(--st-error)"' : '';
-    return '<div class="v"' + style + '>' + mark + ' ' + escapeHtml(c.name) + '：' +
-      escapeHtml(c.detail || '') + '</div>';
-  }).join('');
-  const chan = Object.keys(v.channels || {}).map(k =>
-    k + (v.channels[k].applies ? ' ✓' : ' ✗')).join('　');
-  const warn = (v.warnings || []).length
-    ? '<div class="set-diff-row">' + v.warnings.map(w =>
-        '<div class="v" style="color:var(--st-error)">⚠ ' + escapeHtml(w) + '</div>').join('') + '</div>'
-    : '';
-  /* 保存后立刻自证：把刚落盘的备份路径一并带出来，用户不必再去翻日志。 */
-  const bak = (applied || []).length
-    ? '<div class="set-diff-row">' + applied.map(a =>
-        '<div class="v">备份：' + escapeHtml(a.backup || '') + '</div>').join('') + '</div>'
-    : '';
-  box.innerHTML = '<div class="set-diff">' +
-    '<div class="set-diff-hd">' + (bad ? '✗ 验证未通过' : '✓ 验证通过') +
-    '：' + escapeHtml(v.agent_id || '') + ' → ' + escapeHtml(v.model || '（未设置）') +
-    '　' + escapeHtml(live ? '（含真实调用）' : '（静态）') + '</div>' +
-    '<div class="set-diff-row">' + rows +
-    '<div class="v">通道：' + escapeHtml(chan) + '</div></div>' + warn + bak +
-    '<div class="hint" style="margin-top:6px">静态验证只读；真实调用会按模型计费，' +
-    '且只证明"网关此刻认这个 ID"，不代替新开终端里的实际体验。</div></div>';
-  box.style.display = 'block';
-}
+
 
 /* 状态行渲染的**唯一出口**（选 agent 时与保存后刷新都走它，别各写一份文案）：
    v0.13.85 起把「这个 agent 的模型字段认什么」写进来；v0.13.164 再把
    「实际会追加的命令」（grok 注入的是 ccr-hub 而不是模型 ID）与「会失效的风险」摆出来。 */
-function settingsAgentMeta(a) {
-  const el = $('setAgentMeta');
-  if (!el || !a) return;
-  const wm = SET_WRITE_MODE[a.write_mode || 'argv'] || SET_WRITE_MODE.argv;
-  const eff = a.effective || {};
-  const parts = ['字段认：' + wm.label,
-                 '当前：' + (a.current || '（未读到）'),
-                 'hub 侧：' + (a.hub_model || '未设置')];
-  const argv = (a.argv_effective || []).join(' ');
-  if (argv) parts.push('实际注入：' + argv);
-  else if (a.argv) parts.push('注入口径：' + a.argv + ' <模型>');
-  el.innerHTML = escapeHtml(parts.join('｜')) +
-    '<div class="hint" style="margin-top:4px">' + escapeHtml(wm.hint) + '</div>' +
-    ((a.files || []).length ? '<div class="hint">配置文件：' + escapeHtml(a.files.join(' / ')) + '</div>' : '') +
-    ((eff.warnings || []).length
-      ? eff.warnings.map(w => '<div class="hint" style="color:var(--st-error)">⚠ ' +
-          escapeHtml(w) + '</div>').join('')
-      : '');
-}
 
-function settingsRefreshMeta(model) {
-  const a = SET_AGENTS.find(x => x.id === SET_AGENT);
-  const el = $('setAgentMeta');
-  if (!el) return;
-  if (!a) { el.textContent = '已保存：' + model; return; }
-  settingsAgentMeta(a);
-}
+
+
 
 /* ── 撤销上一次保存（v0.13.181，借 magpie 的 disconnect 语义）────────────
    为什么要这个：落盘前有备份，但回滚要人自己去目录里挑 .bak、判断哪份对、
    再手工 cp —— 手机上根本做不了。后端把「刚写的那次」记在 model_writes 表里，
    这里一键还原（还原前它还会再备份一次当前状态，撤错了还能再撤回去）。
    破坏性动作 ⇒ 必须 confirm。 */
-async function settingsUndoModel() {
-  if (!SET_AGENT) return toast('先选一个 agent', 'err');
 
-  if (!window.confirm('把 ' + SET_AGENT + ' 的配置文件还原到「上一次保存之前」？\n\n' +
-      '· 只撤销最近一次保存，更早的不动\n' +
-      '· 还原前会再备份一次当前状态\n' +
-      '· 已开着的会话不受影响，新开终端才读新配置')) return;
-  const btn = $('setUndoBtn');
-  if (btn) btn.disabled = true;
-  try {
-    const d = await api('/api/settings/model/undo', {
-      method: 'POST', noToken: true,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent_id: SET_AGENT })
-    });
-    SET_AGENTS = [];
-    SET_DIFF = null;
-    await settingsModelsLoad(true);
-    settingsRenderUndone(d);
-    toast(SET_AGENT + '：已还原 ' + (d.restored || []).length + ' 个文件', 'ok');
-  } catch (e) {
-    settingsRenderError('撤销失败', e);
-    toast('撤销失败：' + e.message, 'err');
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
 
-function settingsRenderUndone(d) {
-  const box = $('setDiffBox');
-  if (!box) return;
-  box.innerHTML = '<div class="set-diff"><div class="set-diff-hd">已撤销：' +
-    escapeHtml(d.agent_id) + ' 的模型写入已还原</div>' +
-    (d.restored || []).map(r => '<div class="set-diff-row"><div class="k">' +
-      escapeHtml(r.file) + '</div><div class="v">还原自备份：' +
-      escapeHtml(r.from_backup) + '</div></div>').join('') +
-    '<div class="v">hub 侧模型现在是：' + escapeHtml(d.hub_model_to || '（未设置）') +
-    '。开新终端前请确认这就是你想要的。</div></div>';
-  box.style.display = 'block';
-}
+
 
 /* ── 设置 → GitHub 子菜单（v0.13.42）──────────────────────────────────────
    把原来写死在 githubprojects.py 里的三样东西（API 基址 / token 文件 / 克隆落点）
@@ -1954,7 +1521,7 @@ async function settingsGithubRefresh() {
    2026-11-07 C 档：读端点身份就是会话 Cookie（api() 同源自动带），不再拼 x-hub-token、
    不再二次输入口令；未登录 401 时提示重新登录。
    var 声明而非 let：go()（06 分片顶层就会跑）可能经 settingsLogsLoad 读到它，
-   与 setModelPageLoaded 同一条 TDZ 纪律。 */
+   与 setGithubPageLoaded 同一条 TDZ 纪律。 */
 var LOG_LAST = null;      // 最近一次结果：复制/导出复用，不再为同一次查看打两次后端
 var logPage = 0;          // Task11 日志分页（JS 变量，每页 100 行）
 var logQTimer = null;
@@ -2608,19 +2175,7 @@ function settingsDelegates() {
     /* 模型计量：表头排序走同一委托出口，禁 inline onclick */
     const mth = e.target.closest('[data-mcl-sort]');
     if (mth) return mclSortKey(mth.dataset.mclSort);
-    const ag = e.target.closest('[data-settings-agent]');
-    if (ag) {
-      if (ag.getAttribute('aria-disabled') === 'true') {
-        return toast(ag.getAttribute('title') || '该 agent 不支持统一设置模型', 'err');
-      }
-      return settingsPickAgent(ag.dataset.settingsAgent);
-    }
     const act = e.target.closest('[data-settings-act]');
-    if (act && act.dataset.settingsAct === 'preview') return settingsPreviewModel();
-    if (act && act.dataset.settingsAct === 'apply') return settingsApplyModel();
-    if (act && act.dataset.settingsAct === 'undo') return settingsUndoModel();
-    if (act && act.dataset.settingsAct === 'verify') return settingsVerifyModel(false);
-    if (act && act.dataset.settingsAct === 'verify-live') return settingsVerifyModel(true);
     if (act) {
       const a = act.dataset.settingsAct;
       if (a === 'gh-test') return settingsGithubTest();
@@ -2641,6 +2196,10 @@ function settingsDelegates() {
       if (a === 'users-new') return usersPanelNew();
       /* 模型计量页（2026-11-07，借鉴 LangChat） */
       if (a === 'mcl-load') return mclPanelLoad();
+      /* 设置→重启页：手动重启 agenthub，复用顶栏「需重启」的 restartHub
+         （含活会话 409 二次确认、轮询恢复、自动刷新）。 */
+      if (a === 'hub-restart') return restartHub({ currentTarget: act });
+      if (a === 'rst-refresh') return settingsRestartStatus();
     }
     /* 用户授权页：卡片按钮统一走 data-uact 委托（禁 inline onclick，§4.2）。
        刻意放在既有分支之后：test_ghsettings.py 用固定 1400 字符窗口截本函数开头查 gh-，

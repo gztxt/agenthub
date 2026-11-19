@@ -48,9 +48,9 @@ SHARDS = sorted((ROOT / "static" / "hub").glob("[0-9][0-9]-*.js"))
 # 13-term-touch.js（v0.13.64 终端移动端触摸层）：新分片，红基线期不存在。
 # 14-botboy.js（v0.13.170 DS Bot 团队只读投影）：新分片，红基线期不存在。
 # 08-runlog.js（v0.13.27）随运行日志页于 v0.13.47 删除，名字从两处清单里一并摘掉。
-SHARDS_AFTER_RED = ["07-asset-panel.js", "09-local-projects.js",
+SHARDS_AFTER_RED = ["09-local-projects.js",
                     "10-github-projects.js", "11-resources.js", "12-activity.js",
-                    "13-term-touch.js", "14-botboy.js", "15-workbench.js",
+                    "13-term-touch.js", "15-workbench.js",
                     "16-events-panel.js", "17-checkin.js"]
 HUBJS = ROOT / "static" / "hub.js"   # 产物也一起纳入零丢行断言
 HUB = ROOT / "static" / "hub.js"
@@ -298,9 +298,9 @@ class TestLsGuardStatic(unittest.TestCase):
         self.assertEqual([p.name for p in SHARDS],
                          ["01-core-boot.js", "02-nav-and-poll.js", "03-agents-cards.js",
                           "04-terminal-ws.js", "05-chat-and-history.js", "06-manager-tasks.js",
-                          "07-asset-panel.js", "09-local-projects.js",
+                          "09-local-projects.js",
                           "10-github-projects.js", "11-resources.js", "12-activity.js",
-                          "13-term-touch.js", "14-botboy.js", "15-workbench.js",
+                          "13-term-touch.js", "15-workbench.js",
                           "16-events-panel.js", "17-checkin.js"],
                          "分片清单变了 ⇒ 逐文件计数与红基线要一起核")
 

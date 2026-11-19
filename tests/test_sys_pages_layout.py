@@ -36,14 +36,13 @@ TPL = _REPO / "templates" / "index.html"
 SHARD04 = _REPO / "static" / "hub" / "04-terminal-ws.js"
 SHARD05 = _REPO / "static" / "hub" / "05-chat-and-history.js"
 SHARD06 = _REPO / "static" / "hub" / "06-manager-tasks.js"
-SHARD07 = _REPO / "static" / "hub" / "07-asset-panel.js"
 SHARD15 = _REPO / "static" / "hub" / "15-workbench.js"
 
 #: 系统菜单（左栏「系统」手风琴）下的全部子菜单页 —— 本次重排的对象
-SYS_PAGES = ("ports", "telemetry", "memory", "skills", "kb",
-             "mcp", "tasks", "jobs", "assets", "botboy", "checkin")   # v0.13.47：runlog 页删除，并入设置→日志
-                                                          # v0.13.170：botboy（DS Bot 团队只读投影）
-                                                          # v0.13.201：checkin（积分签到远程管理）
+SYS_PAGES = ("ports", "memory", "skills", "kb",
+             "mcp", "tasks", "jobs", "checkin")   # v0.13.47：runlog 页删除，并入设置→日志
+                                                  # 2026-11-20：telemetry/assets/botboy 三页按实测调用量删除
+                                                  # v0.13.201：checkin（积分签到远程管理）
 
 #: 单表/单列表页：表格必须在限高盒（.sp-bd.box + .tscroll）里，sticky 表头才有滚动容器
 TABLE_PAGES = ("ports", "jobs", "tasks")
@@ -115,8 +114,8 @@ class TestSysPagesLayout(unittest.TestCase):
         self.assertIn("page === 'chat'", strip_comments(m.group(0)))
 
     def test_page_labels_kept_for_future_use(self):
-        """PAGE_LABELS 仍要留着（页名→中文名唯一映射；test_asset_panel 钉着 assets 那条）。"""
-        self.assertIn("assets: '资产'", self.s05)
+        """PAGE_LABELS 仍要留着（页名→中文名唯一映射）。"""
+        self.assertIn("kb: '知识库'", self.s05)
 
     # ── ② 十个页面全部迁到统一骨架 ────────────────────────────────────
     def test_all_system_pages_present_and_marked(self):
@@ -236,11 +235,6 @@ class TestSysPagesLayout(unittest.TestCase):
         self.assertIn("Array.from($('memFedSrcs').selectedOptions)", self.s04)
         self.assertIn("Array.from($('kbRoutes').selectedOptions)", self.s04)
         self.assertIn("Array.from($('instTo').selectedOptions)", self.s04)
-
-    def test_assets_page_keeps_mem_grid_contract(self):
-        """资产页窄屏塌单列靠 .mem-grid 自身响应式（verify_asset_panel_live N4 钉着），
-        重排后这个容器必须还在。"""
-        self.assertIn('class="mem-grid"', self.sections["assets"])
 
     def test_visible_panels_reveal_as_flex_not_block(self):
         """默认隐藏的卡片显隐只切 inline 值：写死 display:block 会把 flex 列打回块级

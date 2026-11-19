@@ -96,7 +96,7 @@ class TestOverlayInvariants(unittest.TestCase):
         self.assertNotIn('id="settingsDrawer"', self.html, "设置抽屉又回来了")
         self.assertIn("settings: '设置'", self.hub, "侧栏缺「设置」手风琴组")
         self.assertIn("SET_PAGES", self.hub, "设置子页清单缺失")
-        for sp in ("settings-model", "settings-github", "settings-token", "settings-logs"):
+        for sp in ("settings-github", "settings-logs"):
             self.assertIn("'%s'" % sp, self.hub, "设置子页 %s 不在清单里" % sp)
             self.assertIn('id="page-%s"' % sp, self.html, "#page-%s 缺失" % sp)
 

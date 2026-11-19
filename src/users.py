@@ -58,27 +58,26 @@ router = APIRouter()
 _login_fail: Dict[str, list] = {}
 
 MODULE_TOP = ["classroom", "localprojects", "github", "resources"]
-MODULE_SYS = ["ports", "telemetry", "memory", "skills", "kb", "mcp", "jobs", "tasks",
-              "assets", "botboy"]
-MODULE_SET = ["settings-model", "settings-github", "settings-token", "settings-logs",
-              "settings-users", "settings-modelcalls"]   # 2026-11-07：与前端 SET_PAGES 六项对齐
+MODULE_SYS = ["ports", "memory", "skills", "kb", "mcp", "jobs", "tasks", "checkin"]
+MODULE_SET = ["settings-github", "settings-logs",
+              "settings-users", "settings-modelcalls", "settings-restart"]   # 2026-11-20：与前端 SYS_PAGES/SET_PAGES 对齐
 #: 2026-11-08：左侧手风琴的分组本身也可授权（勾组头 = 整组可见）。
 #: 前缀 `group:` 与菜单叶子 id 不会撞（叶子 id 均无冒号）。
 MODULE_GROUPS = ["group:agents", "group:infra", "group:system", "group:settings"]
 # ── 2026-11-07 menu_items seed 常量（与前端 05-chat-and-history.js 的 SYS_PAGES/SET_PAGES
 #    逐条对齐，图标取已验证存在过的 sprite id）──
 TOP_ICONS = {"classroom": "school", "localprojects": "folder", "github": "globe", "resources": "boxes"}
-SYS_ICONS = {"ports": "share", "telemetry": "activity", "memory": "database", "skills": "zap",
+SYS_ICONS = {"ports": "share", "memory": "database", "skills": "zap",
              "kb": "book", "mcp": "wrench", "jobs": "clock", "tasks": "flow",
-             "assets": "layers", "botboy": "message"}
-SET_ICONS = {"settings-model": "cpu", "settings-github": "globe", "settings-token": "terminal",
-             "settings-logs": "activity", "settings-users": "eye", "settings-modelcalls": "radar"}
+             "checkin": "star"}
+SET_ICONS = {"settings-github": "globe",
+             "settings-logs": "activity", "settings-users": "eye", "settings-modelcalls": "radar",
+             "settings-restart": "refresh"}
 _LABELS = {"classroom": "课堂", "localprojects": "本地项目", "github": "GitHub", "resources": "资源",
-           "ports": "端口", "telemetry": "遥测", "memory": "记忆中心", "skills": "技能中心",
-           "kb": "知识库", "mcp": "MCP服务器", "jobs": "定时", "tasks": "协同", "assets": "资产",
-           "botboy": "Botboy", "settings-model": "模型", "settings-github": "GitHub",
-           "settings-token": "认证状态", "settings-logs": "日志", "settings-users": "用户授权",
-           "settings-modelcalls": "模型计量"}
+           "ports": "端口", "memory": "记忆中心", "skills": "技能中心",
+           "kb": "知识库", "mcp": "MCP服务器", "jobs": "定时", "tasks": "协同", "checkin": "积分签到",
+           "settings-github": "GitHub", "settings-logs": "日志", "settings-users": "用户授权",
+           "settings-modelcalls": "模型计量", "settings-restart": "重启"}
 
 
 def _sha(t: str) -> str:

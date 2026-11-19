@@ -352,7 +352,7 @@ function cmdCatalog() {
     rows.push({ k: 'a', id: a.id, label: a.name || a.id, sub: a.id });
   });
   rows.push({ k: 'x', id: 'terminal', label: '打开终端（当前 Agent）', sub: '动作' });
-  rows.push({ k: 'x', id: 'settings', label: '打开设置 · 模型', sub: '动作' });
+  rows.push({ k: 'x', id: 'settings', label: '打开设置', sub: '动作' });
   rows.push({ k: 'x', id: 'register', label: '注册自定义 Agent', sub: '动作' });
   rows.push({ k: 'x', id: 'scan', label: '自动扫描本机 Agent', sub: '动作' });
   rows.push({ k: 'x', id: 'reload', label: '刷新实体与健康', sub: '动作' });
@@ -374,7 +374,7 @@ function cmdAction(id) {
     gotoChat(pick, 'term');
     return;
   }
-  if (id === 'settings') { go('settings-model'); return; }
+  if (id === 'settings') { go('settings-github'); return; }
   if (id === 'register') { openRegister(); return; }
   if (id === 'scan') { runScan(); return; }
 }
@@ -475,32 +475,30 @@ const NAV_GROUPS = { agents: 'AGENTS', infra: '基础设施', system: '系统', 
 const NAV_ICONS = { agents: 'hubmark', infra: 'server', system: 'sliders', settings: 'settings' };   // 收起成图标条时仍可辨认（sprite id）
 const NAV_ORDER = ['agents', 'infra', 'system', 'settings'];
 const NAV_SUB_KINDS = [['gateway', '网关'], ['service', '服务'], ['tool', '工具'], ['memory', '记忆'], ['file', '文件管理'], ['convert', '文件转换']];
-const SYS_PAGES = [['ports', '端口', 'share'], ['telemetry', '遥测', 'activity'], ['memory', '记忆中心', 'database'],
+const SYS_PAGES = [['ports', '端口', 'share'], ['memory', '记忆中心', 'database'],
                    ['skills', '技能中心', 'zap'], ['kb', '知识库', 'book'],
                    ['mcp', 'MCP服务器', 'wrench'], ['jobs', '定时', 'clock'], ['tasks', '协同', 'flow'],
-                   ['assets', '资产', 'layers'], ['botboy', 'Botboy', 'message'],
                    ['checkin', '积分签到', 'star']];
 /* v0.13.47：运行日志页删除，内容并入设置→日志。
-   v0.13.170：Botboy = DS Bot 团队面板（只读投影 ~/.dsh/bot/state.json）。
-   图标用现成的 message —— sprite 里没有 bot/robot 图形，ico() 对不存在的 id
-   静默不画（判例：kb 行曾经整行空白），所以只许选已验证存在的 symbol。 */
+   2026-11-20：遥测 / 资产 / Botboy 三页按实测（21 天 0~1 次调用）删除，端点保留。 */
 const MODE_LABEL = { embed: '嵌入', term: '终端', chat: '对话', detail: '详情', open: '新窗口' };
 /* v0.13.43 设置子菜单：与系统页同形态（data-sys → go(page) ⇒ 正文出页、窄屏自动收侧栏），
    只是单独成组挂在「系统」之下；这三项此前是右侧抽屉里的三个 tab。 */
-const SET_PAGES = [['settings-model', '模型', 'cpu'], ['settings-github', 'GitHub', 'globe'],
+const SET_PAGES = [['settings-github', 'GitHub', 'globe'],
                    ['settings-logs', '日志', 'activity'],
-                   ['settings-users', '用户授权', 'eye'], ['settings-modelcalls', '模型计量', 'radar']];
+                   ['settings-users', '用户授权', 'eye'], ['settings-modelcalls', '模型计量', 'radar'],
+                   ['settings-restart', '重启', 'refresh']];
 /* 2026-10-25：「设置 · 记忆存储」并入「系统 · 记忆中心」（同一份本机记忆的读写入口
    不该分居两个菜单，设置组也不该为 4 条便签单占一个一级项）。 */
 const PAGE_LABELS = { classroom: '总览', chat: '统一对话', tasks: '协同', jobs: '定时',
-                      memory: '记忆中心', skills: '技能中心', kb: '知识库', mcp: 'MCP服务器', ports: '端口', telemetry: '遥测',
-                      assets: '资产', localprojects: '本机项目', github: 'GitHub 项目', resources: '资源监控',
-                      botboy: 'Botboy', checkin: '积分签到',
-                      'settings-model': '设置 · 模型', 'settings-github': '设置 · GitHub',
-                      'settings-token': '设置 · 认证状态',
+                      memory: '记忆中心', skills: '技能中心', kb: '知识库', mcp: 'MCP服务器', ports: '端口',
+                      localprojects: '本机项目', github: 'GitHub 项目', resources: '资源监控',
+                      checkin: '积分签到',
+                      'settings-github': '设置 · GitHub',
                       'settings-logs': '设置 · 日志',
                       'settings-users': '设置 · 用户授权',
-                      'settings-modelcalls': '设置 · 模型计量' };
+                      'settings-modelcalls': '设置 · 模型计量',
+                      'settings-restart': '设置 · 重启' };
 const navOpenStored = lsGet('hub.nav.open');
 let navOpen = navOpenStored === null ? 'agents' : navOpenStored;   // 首屏默认展开 AGENTS；'' = 用户主动全收起
 let curPage = '';
@@ -514,31 +512,6 @@ function navRank(a) {
   if (typeof agentHealth === 'function' && agentHealth(a).bad) return 0;
   return NAV_RANK[a.status] == null ? 9 : NAV_RANK[a.status];
 }
-function navMatch(a, q) {
-  // 侧栏搜索：与全站其他搜索框同一口径（fuzzyMatch：精确恒 1000 压倒近似）。
-  return fuzzyMatch([[a.name, 3], [a.id, 2], [a.port, 1]], q) > 0;
-}
-// 搜索词高亮
-/* P1-22（2026-09-30）：高亮改在**转义之后**的串上匹配。
-   旧写法拿原文下标 idx 去切 escapeHtml(text)：
-     text = 'a & b'，查 '&' → 原文 idx=2，切转义串得到 'a &' 之类错位，
-   含 & < > " ' 时高亮会盖错字符（轻则高亮到半个实体，重则切出 < 破坏 HTML）。
-   正确做法：先转义成最终 HTML，再在这份 HTML 上匹配 —— 但那样查询词里的
-   & 也要跟着转义才搜得到，所以两边各自转义后再比。 */
-function hlMatch(text, q) {
-  if (!q) return escapeHtml(text);
-  const escaped = escapeHtml(text);
-  const needle = escapeHtml(q);
-  if (!needle) return escaped;
-  const hay = escaped.toLowerCase(), nd = needle.toLowerCase();
-  let result = '', last = 0, idx = hay.indexOf(nd);
-  while (idx !== -1) {
-    result += escaped.slice(last, idx) + '<mark>' + escaped.slice(idx, idx + needle.length) + '</mark>';
-    last = idx + needle.length;
-    idx = hay.indexOf(nd, last);
-  }
-  return result + escaped.slice(last);
-}
 function navItemHtml(a, child) {
   const st = seatStateOf(a);
   const on = (curPage === 'chat' && a.id === chatPick) ? ' on' : '';
@@ -549,7 +522,7 @@ function navItemHtml(a, child) {
   // 端口 / 判定理由 / 描述全文不再进 title（用户 2026-11-08）。
   const tip = seatLabelOf(a) + ' · ' + (a.name || a.id);
   // 搜索高亮：名称用 hlMatch，ID 和端口保持原样
-  const nameHtml = hlMatch(a.name || a.id, ($('navSearch') ? $('navSearch').value.trim() : ''));
+  const nameHtml = escapeHtml(a.name || a.id);
   // 操作按钮：按 entries 类型渲染（最多3个）
   const es = a.entries || [];
   const actBtns = [];
@@ -719,31 +692,25 @@ function navRow(a, child) { return navItemHtml(a, child) + (a.id === histOpen ? 
 function renderNav() {
   const box = $('navTree');
   if (!box) return;
-  const q = ($('navSearch') ? $('navSearch').value.trim() : '').toLowerCase();
   const all = AGENTS.filter(a => a.kind === 'agent').filter(a => (typeof _permOk !== 'function') || _permOk(a.id));
   const infra = AGENTS.filter(a => a.kind !== 'agent').filter(a => (typeof _permOk !== 'function') || _permOk(a.id));
   const _sysOk = SYS_PAGES.filter(([p]) => (typeof _permOk !== 'function') || _permOk(p));
   const _setOk = SET_PAGES.filter(([p]) => (typeof _permOk !== 'function') || _permOk(p));
+  const sorter = (x, y) => navRank(x) - navRank(y) || String(x.name||'').localeCompare(String(y.name||''), 'zh');
   const lists = {
-    agents: q ? all.filter(a => navMatch(a, q)) : all.slice().sort((x, y) => navRank(x) - navRank(y) || String(x.name||'').localeCompare(String(y.name||''), 'zh')),
-    infra: q ? infra.filter(a => navMatch(a, q)) : infra.slice().sort((x, y) => navRank(x) - navRank(y) || String(x.name||'').localeCompare(String(y.name||''), 'zh')),
-    system: q ? [] : _sysOk,
-    settings: q ? [] : _setOk,   // 2026-11-07 用户授权：叶子级按 user_perms 过滤
+    agents: all.slice().sort(sorter),
+    infra: infra.slice().sort(sorter),
+    system: _sysOk,
+    settings: _setOk,   // 2026-11-07 用户授权：叶子级按 user_perms 过滤
   };
   /* 2026-11-08：分组本身也可授权（group:<g>）。组头无权限且组内无可见叶子
      ⇒ 整组不渲染（此前会留一个空手风琴头，用户看到的就是「点了没东西」）。 */
   const _authLimited = (typeof AUTH_PERMS !== 'undefined') && AUTH_PERMS !== null;
   const _grpOk = g => (typeof _permOk !== 'function') || _permOk('group:' + g) || lists[g].length > 0;
-  // 搜索结果计数
-  let totalMatch = 0;
-  if (q) {
-    totalMatch = all.filter(a => navMatch(a, q)).length + infra.filter(a => navMatch(a, q)).length;
-  }
   const html = NAV_ORDER.map(g => {
     const list = lists[g];
-    if (!q && !_grpOk(g)) return '';
-    if (q && !list.length) return '';
-    const open = q ? true : navOpen === g;
+    if (!_grpOk(g)) return '';
+    const open = navOpen === g;
     let body = '';
     if (g === 'infra') {
       /* 子项分组（2026-11-07 用户要求「proxy panel 下加 xray/openrung 子菜单」）：

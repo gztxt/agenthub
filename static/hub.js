@@ -231,10 +231,9 @@ let AGENTS = [], PORTS = [], portsLoaded = false, skillsLoaded = false, kbLoaded
 var lpLoaded = false;
 /* v0.13.31 GitHub 页同型：声明同样只在 01 一处（理由见上）。 */
 var ghLoaded = false;
-/* v0.13.43 设置三页懒加载标志：go() 在 06 分片顶层就会跑（可能早于 01 里
-   settingsModelsLoad 之外的一些初始化），故同样用 var 提升规避 TDZ —— 与
-   lpLoaded / ghLoaded 同一条纪律；真值在 go() 里首次进页时才置。 */
-var setModelPageLoaded = false;
+/* v0.13.43 设置页懒加载标志：go() 在 06 分片顶层就会跑（可能早于 01 里
+   其它初始化），故同样用 var 提升规避 TDZ —— 与 lpLoaded / ghLoaded 同一条
+   纪律；真值在 go() 里首次进页时才置。2026-11-17 模型页删除后去掉 setModelPageLoaded。 */
 var setGithubPageLoaded = false;
 var setLogsPageLoaded = false;   // v0.13.46：日志页（进页才拉，日志量级大不能每次导航都拉）
 /* 2026-10-25：setMemPageLoaded 随「设置 · 记忆存储」页一并删除（并入记忆中心折叠块）。 */
@@ -700,18 +699,18 @@ function go(page) {
   if (page === 'kb' && !kbLoaded) { kbLoaded = true; loadKbStatus(); kbBrowse(); }
   if (page === 'localprojects' && !lpLoaded) { lpLoaded = true; loadLocalProjects(); }   // v0.13.30 本机项目页（09 分片）
   if (page === 'github' && !ghLoaded) { ghLoaded = true; loadGithubRepos(); }   // v0.13.31 GitHub 项目页（10 分片）
-  // v0.13.43 设置三页：与系统页同口径，进页才拉（模型清单 / GitHub 现值）
-  if (page === 'settings-model' && !setModelPageLoaded) { setModelPageLoaded = true; settingsModelsLoad(); }
+  // v0.13.43 设置页：与系统页同口径，进页才拉（GitHub 现值）
   if (page === 'settings-github' && !setGithubPageLoaded) { setGithubPageLoaded = true; settingsGithubLoad(); }
   if (page === 'settings-logs' && !setLogsPageLoaded) { setLogsPageLoaded = true; settingsLogsLoad(); }
   /* 2026-11-07 用户授权页：每次进页都重读（用户/token 可能随时被其他 admin 改） */
   if (page === 'settings-users') { usersPanelLoad(); }
   /* 2026-11-07 模型计量页：每次进页都重读（计量数据随调用实时增长） */
   if (page === 'settings-modelcalls') { mclPanelLoad(); }
+  /* 2026-11-17 重启页：每次进页都重读状态（版本/活会话/是否待重启） */
+  if (page === 'settings-restart') { settingsRestartStatus(); }
   /* 2026-10-25：settings-memory 页已并入「记忆中心」（#page-memory 的本机旧层折叠块），
      不再有独立的进页钩子 —— 折叠块展开时才由 mxLegacyToggle() 拉 L1/L2/L3。 */
   if (page === 'ports' && !portsLoaded) { portsLoaded = true; loadPorts(); }
-  if (page === 'telemetry') loadTelemetry();
   if (page === 'resources' && !resLoaded) { resLoaded = true; loadResources(); }
   // v0.13.47：原运行日志页的进页钩子随页面一并删除（内容并入设置→日志）
   if (page === 'chat') renderChatSide();
@@ -719,9 +718,6 @@ function go(page) {
   if (page === 'tasks') enterTasksPage();
   if (page === 'jobs') { fillAgentSelect($('jobAgent'), false); loadJobs(); }
   if (page === 'mcp') { loadMcp(); loadAcl(); }
-  if (page === 'assets') loadAssets();   // P4 资产面板（只读门面聚合，07-asset-panel.js）
-  // v0.13.170：Botboy 页每次进页都重读（state.json 是活文件），由 14-botboy.js 负责渲染
-  if (page === 'botboy') loadBotboy(false);
   // v0.13.201：积分签到页每次进页重读（机器清单/执行流水是活数据），由 17-checkin.js 渲染
   if (page === 'checkin') loadCheckin(false);
 }
@@ -844,6 +840,10 @@ async function loadAgents() {
        口径未变：异常仍由 countBadAgents 单点判定（test_health_verdict_single_source 钉住）。 */
     const errs = countBadAgents(AGENTS);
     $('hErrors').innerHTML = errs ? '<span class="hdot r" title="启动异常的 Agent（vitals 实测结论）">异常 ' + errs + '</span>' : '';
+    /* 2026-11-17：设置→模型页删除后，SET_AGENTS 不再有进页钩子填充。
+       终端模型选择器（04-terminal-ws.js:149/186）读它的 value_prefix（opencode 的 ccr/ 前缀），
+       故数据加载上移到启动链路，与页面解耦；空值不影响其它 agent（前缀默认 ''）。 */
+    loadSetAgents();
   } catch (e) {
     // 服务重启窗口容忍瞬时失败；连续 ≥2 次才报（避免误报）。
     // 2026-10-08：原先这里的 setHealthDot('r', …) 随健康灯一起摘掉了——
@@ -961,6 +961,23 @@ async function restartHub(ev) {
   }
   if (back) { toast('agenthub 已重启'); setTimeout(() => location.reload(), 600); }
   else { toast('重启后 90s 内未恢复，请检查服务', 'err'); btn.disabled = false; btn.textContent = old; }
+}
+
+/* 设置→重启页：读 /health 显示当前版本/活会话/代码新鲜度。
+   与顶栏「需重启」同源数据，失败不抛错（页内说明已覆盖含义）。 */
+async function settingsRestartStatus() {
+  const box = $('rstStatus');
+  if (!box) return;
+  try {
+    const d = await api('/health');
+    const ver = (d && d.version) || '?';
+    const sess = (d && d.term_sessions) || 0;
+    const need = d && (d.needs_restart === true || d.code_stale === true);
+    box.innerHTML = '版本 <b>' + escapeHtml(String(ver)) + '</b> · 活会话 <b>' + sess +
+      '</b> · 代码 <b>' + (need ? '待重启生效' : '已同步') + '</b>';
+  } catch (e) {
+    box.textContent = '读不到 /health（服务可能正在重启）';
+  }
 }
 
 /* 模型层情报（rt_state）→ 短标。它只影响副标文案，永远不影响「可用」。 */
@@ -1116,140 +1133,41 @@ async function verifyAgent(id) {
    登录闸门保护，浏览器请求自带 HttpOnly 会话 Cookie，不再收任何口令。 */
 
 
-/* ── 设置 → 模型子菜单（v0.13.41）──────────────────────────────────────
-   交互两步：先选 agent，再选该 agent 要用的 CCR 模型；保存前给 diff 预览，
-   保存直接走登录态（HttpOnly Cookie），不再收口令。
-   三条纪律：
-     ① **不新增浮层**：v0.13.43 起三个子页是 main 里的 section.page（抽屉已拆），
-        切换由左侧手风琴 + go(page) 完成 —— 比"抽屉内切 section"更彻底：压根没有浮层；
-     ② **不用 inline onclick**：一切走三个设置页上的同一委托 settingsDelegates()
-        （inline 会旁路委托，把"导航即清浮层"那类收场逻辑整段跳过）；
-     ③ **档位判定读当前值、不读存档**：进哪个子页由点击决定，不写 localStorage
-        （跨 origin 分叉那条不变量的同款要求）。 */
+/* ── 设置（2026-11-20）──────────────────────────────────────────────
+   设置→模型页已于 2026-11-17 删除；本文件的 SET_AGENTS 只剩一个消费点：
+   终端模型选择器读它的 value_prefix（opencode 用 ccr/ 前缀）。 */
 let SET_AGENTS = [];          // /api/settings/models 的 agents 段
-let SET_AGENT = '';           // 当前选中的 agent（不落盘）
-let SET_MODELS = null;        // /api/models 缓存（60s）
-let SET_DIFF = null;          // 最近一次预览结果（保存时复用同一个 model 值）
-/* 设置页 select 的「上一个合法值」：付费档取消确认时回滚到这里。
-   必须是**渲染后实际选中的值**，不能假设是 agent 的 hub_model —— 清单外补项、
-   前缀形状都会让两者不同（v0.13.86 的教训）。 */
-let SET_MODEL_PREV = '';
-let SET_DRIFT = [];           // 配置文件漂移体检（v0.13.85：此前后端算了但前端从不显示）
-/* v0.13.85：写入模式文案的单一真相源，与后端 WRITE_MODE 一一对应。
-   ccr   = 该字段直接吃 CCR 的 provider/model ID
-   native= 该字段只认本家原生模型名（qoder 实测拒绝 CCR ID）
-   argv  = 无默认配置文件可落，只能靠拉起终端时注入 --model */
-const SET_WRITE_MODE = {
-  ccr: { label: 'CCR 模型 ID', hint: '此 agent 的模型字段直接接受 CCR 的 provider/model ID。' },
-  native: { label: '本家原生模型名', hint: '此 agent 的模型字段只认本家原生名（如 Qwen3.8-Max），' +
-    'CCR 模型不写进该字段，只经终端 --model 注入生效。' },
-  argv: { label: '仅终端注入', hint: '此 agent 无默认模型配置文件，只有 hub 拉起的终端会带 --model。' },
-  none: { label: '不支持设置', hint: '该 agent 不在模型设置范围内。' },
-};
-/* 设置页 id —— 委托与 go() 懒加载共用这一份清单，别再各处写字面量 */
-const SET_PAGE_IDS = ['page-settings-model', 'page-settings-github', 'page-settings-token',
-                      'page-settings-logs', 'page-settings-users', 'page-settings-modelcalls'];   // 2026-11-07：用户授权页 + 模型计量页
 
-async function settingsModelsLoad(force) {
-  const box = $('setAgentList');
-  if (!box) return;
-  if (!SET_AGENTS.length || force) {
+/* 设置页 id —— 委托与 go() 懒加载共用这一份清单，别再各处写字面量 */
+const SET_PAGE_IDS = ['page-settings-github',
+                      'page-settings-logs', 'page-settings-users', 'page-settings-modelcalls', 'page-settings-restart'];   // 重启页手动触发 /api/system/restart
+
+/* 2026-11-17：设置→模型页删除后，SET_AGENTS 的加载从页面解耦到启动链路。
+   终端模型选择器读它的 value_prefix（opencode 用 ccr/ 前缀），这是唯一仍在的消费点。 */
+let setAgentsLoading = null;
+async function loadSetAgents(force) {
+  if (setAgentsLoading && !force) return setAgentsLoading;
+  setAgentsLoading = (async () => {
     try {
       const d = await api('/api/settings/models');
       SET_AGENTS = d.agents || [];
-      SET_DRIFT = d.drift || [];
-      settingsRouterRender(d.ccr || {});
-    } catch (e) {
-      box.innerHTML = '<span class="hint">agent 清单加载失败：' + escapeHtml(e.message) + '</span>';
-      return;
-    }
-  }
-  const drifted = new Set(SET_DRIFT.map(x => x.id));
-  box.innerHTML = SET_AGENTS.map(a => {
-    const off = !a.writable;
-    const why = a.reason || a.note || '不可设置';
-    /* tip 用成分行拼装：provider 只在它真是"provider"时才说（v0.13.85 前 grok 的
-       provider 字段串位显示成模型 ID，tip 就变成了 "provider alibaba/xxx" 这种误导）。 */
-    const lines = [];
-    if (off) {
-      lines.push(why);
-    } else {
-      const wm = SET_WRITE_MODE[a.write_mode || 'argv'] || SET_WRITE_MODE.argv;
-      lines.push((a.name || a.id) + ' · 字段认：' + wm.label);
-      lines.push('文件现值：' + (a.current || '（未读到）') +
-        (a.provider ? '（provider ' + a.provider + '）' : ''));
-      lines.push('hub 侧：' + (a.hub_model || '（未设置）'));
-      /* v0.13.164：把「会失效的风险」提前到列表里 —— 用户点进去之前就该知道
-         这个设置在这个 agent 上到底能不能生效。 */
-      const eff = a.effective || {};
-      if ((a.argv_effective || []).length) lines.push('实际注入：' + a.argv_effective.join(' '));
-      if (eff.catalog && eff.catalog.checked && eff.catalog.ok === false) {
-        lines.push('⚠ 该模型已不在 CCR 在册清单（' + eff.catalog.size + ' 条）');
-      }
-      (eff.warnings || []).forEach(w => lines.push('⚠ ' + w));
-      if (a.files && a.files.length) lines.push(a.files.join('\n'));
-      if (drifted.has(a.id)) {
-        const d = SET_DRIFT.find(x => x.id === a.id) || {};
-        lines.push('⚠ 检测到配置漂移：' + JSON.stringify(d.owned || {}));
-      }
-    }
-    return '<button class="btn sm' + (a.id === SET_AGENT ? ' on' : '') +
-      (drifted.has(a.id) ? ' drift' : '') + '" type="button"' +
-      ' data-settings-agent="' + escapeHtml(a.id) + '"' +
-      (off ? ' aria-disabled="true"' : '') +
-      ' title="' + escapeHtml(lines.join('\n')) + '">' + escapeHtml(a.name || a.id) +
-      (drifted.has(a.id) ? ' ⚠' : '') + '</button>';
-  }).join('') || '<span class="hint">无可用 agent</span>';
-  settingsDriftRender();
+    } catch (e) { /* 终端 value_prefix 取不到时按空串兜底，不阻断启动 */ }
+  })();
+  return setAgentsLoading;
 }
+
+
 
 /* v0.13.85：漂移体检结果必须**在页面上出现**。
    此前 /api/settings/models 一直在算 drift（后端 drift_report），前端却一个字都没渲染
-   ⇒ 「CCR 重启把 claude 的 env 改回旧模型」这类问题在界面上完全不可见，
+   ⇒ 「网关/客户端改写 agent 的 env 模型」这类问题在界面上完全不可见，
    与"体检全绿"无从区分。这里把它摆到明面上；只读，不提供写回按钮
    （写回属共享配置写入，走既有的 repair_drift + 用户授权，不在本页扩张）。 */
-function settingsDriftRender() {
-  const box = $('setDriftBox');
-  if (!box) return;
-  if (!SET_DRIFT.length) {
-    box.className = 'hint';
-    box.textContent = '配置漂移体检：' + SET_AGENTS.length + ' 个 agent 的配置文件现值与 hub 侧一致。';
-    return;
-  }
-  box.className = '';
-  box.innerHTML = '<div class="set-drift"><div class="set-diff-hd">⚠ ' + SET_DRIFT.length +
-    ' 个 agent 的配置文件现值与 hub 侧不一致（常见原因：CCR 重启会重写 claude 的 env 三兄弟）</div>' +
-    SET_DRIFT.map(d => '<div class="set-diff-row"><div class="k">' + escapeHtml(d.id) +
-      '（hub 侧 ' + escapeHtml(d.hub_model || '') + '）</div>' +
-      Object.keys(d.owned || {}).map(k => '<div class="v">' + escapeHtml(k) + ' = ' +
-        escapeHtml((d.owned || {})[k]) + '</div>').join('') + '</div>').join('') +
-    '<div class="hint" style="margin-top:6px">只读展示：写回配置属共享配置写入，由后端漂移巡检按 hub 侧现值修复（带时间戳备份）。</div></div>';
-}
 
-function settingsRouterRender(ccr) {
-  const box = $('setCcrRouter');
-  if (!box) return;
-  const r = ccr.router || {};
-  const keys = Object.keys(r);
-  if (!keys.length) { box.textContent = ccr.note || '未读到 CCR 配置'; return; }
-  box.innerHTML = '<div class="set-router">' + keys.map(k =>
-    '<span class="k">' + escapeHtml(k) + '</span><span class="v">' + escapeHtml(r[k]) + '</span>').join('') +
-    '</div><div class="hint" style="margin-top:6px">只读：CCR 属三方互斥保护面，且运行中写 config.json 会被运行态覆盖。</div>';
-}
 
-function settingsPickAgent(id) {
-  const a = SET_AGENTS.find(x => x.id === id);
-  if (!a || !a.writable) return;
-  SET_AGENT = id;
-  SET_DIFF = null;
-  settingsModelsLoad();                       // 重渲染选中态
-  $('setModelStep').style.display = 'block';
-  $('setDiffBox').style.display = 'none';
-  /* v0.13.45：不再在这里把保存按钮置灰 —— 置灰的按钮不派发 click，用户点它
-     得不到任何反馈（日志里连请求都没有），正是第二轮报障的形态。 */
-  settingsAgentMeta(a);
-  settingsModelOptions(a);
-}
+
+
+
 
 /* ── 模型计费标记（判定在后端 `api_models.model_billing`，这里只渲染）──
    为什么要有：CCR 清单里免费与付费混在同一个 vendor 分组里，
@@ -1280,84 +1198,7 @@ function modelConfirmPaid(mid, m, confirmFn) {
   return !!yes;
 }
 
-async function settingsModelOptions(a) {
-  const sel = $('setModelSel');
-  if (!sel) return;
-  const fresh = !SET_MODELS || (Date.now() - (SET_MODELS._ts || 0) > 60000);
-  if (fresh) {
-    sel.innerHTML = '<option value="">模型清单加载中…</option>';
-    try {
-      const d = await api('/api/models');
-      SET_MODELS = { models: d.models || [], groups: d.groups || {}, _ts: Date.now() };
-    } catch (e) {
-      sel.innerHTML = '<option value="">模型清单加载失败</option>';
-      return;
-    }
-  }
-  // 未设 hub 侧时以 agent 现值预选；两项都没有则「默认（网关路由）」= 空值
-  const cur = a.hub_model || a.current || '';
-  /* v0.13.86：**选项值必须是该 agent 字段真正要的形状**。
-     用户的准则是「原生 + 插入，插入要精确」—— 而"精确"从下拉这一层就要成立：
-     后端 CCR 清单给的是裸 ID（alibaba/qwen3.8-max），opencode 的字段收的却是
-     `ccr/<裸 ID>`（官方 Models 页：格式即 provider/model；本机 `opencode models ccr`
-     逐行皆 `ccr/…`）。改前这里直接拿裸 ID 当 value ⇒ 用户点任何一个都必然被 409 拒
-     （报「没有 provider alibaba」，指向也错），而 qoder 那一栏更狠：13 个 CCR ID 全部
-     必然 400。根因不是"没做校验"，是**下拉把不可写的值摆成了可选项**。
-     现在：value_prefix 由后端随接口透出（单一真相源，前端不自己拼前缀）；
-     models 非空的 agent（native 型）改成摆它自己的原生清单，且不再摆 CCR 分组。 */
-  const prefix = a.value_prefix || '';
-  const native = a.models || [];
-  const wm = SET_WRITE_MODE[a.write_mode || 'argv'] || SET_WRITE_MODE.argv;
-  /* v0.13.85：空值这一项改名为「撤销 hub 侧默认（不注入 --model）」。
-     原名「默认（网关路由）」容易被读成"把该 agent 的配置也改成网关路由"，
-     而清空**只**撤销 hub 注入、不动任何配置文件（见后端 preview_clear 的说明）。
-     这个语义差别必须写在选项里，否则用户会以为配置被还原了。 */
-  let html = '<option value="">撤销 hub 侧默认（不再注入 --model）</option>';
-  /* 现值不在清单里（清单外模型 / qoder 那种原生名）时**补一项**：不补的话
-     select 会落回第一项"撤销"，于是"当前值"在界面上被抹掉 —— 用户会以为已经清空了。
-     补进来只是**显示**，不代表该值可写（写入校验仍在后端）。 */
-  let extra = '';
-  const known = new Set(native.concat((SET_MODELS.models || []).map(m => prefix + m.id)));
-  if (cur && !known.has(cur)) {
-    extra = '<optgroup label="当前值（不在可写清单内）">' +
-      '<option value="' + escapeHtml(cur) + '" selected>' + escapeHtml(cur) + '</option></optgroup>';
-  }
-  if (native.length) {
-    /* native 型（qoder）：只摆它认的原生名。摆 CCR 清单等于摆一排必然被拒的选项。 */
-    html += '<optgroup label="' + escapeHtml(wm.label) + '（本家清单）">' +
-      native.map(nm => '<option value="' + escapeHtml(nm) + '"' +
-        (nm === cur ? ' selected' : '') + '>' + escapeHtml(nm) + '</option>').join('') +
-      '</optgroup>';
-  } else {
-    const g = SET_MODELS.groups || {};
-    Object.keys(g).forEach(gk => {
-      html += '<optgroup label="' + escapeHtml(gk) + '">' + g[gk].map(mid => {
-        const m = (SET_MODELS.models || []).find(x => x.id === mid);
-        const val = prefix + mid;                 // ← 精确：值等于该字段要的形状
-        const label = modelOptionLabel(mid, m);   // 前置 [免费]/[付费]，值不变
-        return '<option value="' + escapeHtml(val) + '"' + (val === cur ? ' selected' : '') + '>' +
-          escapeHtml(label) + '</option>';
-      }).join('') + '</optgroup>';
-    });
-    const grouped = new Set(Object.keys(g).flatMap(k => g[k]));
-    const rest = (SET_MODELS.models || []).filter(m => !grouped.has(m.id));
-    if (rest.length) {
-      html += '<optgroup label="其他">' + rest.map(m => {
-        const val = prefix + m.id;
-        return '<option value="' + escapeHtml(val) + '"' + (val === cur ? ' selected' : '') + '>' +
-          escapeHtml(modelOptionLabel(m.id, m)) + '</option>';
-      }).join('') + '</optgroup>';
-    }
-  }
-  /* 顺序：撤销项固定第一（与改前「默认（网关路由）」同位，位置不飘），
-     其后才是「当前值不在清单内」的补项，再是各 provider 分组。
-     ⚠ 补项必须带 selected 才能被选中 —— 位置不决定选中态，属性才决定。 */
-  sel.innerHTML = html + extra;
-  /* 记下渲染后的合法值：用户选到付费档又拒绝确认时，回滚到这里（§4.2 ③
-     「遮罩/浮层单一出口」同理 —— 取消必须真的回到原值，不能停在半选态）。 */
-  SET_MODEL_PREV = sel.value || '';
-  settingsModelHint(a);
-}
+
 
 /* v0.13.86：下拉下方的一行口径说明。存在的理由：write_mode 的三类语义里，
    只有 argv 型（claude 之外那些「无配置文件可落」的）需要提醒"只影响 hub 拉起的会话"；
@@ -1382,49 +1223,9 @@ function modelMetaFromValue(val, a, models) {
   return { id: m ? m.id : mid, m: m || null };
 }
 
-/* 设置页：选到付费档先确认；取消则**真的回到上一个值**（停在下拉里不算取消）。 */
-$('setModelSel')?.addEventListener?.('change', function () {
-  const sel = $('setModelSel');
-  if (!sel) return;
-  const a = SET_AGENTS.find(x => x.id === SET_AGENT) || null;
-  const meta = modelMetaFromValue(sel.value, a, (SET_MODELS || {}).models);
-  if (!meta) { SET_MODEL_PREV = sel.value || ''; settingsModelHint(a); return; }
-  if (!modelConfirmPaid(meta.id, meta.m)) {
-    sel.value = SET_MODEL_PREV;
-    toast('已取消：' + meta.id + ' 按量计费', 'err');
-    return;
-  }
-  SET_MODEL_PREV = sel.value;
-  settingsModelHint(a);
-  /* Task11：选模型后自动预览 diff（保存前必须看到改了啥） */
-  settingsPreviewModel();
-});
 
-function settingsModelHint(a) {
-  const el = $('setModelHint');
-  if (!el) return;
-  if (!a) { el.textContent = ''; return; }
-  const wm = SET_WRITE_MODE[a.write_mode || 'argv'] || SET_WRITE_MODE.argv;
-  const bits = [wm.hint];
-  if (a.value_prefix) {
-    bits.push('选项值按该 agent 要求的形状拼成 ' + a.value_prefix + '<CCR 模型 ID>（官方格式 provider/model）。');
-  }
-  if ((a.models || []).length) {
-    bits.push('原生清单由 hub 内置（以 `qodercli --list-models` 为准），会随版本变化。');
-  }
-  /* 计费档必须实时跟着下拉走：这是「保存后会一直生效」的设置，
-     用户需要在下笔前就看到自己在选免费还是付费。 */
-  const meta = modelMetaFromValue(setSelectedModel(), a, (SET_MODELS || {}).models);
-  let tag = '';
-  if (meta) {
-    tag = modelIsFree(meta.m)
-      ? '<span class="stale-tag" style="color:var(--muted);border-color:var(--border)">免费</span> '
-      : '<span class="stale-tag">付费·按量</span> ';
-  }
-  el.innerHTML = tag + escapeHtml(bits.join(''));
-}
 
-function setSelectedModel() { return $('setModelSel') ? $('setModelSel').value : ''; }
+
 /* password 框显示/隐藏切换（GitHub PAT 等）：原生细节，只改 type 属性，不用新依赖 */
 function passEye(btn, id) {
   const inp = $(id);
@@ -1433,275 +1234,41 @@ function passEye(btn, id) {
   btn.textContent = inp.type === 'password' ? '显示' : '隐藏';
 }
 
-async function settingsPreviewModel() {
-  if (!SET_AGENT) return toast('先选一个 agent', 'err');
-  /* v0.13.85：空值是合法目标（撤销 hub 侧默认），不再 early-return ——
-     原先这里 `if (!model) return toast(...)` 让「撤销」那一项连预览都点不出来。 */
-  const model = setSelectedModel();
-  const box = $('setDiffBox');
-  try {
-    SET_DIFF = await api('/api/settings/model/preview?agent_id=' + encodeURIComponent(SET_AGENT) +
-      '&model=' + encodeURIComponent(model));
-  } catch (e) {
-    SET_DIFF = null; box.style.display = 'none';
-    settingsRenderError('预览失败', e);
-    return toast('预览失败：' + e.message, 'err');
-  }
-  const wm = SET_WRITE_MODE[SET_DIFF.write_mode || 'argv'] || SET_WRITE_MODE.argv;
-  if (SET_DIFF.mode === 'clear') {
-    /* 清空必须把「配置文件不动」写在最显眼处：用户点这一项时最常见的预期是
-       "把 agent 配置也还原成默认"，而实际语义只是"hub 不再注入 --model"。 */
-    box.innerHTML = '<div class="set-diff"><div class="set-diff-hd">将撤销 hub 侧默认模型</div>' +
-      '<div class="set-diff-row"><div class="v">hub 侧：' +
-      escapeHtml(SET_DIFF.hub_model_from || '（未设置）') + ' → （无）</div>' +
-      '<div class="v">' + escapeHtml(SET_DIFF.note || '') + '</div>' +
-      '<div class="v">不写任何配置文件，因此没有备份、也不会有 diff。</div></div></div>';
-    box.style.display = 'block';
-    $('setApplyBtn').disabled = false;
-    return;
-  }
-  const files = SET_DIFF.files || [];
-  box.innerHTML = '<div class="set-diff">' +
-    '<div class="set-diff-hd">将写入 ' + files.length + ' 个文件（保存时自动时间戳备份）' +
-    '｜字段认：' + escapeHtml(wm.label) + '</div>' +
-    files.map(f => '<div class="set-diff-row"><div class="k">' + escapeHtml(f.file) + '</div>' +
-      (f.changes || []).map(c => '<div class="v">' + escapeHtml(c.where) + '：' +
-        escapeHtml(c.from || '（空）') + ' → ' + escapeHtml(c.to) + '</div>').join('') +
-      /* v0.13.44：预览就把「这个文件现在写不动」摆在明面上（chattr +i / 只读挂载），
-         别等保存时才用一句 4 秒就消失的 toast 告诉用户。 */
-      (f.writable === false ? '<div class="v">注意：该文件当前不可写，直接保存会被拒' +
-        '（常见是被设了不可变属性，需先解除）</div>' : '') + '</div>').join('') +
-    '</div>' + (SET_DIFF.argv && SET_DIFF.argv.length
-      ? '<div class="hint" style="margin-top:6px">hub 拉起终端时追加：' + escapeHtml(SET_DIFF.argv.join(' ')) + '</div>'
-      : '<div class="hint" style="margin-top:6px">此 agent 不注入 --model（无白名单 flag），' +
-        '仅写配置文件。</div>');
-  box.style.display = 'block';
-  $('setApplyBtn').disabled = false;
-}
+
 
 /* 保存结果必须**常驻在页内**：09-27 报障「保存并不能生效」的真身是——保存其实成功
    了，但页面只闪一条 4 秒的 toast，状态行与下拉全都停在保存前的样子，用户据此判定
    没生效。所以成功要把落盘清单 + 备份路径写出来，失败要把 HTTP 状态与原因写出来，
    两样都不许只靠 toast。 */
-function settingsRenderApplied(d) {
-  const box = $('setDiffBox');
-  if (!box) return;
-  const applied = d.applied || [];
-  if (d.mode === 'clear') {
-    box.innerHTML = '<div class="set-diff"><div class="set-diff-hd">已生效：' +
-      escapeHtml(d.agent_id) + ' 的 hub 侧默认模型已撤销</div>' +
-      '<div class="set-diff-row"><div class="v">' + escapeHtml(d.note || '') + '</div>' +
-      '<div class="v">该 agent 自己的配置文件未被改动（无备份产生）。</div></div></div>';
-    box.style.display = 'block';
-    return;
-  }
-  box.innerHTML = '<div class="set-diff"><div class="set-diff-hd">已生效：' +
-    escapeHtml(d.agent_id) + ' → ' + escapeHtml(d.model) +
-    (d.argv && d.argv.length ? '（新开终端追加 ' + escapeHtml(d.argv.join(' ')) + '）' : '') +
-    '</div>' +
-    applied.map(a => '<div class="set-diff-row"><div class="k">' + escapeHtml(a.file) + '</div>' +
-      (a.changes || []).map(c => '<div class="v">' + escapeHtml(c.where) + '：' +
-        escapeHtml(c.from || '（空）') + ' → ' + escapeHtml(c.to) + '</div>').join('') +
-      '<div class="v">备份：' + escapeHtml(a.backup) + '</div></div>').join('') +
-    '<div class="v">已开着的会话不受影响，新开终端才带这个模型。</div></div>';
-  box.style.display = 'block';
-}
 
-function settingsRenderError(prefix, e) {
-  const box = $('setDiffBox');
-  if (!box) return;
-  box.innerHTML = '<div class="set-diff"><div class="set-diff-hd">' + escapeHtml(prefix) + '</div>' +
-    '<div class="set-diff-row"><div class="v">' + escapeHtml(e.message || String(e)) + '</div>' +
-    (e.http ? '<div class="v">HTTP ' + escapeHtml(String(e.http)) + '</div>' : '') +
-    '</div></div>';
-  box.style.display = 'block';
-}
 
-async function settingsApplyModel() {
-  /* v0.13.45：保存按钮不再有"未预览就禁用"的状态。09-27 第二轮报障（手机
-     192.168.5.99 来访）日志里只有 GET /api/settings/models 与 /api/models，
-     **连一条 preview/apply 请求都没有** ⇒ 用户是选完模型直接点保存，而 disabled
-     按钮不派发 click ⇒ 委托收不到、toast 也不弹，全程零反馈，"保存不了"就此成立。
-     所以：保存自己负责补齐预览（一次点击走完），按钮只在**保存进行中**才禁用。 */
-  if (!SET_AGENT) {
-    settingsRenderError('保存未执行', new Error('先在上面的列表里选一个 agent'));
-    return toast('先选一个 agent', 'err');
-  }
-  /* v0.13.85：model 允许为空 —— 空值 = 下拉里的「撤销 hub 侧默认（不再注入 --model）」。
-     此前这里用 `if (!model)` 直接 return + toast「先选一个模型」，于是那一项**永远存不了**
-     （后端 validate_model("") 也会 400）。现在空值是合法动作，由后端 preview_clear/
-     clear_model 处理。 */
-  const model = setSelectedModel();
-  if (!SET_DIFF || SET_DIFF.model !== model) {
-    await settingsPreviewModel();              // 自动补预览；失败时里面已渲染 + toast
-    if (!SET_DIFF || SET_DIFF.model !== model) return;
-  }
 
-  const btn = $('setApplyBtn');
-  if (btn) btn.disabled = true;                // 只防连点，保存完立刻恢复
-  try {
-    const d = await api('/api/settings/model/apply', {
-      method: 'POST', noToken: true,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent_id: SET_AGENT, model: model })
-    });
-    if (d.mode === 'clear') {
-      toast(SET_AGENT + '：已撤销 hub 侧默认模型（配置文件未改动）', 'ok');
-    } else {
-      const nb = (d.applied || []).length;
-      toast(SET_AGENT + ' 模型已设为 ' + model + (nb ? '（备份 ' + nb + ' 份）' : '（未改配置文件）'), 'ok');
-    }
-    SET_AGENTS = [];
-    SET_DIFF = null;
-    await settingsModelsLoad(true);
-    settingsRefreshMeta(model);               // 用重载后的真值刷新状态行（不是拿入参糊一个）
-    /* v0.13.164：保存后立刻做一次静态自证，把「写入成功」升级成「四条判据全过」。
-       只报 200 不叫生效 —— 清单里没这个 ID / 该 agent 不注入，界面必须当场说出来。 */
-    try {
-      const v = await api('/api/settings/model/verify?agent_id=' + encodeURIComponent(SET_AGENT));
-      if (d.mode === 'clear') settingsRenderApplied(d); else settingsRenderVerify(v, false, d.applied);
-    } catch (e) {
-      settingsRenderApplied(d);               // 验证本身失败不推翻保存结果
-    }
-  } catch (e) {
-    settingsRenderError('保存失败', e);
-    toast('保存失败：' + e.message, 'err');
-  } finally {
-    if (btn) btn.disabled = false;            // 保存完必须恢复可点，否则第二次就"点不动"
-  }
-}
+
+
 
 /* v0.13.164：执行逻辑自证。
    用户反复报"设置好了没用"，而页面原来只有"已生效"三个字 —— 那三个字的唯一依据是
    HTTP 200。现在把四条判据（落点/清单/注入/通道）逐条摆出来，错了就指出哪一条错。
    live=true 会真打一次网关（付费模型计费）。 */
-async function settingsVerifyModel(live) {
-  if (!SET_AGENT) return toast('先选一个 agent', 'err');
 
-  const box = $('setDiffBox');
-  try {
-    const v = live
-      ? await api('/api/settings/model/verify-live', {
-          method: 'POST', noToken: true,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ agent_id: SET_AGENT })
-        })
-      : await api('/api/settings/model/verify?agent_id=' + encodeURIComponent(SET_AGENT));
-    settingsRenderVerify(v, live);
-  } catch (e) {
-    settingsRenderError('验证失败', e);
-    toast('验证失败：' + e.message, 'err');
-  }
-}
 
-function settingsRenderVerify(v, live, applied) {
-  const box = $('setDiffBox');
-  if (!box) return;
-  const bad = v.verdict !== 'ok';
-  const rows = (v.checks || []).map(c => {
-    const mark = c.ok === true ? '✓' : (c.ok === false ? '✗' : '·');
-    const style = c.ok === false ? ' style="color:var(--st-error)"' : '';
-    return '<div class="v"' + style + '>' + mark + ' ' + escapeHtml(c.name) + '：' +
-      escapeHtml(c.detail || '') + '</div>';
-  }).join('');
-  const chan = Object.keys(v.channels || {}).map(k =>
-    k + (v.channels[k].applies ? ' ✓' : ' ✗')).join('　');
-  const warn = (v.warnings || []).length
-    ? '<div class="set-diff-row">' + v.warnings.map(w =>
-        '<div class="v" style="color:var(--st-error)">⚠ ' + escapeHtml(w) + '</div>').join('') + '</div>'
-    : '';
-  /* 保存后立刻自证：把刚落盘的备份路径一并带出来，用户不必再去翻日志。 */
-  const bak = (applied || []).length
-    ? '<div class="set-diff-row">' + applied.map(a =>
-        '<div class="v">备份：' + escapeHtml(a.backup || '') + '</div>').join('') + '</div>'
-    : '';
-  box.innerHTML = '<div class="set-diff">' +
-    '<div class="set-diff-hd">' + (bad ? '✗ 验证未通过' : '✓ 验证通过') +
-    '：' + escapeHtml(v.agent_id || '') + ' → ' + escapeHtml(v.model || '（未设置）') +
-    '　' + escapeHtml(live ? '（含真实调用）' : '（静态）') + '</div>' +
-    '<div class="set-diff-row">' + rows +
-    '<div class="v">通道：' + escapeHtml(chan) + '</div></div>' + warn + bak +
-    '<div class="hint" style="margin-top:6px">静态验证只读；真实调用会按模型计费，' +
-    '且只证明"网关此刻认这个 ID"，不代替新开终端里的实际体验。</div></div>';
-  box.style.display = 'block';
-}
+
 
 /* 状态行渲染的**唯一出口**（选 agent 时与保存后刷新都走它，别各写一份文案）：
    v0.13.85 起把「这个 agent 的模型字段认什么」写进来；v0.13.164 再把
    「实际会追加的命令」（grok 注入的是 ccr-hub 而不是模型 ID）与「会失效的风险」摆出来。 */
-function settingsAgentMeta(a) {
-  const el = $('setAgentMeta');
-  if (!el || !a) return;
-  const wm = SET_WRITE_MODE[a.write_mode || 'argv'] || SET_WRITE_MODE.argv;
-  const eff = a.effective || {};
-  const parts = ['字段认：' + wm.label,
-                 '当前：' + (a.current || '（未读到）'),
-                 'hub 侧：' + (a.hub_model || '未设置')];
-  const argv = (a.argv_effective || []).join(' ');
-  if (argv) parts.push('实际注入：' + argv);
-  else if (a.argv) parts.push('注入口径：' + a.argv + ' <模型>');
-  el.innerHTML = escapeHtml(parts.join('｜')) +
-    '<div class="hint" style="margin-top:4px">' + escapeHtml(wm.hint) + '</div>' +
-    ((a.files || []).length ? '<div class="hint">配置文件：' + escapeHtml(a.files.join(' / ')) + '</div>' : '') +
-    ((eff.warnings || []).length
-      ? eff.warnings.map(w => '<div class="hint" style="color:var(--st-error)">⚠ ' +
-          escapeHtml(w) + '</div>').join('')
-      : '');
-}
 
-function settingsRefreshMeta(model) {
-  const a = SET_AGENTS.find(x => x.id === SET_AGENT);
-  const el = $('setAgentMeta');
-  if (!el) return;
-  if (!a) { el.textContent = '已保存：' + model; return; }
-  settingsAgentMeta(a);
-}
+
+
 
 /* ── 撤销上一次保存（v0.13.181，借 magpie 的 disconnect 语义）────────────
    为什么要这个：落盘前有备份，但回滚要人自己去目录里挑 .bak、判断哪份对、
    再手工 cp —— 手机上根本做不了。后端把「刚写的那次」记在 model_writes 表里，
    这里一键还原（还原前它还会再备份一次当前状态，撤错了还能再撤回去）。
    破坏性动作 ⇒ 必须 confirm。 */
-async function settingsUndoModel() {
-  if (!SET_AGENT) return toast('先选一个 agent', 'err');
 
-  if (!window.confirm('把 ' + SET_AGENT + ' 的配置文件还原到「上一次保存之前」？\n\n' +
-      '· 只撤销最近一次保存，更早的不动\n' +
-      '· 还原前会再备份一次当前状态\n' +
-      '· 已开着的会话不受影响，新开终端才读新配置')) return;
-  const btn = $('setUndoBtn');
-  if (btn) btn.disabled = true;
-  try {
-    const d = await api('/api/settings/model/undo', {
-      method: 'POST', noToken: true,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent_id: SET_AGENT })
-    });
-    SET_AGENTS = [];
-    SET_DIFF = null;
-    await settingsModelsLoad(true);
-    settingsRenderUndone(d);
-    toast(SET_AGENT + '：已还原 ' + (d.restored || []).length + ' 个文件', 'ok');
-  } catch (e) {
-    settingsRenderError('撤销失败', e);
-    toast('撤销失败：' + e.message, 'err');
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
 
-function settingsRenderUndone(d) {
-  const box = $('setDiffBox');
-  if (!box) return;
-  box.innerHTML = '<div class="set-diff"><div class="set-diff-hd">已撤销：' +
-    escapeHtml(d.agent_id) + ' 的模型写入已还原</div>' +
-    (d.restored || []).map(r => '<div class="set-diff-row"><div class="k">' +
-      escapeHtml(r.file) + '</div><div class="v">还原自备份：' +
-      escapeHtml(r.from_backup) + '</div></div>').join('') +
-    '<div class="v">hub 侧模型现在是：' + escapeHtml(d.hub_model_to || '（未设置）') +
-    '。开新终端前请确认这就是你想要的。</div></div>';
-  box.style.display = 'block';
-}
+
 
 /* ── 设置 → GitHub 子菜单（v0.13.42）──────────────────────────────────────
    把原来写死在 githubprojects.py 里的三样东西（API 基址 / token 文件 / 克隆落点）
@@ -1954,7 +1521,7 @@ async function settingsGithubRefresh() {
    2026-11-07 C 档：读端点身份就是会话 Cookie（api() 同源自动带），不再拼 x-hub-token、
    不再二次输入口令；未登录 401 时提示重新登录。
    var 声明而非 let：go()（06 分片顶层就会跑）可能经 settingsLogsLoad 读到它，
-   与 setModelPageLoaded 同一条 TDZ 纪律。 */
+   与 setGithubPageLoaded 同一条 TDZ 纪律。 */
 var LOG_LAST = null;      // 最近一次结果：复制/导出复用，不再为同一次查看打两次后端
 var logPage = 0;          // Task11 日志分页（JS 变量，每页 100 行）
 var logQTimer = null;
@@ -2608,19 +2175,7 @@ function settingsDelegates() {
     /* 模型计量：表头排序走同一委托出口，禁 inline onclick */
     const mth = e.target.closest('[data-mcl-sort]');
     if (mth) return mclSortKey(mth.dataset.mclSort);
-    const ag = e.target.closest('[data-settings-agent]');
-    if (ag) {
-      if (ag.getAttribute('aria-disabled') === 'true') {
-        return toast(ag.getAttribute('title') || '该 agent 不支持统一设置模型', 'err');
-      }
-      return settingsPickAgent(ag.dataset.settingsAgent);
-    }
     const act = e.target.closest('[data-settings-act]');
-    if (act && act.dataset.settingsAct === 'preview') return settingsPreviewModel();
-    if (act && act.dataset.settingsAct === 'apply') return settingsApplyModel();
-    if (act && act.dataset.settingsAct === 'undo') return settingsUndoModel();
-    if (act && act.dataset.settingsAct === 'verify') return settingsVerifyModel(false);
-    if (act && act.dataset.settingsAct === 'verify-live') return settingsVerifyModel(true);
     if (act) {
       const a = act.dataset.settingsAct;
       if (a === 'gh-test') return settingsGithubTest();
@@ -2641,6 +2196,10 @@ function settingsDelegates() {
       if (a === 'users-new') return usersPanelNew();
       /* 模型计量页（2026-11-07，借鉴 LangChat） */
       if (a === 'mcl-load') return mclPanelLoad();
+      /* 设置→重启页：手动重启 agenthub，复用顶栏「需重启」的 restartHub
+         （含活会话 409 二次确认、轮询恢复、自动刷新）。 */
+      if (a === 'hub-restart') return restartHub({ currentTarget: act });
+      if (a === 'rst-refresh') return settingsRestartStatus();
     }
     /* 用户授权页：卡片按钮统一走 data-uact 委托（禁 inline onclick，§4.2）。
        刻意放在既有分支之后：test_ghsettings.py 用固定 1400 字符窗口截本函数开头查 gh-，
@@ -7806,46 +7365,6 @@ function renderPorts() {
     '<td>' + (r.agent ? '<span class="tag agent">' + escapeHtml(r.agent) + '</span>' : '') + '</td></tr>').join('');
 }
 
-/* ── 遥测 ─────────────────────────────────────────── */
-
-/* Task9 遥测范围档：JS 变量（不落盘），默认 24h；档位只改事件条数上限 */
-var telRange = '24h';
-function telRangeSet(r) {
-  telRange = r;
-  var hint = $('telRangeHint');
-  if (hint) hint.textContent = 'Token 聚合 · 范围 ' + r;
-  loadTelemetry();
-}
-async function loadTelemetry() {
-  $('curlExample').textContent =
-    '# Claude/pi 等 Agent 会话结束后上报用量（同 session 重报=覆盖）\n' +
-    "curl -X POST http://" + location.hostname + ":3102/telemetry/events/claude \\\n" +
-    "  -H 'Content-Type: application/json' \\\n" +
-    "  -d '{\"session_id\":\"abc123\",\"event\":\"session_usage\",\"cwd\":\"/path/proj\",\n" +
-    "       \"usage\":{\"input_tokens\":1088,\"output_tokens\":256,\"cached_tokens\":1024},\n" +
-    "       \"usage_scope\":\"session\"}'";
-  try {
-    const u = await api('/telemetry/usage/summary');
-    const rows = Object.entries(u.by_source || {});
-    $('usageTable').innerHTML = rows.length ?
-      '<table><thead><tr><th>来源</th><th>会话</th><th>输入</th><th>输出</th><th>缓存命中</th></tr></thead><tbody>' +
-      rows.map(([k, v]) => '<tr><td><b>' + k + '</b></td><td>' + v.sessions + '</td><td>' + v.input_tokens + '</td><td>' + v.output_tokens + '</td><td>' + v.cached_tokens + '</td></tr>').join('') +
-      '</tbody></table>' : '<div class="hint">暂无 session_usage 数据</div>';
-    const prof = u.profile || [];
-    $('profTable').innerHTML = prof.length ?
-      '<table><thead><tr><th>来源</th><th>对象</th><th>次数</th><th>成功率</th><th>均耗时</th><th>峰值</th></tr></thead><tbody>' +
-      prof.map(p => '<tr><td>' + p.source + '</td><td><b>' + escapeHtml(p.subject) + '</b></td><td>' + p.calls +
-        '</td><td>' + (p.success_rate >= 99 ? ico('check-circle', 'xs') : p.success_rate >= 80 ? ico('circle', 'xs') : ico('alert', 'xs')) + ' ' + p.success_rate + '%</td>' +
-        '<td>' + p.avg_ms + 'ms</td><td>' + (p.max_ms || '-') + 'ms</td></tr>').join('') + '</tbody></table>'
-      : '<div class="hint">暂无画像数据（对话/指挥官/DAG/定时执行后自动生成）</div>';
-    const telLimit = ({ '1h': 20, '6h': 50, '24h': 100, 'all': 200 })[telRange] || 100;
-    const e = await api('/telemetry/events?limit=' + telLimit);
-    $('eventTable').innerHTML = '<table><thead><tr><th>时间</th><th>来源</th><th>会话</th><th>事件</th></tr></thead><tbody>' +
-      (e.events || []).map(x => '<tr><td>' + (x.created_at || '').slice(5, 16).replace('T', ' ') + '</td><td>' + escapeHtml(x.source) + '</td><td style="font-family:var(--font-mono);font-size:var(--fs-sm)">' + escapeHtml((x.session_id || '').slice(0, 14)) + '</td><td>' + escapeHtml(x.event) + '</td></tr>').join('') +
-      '</tbody></table>';
-  } catch (err) { toast(err.message, 'err'); }
-}
-
 /* ── S2 自动扫描 ──────────────────────────────────── */
 
 async function runScan() {
@@ -9291,7 +8810,7 @@ function cmdCatalog() {
     rows.push({ k: 'a', id: a.id, label: a.name || a.id, sub: a.id });
   });
   rows.push({ k: 'x', id: 'terminal', label: '打开终端（当前 Agent）', sub: '动作' });
-  rows.push({ k: 'x', id: 'settings', label: '打开设置 · 模型', sub: '动作' });
+  rows.push({ k: 'x', id: 'settings', label: '打开设置', sub: '动作' });
   rows.push({ k: 'x', id: 'register', label: '注册自定义 Agent', sub: '动作' });
   rows.push({ k: 'x', id: 'scan', label: '自动扫描本机 Agent', sub: '动作' });
   rows.push({ k: 'x', id: 'reload', label: '刷新实体与健康', sub: '动作' });
@@ -9313,7 +8832,7 @@ function cmdAction(id) {
     gotoChat(pick, 'term');
     return;
   }
-  if (id === 'settings') { go('settings-model'); return; }
+  if (id === 'settings') { go('settings-github'); return; }
   if (id === 'register') { openRegister(); return; }
   if (id === 'scan') { runScan(); return; }
 }
@@ -9414,32 +8933,30 @@ const NAV_GROUPS = { agents: 'AGENTS', infra: '基础设施', system: '系统', 
 const NAV_ICONS = { agents: 'hubmark', infra: 'server', system: 'sliders', settings: 'settings' };   // 收起成图标条时仍可辨认（sprite id）
 const NAV_ORDER = ['agents', 'infra', 'system', 'settings'];
 const NAV_SUB_KINDS = [['gateway', '网关'], ['service', '服务'], ['tool', '工具'], ['memory', '记忆'], ['file', '文件管理'], ['convert', '文件转换']];
-const SYS_PAGES = [['ports', '端口', 'share'], ['telemetry', '遥测', 'activity'], ['memory', '记忆中心', 'database'],
+const SYS_PAGES = [['ports', '端口', 'share'], ['memory', '记忆中心', 'database'],
                    ['skills', '技能中心', 'zap'], ['kb', '知识库', 'book'],
                    ['mcp', 'MCP服务器', 'wrench'], ['jobs', '定时', 'clock'], ['tasks', '协同', 'flow'],
-                   ['assets', '资产', 'layers'], ['botboy', 'Botboy', 'message'],
                    ['checkin', '积分签到', 'star']];
 /* v0.13.47：运行日志页删除，内容并入设置→日志。
-   v0.13.170：Botboy = DS Bot 团队面板（只读投影 ~/.dsh/bot/state.json）。
-   图标用现成的 message —— sprite 里没有 bot/robot 图形，ico() 对不存在的 id
-   静默不画（判例：kb 行曾经整行空白），所以只许选已验证存在的 symbol。 */
+   2026-11-20：遥测 / 资产 / Botboy 三页按实测（21 天 0~1 次调用）删除，端点保留。 */
 const MODE_LABEL = { embed: '嵌入', term: '终端', chat: '对话', detail: '详情', open: '新窗口' };
 /* v0.13.43 设置子菜单：与系统页同形态（data-sys → go(page) ⇒ 正文出页、窄屏自动收侧栏），
    只是单独成组挂在「系统」之下；这三项此前是右侧抽屉里的三个 tab。 */
-const SET_PAGES = [['settings-model', '模型', 'cpu'], ['settings-github', 'GitHub', 'globe'],
+const SET_PAGES = [['settings-github', 'GitHub', 'globe'],
                    ['settings-logs', '日志', 'activity'],
-                   ['settings-users', '用户授权', 'eye'], ['settings-modelcalls', '模型计量', 'radar']];
+                   ['settings-users', '用户授权', 'eye'], ['settings-modelcalls', '模型计量', 'radar'],
+                   ['settings-restart', '重启', 'refresh']];
 /* 2026-10-25：「设置 · 记忆存储」并入「系统 · 记忆中心」（同一份本机记忆的读写入口
    不该分居两个菜单，设置组也不该为 4 条便签单占一个一级项）。 */
 const PAGE_LABELS = { classroom: '总览', chat: '统一对话', tasks: '协同', jobs: '定时',
-                      memory: '记忆中心', skills: '技能中心', kb: '知识库', mcp: 'MCP服务器', ports: '端口', telemetry: '遥测',
-                      assets: '资产', localprojects: '本机项目', github: 'GitHub 项目', resources: '资源监控',
-                      botboy: 'Botboy', checkin: '积分签到',
-                      'settings-model': '设置 · 模型', 'settings-github': '设置 · GitHub',
-                      'settings-token': '设置 · 认证状态',
+                      memory: '记忆中心', skills: '技能中心', kb: '知识库', mcp: 'MCP服务器', ports: '端口',
+                      localprojects: '本机项目', github: 'GitHub 项目', resources: '资源监控',
+                      checkin: '积分签到',
+                      'settings-github': '设置 · GitHub',
                       'settings-logs': '设置 · 日志',
                       'settings-users': '设置 · 用户授权',
-                      'settings-modelcalls': '设置 · 模型计量' };
+                      'settings-modelcalls': '设置 · 模型计量',
+                      'settings-restart': '设置 · 重启' };
 const navOpenStored = lsGet('hub.nav.open');
 let navOpen = navOpenStored === null ? 'agents' : navOpenStored;   // 首屏默认展开 AGENTS；'' = 用户主动全收起
 let curPage = '';
@@ -9453,31 +8970,6 @@ function navRank(a) {
   if (typeof agentHealth === 'function' && agentHealth(a).bad) return 0;
   return NAV_RANK[a.status] == null ? 9 : NAV_RANK[a.status];
 }
-function navMatch(a, q) {
-  // 侧栏搜索：与全站其他搜索框同一口径（fuzzyMatch：精确恒 1000 压倒近似）。
-  return fuzzyMatch([[a.name, 3], [a.id, 2], [a.port, 1]], q) > 0;
-}
-// 搜索词高亮
-/* P1-22（2026-09-30）：高亮改在**转义之后**的串上匹配。
-   旧写法拿原文下标 idx 去切 escapeHtml(text)：
-     text = 'a & b'，查 '&' → 原文 idx=2，切转义串得到 'a &' 之类错位，
-   含 & < > " ' 时高亮会盖错字符（轻则高亮到半个实体，重则切出 < 破坏 HTML）。
-   正确做法：先转义成最终 HTML，再在这份 HTML 上匹配 —— 但那样查询词里的
-   & 也要跟着转义才搜得到，所以两边各自转义后再比。 */
-function hlMatch(text, q) {
-  if (!q) return escapeHtml(text);
-  const escaped = escapeHtml(text);
-  const needle = escapeHtml(q);
-  if (!needle) return escaped;
-  const hay = escaped.toLowerCase(), nd = needle.toLowerCase();
-  let result = '', last = 0, idx = hay.indexOf(nd);
-  while (idx !== -1) {
-    result += escaped.slice(last, idx) + '<mark>' + escaped.slice(idx, idx + needle.length) + '</mark>';
-    last = idx + needle.length;
-    idx = hay.indexOf(nd, last);
-  }
-  return result + escaped.slice(last);
-}
 function navItemHtml(a, child) {
   const st = seatStateOf(a);
   const on = (curPage === 'chat' && a.id === chatPick) ? ' on' : '';
@@ -9488,7 +8980,7 @@ function navItemHtml(a, child) {
   // 端口 / 判定理由 / 描述全文不再进 title（用户 2026-11-08）。
   const tip = seatLabelOf(a) + ' · ' + (a.name || a.id);
   // 搜索高亮：名称用 hlMatch，ID 和端口保持原样
-  const nameHtml = hlMatch(a.name || a.id, ($('navSearch') ? $('navSearch').value.trim() : ''));
+  const nameHtml = escapeHtml(a.name || a.id);
   // 操作按钮：按 entries 类型渲染（最多3个）
   const es = a.entries || [];
   const actBtns = [];
@@ -9658,31 +9150,25 @@ function navRow(a, child) { return navItemHtml(a, child) + (a.id === histOpen ? 
 function renderNav() {
   const box = $('navTree');
   if (!box) return;
-  const q = ($('navSearch') ? $('navSearch').value.trim() : '').toLowerCase();
   const all = AGENTS.filter(a => a.kind === 'agent').filter(a => (typeof _permOk !== 'function') || _permOk(a.id));
   const infra = AGENTS.filter(a => a.kind !== 'agent').filter(a => (typeof _permOk !== 'function') || _permOk(a.id));
   const _sysOk = SYS_PAGES.filter(([p]) => (typeof _permOk !== 'function') || _permOk(p));
   const _setOk = SET_PAGES.filter(([p]) => (typeof _permOk !== 'function') || _permOk(p));
+  const sorter = (x, y) => navRank(x) - navRank(y) || String(x.name||'').localeCompare(String(y.name||''), 'zh');
   const lists = {
-    agents: q ? all.filter(a => navMatch(a, q)) : all.slice().sort((x, y) => navRank(x) - navRank(y) || String(x.name||'').localeCompare(String(y.name||''), 'zh')),
-    infra: q ? infra.filter(a => navMatch(a, q)) : infra.slice().sort((x, y) => navRank(x) - navRank(y) || String(x.name||'').localeCompare(String(y.name||''), 'zh')),
-    system: q ? [] : _sysOk,
-    settings: q ? [] : _setOk,   // 2026-11-07 用户授权：叶子级按 user_perms 过滤
+    agents: all.slice().sort(sorter),
+    infra: infra.slice().sort(sorter),
+    system: _sysOk,
+    settings: _setOk,   // 2026-11-07 用户授权：叶子级按 user_perms 过滤
   };
   /* 2026-11-08：分组本身也可授权（group:<g>）。组头无权限且组内无可见叶子
      ⇒ 整组不渲染（此前会留一个空手风琴头，用户看到的就是「点了没东西」）。 */
   const _authLimited = (typeof AUTH_PERMS !== 'undefined') && AUTH_PERMS !== null;
   const _grpOk = g => (typeof _permOk !== 'function') || _permOk('group:' + g) || lists[g].length > 0;
-  // 搜索结果计数
-  let totalMatch = 0;
-  if (q) {
-    totalMatch = all.filter(a => navMatch(a, q)).length + infra.filter(a => navMatch(a, q)).length;
-  }
   const html = NAV_ORDER.map(g => {
     const list = lists[g];
-    if (!q && !_grpOk(g)) return '';
-    if (q && !list.length) return '';
-    const open = q ? true : navOpen === g;
+    if (!_grpOk(g)) return '';
+    const open = navOpen === g;
     let body = '';
     if (g === 'infra') {
       /* 子项分组（2026-11-07 用户要求「proxy panel 下加 xray/openrung 子菜单」）：
@@ -10289,239 +9775,6 @@ loadAgents();
    `let term` —— 见 01 里 settingsDelegates 上方的注释：TDZ 闸门判的是调用点顺序）。 */
 settingsDelegates();
 go(lsGet('hub.page') || 'classroom');  // T9：默认落点 = 上次所在页（chatPick/chatMode 已在声明处恢复）
-/* ══════════════════ P4 资产面板（只读门面聚合）══════════════════
-   契约源：src/memory.py（/api/memory/*）、src/kb.py（/api/kb/*）、src/skill.py（/api/skill/*）。
-   口径（09-24 架构裁定）：hub 只做**门面 + ACL + 审计 + 前端**，本页零写操作、零"第二权威副本"。
-
-   ★ 为什么这个文件里最讲究的是"四态可区分"而不是好看：
-     ok / empty / degraded / down 四态里，只要把后两种渲染成"暂无数据"，
-     用户就会以为本机资产是空的 —— 这正是 ccpocket-bridge「active、端口在听、/health ok
-     而会话起不来，静默 21 天」那一族故障在前端层的形态。闸门
-     tests/test_asset_panel.py 用**抽出来的真函数**喂 degraded 与 404 两种载荷钉死这条。
-
-   ★ 施工约束（09-23 分档五不变量 + 浮层三条）：
-     - 不新增 matchMedia（断点唯一真相在 01 的 HUB_NARROW_MQ）；
-     - 不裸用 localStorage（一律 lsGet/lsSet）；
-     - 侧栏/菜单内禁 inline onclick ⇒ 本页交互全走 data-asset 委托，且入口函数
-       initAssetPanel() 由 go('assets') 懒调用（不用顶层 IIFE：v0.13.11 的 TDZ 教训）。 */
-
-/* 顶层状态位故意用 `var`：本分片在 hub.js 里排在 01 之后，而 01 的 go() 会调到
-   本文件的函数。`let/const` 在语句执行到之前是 TDZ（v0.13.11 的 `_navHtml` 白屏
-   就是这一型），而 `function` 声明整体提升 ⇒ 下面的常量表一律做成函数。 */
-var assetsBound = false;   // 事件委托只绑一次（go() 会反复进本页）
-
-function ASSET_SOURCES() {
-  return [
-  {
-    key: 'memory', label: '记忆', box: 'assetMemory', needsQ: true,
-    path: q => '/api/memory/search?q=' + encodeURIComponent(q) + '&limit=6',
-    items: d => d.memories || [],
-    itemText: it => it.content || it.summary || it.text || '',
-    itemMeta: it => [it.category || it.type, it.agent || it.source, it.created_at ? String(it.created_at).slice(0, 10) : ''].filter(Boolean).join(' · '),
-    status: d => (d.engines && d.engines.memory) || d.engine || '',
-  },
-  {
-    key: 'kb', label: '技术文档', box: 'assetKb', needsQ: true,
-    path: q => '/api/kb/search?q=' + encodeURIComponent(q) + '&k=6',
-    items: d => d.results || [],
-    itemText: it => it.snippet || it.text || it.title || '',
-    itemMeta: it => [it.path || it.url, it.chunk ? '#' + it.chunk : ''].filter(Boolean).join(''),
-    status: d => d.engine || '',
-  },
-  {
-    key: 'skill', label: '技能', box: 'assetSkill', needsQ: false,
-    path: q => '/api/skill/list?limit=6' + (q ? ('&q=' + encodeURIComponent(q)) : ''),
-    items: d => d.items || [],
-    itemText: it => it.name + (it.description ? (' — ' + it.description) : ''),
-    itemMeta: it => [it.route, it.dir ? (it.dir.split('/').slice(-2).join('/')) : ''].filter(Boolean).join(' · '),
-    status: d => (d.engine || 'disk'),
-  },
-  ];
-}
-
-/* 第五态 idle：某些门面端点按契约 **缺 q 就回 422**（memory/kb 检索）。
-   空查询时发一个注定 422 的请求、再把后端校验错报成「部分后端不可用」，
-   技术上诚实但语义误导（用户什么都没输）。idle 单独一态，不发请求。 */
-function assetIdleHtml(src) {
-  return '<div class="hint">「' + escapeHtml(src.label) + '」这一路需要检索词（端点缺 q 按契约回 422）。'
-    + '在上方输入关键词后点「检索」。</div>';
-}
-
-/* 四态之一：ok / empty / degraded / down。判定顺序即优先级——坏消息不许被"空"掩盖。 */
-function assetStateOf(d, err) {
-  if (err) return /HTTP 404/.test(String(err.message)) ? 'down' : 'degraded';
-  if (!d) return 'down';
-  // 后端自己报的 degraded 与逐路 backends[].ok 取并集（有一路不算账就算降级）
-  const bad = (d.backends || []).some(b => !b.ok) || (d.degraded || []).length > 0;
-  if (bad) return 'degraded';
-  return (d.count || 0) ? 'ok' : 'empty';
-}
-
-/* 状态文案与颜色同样做成函数（见上方 TDZ 注释）。
-   只用主题里**真存在**的 token（--ok / --muted / --warn / --danger-text）：
-   不存在的 var() 会静默退化成继承色 ⇒ 警告条变普通文字，又是新的静默不可用。 */
-function assetStateText(state) {
-  return ({ ok: '有结果', empty: '确实零命中', idle: '待输入检索词',
-            unwired: '按设计未接入',
-            degraded: '部分后端不可用', down: '端点不可用' })[state] || state;
-}
-
-function assetStateColor(state) {
-  return ({ ok: 'var(--ok)', empty: 'var(--muted)', idle: 'var(--muted)',
-            unwired: 'var(--muted)',
-            degraded: 'var(--warn)', down: 'var(--danger-text)' })[state] || 'var(--muted)';
-}
-
-function assetBadge(src, state, note) {
-  return '<div class="chip" style="min-width:0">' +
-    '<b style="color:' + assetStateColor(state) + '">' + escapeHtml(src.label) +
-    '：' + escapeHtml(assetStateText(state)) + '</b>' +
-    (note ? '<span class="hint">' + escapeHtml(note) + '</span>' : '') + '</div>';
-}
-
-function assetResultsHtml(src, d, state, err) {
-  if (state === 'down') {
-    return '<span style="color:var(--danger-text)">该门面端点取不到（' +
-      escapeHtml(err ? String(err.message).slice(0, 120) : 'HTTP 404') +
-      '）。<b>这不是"没有资产"</b>——多半是 hub 代码比进程新（未重启）或后端未启用。</span>' +
-      ' <button class="btn ghost sm" data-asset="search">重试</button>';
-  }
-  if (state === 'degraded') {
-    /* ★ 红向修正：降级态以前会落到 empty 分支里说「确实没有命中」，
-       那恰好把「查不了」糊成「没有」——就是 09-22 那族静默不可用。 */
-    return '<div class="hint" style="color:var(--warn)"><b>部分后端不可用</b>：'
-      + '下面的清单<b>不完整</b>，不能当作「没有资产」。 <button class="btn ghost sm" data-asset="search">重试</button></div>'
-      + (d && d.note ? '<div class="hint" style="color:var(--warn)">' + escapeHtml(d.note) + '</div>' : '')
-      + (d ? backendLedger(d) : '')
-      + (d && src.items(d).length ? itemListHtml(src, src.items(d))
-                                  : '<div class="hint">可用后端本次未返回条目。</div>');
-  }
-  if (state === 'empty') {
-    return (d && d.note ? '<div class="hint" style="color:var(--warn)">' + escapeHtml(d.note) + '</div>' : '')
-      + backendLedger(d) +
-      '<div class="hint">后端全部在线，这条改写查询确实没有命中 —— 换个说法再试。</div>';
-  }
-  const items = d ? src.items(d) : [];
-  return (d && d.note ? '<div class="hint" style="color:var(--warn)">' + escapeHtml(d.note) + '</div>' : '')
-    + backendLedger(d) + itemListHtml(src, items);
-}
-
-/* 逐路 backends[] 台账：路名 + 成败 + 条数 + 耗时 + 错因（错因截 60 字防溦屏） */
-function backendLedger(d) {
-  const backs = ((d && d.backends) || []).map(b =>
-    '<span class="hint" style="margin-right:8px">' + escapeHtml(b.name) +
-    (b.ok ? '✓' : '✗') + ' ' + (b.count == null ? '-' : b.count) + '条 ' + (b.ms == null ? '' : b.ms + 'ms') +
-    (b.ok ? '' : (' <span style="color:var(--danger-text)">' + escapeHtml(String(b.error || '')).slice(0, 60) + '</span>')) +
-    '</span>').join('');
-  return backs ? '<div style="margin-bottom:6px">' + backs + '</div>' : '';
-}
-
-function itemListHtml(src, items) {
-  if (!items || !items.length) return '<div class="hint">本次无条目。</div>';
-  return '<div class="mem-list">' + items.map(it =>
-    '<div class="mem-item"><p>' + escapeHtml(String(src.itemText(it)).slice(0, 300)) +
-    (src.itemMeta(it) ? '<br><span class="hint">' + escapeHtml(src.itemMeta(it)) + '</span>' : '') +
-    '</p></div>').join('') + '</div>';
-}
-
-async function loadAssetStatus() {
-  const box = $('assetStatus');
-  if (!box) return;
-  const probes = [
-    { label: '技能', path: '/api/skill/status', kind: 'status' },
-    { label: '知识', path: '/api/kb/status', kind: 'status' },
-    { label: '记忆', path: '/health', kind: 'health' },
-  ];
-  const settled = await Promise.allSettled(probes.map(p => api(p.path)));
-  const chips = settled.map((r, i) => {
-    const p = probes[i];
-    if (r.status === 'rejected') {
-      const st = /HTTP 404/.test(String(r.reason.message)) ? 'down' : 'degraded';
-      return assetBadge({ label: p.label }, st, String(r.reason.message).slice(0, 60));
-    }
-    const d = r.value || {};
-    if (p.kind === 'health') {
-      const mb = d.memory_backend || {};
-      const st = mb.state === 'ok' ? 'ok' : (mb.state ? 'degraded' : 'down');
-      return assetBadge({ label: '记忆' }, st,
-        mb.state ? (mb.state + ' L1=' + mb.l1_total + ' L0=' + mb.l0_total + (mb.stale ? ' stale' : '')) : '字段缺失（进程旧于代码）');
-    }
-    /* ★ 关键区分：`available:false` 开 **带 why** 的是设汁裁定（如 kb 的 wigolo、skill 的 TDAI 注册表），
-       不是故障；带 error 的才是真挂了。把前者涂成黄色告警，首屏就是一屏假故障——
-       那会把真故障埋掉（09-22 “静默不可用”的反面：吼叫式假告警）。 */
-    const off = Object.values(d).filter(v => v && typeof v === 'object' && v.available === false);
-    const unwired = off.filter(v => v.why && !v.error);
-    const broken = off.filter(v => !(v.why && !v.error));
-    const st = broken.length ? 'degraded' : (unwired.length ? 'unwired' : 'ok');
-    const why = (broken.length ? broken.map(v => v.error || '未说明') : unwired.map(v => v.why))
-      .join('；').slice(0, 90);
-    return assetBadge({ label: p.label }, st, off.length ? ((broken.length ? '不可用：' : '原因：') + why) : '');
-  });
-  /* v0.13.40：align-items:flex-start —— 三个徽标的 note 长短差很多（kb 那条 90+ 字），
-     不拉伸才能让每块只占自己内容的高度，否则短的那块（技能）下面拖一大片空白。 */
-  box.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start">' + chips.join('') + '</div>';
-}
-
-async function runAssetSearch() {
-  const q = (($('assetQ') || {}).value || '').trim();
-  const hint = $('assetHint');
-  if (hint) { hint.textContent = '检索中…'; }
-  const settled = await Promise.allSettled(ASSET_SOURCES().map(s => {
-    // 空查询时，需要 q 的那两路**根本不发请求**（而是置 idle）
-    if (!q && s.needsQ) return Promise.resolve({ idle: true });
-    return api(s.path(q));
-  }));
-  let degraded = 0;
-  settled.forEach((r, i) => {
-    const src = ASSET_SOURCES()[i];
-    const box = $(src.box);
-    if (!box) return;
-    let state, d = null, err = null;
-    if (r.status === 'fulfilled' && r.value && r.value.idle) {
-      state = 'idle'; box.innerHTML = assetIdleHtml(src);
-    } else if (r.status === 'rejected') {
-      err = r.reason; state = assetStateOf(null, err);
-      box.innerHTML = assetResultsHtml(src, null, state, err);
-    } else {
-      d = r.value; state = assetStateOf(d, null);
-      box.innerHTML = assetResultsHtml(src, d, state, null);
-    }
-    if (state === 'degraded' || state === 'down') degraded++;
-  });
-  if (hint) {
-    if (!q) {
-      hint.textContent = '未带检索词：记忆/技术文档两路置为待输入（它们缺 q 会回 422），技能路已列前 6 条';
-    } else {
-      hint.textContent = degraded
-        ? ('完成：' + degraded + '/3 路有降级，见对应列的红/黄字')
-        : '完成：三路均正常';
-    }
-  }
-}
-
-function initAssetPanel() {
-  if (assetsBound) return;
-  assetsBound = true;
-  const root = $('page-assets');
-  if (!root) return;
-  // data-asset 委托：唯一出口，侧栏/菜单内零 inline onclick（浮层三条之配套红线）
-  root.addEventListener('click', e => {
-    const b = e.target.closest('[data-asset]');
-    if (!b) return;
-    if (b.dataset.asset === 'search') runAssetSearch();
-    else if (b.dataset.asset === 'refresh') loadAssets();
-  });
-  const inp = $('assetQ');
-  if (inp) inp.addEventListener('keydown', e => { if (e.key === 'Enter') runAssetSearch(); });
-}
-
-async function loadAssets() {
-  initAssetPanel();
-  const sb = $('assetStatus');
-  if (sb) sb.innerHTML = '<span class="hint">门面健康自检中…</span>';
-  await loadAssetStatus();
-  runAssetSearch();
-}
 /* ── 本机项目页（v0.13.30）────────────────────────────────────────
  * 分片头注释（军规：分片源，不是 build 产物；产物在 static/hub.js 由
  * scripts/build_hubjs.sh 按字典序拼接，直接改产物会被 test_hubjs_split 判红）。
@@ -12181,208 +11434,7 @@ function termKeysBind() {
 }
 
 /* 换会话 / 断线时清掉修饰键残留态（视觉与语义必须同时复位）。 */
-function termKeysReset() { ttKeyStop(); ttKeyMods.ctrl = false; ttKeyMods.alt = false; ttKeySync(); }/* v0.13.170 · Botboy 页（系统菜单第 10 项）：DS Bot 团队的只读投影。
- *
- * 数据面唯一来源：GET /api/botboy/overview（服务端读 ~/.dsh/bot/state.json）。
- * 为什么不在前端直连 dsh：① dsh 是按需拉起、本机常 inactive；② dsh web 的鉴权 token
- * 是进程级随机值，前端拿不到也不该拿；③ 跨源 fetch 会被 CORS 挡。读落盘文件是同一份数据。
- *
- * 三种"没有"必须分开渲染（静默不可用是本仓最禁的失败形态）：
- *   ok=false          → 文件在但读不了/不是 JSON：把 code+message 原样打出来，别当空团队
- *   found=false       → 还没有 state.json：附安装态与建团队入口
- *   ok && found && 0  → 真·空团队（文件在、结构正常、一条都没有）
- */
-/* ⚠ 必须是 var：本分片排在 01-core-boot.js 之后，而 go()/initSidebar() 在启动期就会
-   走到 loadBotboy()。`let` 声明在拼接产物里晚于调用点 ⇒ TDZ（ReferenceError），
-   这正是 tests/test_tdz_order.py 抓的那一类（red baseline 是 _navHtml）。 */
-var bbBound = false;
-var bbBusy = false;
-
-function bbAgo(ms) {
-  if (!ms) return '';
-  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-  if (s < 60) return s + ' 秒前';
-  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
-  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
-  return Math.floor(s / 86400) + ' 天前';
-}
-
-function bbStamp(ms) {
-  if (!ms) return '—';
-  const d = new Date(ms), p = n => String(n).padStart(2, '0');
-  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
-}
-
-function initBotboy() {
-  if (bbBound) return;
-  bbBound = true;
-  const root = $('page-botboy');
-  if (!root) return;
-  // data-bb 委托：唯一出口，页内零 inline onclick（浮层/菜单三条的配套红线）
-  root.addEventListener('click', e => {
-    const b = e.target.closest('[data-bb]');
-    if (b && b.dataset.bb === 'refresh') loadBotboy(true);
-  });
-}
-
-function bbBotCard(b) {
-  const main = b.main ? '<span class="s-badge running" title="Main Bot"></span><b>Main</b> ' : '';
-  const meta = [b.model, b.effort, b.workDir ? '工作目录 ' + b.workDir : '']
-    .filter(Boolean).map(escapeHtml).join(' · ');
-  const active = b.lastActive
-    ? '活跃 ' + escapeHtml(bbStamp(b.lastActive)) + '（' + escapeHtml(bbAgo(b.lastActive)) + '）· ' + b.exchanges + ' 条交接'
-    : '暂无交接记录';
-  return '<div class="sp-cell">' +
-    '<div class="sp-sub">' + main + escapeHtml(b.name) + '</div>' +
-    (b.role ? '<div class="hint">' + escapeHtml(b.role) + '</div>' : '') +
-    (meta ? '<div class="hint">' + meta + '</div>' : '') +
-    '<div class="hint">' + active + '</div>' +
-    (b.createdAt ? '<div class="hint">建于 ' + escapeHtml(bbStamp(b.createdAt)) + '</div>' : '') +
-    '</div>';
-}
-
-function bbRoomCard(r) {
-  const members = r.members.map(m => escapeHtml(m.name)).join('、') || '（无成员）';
-  const admin = r.adminName ? '主持 ' + escapeHtml(r.adminName) : '';
-  const active = r.lastActive
-    ? '活跃 ' + escapeHtml(bbStamp(r.lastActive)) + '（' + escapeHtml(bbAgo(r.lastActive)) + '）'
-    : '暂无发言';
-  return '<div class="sp-cell">' +
-    '<div class="sp-sub">' + escapeHtml(r.name) + '</div>' +
-    '<div class="hint">' + members + '</div>' +
-    '<div class="hint">' + [r.memberCount + ' 人', admin, r.mode ? '模式 ' + escapeHtml(r.mode) : '']
-      .filter(Boolean).join(' · ') + '</div>' +
-    '<div class="hint">' + active + '</div>' +
-    (r.notice ? '<div class="hint">公告：' + escapeHtml(r.notice) + '</div>' : '') +
-    '</div>';
-}
-
-function bbWorkRow(w) {
-  const route = escapeHtml(w.fromName || '用户') + ' → ' + escapeHtml(w.toName || '—');
-  const where = w.roomName ? '群聊 ' + escapeHtml(w.roomName) : '';
-  const state = '等待 ' + (w.waiting || 0) + ' 项 · 已回 ' + (w.results || 0) + ' 项';
-  return '<div class="mem-item">' +
-    '<p>' + route + (where ? ' <span class="hint">（' + where + '）</span>' : '') +
-      '<br><span class="hint">' + state + (w.at ? ' · 开始于 ' + escapeHtml(bbStamp(w.at)) : '') + '</span></p>' +
-    '</div>';
-}
-
-function bbRender(d) {
-  const status = $('bbStatus'), hint = $('bbHint');
-  const botsBox = $('bbBots'), roomsBox = $('bbRooms');
-  const botCount = $('bbBotCount'), roomCount = $('bbRoomCount'), exBody = $('bbEx');
-  const worksBox = $('bbWorks'), workCount = $('bbWorkCount');
-
-  // ① 读不了：原样给错误，不渲染成"空团队"
-  if (!d.ok) {
-    const err = d.error || {};
-    if (status) status.innerHTML = '<span class="s-badge error"></span>state.json 不可读';
-    if (hint) hint.innerHTML = '<b>' + escapeHtml(err.code || 'unknown') + '</b>：' +
-      escapeHtml(err.message || '未知错误') + '<br>路径 <code>' + escapeHtml(d.state_path || '') + '</code>';
-    if (botsBox) botsBox.innerHTML = '<div class="hint">不可判定（文件存在但解析失败）</div>';
-    if (roomsBox) roomsBox.innerHTML = '<div class="hint">不可判定</div>';
-    if (exBody) exBody.innerHTML = '<tr><td colspan="3" class="hint">不可判定</td></tr>';
-    if (worksBox) worksBox.innerHTML = '<div class="hint">不可判定</div>';
-    if (workCount) workCount.textContent = '—';
-    if (botCount) botCount.textContent = '—';
-    if (roomCount) roomCount.textContent = '—';
-    return;
-  }
-
-  // ② 还没装 / 还没建：说清楚下一步，别留白
-  if (!d.found) {
-    const inst = d.install || {}, profs = inst.profiles || {};
-    const lines = Object.keys(profs).map(p => {
-      const v = profs[p] || {};
-      return p + '：' + Object.keys(v).map(k => k + (v[k] ? ' 已装' : ' 未装')).join(' · ');
-    });
-    if (status) status.innerHTML = '<span class="s-badge installed"></span>还没有团队文件';
-    if (hint) hint.innerHTML = escapeHtml(d.hint || '') +
-      (lines.length ? '<br>安装态 —— ' + lines.map(escapeHtml).join('；') : '') +
-      '<br>装法：<code>dsh plugin --profile web add -w ds-bot</code>（远程入口另装 ' +
-      '<code>ds-harness-remote@0.5.20</code>）；装好后在 dsh 里建 Main Bot，本页自动出现。' +
-      '<br>路径 <code>' + escapeHtml(d.state_path || '') + '</code>';
-    if (botsBox) botsBox.innerHTML = '<div class="hint">0 个 Bot（文件不存在，不是读取失败）</div>';
-    if (roomsBox) roomsBox.innerHTML = '<div class="hint">0 个群聊</div>';
-    if (exBody) exBody.innerHTML = '<tr><td colspan="3" class="hint">暂无交接</td></tr>';
-    if (worksBox) worksBox.innerHTML = '<div class="hint">0 项（文件不存在，不是读取失败）</div>';
-    if (workCount) workCount.textContent = '0 项';
-    if (botCount) botCount.textContent = '0 个';
-    if (roomCount) roomCount.textContent = '0 个';
-    return;
-  }
-
-  // ③ 正常
-  const c = d.counts || {};
-  if (status) {
-    status.innerHTML = '<span class="s-badge running"></span>' +
-      'state.json 最后写入 ' + escapeHtml(bbStamp(d.updated_at)) +
-      '（' + escapeHtml(bbAgo(d.updated_at)) + '）· revision ' + escapeHtml(String(d.revision)) +
-      ' · ' + (c.bots || 0) + ' Bot（' + (c.mains || 0) + ' Main） / ' + (c.rooms || 0) + ' 群聊 / ' +
-      (c.exchanges || 0) + ' 条交接 / ' + (c.works || 0) + ' 委派中';
-  }
-  if (hint) {
-    const inst = d.install || {}, profs = inst.profiles || {};
-    const has = Object.keys(profs).some(p => (profs[p] || {})['ds-bot']);
-    hint.innerHTML = (has ? '' : '<b>未在 node_modules 里检测到 ds-bot</b>（本页只按文件投影，' +
-      '数据可能来自另一个 DSH_HOME）。') +
-      '路径 <code>' + escapeHtml(d.state_path || '') + '</code>';
-  }
-
-  if (botsBox) {
-    botsBox.innerHTML = (d.bots || []).length
-      ? d.bots.map(bbBotCard).join('')
-      : '<div class="hint">团队是空的：state.json 存在但没有 Bot。</div>';
-  }
-  if (roomsBox) {
-    roomsBox.innerHTML = (d.rooms || []).length
-      ? d.rooms.map(bbRoomCard).join('')
-      : '<div class="hint">还没有群聊（群聊由 dsh 侧创建，至少要两个 Bot）。</div>';
-  }
-  if (botCount) botCount.textContent = (d.bots || []).length + ' 个（' + (c.mains || 0) + ' Main）';
-  if (roomCount) roomCount.textContent = (d.rooms || []).length + ' 个';
-  if (worksBox) {
-    worksBox.innerHTML = (d.works || []).length
-      ? d.works.map(bbWorkRow).join('')
-      : '<div class="hint">没有在等回执的委派（ds-bot 关闭委派时会从 state.works 删掉）。</div>';
-  }
-  if (workCount) workCount.textContent = (d.works || []).length + ' 项';
-  if (exBody) {
-    const list = d.exchanges || [];
-    exBody.innerHTML = list.length
-      ? list.map(e => '<tr>' +
-          '<td class="hint">' + escapeHtml(bbStamp(e.time)) + '</td>' +
-          '<td>' + escapeHtml(e.fromName || '用户') + ' → ' + escapeHtml(e.toName || '—') +
-            (e.roomId ? ' <span class="hint">（群聊）</span>' : '') + '</td>' +
-          '<td>' + escapeHtml(e.text || '') + '</td>' +
-          '</tr>').join('')
-      : '<tr><td colspan="3" class="hint">暂无交接</td></tr>';
-  }
-}
-
-async function loadBotboy(force) {
-  initBotboy();
-  /* 不做"整会话只拉一次"的门：state.json 是活文件（dsh 那边随时在写），
-     进页就该看到当前值。只挡并发重入。 */
-  if (bbBusy) return;
-  bbBusy = true;
-  const hint = $('bbHint'), status = $('bbStatus');
-  if (status) status.innerHTML = '<span class="hint">读取中…</span>';
-  if (hint) hint.textContent = '';
-  try {
-    const d = await api('/api/botboy/overview?limit=30');
-    bbRender(d);
-    if (force) toast('已重读 DS Bot 团队文件', 'ok');
-  } catch (e) {
-    // 请求层失败（服务未重启到本版本 / 网络）与"文件坏"是两件事，分开说
-    if (status) status.innerHTML = '<span class="s-badge error"></span>端点不可用';
-    if (hint) hint.innerHTML = '读取失败：' + escapeHtml(e.message || String(e)) +
-      '<br>若刚升级：多半是后端还没重启到本版本（<code>GET /api/botboy/overview</code> 404）。';
-  } finally {
-    bbBusy = false;
-  }
-}
-/* 15-workbench.js — P2 工作台（v0.13.193，方案 AgentHub优化设计方案.md §4.3）
+function termKeysReset() { ttKeyStop(); ttKeyMods.ctrl = false; ttKeyMods.alt = false; ttKeySync(); }/* 15-workbench.js — P2 工作台（v0.13.193，方案 AgentHub优化设计方案.md §4.3）
  * 首页注意力排序：待人工验收 > 失败24h > code_stale/异常 > 终端等待 > 运行中 > 已停止折叠。
  * 数据源全部是既有端点：/api/agents（AGENTS 全局）、/health（HUB_HEALTH）、/api/tasks/queue。
  * 纪律：只读渲染，不新增写端点；排序规则固定，不让用户先配置。

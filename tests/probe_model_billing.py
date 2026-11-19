@@ -161,41 +161,6 @@ def main():
         no_reprompt = (_result["dialog"] is None and again == target["v"])
         print("   二次选择后 value =", repr(again), "| 又弹框 =", bool(_result["dialog"]))
 
-        print("\n[设置页] 切到 设置→模型，验证同一套标注也在")
-        cdp.send("Runtime.evaluate", awaitPromise=True, returnByValue=True,
-                 expression="go('settings-model')")
-        wait_for(cdp, "typeof SET_AGENTS !== 'undefined' && SET_AGENTS.length > 0",
-                 "SET_AGENTS 加载")
-        cdp.send("Runtime.evaluate", awaitPromise=True, returnByValue=True,
-                 expression="settingsPickAgent(SET_AGENTS[0].id)")
-        wait_for(cdp, "document.querySelector('#setModelSel') && "
-                      "document.querySelector('#setModelSel').options.length > 1",
-                 "设置页模型下拉渲染")
-        s_opts = cdp.eval("""Array.from(document.querySelector('#setModelSel').options)
-            .map(o => ({v:o.value, t:o.textContent}))""")
-        s_free = [o for o in s_opts if "[免费]" in o["t"]]
-        s_paid = [o for o in s_opts if "[付费]" in o["t"]]
-        s_unt = [o for o in s_opts if "[免费]" not in o["t"] and "[付费]" not in o["t"]]
-        print("   设置页 option 数 =", len(s_opts), "| [免费] =", len(s_free),
-              "| [付费] =", len(s_paid), "| 无标记 =", [o["t"] for o in s_unt])
-        set_tagged = bool(s_free and s_paid)
-
-        # 选中付费档 ⇒ hint 必须出现「付费·按量」（这是「保存后会一直生效」的唯一提示位）
-        if s_paid:
-            _result["answer"] = True
-            cdp.eval("""(() => {
-                const s = document.querySelector('#setModelSel');
-                s.value = %s;
-                s.dispatchEvent(new Event('change', {bubbles: true}));
-                return s.value;
-            })()""" % json.dumps(s_paid[0]["v"]))
-            time.sleep(0.8)
-            hint = cdp.eval("document.querySelector('#setModelHint').textContent")
-            print("   hint 文本 =", repr((hint or "")[:80]))
-            hint_ok = "付费" in (hint or "")
-        else:
-            hint_ok = False
-
         print("\n=== 判定 ===")
         checks = [
             ("每个具体模型都带计费标记", not untagged or all(o["v"] == "" for o in untagged)),
@@ -204,8 +169,6 @@ def main():
             ("拒绝确认后回滚到原值", rollback_ok),
             ("接受确认后保持选中", accept_ok),
             ("已确认模型不重复弹框", no_reprompt),
-            ("设置页同样带标记", set_tagged),
-            ("设置页 hint 显示付费档", hint_ok),
         ]
         for name, ok in checks:
             print("  %-24s %s" % (name, "PASS" if ok else "FAIL"))

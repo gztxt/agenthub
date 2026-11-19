@@ -243,8 +243,6 @@ class WiringTest(unittest.TestCase):
     def test_rollback_targets_exist(self):
         core = CORE.read_text(encoding="utf-8")
         chat = (_REPO / "static" / "hub" / "04-terminal-ws.js").read_text(encoding="utf-8")
-        self.assertRegex(core, r"SET_MODEL_PREV\s*=\s*sel\.value",
-                         "设置页没记录渲染后的合法值 ⇒ 取消无处可回滚")
         self.assertRegex(chat, r"CHAT_MODEL_PREV\s*=\s*sel\.value",
                          "对话页没记录渲染后的合法值 ⇒ 取消无处可回滚")
 

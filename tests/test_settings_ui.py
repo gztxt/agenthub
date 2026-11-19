@@ -14,9 +14,6 @@ class TestSettingsUi(unittest.TestCase):
         cls.tpl = TPL.read_text(encoding="utf-8")
         cls.js = BOOT.read_text(encoding="utf-8")
 
-    def test_model_select_auto_previews_diff(self):
-        self.assertIn("settingsPreviewModel()", self.js)
-
     def test_password_eye_toggles(self):
         # 2026-11-07 C 档：日志页口令框已删；password eye 仍服务 GitHub PAT 框（inline onclick）。
         self.assertIn("passEye", self.tpl)

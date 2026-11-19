@@ -75,7 +75,7 @@ def build(src):
     bodies = {}
     for name, start in funcs.items():
         nxt = [x for x in tlines if x > start]
-        bodies[name] = "\n".join(src.split("\n")[start - 1:(nxt[0] if nxt else len(tlines))])
+        bodies[name] = "\n".join(src.split("\n")[start - 1:(nxt[0] - 1 if nxt else len(tlines))])
 
     def refs(name, depth, seen):
         """函数体里同步读到的 (被调函数 ∪ 被读标识符)。"""
@@ -101,7 +101,7 @@ def build(src):
             heads = [x for x in USE_RE.findall(ln) if x in bodies]
             # IIFE 内部体：扫到语句块结束
             nxt = [x for x in tlines if x > i]
-            blk = "\n".join(src.split("\n")[i - 1:(nxt[0] if nxt else len(tlines))])
+            blk = "\n".join(src.split("\n")[i - 1:(nxt[0] - 1 if nxt else len(tlines))])
             heads += [x for x in USE_RE.findall(blk) if x in bodies]
         else:
             m = CALL_RE.match(ln)

@@ -29,11 +29,7 @@ sys.path.insert(0, str(_REPO / "tests"));
 
 import botboy                        # noqa: E402
 
-TPL = _REPO / "templates" / "index.html"
 SHARD05 = _REPO / "static" / "hub" / "05-chat-and-history.js"
-SHARD14 = _REPO / "static" / "hub" / "14-botboy.js"
-SHARD01 = _REPO / "static" / "hub" / "01-core-boot.js"
-SERVED = _REPO / "static" / "hub.js"
 
 
 def _state(**over) -> dict:
@@ -235,48 +231,6 @@ class TestInstallProbe(_Base):
         d = botboy.overview()
         self.assertEqual(d["install"]["profiles"], {})
         self.assertFalse(d["install"]["any"])
-
-
-class TestFrontendWiring(unittest.TestCase):
-    """前端四件套 + 产物同步（缺一条就是「菜单点了没反应」或「点了退回总览」）。"""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.html = TPL.read_text(encoding="utf-8")
-        cls.s05 = SHARD05.read_text(encoding="utf-8")
-        cls.s01 = SHARD01.read_text(encoding="utf-8")
-        cls.s14 = SHARD14.read_text(encoding="utf-8")
-
-    def test_sys_pages_has_botboy_with_existing_sprite_icon(self):
-        self.assertRegex(self.s05, r"\['botboy',\s*'Botboy',\s*'([a-z-]+)'\]")
-        icon = self.s05.split("['botboy', 'Botboy', '")[1].split("'")[0]
-        self.assertIn('<symbol id="i-%s"' % icon, self.html,
-                      "ico() 对不存在的 sprite id 静默不画（kb 行整行空白的复发面）")
-
-    def test_page_labels_and_section(self):
-        self.assertIn("botboy: 'Botboy'", self.s05)
-        self.assertRegex(self.html, r'<section class="page sys" id="page-botboy">')
-
-    def test_page_uses_shared_skeleton(self):
-        seg = self.html.split('id="page-botboy">', 1)[1].split("</section>", 1)[0]
-        self.assertIn('class="sp"', seg)
-        self.assertIn('class="sp-card"', seg)
-        self.assertNotRegex(seg, r"""class\s*=\s*['"][^'"]*\bpanel\b""")
-
-    def test_go_hook_present(self):
-        self.assertIn("page === 'botboy'", self.s01)
-        self.assertIn("loadBotboy(", self.s01)
-
-    def test_works_card_wired(self):
-        """「任务列表」= state.works 的投影，页面上必须有承接元素，否则数据到了画不出来。"""
-        self.assertIn('id="bbWorks"', self.html)
-        self.assertIn('id="bbWorkCount"', self.html)
-        self.assertIn("bbWorkRow", self.s14)
-        self.assertIn("d.works", self.s14)
-
-    def test_server_js_is_built_from_shards(self):
-        self.assertIn("/* v0.13.170 · Botboy 页", SERVED.read_text(encoding="utf-8"),
-                      "分片改了没跑 build_hubjs.sh ⇒ 线上仍是旧 bundle（漂移由 test_hubjs_split 判）")
 
 
 if __name__ == "__main__":

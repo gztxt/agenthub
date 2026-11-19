@@ -1869,7 +1869,6 @@
                         <button class="btn ghost" onclick="openRegister()"><svg class="i xs" aria-hidden="true"><use href="#i-folder-plus"/></svg>注册自定义 Agent</button>
                         <button class="btn ghost" onclick="runScan()"><svg class="i xs" aria-hidden="true"><use href="#i-radar"/></svg>自动扫描</button>
                         <button class="btn ghost" onclick="go('ports')"><svg class="i xs" aria-hidden="true"><use href="#i-share"/></svg>端口占用</button>
-                        <button class="btn ghost" onclick="go('telemetry')"><svg class="i xs" aria-hidden="true"><use href="#i-activity"/></svg>遥测</button>
                     </div>
                 </div>
             </div>
@@ -2707,53 +2706,9 @@
             </div>
         </section>
 
-        <!-- 遥测（v0.13.40 统一骨架）：原来的 h3 把契约长句整段塞进标题
-             （「接入方式（覆盖式账本：同 source+session 重报取末值，不叠加）」），
-             宽屏下标题自己就折两行；现在标题只留名词，长句下沉到 .sp-r / .sp-note。 -->
-        <section class="page sys" id="page-telemetry">
-            <div class="sp">
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>上报接入</h3>
-                        <div class="sp-r"><span class="hint">覆盖式账本：同 source+session 重报取末值，不叠加</span></div>
-                    </div>
-                    <div class="sp-bd"><pre class="code" id="curlExample"></pre></div>
-                    <div class="sp-note">未设置 HOOK_AUTH_TOKEN 时仅接受回环来源写入；对外接入请在 .env 配置 token。</div>
-                </div>
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>用量与事件</h3>
-                        <div class="sp-r"><span class="hint" id="telRangeHint">Token 聚合 · 最近 20 条</span>
-                        <span class="toolbar" style="display:inline-flex;gap:4px;margin-left:8px">
-                            <button class="btn ghost sm" onclick="telRangeSet('1h')">1h</button>
-                            <button class="btn ghost sm" onclick="telRangeSet('6h')">6h</button>
-                            <button class="btn ghost sm" onclick="telRangeSet('24h')">24h</button>
-                            <button class="btn ghost sm" onclick="telRangeSet('all')">全量</button>
-                        </span></div>
-                    </div>
-                    <div class="sp-bd">
-                        <div class="sp-grid">
-                            <div class="sp-col"><div class="sp-sub">Token 用量聚合</div><div id="usageTable" class="hint tscroll">加载中…</div></div>
-                            <div class="sp-col"><div class="sp-sub">最近事件</div><div id="eventTable" class="hint tscroll">加载中…</div></div>
-                        </div>
-                    </div>
-                </div>
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>Agent 画像</h3>
-                        <div class="sp-r"><span class="hint">成功率 / 平均耗时 / 峰值 — S2 profile_events</span></div>
-                    </div>
-                    <div class="sp-bd flush"><div id="profTable" class="hint tscroll">加载中…</div></div>
-                </div>
-            </div>
-        </section>
-
         <!-- v0.13.47：原「运行日志」页（#page-runlog）已删除——系统菜单不再单独挂它，
              三中心检索留痕改由「设置 → 日志」的「运行日志（三中心检索）」来源视图承接
              （后端 /api/hublog?source=rest；埋点 track() 与 /api/runlog 门面保留）。 -->
-        <!-- P4 资产面板：三路只读门面（记忆 / 知识 / 技能）。
-             不新建 @media、不新建浮层、不用 inline onclick（交互全走 data-asset 委托）。
-             列宽靠 .mem-grid 自身响应式（≤1100px 自动单列），窄屏不靠这里写死。 -->
         <!-- v0.13.26 批4：技能中心 + 知识库中心（与记忆中心同级的三大中心） -->
         <!-- 技能中心（v0.13.40 统一骨架）：原「查看」按钮被 .mem-item 的两端对齐
              拉到卡片右缘、长描述在它左侧被挤成窄条（1440 截图里按钮是一整块黑柱）；
@@ -3112,113 +3067,6 @@
             </div>
         </section>
 
-        <!-- 资产门面（v0.13.40 统一骨架）：原「未加载」/健康徽标是一排整行宽的
-             .chip 块（长 note 把 chip 撑满一行、粗体标签和说明挤在一起读不动），
-             现在徽标块允许换行 + note 独占一行（.chip 规则见样式区），并收进
-             「门面健康」卡；三路结果仍是 .mem-grid（窄屏塌单列的既有契约不变，
-             见 tests/verify_asset_panel_live.py N4）。 -->
-        <section class="page sys" id="page-assets">
-            <div class="sp">
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>资产门面</h3>
-                        <div class="sp-r"><span class="hint">记忆 / 知识 / 技能 —— hub 只做门面，不建第二权威副本</span></div>
-                    </div>
-                    <div class="sp-tools">
-                        <div class="toolbar">
-                            <input id="assetQ" placeholder="一次问三路门面（如：端口 / 备份 / 技能）">
-                            <button class="btn sm" data-asset="search">检索</button>
-                            <button class="btn sm" data-asset="refresh">重检健康</button>
-                            <span class="hint" id="assetHint"></span>
-                        </div>
-                    </div>
-                    <div class="sp-bd" style="padding-top:0"><div id="assetStatus" class="hint">未加载</div></div>
-                </div>
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>三路结果</h3>
-                        <div class="sp-r"><span class="hint">空查询时记忆 / 技术文档两路置为「待输入」（端点缺 q 按契约回 422）</span></div>
-                    </div>
-                    <div class="sp-bd">
-                        <div class="mem-grid">
-                            <div class="sp-cell"><div class="sp-sub">记忆（本地 + TDAI RRF）</div><div id="assetMemory" class="hint tscroll">未检索</div></div>
-                            <div class="sp-cell"><div class="sp-sub">技术文档（turbovec 语义）</div><div id="assetKb" class="hint tscroll">未检索</div></div>
-                            <div class="sp-cell"><div class="sp-sub">技能（磁盘四路）</div><div id="assetSkill" class="hint tscroll">未检索</div></div>
-                        </div>
-                    </div>
-                </div>
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>四态语义</h3>
-                        <div class="sp-r"><span class="hint">「查不了」与「没有」必须能分辨</span></div>
-                    </div>
-                    <div class="sp-bd">
-                        <div class="hint">
-                            <b>有结果</b> / <b>确实零命中</b>（后端全绿且 count=0）/
-                            <b>部分后端不可用</b>（某一路挂了，清单不完整 —— 不代表没资产）/
-                            <b>端点不可用</b>（端口 404，通常是代码比进程新、未重启）。
-                            把后两种渲染成「没东西」，就是本机最禁的「静默不可用」在前端层的形态。
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-        <!-- Botboy（v0.13.170）：DS Bot 团队模式的只读投影。
-             数据源 = ~/.dsh/bot/state.json（ds-bot 的权威落盘面），不调 POST api/bot
-             ⇒ 不依赖 dsh 在跑、不碰进程级 token。写动作一律回 dsh 原生界面做。 -->
-        <section class="page sys" id="page-botboy">
-            <div class="sp">
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>DS Bot 团队</h3>
-                        <div class="sp-r">
-                            <button class="btn sm ghost" data-bb="refresh" title="重读 state.json"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
-                        </div>
-                    </div>
-                    <div class="sp-tools">
-                        <div class="toolbar">
-                            <span class="hint" id="bbStatus">未加载</span>
-                        </div>
-                    </div>
-                    <div class="sp-bd" style="padding-top:0"><div class="hint" id="bbHint">进页自动读一次本机 DS Bot 团队文件。</div></div>
-                    <div class="sp-note">只读面板：不建 Bot、不发消息、不改 state.json —— ds-bot 用 state.lock
-                        保证同一份数据只有一个写者，hub 越权改写会制造假锁冲突。要动团队请回 dsh 原生界面。</div>
-                </div>
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>Bot</h3>
-                        <div class="sp-r"><span class="hint" id="bbBotCount">–</span></div>
-                    </div>
-                    <div class="sp-bd"><div class="sp-grid" id="bbBots"><div class="hint">未加载</div></div></div>
-                </div>
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>群聊</h3>
-                        <div class="sp-r"><span class="hint" id="bbRoomCount">–</span></div>
-                    </div>
-                    <div class="sp-bd"><div class="sp-grid" id="bbRooms"><div class="hint">未加载</div></div></div>
-                </div>
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>进行中的委派</h3>
-                        <div class="sp-r"><span class="hint" id="bbWorkCount">–</span></div>
-                    </div>
-                    <div class="sp-bd"><div class="sp-list" id="bbWorks"><div class="hint">未加载</div></div></div>
-                </div>
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>最近交接</h3>
-                        <div class="sp-r"><span class="hint">Bot 之间 / 用户与 Bot 的消息流水，最新的在上</span></div>
-                    </div>
-                    <div class="sp-bd box flush tscroll">
-                        <table>
-                            <thead><tr><th style="width:150px">时间</th><th style="width:210px">谁 → 谁</th><th>内容</th></tr></thead>
-                            <tbody id="bbEx"><tr><td colspan="3" class="hint">未加载</td></tr></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-        </section>
         <!-- 积分签到（v0.13.201）：A/B 两机 AIAutomator 远程管理只读投影 + 受控触发 -->
         <section class="page sys" id="page-checkin">
             <div class="sp">
@@ -3258,51 +3106,27 @@
                 </div>
             </div>
         </section>
-        <!-- 设置 · 模型（v0.13.43：设置子菜单改成手风琴 → 正文出页，不再有抽屉）
-             内容与 v0.13.41 的面板一致，只是外套换成系统页统一骨架 .sp/.sp-card。 -->
-        <section class="page sys" id="page-settings-model">
+        
+        
+        <!-- 设置 · 重启（手动重启 agenthub，复用 /api/system/restart + 活会话确认）-->
+        <section class="page sys" id="page-settings-restart">
             <div class="sp">
                 <div class="sp-card">
                     <div class="sp-hd">
-                        <h3>模型设置</h3>
-                        <div class="sp-r"><span class="hint">选 agent → 选 CCR 模型 → 预览 → 保存</span></div>
+                        <h3>重启 agenthub</h3>
+                        <div class="sp-r"><span class="hint">手动重启让磁盘改动生效</span></div>
                     </div>
                     <div class="sp-bd">
-                        <div class="hint" style="margin-bottom:10px">保存同时写入<b>该 agent 自己的配置文件</b>
-                            （落笔前自动时间戳备份）与 <b>hub 侧</b>（拉起终端时按白名单注入 <code>--model</code>）。</div>
-                        <div class="set-sub">1 · 选择 agent</div>
-                        <!-- v0.13.85：漂移体检常驻展示位。后端 /api/settings/models 一直在算
-                             drift，但前端从不渲染 ⇒ 这类问题在界面上完全不可见。 -->
-                        <div id="setDriftBox" class="hint"></div>
-                        <div id="setAgentList" class="set-agents"><span class="hint">加载中…</span></div>
-                        <div id="setModelStep" style="display:none">
-                            <div class="set-sub">2 · 选择模型（CCR :3456 清单）</div>
-                            <div id="setAgentMeta" class="hint" style="margin-bottom:6px"></div>
-                            <select id="setModelSel" aria-label="CCR 模型" style="width:100%"></select>
-                            <!-- v0.13.86：下拉口径说明。选项值已按该 agent 要求的形状拼好
-                                 （opencode 的 ccr/<ID>），且 native 型 agent 摆的是本家清单
-                                 而不是必然被拒的 CCR 清单 —— 这行把"为什么长这样"说出来。 -->
-                            <div id="setModelHint" class="hint" style="margin-top:4px"></div>
-                            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
-                                <button class="btn sm" type="button" data-settings-act="preview">预览变更</button>
-                                <!-- v0.13.164：执行逻辑自证。静态验证只读；真实调用会计费。 -->
-                                <button class="btn sm" type="button" data-settings-act="verify">验证生效</button>
-                                <button class="btn sm" type="button" data-settings-act="verify-live">真实验证（会调用网关）</button>
-                                <!-- v0.13.45：不再带 disabled。置灰按钮不派发 click，
-                                     用户点它得不到任何反馈（日志里连一条请求都没有）；
-                                     未预览时由保存自己补一次预览。 -->
-                                <button class="btn sm" type="button" id="setApplyBtn" data-settings-act="apply">保存</button>
-                                <!-- v0.13.181：撤销上一次保存（把配置文件还原到那次之前的字节）。
-                                     破坏性动作，前端会先 confirm。 -->
-                                <button class="btn sm" type="button" id="setUndoBtn" data-settings-act="undo"
-                                        title="把该 agent 的配置文件还原到上一次保存之前（只撤最近一次）">撤销上次保存</button>
-                            </div>
-                            <div id="setDiffBox" style="display:none"></div>
+                        <div class="hint" style="margin-bottom:10px">改了后端代码或配置后，点下面按钮重启 agenthub 服务。
+                            若当前有终端会话在跑，会先弹出确认框（重启会中断它们）。</div>
+                        <div class="set-sub">当前状态</div>
+                        <div id="rstStatus" class="hint">—</div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+                            <button class="btn sm" type="button" data-settings-act="hub-restart">重启 agenthub</button>
+                            <button class="btn sm" type="button" data-settings-act="rst-refresh">刷新状态</button>
                         </div>
-                        <div class="set-sub">CCR 网关 Router（只读，不写）</div>
-                        <div id="setCcrRouter" class="hint"></div>
                     </div>
-                    <div class="sp-note">CCR Router 五场景属三方互斥军规保护面：本页只读展示，不提供写入。</div>
+                    <div class="sp-note">重启由后端 <code>/api/system/restart</code> 执行；有活会话时返回 409 并二次确认，与「需重启」标签同一入口。重启窗口约数秒，页面会自动刷新。</div>
                 </div>
             </div>
         </section>
@@ -3373,23 +3197,6 @@
                     </div>
                     <div class="sp-note">只做<b>只读 + 克隆</b>（列仓库、单仓核对、克隆到本地）；地址必须 https，
                         内网 / 回环地址一律拒绝（防止把 key 明文发到内网）。</div>
-                </div>
-            </div>
-        </section>
-
-        <!-- 设置 · 认证状态（2026-11-07 C 档：共享口令已废弃，保留页面 ID 以免留下死菜单项） -->
-        <section class="page sys" id="page-settings-token">
-            <div class="sp">
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>认证状态</h3>
-                        <div class="sp-r"><span class="hint">全站单一认证面 · 用户名 + 密码登录</span></div>
-                    </div>
-                    <div class="sp-bd">
-                        <div class="hint" style="margin-bottom:12px">2026-11-07 起，终端与全部设置写端点统一由右上角「登录」（用户名 + 密码，HttpOnly 会话 Cookie）保护。</div>
-                        <div class="hint">原有的 TERM_TOKEN（终端共享 token）与 HUB_PASSCODE（设置口令）已废弃：代码不再读取、不再校验，保留在 .env 中仅为兼容历史配置，可安全移除。</div>
-                    </div>
-                    <div class="sp-note">未登录时写操作返回 401；机器侧调用用 HTTP Basic（同一份用户名 + 密码）。</div>
                 </div>
             </div>
         </section>
@@ -3704,8 +3511,8 @@
           // 防过期闸门：tests/test_hubjs_split.py 的 TestLadder 会逐项核对①②③，清单漂了即红。
           + '符号阶梯=' + ['mdInline', 'openOverlay', 'renderHomeStats', 'passEye', 'logQDebounced', 'logPageGo', 'settingsDelegates',
                           'termToast', 'termWriteReplay', 'termFindBind', 'termFontStep', 'startMemoryEdit', 'memQDebounced',
-                          'skillQDebounced', 'renderSkillInvocations', 'kbQDebounced', 'telRangeSet', 'dagZoom', 'navItemHtml', 'histHtml', 'navRow',
-                          'renderNav', 'navAccKeydown', 'initSidebar', 'lpQDebounced', 'lpClearFilter', 'ghQDebounced', 'ghClearFilter', 'termTouchBind', 'bbRender', 'ckMachineCard']
+                          'skillQDebounced', 'renderSkillInvocations', 'kbQDebounced', 'dagZoom', 'navItemHtml', 'histHtml', 'navRow',
+                          'renderNav', 'navAccKeydown', 'initSidebar', 'lpQDebounced', 'lpClearFilter', 'ghQDebounced', 'ghClearFilter', 'termTouchBind', 'ckMachineCard']
               .map(function (k) { return k + ':' + (typeof window[k] === 'function' ? 1 : 0); }).join(' ') + '\n'
           + (L.length ? '异常清单(前8):\n' + L.slice(0, 8).join('\n') : '异常清单: 无');
       }
@@ -3749,7 +3556,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=7d4008f7';
+      var HUB_SRC = '/static/hub.js?v=f795f3b3';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

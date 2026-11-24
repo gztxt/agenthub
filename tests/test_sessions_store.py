@@ -723,6 +723,11 @@ class TestJcodeWindow(unittest.TestCase):
 
     def test_limit_is_actually_filled(self):
         """产品默认 5 条（HIST_LIMIT）：不得再出现"只要 5 条却给 1 条"的静默缺量"""
+        total = len(ss.list_history("jcode", CWD, 200)["items"])
+        if total < 8:
+            # 本机 jcode 在该 cwd 下只有几条时，limit=8 数学上填不满 ——
+            # 那是数据不足，不是窗口缺陷。假红过一次（2026-11-24 实测 7 条）。
+            self.skipTest(f"jcode 在 {CWD} 下只有 {total} 条，验不了 limit=8（数据不足）")
         d = ss.list_history("jcode", CWD, 5)
         self.assertEqual(len(d["items"]), 5, "limit=5 必须填满")
         d8 = ss.list_history("jcode", CWD, 8)

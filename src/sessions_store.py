@@ -913,6 +913,18 @@ def list_history(agent_id: str, cwd: str, limit: int = 3) -> dict:
     except Exception as e:  # noqa: BLE001
         items, note = [], f"历史读取失败：{type(e).__name__}"
     items = _filter_history_items(items, cwd)
+    # 2026-11-24（PT 实铳）：子代理/临时目录会话的过滤发生在「取数窗」之后，
+    # 而各 _t_* 是按 limit 逐条 append 的 ⇒ 窗口被该剔除的条目占满时，过滤后就不足 limit
+    # （实测 jcode limit=8 只回 7，limit=5 恰好够所以看着正常）。这里不足时用上限 20
+    # 重取一次再过滤——只扩窗，不改过滤判据、不改排序。
+    if len(items) < limit:
+        try:
+            wide, note2 = st["fn"](cwd, 20, time.time())
+            wide = _filter_history_items(wide, cwd)
+            if len(wide) > len(items):
+                items, note = wide, note2
+        except Exception as e:  # noqa: BLE001 — 扩窗失败不改变原结果
+            _ = e
     items.sort(key=lambda x: x.get("ts") or 0, reverse=True)
     out = {"items": items[:limit], "cwd": cwd, "note": note}
     _CACHE[key] = (time.time(), out)

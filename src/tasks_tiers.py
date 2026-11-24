@@ -9,6 +9,7 @@
 名字拷贝会让补丁静默失效。
 """
 import asyncio
+import json
 import os
 import re
 from datetime import datetime, timezone
@@ -88,6 +89,12 @@ TASK_SKILL_TIMEOUT_S = float(os.getenv("TASK_SKILL_TIMEOUT_S", "12"))
 #: B3：验证失败且**可修复**时自动重试的最大次数。默认 1（= 最多跑两遍）。
 #: 不做无限重试：验证失败如果每次原因相同，重跑只是烧钱（本仓铁律：失败即止损）。
 MAX_AUTO_RETRY = int(os.getenv("TASK_AUTO_RETRY", "1"))
+
+#: 2026-11-21 用户裁定：**协同 agent 的模型不能正常使用 ⇒ 自动切换到可用模型**。
+#: 与 `MAX_AUTO_RETRY` 分开记账：换模型是「同一能力档里换一条能用通道」，不是
+#: 「同档原地再赌一次」，也不该吃掉验证失败的重试额度。默认 2 次 = 最多试三个模型，
+#: 防止清单里全挂时无限换。
+MAX_MODEL_FALLBACK = int(os.getenv("TASK_MODEL_FALLBACK", "2"))
 
 
 #: 全链路编排（2026-10-27）：一个 goal 最多自动跑几**轮**（拆解→派发→汇总→重拆）。
@@ -450,6 +457,161 @@ def escalate_target(agent_id: str, model_choice: Optional[str], attempts: Any,
     return dict(base, reason="no_escalation_path")
 
 
+# ── 模型不可用 → 自动换模型（2026-11-21 用户裁定）─────────────────────
+# 只认**显式**的模型报文：generic 失败（429/超时/空输出）不在此列 —— 误判会白烧一次
+# 调用。空输出单独由 CLI 适配器判失败，交给正常升档路径。
+_MODEL_FAIL_RE = re.compile(
+    r"(?i)(unknown\s+model"
+    r"|model[\s_\-]*(?:not\s+found|not\s+exist|invalid|unsupported|not\s+supported)"
+    r"|model[^\n]{0,120}(?:not\s+found|not\s+exist)"
+    r"|(?:invalid|unsupported|unknown)[^\n]{0,24}model"
+    r"|model_resolution|please\s+use\s+--model|model_not_found"
+    r"|no\s+available\s+(?:channel|provider|model)"
+    r"|模型(?:不存在|不可用|不支持)|不支持(?:该|此)?模型|没有可用(?:的)?模型)")
+
+
+def is_model_failure(*texts: Any) -> bool:
+    """回包/异常里是否在说「这个模型不能用」。空值安全，纯函数可 L0 直测。"""
+    for t in texts:
+        if t and _MODEL_FAIL_RE.search(str(t)):
+            return True
+    return False
+
+
+#: 「模型本身在册，但它走的**通道**不可用」——2026-11-21 实弹：pi/omp 派 `alibaba/*`
+#: 报 `No API key found for vercel-ai-gateway`，模型 ID 完全合法。这类失败换同档模型
+#: 几乎必然再撞同一通道，正确动作是先回落到 agent 自己的默认模型（实测可用），
+#: 再谈档位。只认凭据/通道的说法，不把 401/403 泛化成通道问题（那是账号级故障）。
+_CHANNEL_FAIL_RE = re.compile(
+    r"(?i)(no\s+api\s+key(\s+found)?|missing\s+api\s+key|api\s+key\s+(?:is\s+)?(?:missing|not\s+found)"
+    r"|provider[^\n]{0,30}not\s+configured|no\s+available\s+(?:channel|provider))")
+
+
+def is_channel_failure(*texts: Any) -> bool:
+    """模型在册但通道/凭据不可用 ⇒ 应优先回落到 agent 默认模型。"""
+    for t in texts:
+        if t and _CHANNEL_FAIL_RE.search(str(t)):
+            return True
+    return False
+
+
+#: 「agent 自己的模型清单里没有这个 ID」——pi: `Model "x" not found. Use --list-models`；
+#: omp: `Run omp models find …`。这与网关摘牌不同：换同档另一个 CCR ID 只会再吃一次
+#: not found（pi/omp 的本地清单不含 tier 表里的 alibaba/*），正确动作是立刻回默认模型。
+_LOCAL_CATALOG_MISS_RE = re.compile(
+    r"(?i)(use\s+--list-models|--list-models|run\s+`?omp\s+models"
+    r"|omp\s+models\s+find|not\s+found[^\n]{0,80}(?:list-models|omp\s+models))")
+
+
+def is_agent_catalog_miss(*texts: Any) -> bool:
+    """错误在说「这个 agent 本地没有该模型」⇒ 换 ID 无用，回 agent 默认模型。"""
+    for t in texts:
+        if t and _LOCAL_CATALOG_MISS_RE.search(str(t)):
+            return True
+    return False
+
+
+def prefers_agent_default(*texts: Any) -> bool:
+    """换模型时应**先回 agent 默认**（通道故障 / 本地清单没有该 ID）。"""
+    return is_channel_failure(*texts) or is_agent_catalog_miss(*texts)
+
+
+#: `model_planned` 的哨兵：本次不带 `--model`，用 agent 自己的默认模型。
+#: 不能写空串 —— 空串会被 `exec_model = model_planned or model_choice` 回落到坏模型。
+AGENT_DEFAULT_MODEL = "@agent-default"
+
+
+def _agent_default_model(agent_id: str) -> Optional[str]:
+    """agent 的默认模型 ID（有显式 `model_fallback` 才返回）；没有 ⇒ None。
+
+    CLI 规格里只有 pi 显式声明了 `model_fallback`，其余 agent 的默认模型在自己的配置里，
+    hub 不知道 ID，用 `AGENT_DEFAULT_MODEL` 哨兵表达「别传 --model」。
+    """
+    try:
+        from adapters.cli_agent import SPECS
+        sp = SPECS.get(agent_id) or {}
+        return (sp.get("model_fallback") or "").strip() or None
+    except Exception:  # noqa: BLE001 — 取不到就不是「知道默认模型」
+        return None
+
+
+def parse_models_tried(raw: Any) -> List[str]:
+    """`models_tried` 列（JSON 数组，兼容旧逗号串）→ 去重后的有序列表。"""
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple)):
+        seq = [str(x) for x in raw]
+    else:
+        try:
+            v = json.loads(str(raw))
+        except Exception:  # noqa: BLE001 — 旧值/脏值按逗号串读，不抛
+            v = str(raw).split(",")
+        seq = [str(x) for x in v] if isinstance(v, list) else [str(v)]
+    out: List[str] = []
+    for x in seq:
+        x = x.strip()
+        if x and x not in out:
+            out.append(x)
+    return out
+
+
+def model_fallback_target(agent_id: str, tier: Optional[str], tried: Any, *,
+                          catalog: Optional[set] = None,
+                          catalog_checked: bool = False,
+                          tiers_cfg: Optional[Dict[str, List[str]]] = None,
+                          prefer_agent_default: bool = False) -> Optional[str]:
+    """模型不可用时，下一条**在册且没试过**的模型；None = 无可换（交给升档/失败）。
+
+    选择顺序（每档都跳过 `tried`）：
+      ① 通道/凭据故障、或 agent 本地清单没有该 ID（`prefer_agent_default=True`）⇒ **先**
+         agent 默认模型：同一通道换档位
+         只会再撞同一把锁（实测 pi/omp 的 alibaba 全系都走 vercel-ai-gateway）；
+      ② 当前档其余模型 —— 换通道不换能力；
+      ③ 更高档 —— 当前档全挂才向上；
+      ④ 更低档 —— 兜底，保证「高档全挂」时仍有可跑的；
+      ⑤ agent 默认模型（显式 ID 或 `AGENT_DEFAULT_MODEL` 哨兵）—— 最后的安全网。
+    `tier` 为 explicit/native/未知 ⇒ 按档位顺序全表挑第一个未试的。
+
+    只对模型域 = CCR 的 agent 生效：codebuddy/cursor 的模型是厂商自有清单，塞 CCR ID
+    就是「换一个也报 unknown model」；dsh 没有 `--model` 开关。清单取不到时同样返回
+    None —— 「不知道有哪些」不等于「随便挑一个」。
+    """
+    if agent_id not in _ccr_model_agents():
+        return None
+    if not catalog_checked or not catalog:
+        return None
+    import tiercfg as tierlib
+    tiers = tiers_cfg if tiers_cfg is not None else tierlib.parse_tiers()
+    tried_set = {str(x) for x in parse_models_tried(tried)}
+    order_ = tierlib.order(tiers)
+    t = (tier or "").strip()
+    if t in order_:
+        i = order_.index(t)
+        seq = [t] + order_[i + 1:] + list(reversed(order_[:i]))
+    else:
+        seq = list(order_)
+
+    def _tier_candidates():
+        for name in seq:
+            for m in tiers.get(name) or []:
+                if m and m not in tried_set and m in catalog:
+                    yield m
+
+    default = _agent_default_model(agent_id)
+    default_cand = default if (default and default not in tried_set) else None
+    if not default_cand and AGENT_DEFAULT_MODEL not in tried_set:
+        default_cand = AGENT_DEFAULT_MODEL
+    if prefer_agent_default:
+        if default_cand:
+            return default_cand
+        for m in _tier_candidates():
+            return m
+        return None
+    for m in _tier_candidates():
+        return m
+    return default_cand
+
+
 def _schedule_exec_retry(run_id: str, row: dict, err: str, reason: str,
                          attempts_done: int, exec_agent: str, exec_model: Optional[str],
                          *, dur: int = 0, spent_tokens: int = 0,
@@ -461,9 +623,55 @@ def _schedule_exec_retry(run_id: str, row: dict, err: str, reason: str,
     超时、任意异常），各写一遍重试必然漂移（2026-10-29 就是只给 verifier 失败
     写了重试，执行失败三处全漏 ⇒ dsh 429 直接终态、汇总永远跑不到）。
     """
-    if attempts_done >= MAX_AUTO_RETRY:
+    model_like = (is_model_failure(err, reason, row.get("error"))
+                  or prefers_agent_default(err, reason, row.get("error")))
+    # CLI 的 `empty-output` 也按模型问题处理：pi 的注记写着「模型被摘牌 ⇒ 静默空输出」，
+    # 而空正文没有别的可判据。非 CCR 域（codebuddy/cursor/dsh）没有可换的 model 通道，
+    # 该判据不会触发它们。
+    if (not model_like and str(err or "").startswith("empty-output")
+            and exec_agent in _ccr_model_agents()):
+        model_like = True
+    if attempts_done >= MAX_AUTO_RETRY and not model_like:
         return False
     cat, checked = _catalog_snapshot()
+    # ── ⓪ 模型不可用 ⇒ 先换模型（2026-11-21 用户裁定）──────────────────
+    # 放在 attempts/升档闸门之前：换模型不占验证失败的重试额度，也不要求「有升档路径」。
+    # 反过来（先判升档）会让「模型被摘牌」被记成 out of attempts 的终态 —— 那正是
+    # 2026-11-02 agnes 被摘牌后任务静默 0 产出的形态。
+    if model_like:
+        done = int(row.get("model_fallbacks") or 0)
+        if done < MAX_MODEL_FALLBACK:
+            tried = parse_models_tried(row.get("models_tried"))
+            for m in (exec_model, used_model, row.get("model_sent"),
+                      row.get("model"), row.get("model_planned"), row.get("model_choice")):
+                m = str(m or "").strip()
+                if m and m != "native" and m not in tried:
+                    tried.append(m)
+            nxt = model_fallback_target(
+                exec_agent, row.get("tier"), tried,
+                catalog=cat, catalog_checked=checked,
+                prefer_agent_default=prefers_agent_default(err, reason, row.get("error")))
+            if nxt:
+                db.execute(
+                    "UPDATE tasks SET status='pending',model_planned=?,tier_reason=?,"
+                    "models_tried=?,model_fallbacks=COALESCE(model_fallbacks,0)+1,"
+                    "error=?,verify_reason=?,finished_at=NULL,updated_at=?"
+                    " WHERE run_id=? AND task_id=?",
+                    (nxt, "model_fallback:model_unusable",
+                     json.dumps(tried, ensure_ascii=False),
+                     ("模型不可用（%s），已自动切换 %s→%s（第 %d/%d 次模型回退）"
+                      % (err[:200], exec_model or "?", nxt,
+                         done + 1, MAX_MODEL_FALLBACK))[:500],
+                     reason[:500], _now(), run_id, row["task_id"]))
+                db.log_profile_event("task_exec", row["agent_id"], "model_fallback", dur,
+                                     trace_id=row["trace_id"],
+                                     detail={"task": row["task_id"],
+                                             "error": err[:200],
+                                             "from_model": exec_model, "to_model": nxt,
+                                             "tried": tried, "attempt": done + 1})
+                return True
+    if attempts_done >= MAX_AUTO_RETRY:
+        return False
     esc = escalate_target(exec_agent, exec_model, attempts_done + 1,
                           _known_agent_ids(), tier=row.get("tier"),
                           catalog=cat, catalog_checked=checked)

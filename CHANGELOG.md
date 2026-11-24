@@ -1,3 +1,121 @@
+## v0.13.212 — 彻底删除「积分签到」：菜单/页面/路由/模块/库表（2026-11-22）
+
+> 用户令：「系统菜单里面的积分签到 彻底删除 包括所有相关数据」。
+
+**删除范围（一条链，逐点核实）**
+
+| 层 | 删除内容 |
+|---|---|
+| 菜单 | 前端 `SYS_PAGES` / `PAGE_LABELS` 的 `checkin`；后端 `users.MODULE_SYS` / `SYS_ICONS` / `_LABELS`；库内 `menu_items` 行（23→22） |
+| 页面 | `templates/index.html` 的 `#page-checkin` section；`static/hub/17-checkin.js` 整个分片；进页钩子与符号阶梯项；重建 `static/hub.js`（?v= 同步） |
+| 后端 | `src/main.py` 的 `import checkinmgr` 与 `include_router`；删除 `src/checkinmgr.py`；`authz` 的 7 条写路由 + 5 条副作用声明 |
+| 测试 | 删除 `tests/test_checkinmgr.py`；同步 `test_scope_dryrun`（112→105）、`test_authz_scopes`（113→106 / 33→28）、`test_ls_guard` 分片清单、`test_sys_pages_layout` |
+| 数据 | `data/agents.db`：`DROP TABLE checkin_machines / checkin_runs`（2 + 53 行）；`user_perms` 无关联行；其余表无 `%checkin%` 残留 |
+
+**保留**：`CHANGELOG.md` 与 `main.py` 里 v0.13.201–205 的历史注释（归档用途，不影响运行）；`data/*.bak-*` 数据库备份（安全回滚点）。
+
+**验证**：相关 L0 全绿（`test_ls_guard` / `test_sys_pages_layout` / `test_scope_dryrun` / `test_authz_scopes` / `test_hubjs_split` / `test_term_scroll_sensitivity`）；全量 `tests` 4292 passed，余下失败经 HEAD 基线对照均为既有问题。
+
+**生效条件**：需重启 agenthub（活会话 >0 时按军规须显式签字），见 `scripts/hub-restart.sh`。
+
+## v0.13.211 — pi web 会话内容在手机 APP 里划不动：@layer 兼容（2026-11-21）
+
+> 用户令：「pi web APP 里面打开 3201 端口 pi web 无法上下滑动，agenthub 里面 pi web 也是一样的无法上下滑动会话内容，其他 agent 会话内容正常，浏览器里面打开正常」。
+
+**根因（不是滚动代码，是 CSS 被整层丢掉）**：pi-web 0.17/0.18 用 Tailwind v4 出 CSS，全部布局工具类（`.flex/.h-full/.min-h-0/.flex-1/.overflow-y-auto`）只存在于 `@layer utilities{…}` 块内（实测 :30141 的 `6146f73bba872428.css`：utilities 块 9940–18694 字节，共 793 条规则）。CSS 规范要求未知 at-rule 连块一起丢弃，而 `@layer` 是 Chrome 99 才有：
+
+- 手机 WebView 丢掉整个 utilities 层 ⇒ 聊天记录容器没有 `overflow`、没有 `flex-1/min-h-0`，高度被内容撑开；
+- 外层 `html,body{overflow:hidden}` ⇒ 会话内容**永远划不动**，页面其余部分（侧栏/输入框走自定义 CSS）看起来正常；
+- 桌面 Chrome 支持 @layer ⇒ 同一份页面完全正常 —— 与用户「浏览器正常、APP 异常」的观察一致。
+
+**版本证据**（本机回传日志）：2026-11-20 18:20 页面报 `structuredClone is not defined`（Chrome 98 才有）⇒ WebView < 98；2026-11-21 16:16 `interactive-widget` 不被识别（Chrome 108 才有）⇒ < 108。
+
+**第二层病根（同一症状的另一半，17:2x 复测仍未解决后定位）**：只拆 @layer 还不够。pi-web 的
+`--app-viewport-height` **只在 `@media (display-mode:standalone)` 里定义**（该文件 23201 字节处），
+其余场合一律 `var(--app-viewport-height, 100dvh)`。WebView < Chrome 108 没有 `dvh` ⇒ 该声明在
+计算值阶段失效、`height` 退回 `auto` ⇒ 聊天滚动区高度=内容高度，永远没有溢出 ⇒ 划不动；
+`body{overflow:hidden}` 还把输入框推到屏幕外。无头 Chromium 抹掉 dvh 复现：`clientHeight =
+scrollHeight = 10847`、composer top 10891；补上兜底后回到 `658 / 10847`、composer top 702。
+
+**修法（只对老 Chromium 生效，字节级）**：
+1. `_bust_css_urls`：文档出桥时给 `/_next/static/css/*.css` 加 `?hubcss=1`。Next 对这些资源发 `max-age=1y, immutable`，不换 URL 浏览器不会回来请求（缓存里那份仍是坏的）；
+2. `_stylesheet`：带该标记的 CSS 强制 `Accept-Encoding: identity` 整份读回、拆掉 `@layer` 外壳（层序=源码顺序）、重算 Content-Length 并剥掉 ETag/Last-Modified/Cache-Control（正文改过就不许 304）；
+3. 兜底：非 text/css、压缩体、解帧失败、没有 @layer ⇒ 原样透传，绝不猜；15s 未收完按已收字节继续，不挂住样式表；
+4. `VIEWPORT_CSS`：每个嵌页 `</head>` 前插 `@supports not (height:100dvh){:root{--app-viewport-height:100vh} html,body{height:100vh}}` —— 只在没有 dvh 的引擎生效，不加 `!important`（页面键盘弹出时靠内联值压它）。
+
+**闸门**：`tests/test_embed_css_layers.py` 14 例全绿（拆层顺序/字符串与注释里的花括号/嵌套层/声明式 `@layer a,b;`/UA 闸门/端到端拆层与未标记透传）；真实 pi-web CSS 端到端 793 条规则一条不少（77088→77006 字节，只少了层壳）；`tests -k 'embed or proxy'` 87 通过，唯一失败 `TestTargets::test_only_host_fenced_upstreams_ask_for_rewrite` 是 CCR 下线后的历史断言（与本次无关）。
+
+**生效条件**：`systemctl --user restart agenthub`（重启会断开 hub 终端里的活会话，包括正在对话的这个 codebuddy 会话）。
+
+## v0.13.210 — 协同派发实测闭环：模型不可用自动切换 + 心跳/取消/回执三处链路修复（2026-11-21）
+
+> 用户令：「分析理解并测试系统菜单里面的协同 调用所有正常使用 rtk 的 agent 测试任务派发和执行逻辑 并记录错误 迭代优化完善功能逻辑」；追加：「如果协同的 agent 模型不能正常使用 就自动切换调用可用模型」。
+
+**实测对象**（本机装了 `rtk hook` / `rtk.ts` 扩展的六家）：claude-code、codex、pi、omp、codebuddy、cursor。
+
+| 层 | 方法 | 结果 |
+|---|---|---|
+| 直连派发 | `POST /api/agents/{id}/chat`，六家并行 | 6/6 `success`（31.9s） |
+| 协同 DAG（生产 :3102，旧代码） | run `8f7b840524`：6 个并行只读子任务 + 汇总 | 4 成功 / 2 失败（pi、omp）/ 1 阻塞（汇总） |
+| 协同 DAG（影子 :35271，新代码，首版） | run `b7a61ead81`：同目标同 agent | 7/7 成功；pi/omp 各耗 1 次失败后回默认模型 |
+| 协同 DAG（影子 :35271，新代码，终版） | run `49684b73af`：同目标同 agent | **7/7 成功；pi/omp 一步回默认**（`tried` 只有原计划模型，`model_fallbacks=1`） |
+
+**记录到的错误（原文）**
+- `omp`：`Model "alibaba/deepseek-v4.1-flash" not found` / `Run omp models find …` —— agent 本地清单没有 tier 表里的 CCR ID。
+- `pi`：`Error: Model "alibaba/deepseek-v4.1-flash" not found. Use --list-models …`；重试到 t2 后变成 `No API key found for vercel-ai-gateway.` —— 模型合法但通道凭据缺失。
+- `t_sum`：`上游失败` —— 汇总依赖全部叶子，任一叶子失败即阻塞整条结论（终版已无此情况）。
+- 历史 run（11-03）另两类：`claude-code` 满 600s 超时、`pi` `empty-output` (stderr 540 字)。
+
+**根因与全链路修复**
+1. **模型不可用 → 自动切换可用模型**（新能力）：
+   - `tasks_tiers.is_model_failure` / `is_channel_failure` / `is_agent_catalog_miss`：只认显式模型/通道报文（`unknown model`、`model_resolution`、`Model "x" not found`、`--list-models`、`No API key found`、`模型不存在`…），generic 429/超时不误判；
+   - `model_fallback_target`：候选顺序 **通道故障或本地清单缺该 ID 先回 agent 默认**（同档换 ID 只会再撞同一把锁）→ 当前档 → 高档 → 低档 → agent 默认（`SPECS.model_fallback`，无则 `@agent-default` 哨兵 = 不传 `--model`）；按网关清单过滤，不猜 ID；native 模型域（codebuddy/cursor/dsh）不换；
+   - `_schedule_exec_retry`：模型类失败**先于** attempts/升档闸门，用独立的 `MAX_MODEL_FALLBACK`（默认 2）与 `models_tried`/`model_fallbacks` 两列记账；事件 `model_fallback` 留痕（from/to/tried）；
+   - `_resolve_exec_target`：派发前再验一次「选型还活着」（清单可能 48h 内被摘牌）；已裁决的模型回退不再被按 attempts 的升档覆盖。
+2. **心跳判死从未生效**：派发标签 `task-<run>-<task>` 只作为 `chat_fn` 第三位（session_id）传下去，CLI 适配器的 `register_process(tag)` 拿到空串 ⇒ `live_processes()` 没有可匹配的 pid，`HEARTBEAT_STALL_S` 永远采不到样本。`_call_chat` 现在按 chat_fn 形参名传 `tag`/`trace_id`（第三位叫 `trace_id` 时按 trace 给值），`_chat_dispatch` 把 tag 透传到 adapter。
+3. **取消不杀 CLI 进程组**：`cli_agent.chat` 只接 `Exception`，`asyncio.CancelledError`（心跳 cancel / 外层 600s 超时 cancellation）直接穿过 ⇒ 子进程继续跑、重试再起一份。新增 `except asyncio.CancelledError`：杀组、摘登记、等回收、再上抛。
+4. **换模型被回执误判成重启重放**：`_command_id_for` 只含 `(run, task, attempts)`，而模型回退刻意不改 attempts ⇒ 新一次派发命中旧回执，任务被写成 `failed: 重启恢复…`（新用例当场复现）。回执键补 `model`，同模型重启仍只派一次、换模型是新动作。
+5. 台账：`tasks` 追加 `models_tried` / `model_fallbacks`（幂等 ALTER）；`tasks` 门面重导出新纯函数；`execsem` 把 `model_fallback`/`model_switch`/`retry`/`escalate`/`downgrade`/`mismatch` 登记为 `degraded`（此前 runlog 一律显示 unknown）。
+
+**闸门**：`tests/test_task_model_fallback.py` 21 例（分类/候选顺序/预算上限/上下文透传/三条 E2E/真进程取消回收/事件词表）全绿；`tests/test_task_*.py tests/test_dispatch*.py tests/test_orphan_reap_l0.py tests/test_pydantic_attr_drift.py` 293 例回归全绿；`tests/test_execsem_p2_c3_l0.py` 全绿。
+
+**生效条件**：需 `systemctl --user restart agenthub`（重启会断开 hub 终端里的活会话）。
+
+## v0.13.209 — 设置 → 关机：彻底关闭本机（2026-11-20）
+
+> 用户令：「在设置菜单新建子菜单 关机 可以彻底关闭本机」。
+
+- **菜单**：`SET_PAGES` 新增 `settings-shutdown`（图标 `power`，新增 sprite），`templates/index.html` 出页 `#page-settings-shutdown`；`src/users.py` 的 `MODULE_SET/SET_ICONS/_LABELS` 同步，叶子可按用户授权。
+- **后端**：`POST /api/system/shutdown` 必须带 `confirm=poweroff`（缺 ⇒ 400）；有活终端会话默认 409，`force=1` 才执行（与 restart 同口径）。接口先返回，再由 `systemd-run --user --collect` 瞬态单元 `sleep 1` 后执行 `sudo -n /usr/bin/loginctl poweroff`；瞬态单元挂在 `user@.service` 下，不会被 agenthub 的 cgroup stop 连坐。
+- **为什么不用 `systemctl poweroff`**：`agenthub` 是 user unit，直接 poweroff 无权限；本机 sudoers 只对 `/usr/bin/loginctl` 给了 NOPASSWD，`systemctl poweroff` 会卡在密码提示。`sudo -n` 保证绝不交互等待。
+- **防误触**：页面要求输入「关机」，后端再校验 `confirm=poweroff`；有活会话时浏览器二次 `confirm`，确认后才发 `force=1`。
+- **闸门**：`src/authz.py` 登记 `hub.ops.write` 并加入副作用集合（写路由 113 / 路径 112 / 副作用 33）；`tests/test_api_system_shutdown.py` 新增 4 例（confirm 缺失、活会话 409、派发形状、spawn 失败），只 mock `Popen`/`alive_count`，不触碰真实关机。
+- **回归**：`test_api_system_shutdown` / `test_authz_scopes` / `test_scope_dryrun` / `test_nav_icons` / `test_users` / `test_hubjs_split` / `test_sprite_refs` / `test_frontend_budget` 全绿；`build_hubjs.sh` 重建 `static/hub.js`（12241 行，md5 c41cf821），`?v=` 同步。
+
+## v0.13.208 — pi 对话框「模型错误 / e?.throwIfAborted is not a function」（2026-11-20）
+
+> 用户报障：经 hub 桥打开 pi web（:3201）后，对话框里模型不可用 —— 「模型错误 / e?.throwIfAborted is not a function」，下拉显示没有模型。
+
+- **根因**：pi-web 0.17 的模型加载回调里调 `signal.throwIfAborted()`（上游 `page-*.js` 原文 `t=await n.json(),e?.throwIfAborted()`），而 `AbortSignal.throwIfAborted` 是 Chrome 100 / Safari 15.4 才有的方法。用户浏览器没有它 ⇒ 抛 TypeError，被该回调自己的 catch 归成模型加载失败，渲染成「模型错误」+ 空清单（`chat.modelError` 文案）。
+- **同族的其他缺口**（同一条推理都会踩）：`AbortSignal.timeout`（Chrome 103）、`structuredClone`（Chrome 98）、`crypto.randomUUID`（**要求安全上下文**，所以经 http 局域网进来即使新版 Chrome 也是 undefined）。
+- **修法**：桥（`src/embed_proxy.py`）对每个嵌页 HTML 注入 `COMPAT_JS`（ES5，只补缺失的原生实现、不覆盖已有）。注入点与 ⌘K 脚本同一条字节级插入路径，放在 `</head>` 之前，早于页面自己的模块脚本；**不挂在 `keys` 开关上** —— 这是浏览器能力垫片，不是 ⌘K 功能的一部分。
+- **红/绿取证**（真 chromium + CDP `evaluateOnNewDocument` 删掉三个 API 模拟老浏览器）：
+  - 直连 `:30141`：界面出现 `Model error` / `e?.throwIfAborted is not a function` / `No models`（与用户原话逐字一致）；
+  - 同一浏览器经带垫片的桥：`AbortSignal.prototype.throwIfAborted` 恢复为 function，无 `Model error`/`No models`，模型按钮显示 `Hy4 flash · WorkBuddy`。
+- **闸门**：`tests/test_embed_keys_bridge.py` 新增 2 例（垫片恒在、与 keys/css 无关、顺序在 ⌘K 之前；逐个覆盖报障 API 名 + 「缺失才补」守卫 + 只用 ES5），37 例全绿。
+- **生效条件**：桥实例在 hub 启动时创建 ⇒ 需 `systemctl --user restart agenthub` 后生效（重启会断开 hub 终端里的活会话）。
+
+## v0.13.207 — 彻底删除「基础设施 → 文件转换」（2026-11-20）
+
+> 用户令：「基础设施 文件转换 彻底删除」。
+
+- **后端**：`src/profiles.py` 删 `fileconv` 卡（kind=convert / :8085 / 桥入口随之消失）。
+- **前端**：`static/hub/05-chat-and-history.js` 的 `NAV_SUB_KINDS` 去 `['convert','文件转换']`；`scripts/build_hubjs.sh` 重建 `static/hub.js`（12090 行，md5 36c06711），`index.html` 的 `?v=` 提手同步 1 处。
+- **删除文件**：`scripts/fileconv_web.py`（自建转换 Web 服务）、`tests/verify_fileconv_agents.py`（该功能专用闸门）。
+- **运行时清理**：`fileconv-web.service` 停止 + disable + 删单元（`default.target.wants` 软链一并移除）；`/vol1/1000/filee/`（435 MB，含上游包与 jobs）与 `~/.local/bin/filee` 软链删除；:8085 已释放。
+- **文档**：README「外部项目引入记录」删 Filee 条目。
+- **回归**：见本次提交的测试结果（`test_hubjs_split` / `test_profiles_*` / `test_nav_icons` / `test_users` / `test_embed_keys_bridge`），重启后 `/api/agents` 不再含 `fileconv`。
+
 ## v0.13.206 — 前端瘦身 + 备份/退役服务清理（2026-11-20）
 
 > 用户令：「实际没用的 UI 按实际情况删除」「备份保留最新 2 个」「清理装过但用不了的测试工具/服务」「推 Git」「不能破坏运行」。

@@ -428,7 +428,8 @@ async def _chat_dispatch(agent_id: str, message: str,
                          model: Optional[str] = None,
                          cwd: Optional[str] = None,
                          trace_id: Optional[str] = None,
-                         timeout_s: Optional[float] = None) -> Dict:
+                         timeout_s: Optional[float] = None,
+                         tag: Optional[str] = None) -> Dict:
     import time as _time
     t0 = _time.monotonic()
     # v0.13.50：模型取值的唯一入口 —— 请求显式带了就用请求的，没带就回落「设置 → 模型」
@@ -454,8 +455,13 @@ async def _chat_dispatch(agent_id: str, message: str,
                         "AND role IN ('user','assistant') ORDER BY id DESC LIMIT 20",
                         (session_id,))
         history = [{"role": r["role"], "content": r["content"]} for r in reversed(hist)]
-    result = await adapter.chat(message, session_id=session_id, model=model,
-                                history=history, cwd=cwd, timeout_s=timeout_s)
+    _chat_kw = dict(session_id=session_id, model=model,
+                    history=history, cwd=cwd, timeout_s=timeout_s)
+    # 2026-11-21：派发标签必须传到适配器 —— CLI 用它登记子进程（心跳判死的唯一键）。
+    # 适配器基类/全部实现都收 **kwargs，所以无 tag 时保持原调用形态。
+    if tag:
+        _chat_kw["tag"] = tag
+    result = await adapter.chat(message, **_chat_kw)
     # S2 画像埋点：append-only，成功率/耗时统计源
     dur = int((_time.monotonic() - t0) * 1000)
     db.log_profile_event("hub_chat", agent_id,

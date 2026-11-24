@@ -1704,6 +1704,7 @@
         <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15a1 1 0 0 0 1.52.87l12-7.5a1 1 0 0 0 0-1.74l-12-7.5A1 1 0 0 0 7 4.5Z"/></symbol>
         <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
         <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 2v6h-6"/><path d="M21 13a9 9 0 1 1-3-7.7L21 8"/></symbol>
+        <symbol id="i-power" viewBox="0 0 24 24"><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/><path d="M12 2v10"/></symbol>
         <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></symbol>
         <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
         <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></symbol>
@@ -2554,6 +2555,10 @@
                 现在换 .sp-grid.two + 各自的 .sp-bd.box（限高内滚、横向 tscroll）；
              ③ h3 里的 ACL 长句留「deny 优先」这一条硬口径（tests/test_asset_panel.py
                 钉着），其余说明下沉到 .sp-r。 -->
+        <!-- 2026-11-20：magpie 统一页。记忆/会话/技能/MCP/用量由 magpie 原生页面提供，
+             本页只做入口与 iframe 容器；数据不再在 hub 里重建第二份。 -->
+        <!-- 2026-11-20 用户令：magpie 统一页删除（与网关 magpie 卡 panel 重复）。
+             同类项：网关卡已带 :3430/?k=… 面板，「打开面板/嵌入」等价。 -->
         <section class="page sys" id="page-mcp">
             <div class="sp">
                 <!-- PT-20261110-01 · ① 源：可增删的 MCP 服务器目录 URL。
@@ -3067,45 +3072,6 @@
             </div>
         </section>
 
-        <!-- 积分签到（v0.13.201）：A/B 两机 AIAutomator 远程管理只读投影 + 受控触发 -->
-        <section class="page sys" id="page-checkin">
-            <div class="sp">
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>积分签到 · 机器管理</h3>
-                        <div class="sp-r">
-                            <button class="btn sm ghost" data-ck="refresh" title="重读机器清单与流水"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
-                        </div>
-                    </div>
-                    <div class="sp-tools">
-                        <div class="toolbar">
-                            <span class="hint" id="ckStatus">未加载</span>
-                        </div>
-                    </div>
-                    <div class="sp-bd" style="padding-top:0"><div class="hint" id="ckHint">进页自动读一次机器清单；触发执行默认 plan（dry，不签到不通知）。</div></div>
-                    <div class="sp-note">机器清单只读投影 tailcat <code>connect-targets.tsv</code>；登录态/凭据只在各 Windows 机本地，hub 不回传不落库（多账号面板也只回传脱敏账号名）。远程执行串行（tailcat 单连接）。A/B 机各自保留 Windows 计划任务每日 08:00 自主签到，本页做查看、手动补签与多账号管理（WorkBuddy 短信添加 / TraeWork 导入本机登录态）。</div>
-                </div>
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>已安装机器</h3>
-                        <div class="sp-r"><span class="hint" id="ckMachineCount">–</span></div>
-                    </div>
-                    <div class="sp-bd"><div class="sp-grid" id="ckMachines"><div class="hint">未加载</div></div></div>
-                </div>
-                <div class="sp-card">
-                    <div class="sp-hd">
-                        <h3>最近执行流水</h3>
-                        <div class="sp-r"><span class="hint">最新在上 · offline / unreadable / 正常 三态分开</span></div>
-                    </div>
-                    <div class="sp-bd box flush tscroll">
-                        <table>
-                            <thead><tr><th style="width:130px">时间</th><th style="width:190px">机器</th><th style="width:90px">命令</th><th style="width:80px">模式</th><th>结果</th></tr></thead>
-                            <tbody id="ckRuns"><tr><td colspan="5" class="hint">未加载</td></tr></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-        </section>
         
         
         <!-- 设置 · 重启（手动重启 agenthub，复用 /api/system/restart + 活会话确认）-->
@@ -3127,6 +3093,33 @@
                         </div>
                     </div>
                     <div class="sp-note">重启由后端 <code>/api/system/restart</code> 执行；有活会话时返回 409 并二次确认，与「需重启」标签同一入口。重启窗口约数秒，页面会自动刷新。</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 设置 · 关机（2026-11-20）：彻底关闭本机（poweroff），不可从页面回退 -->
+        <section class="page sys" id="page-settings-shutdown">
+            <div class="sp">
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>关机</h3>
+                        <div class="sp-r"><span class="hint">彻底关闭本机 · 不可从页面重新开机</span></div>
+                    </div>
+                    <div class="sp-bd">
+                        <div class="hint" style="margin-bottom:10px">关机将停止<b>本机所有服务</b>（agenthub、Agent 进程、终端会话、定时任务）
+                            并切断网络。开机需要到机器现场，或由支持来电自启的电源管理拉起。</div>
+                        <div class="set-sub">当前状态</div>
+                        <div id="shutdownStatus" class="hint">—</div>
+                        <label class="set-field" style="margin-top:10px">输入「关机」确认
+                            <input id="shutdownConfirm" autocomplete="off" placeholder="关机">
+                        </label>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap">
+                            <button class="btn sm danger" type="button" data-settings-act="shutdown-host">关闭本机</button>
+                            <button class="btn sm ghost" type="button" data-settings-act="shutdown-refresh">刷新状态</button>
+                        </div>
+                    </div>
+                    <div class="sp-note">执行路径：<code>sudo -n loginctl poweroff</code>，由脱离 agenthub cgroup 的 systemd 瞬态单元在 1 秒后派发。
+                        写端点受登录闸门与 <code>hub.ops.write</code> scope 保护；有活终端会话时须二次确认（<code>force=1</code>）。</div>
                 </div>
             </div>
         </section>
@@ -3512,7 +3505,7 @@
           + '符号阶梯=' + ['mdInline', 'openOverlay', 'renderHomeStats', 'passEye', 'logQDebounced', 'logPageGo', 'settingsDelegates',
                           'termToast', 'termWriteReplay', 'termFindBind', 'termFontStep', 'startMemoryEdit', 'memQDebounced',
                           'skillQDebounced', 'renderSkillInvocations', 'kbQDebounced', 'dagZoom', 'navItemHtml', 'histHtml', 'navRow',
-                          'renderNav', 'navAccKeydown', 'initSidebar', 'lpQDebounced', 'lpClearFilter', 'ghQDebounced', 'ghClearFilter', 'termTouchBind', 'ckMachineCard']
+                          'renderNav', 'navAccKeydown', 'initSidebar', 'lpQDebounced', 'lpClearFilter', 'ghQDebounced', 'ghClearFilter', 'termTouchBind']
               .map(function (k) { return k + ':' + (typeof window[k] === 'function' ? 1 : 0); }).join(' ') + '\n'
           + (L.length ? '异常清单(前8):\n' + L.slice(0, 8).join('\n') : '异常清单: 无');
       }
@@ -3556,7 +3549,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=f795f3b3';
+      var HUB_SRC = '/static/hub.js?v=e959154f';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

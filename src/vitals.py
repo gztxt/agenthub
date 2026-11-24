@@ -77,7 +77,7 @@ RT_NEG_STREAK = int(os.getenv("VITALS_NEG_STREAK", "2"))
 # 所以它一死，`/health` 的 `ccr_gateway.watch` 就永久报 `agnes/agnes-2.5-flash: false`
 # —— 而 `state` 仍是 `ok`，没人看得见（F3）。L4 的用途是「证明这个 agent 真能应答」，
 # 对模型能力无要求，只要在册且快 ⇒ 取 3.2–7.2s 的 flash 档。
-RT_MODEL = os.getenv("VITALS_RT_MODEL", "alibaba/qwen3.8-flash")
+RT_MODEL = os.getenv("VITALS_RT_MODEL", "workbuddy/glm-5.3-flash")
 # 实测一轮真请求耗时：claude 14s / jcode 9s / grok 19s / hermes 21s，40s 够宽容抖。
 RT_TIMEOUT = float(os.getenv("VITALS_RT_TIMEOUT", "90"))
 # 2026-09-24：40s → 90s。实测 claude 走 CCR 在 40s 窗口下跑出一例

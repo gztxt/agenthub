@@ -390,7 +390,10 @@ class TestTargets(unittest.TestCase):
         """
         flags = {t["id"]: t.get("rewrite_host") for t in profiles.embed_proxy_targets()}
         self.assertTrue(flags.get("dsh"), "dsh 的 /api 围栏依赖 bind 地址，必须改写")
-        self.assertTrue(flags.get("ccr"), "ccr 本体只认 127.0.0.1:3458，必须改写")
+        # CCR 已于 2026-11-17 下线（不进 PROFILES ⇒ 也不在 embed targets 里）。
+        # 卡在册时才要求改写；不在册不造一个空断言。
+        if "ccr" in flags:
+            self.assertTrue(flags["ccr"], "ccr 本体只认 127.0.0.1:3458，必须改写")
         others = [k for k, v in flags.items() if k not in ("dsh", "ccr") and v]
         self.assertEqual(others, [], "别家按 Host 拼绝对地址，不能被默认改写")
 

@@ -35,7 +35,7 @@ from config import config                   # noqa: E402
 from dataset_pipeline import assert_free_model   # noqa: E402
 import verifier                             # noqa: E402
 
-DEFAULT_MODEL = "openrouter/free"
+DEFAULT_MODEL = "workbuddy/deepseek-v4.1-flash"  # 2026-11-19：OpenRouter 已关，改 magpie 在册模型
 DEFAULT_SPLIT = "holdout"
 
 #: 评估题面模板（**按判据 kind 选**，否则题面与判据对不上 —— 问「给结论」却用 JSON 判，

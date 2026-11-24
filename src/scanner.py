@@ -10,6 +10,7 @@
 """
 import hashlib
 import json
+import os
 import re
 import subprocess
 from typing import Dict, List
@@ -40,6 +41,36 @@ BUILTIN_PORTS, KNOWN_UNITS = _known_ports_units()
 # 表现为资源页多一条自己家的条目，而不是报错。
 EXCLUDE_PATTERNS = re.compile(
     r"^(ccr|fcc|opensquilla|agenthub|xray|tailscale|unattended|user@)", re.I)
+
+#: 2026-11-20 用户令：「scan-* 卡片隐藏名单」。
+#:
+#: 这些都是**真实在跑的外部服务**，隐藏的只是 hub 里那张只读状态卡 ——
+#: 卡片本身没有任何操作入口（无 panel / 无终端 / 无对话），点开只有「详情」。
+#: 判据：hub 对它们的价值 = 故障时能看见；而下列 7 个不是 hub 的消费对象，
+#: 留着只会把「基础设施」从 9 项撑到 16 项。
+#:
+#: 保留两项的理由：
+#:   xerj-docs     —— 知识库 /api/kb/search 的索引后端，它挂了知识库就空转
+#:   pi-web-relay  —— 手机/局域网入口 :8084，对外可达性出问题时要第一眼看到
+#:
+#: 恢复全量：`HUB_SCAN_SHOW_ALL=1` + 重启（调试扫描器时用，别当常态）。
+SCAN_SHOW_UNITS = frozenset({
+    "xerj-docs",      # 知识库 /api/kb/search 的索引后端，它挂了知识库就空转
+    "pi-web-relay",   # 手机/局域网入口 :8084，对外可达性出问题时要第一眼看到
+})
+
+
+
+def _scan_visible(uname: str) -> bool:
+    """白名单语义（2026-11-20 改）：默认**不登记**任何扫描到的 systemd 单元。
+
+    前一版用黑名单，实测失效：删掉 claude-mem 卡后它的 3 个单元
+    （claude-mem / -ts4 / -ts6）不再进 KNOWN_UNITS ⇒ 立刻以 scan-* 身份冒出来，
+    清单从 9 条又长回 9 条（只是换了成分）。黑名单敌不过单元增删。
+    只有列在 SCAN_SHOW_UNITS 里的才出卡；`HUB_SCAN_SHOW_ALL=1` 恢复全量（调试用）。"""
+    if os.getenv("HUB_SCAN_SHOW_ALL") == "1":
+        return True
+    return uname in SCAN_SHOW_UNITS
 
 
 def _watchlist():
@@ -118,6 +149,8 @@ def scan_systemd() -> List[Dict]:
         uname = unit.name.removesuffix(".service")
         # 画像已收录的单元（cloudcli/fcc/ccr 家族等）不再重复登记
         if uname not in running or EXCLUDE_PATTERNS.match(uname) or uname in KNOWN_UNITS:
+            continue
+        if not _scan_visible(uname):
             continue
         try:
             text = unit.read_text(errors="ignore")

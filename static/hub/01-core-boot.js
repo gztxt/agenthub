@@ -708,6 +708,7 @@ function go(page) {
   if (page === 'settings-modelcalls') { mclPanelLoad(); }
   /* 2026-11-17 重启页：每次进页都重读状态（版本/活会话/是否待重启） */
   if (page === 'settings-restart') { settingsRestartStatus(); }
+  if (page === 'settings-shutdown') { settingsShutdownStatus(); }
   /* 2026-10-25：settings-memory 页已并入「记忆中心」（#page-memory 的本机旧层折叠块），
      不再有独立的进页钩子 —— 折叠块展开时才由 mxLegacyToggle() 拉 L1/L2/L3。 */
   if (page === 'ports' && !portsLoaded) { portsLoaded = true; loadPorts(); }
@@ -718,8 +719,6 @@ function go(page) {
   if (page === 'tasks') enterTasksPage();
   if (page === 'jobs') { fillAgentSelect($('jobAgent'), false); loadJobs(); }
   if (page === 'mcp') { loadMcp(); loadAcl(); }
-  // v0.13.201：积分签到页每次进页重读（机器清单/执行流水是活数据），由 17-checkin.js 渲染
-  if (page === 'checkin') loadCheckin(false);
 }
 
 function fillAgentSelect(sel, withAuto) {
@@ -980,6 +979,52 @@ async function settingsRestartStatus() {
   }
 }
 
+/* 设置→关机页：显示本机当前活会话与版本（与重启页同源 /health）。
+   关机不可逆 ⇒ 不做轮询恢复；下发成功后就地提示页面即将失联。 */
+async function settingsShutdownStatus() {
+  const box = $('shutdownStatus');
+  if (!box) return;
+  try {
+    const d = await api('/health');
+    const ver = (d && d.version) || '?';
+    const sess = (d && d.term_sessions) || 0;
+    box.innerHTML = '版本 <b>' + escapeHtml(String(ver)) + '</b> · 活会话 <b>' + sess +
+      '</b> · 关机后本机断电，需现场开机';
+  } catch (e) {
+    box.textContent = '读不到 /health（服务可能已停止）';
+  }
+}
+
+async function shutdownHost(btn) {
+  const inp = $('shutdownConfirm');
+  if (!inp || String(inp.value || '').trim() !== '关机') {
+    toast('请先在确认框输入「关机」', 'err');
+    if (inp) inp.focus();
+    return;
+  }
+  const post = (force) => api('/api/system/shutdown?confirm=poweroff' + (force ? '&force=1' : ''),
+                              { method: 'POST' });
+  try {
+    try { await post(false); }
+    catch (e) {
+      if (e.http !== 409) throw e;
+      const n = (e.payload && e.payload.detail && e.payload.detail.term_sessions) || '?';
+      if (!confirm('当前有 ' + n + ' 个终端会话在跑。关机会中断它们并彻底关闭本机，且无法从页面重新开机。确认关机？')) {
+        return;
+      }
+      await post(true);
+    }
+  } catch (e) {
+    toast('关机请求失败：' + e.message, 'err');
+    return;
+  }
+  toast('关机指令已下发，本机将在数秒内断电', 'ok');
+  if (btn) { btn.disabled = true; btn.textContent = '关机中…'; }
+  if (inp) inp.disabled = true;
+  const box = $('shutdownStatus');
+  if (box) box.textContent = '已下发 poweroff；页面即将失联。';
+}
+
 /* 模型层情报（rt_state）→ 短标。它只影响副标文案，永远不影响「可用」。 */
 const RT_LABELS = {
   answered: '已应答', blocked_by_account: '额度/登录', rate_limited: '上游限流',
@@ -1140,7 +1185,8 @@ let SET_AGENTS = [];          // /api/settings/models 的 agents 段
 
 /* 设置页 id —— 委托与 go() 懒加载共用这一份清单，别再各处写字面量 */
 const SET_PAGE_IDS = ['page-settings-github',
-                      'page-settings-logs', 'page-settings-users', 'page-settings-modelcalls', 'page-settings-restart'];   // 重启页手动触发 /api/system/restart
+                      'page-settings-logs', 'page-settings-users', 'page-settings-modelcalls', 'page-settings-restart',
+                      'page-settings-shutdown'];   // 重启/关机页手动触发 /api/system/*
 
 /* 2026-11-17：设置→模型页删除后，SET_AGENTS 的加载从页面解耦到启动链路。
    终端模型选择器读它的 value_prefix（opencode 用 ccr/ 前缀），这是唯一仍在的消费点。 */
@@ -2200,6 +2246,9 @@ function settingsDelegates() {
          （含活会话 409 二次确认、轮询恢复、自动刷新）。 */
       if (a === 'hub-restart') return restartHub({ currentTarget: act });
       if (a === 'rst-refresh') return settingsRestartStatus();
+      /* 设置→关机页：输入「关机」+ 二次确认后 POST /api/system/shutdown。 */
+      if (a === 'shutdown-host') return shutdownHost(act);
+      if (a === 'shutdown-refresh') return settingsShutdownStatus();
     }
     /* 用户授权页：卡片按钮统一走 data-uact 委托（禁 inline onclick，§4.2）。
        刻意放在既有分支之后：test_ghsettings.py 用固定 1400 字符窗口截本函数开头查 gh-，

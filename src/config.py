@@ -55,10 +55,10 @@ class Config:
         self.port = int(_env_override.get("PORT") or os.getenv("PORT", "3102"))
         self.host = _env_override.get("HOST") or os.getenv("HOST", "0.0.0.0")
         
-        # Agent 端点
-        self.ccr_url = os.getenv("CLAUDE_CCR_URL", "http://127.0.0.1:3456")
+        # Agent 端点（2026-11-17：CCR 下线，网关位由 magpie :3425 接替）
+        self.ccr_url = os.getenv("CLAUDE_CCR_URL", "http://127.0.0.1:3425")
         self.pi_url = os.getenv("PI_WEB_URL", "http://127.0.0.1:30141")
-        self.jcode_url = os.getenv("JCODE_URL", "http://127.0.0.1:3457")
+        self.jcode_url = os.getenv("JCODE_URL", "http://127.0.0.1:3425")
         self.tdaI_url = os.getenv("TDAI_URL", "http://127.0.0.1:8420")
         
         # 认证
@@ -72,14 +72,11 @@ class Config:
         self.claude_model = os.getenv("CLAUDE_CHAT_MODEL", "")
         self.jcode_model = os.getenv("JCODE_CHAT_MODEL", "")
 
-        # Manager Agent LLM 网关（FCC 优先，见 MEMORY PT-20260905-02）
-        # 默认值指向 **CCR**（:3456）。旧默认是 FCC 的 :8082/v1，而 FCC 已于 2026-09-25 彻底退役
-        # （PT-20260924-15：与 CCR 上游同 key、provider 为 CCR 子集、Claude 档实为 Qwen 别名）
-        # ⇒ 留着它就是一个「.env 丢失/新克隆即指向死网关」的隐形故障源，与军规第 2 条
-        # 「端口以实连为准：CCR API 口 3456」对齐。真值仍由 .env override，不改现有生产行为。
-        self.manager_llm_base = os.getenv("MANAGER_LLM_BASE_URL", "http://127.0.0.1:3456/v1")
+        # Manager Agent LLM 网关（magpie :3425；原 CCR :3456 已下线）
+        # 默认值为 magpie 在册模型，真值由 .env override。
+        self.manager_llm_base = os.getenv("MANAGER_LLM_BASE_URL", "http://127.0.0.1:3425/v1")
         self.manager_llm_key = os.getenv("MANAGER_LLM_API_KEY", "")
-        self.manager_llm_model = os.getenv("MANAGER_LLM_MODEL", "alibaba/qwen3.8-flash")
+        self.manager_llm_model = os.getenv("MANAGER_LLM_MODEL", "workbuddy/deepseek-v4.1-flash")
 
         # Hook 遥测写入鉴权（留空=仅回环可写）
         self.hook_auth_token = os.getenv("HOOK_AUTH_TOKEN", "")

@@ -473,11 +473,11 @@ def _pi_write(model: str):
         prov = (m.get("providers") or {}).get(PI_CCR_PROVIDER)
         ch2: List[dict] = []
         if prov is None:
-            prov = {"api": "openai-completions", "baseUrl": "http://127.0.0.1:3456/v1",
+            prov = {"api": "openai-completions", "baseUrl": "http://127.0.0.1:3425/v1",
                     "apiKey": _api_key(), "models": []}
             m.setdefault("providers", {})[PI_CCR_PROVIDER] = prov
             ch2.append({"where": f"models.json:providers.{PI_CCR_PROVIDER}", "from": "",
-                        "to": "新建 provider（CCR :3456/v1）", "op": "add-section"})
+                        "to": "新建 provider（magpie :3425/v1）", "op": "add-section"})
             ids = []
         else:
             ids = [str(x.get("id") or "") for x in (prov.get("models") or [])]
@@ -664,12 +664,12 @@ def _grok_write(model: str):
     if not existing:
         for ln in text.splitlines():
             s = ln.strip()
-            if s.startswith("api_key") and "3456" in text[max(0, text.find(ln) - 400):text.find(ln)]:
+            if s.startswith("api_key") and any(gw in text[max(0, text.find(ln) - 400):text.find(ln)] for gw in ("3425", "3456")):
                 existing = s.split("=", 1)[1].strip().strip('"')
                 break
     api_key = existing or _api_key()
-    for k, v in (("model", model), ("base_url", "http://127.0.0.1:3456/v1"),
-                 ("name", f"CCR {model}"), ("api_key", api_key),
+    for k, v in (("model", model), ("base_url", "http://127.0.0.1:3425/v1"),
+                 ("name", f"magpie {model}"), ("api_key", api_key),
                  ("api_backend", "chat_completions"), ("auth_scheme", "bearer")):
         text, c = _set_kv(text, k, v, section=sec)
         changes.append(c)

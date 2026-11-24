@@ -91,10 +91,13 @@ class TestClassify(_Base):
         self.assertIsNone(agentscan.classify("agentshield", path, SIGS, prober=lambda p: ""))
 
     def test_bridge_package_is_rejected(self):
-        path = self.pkg("node_modules/bridge", "@ccpocket/bridge",
+        # 2026-11-20：CCPocket Bridge 已彻底下线删除（unit/包/数据/探针全清）。
+        # 这条测的是**通用** `bridge` 反词表（NOT_AGENT_BODY），不是那个已消失的包，
+        # 故夹具换成中性名，规则覆盖不变。
+        path = self.pkg("node_modules/somebridge", "@acme/somebridge",
                         "Bridge server that connects sessions to mobile devices",
                         ["coding-agent"])
-        self.assertIsNone(agentscan.classify("ccpocket-bridge", path, SIGS,
+        self.assertIsNone(agentscan.classify("acme-somebridge", path, SIGS,
                                              prober=lambda p: ""))
 
     def test_real_coding_agent_package_registers(self):

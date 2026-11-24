@@ -66,6 +66,30 @@ class TestInjection(unittest.TestCase):
         self.assertIn(b"<style>X</style>", px3.extra)
         self.assertIn(b"agent-hub-keys", px3.extra, "CSS 与 JS 必须能同时注入")
 
+    def test_compat_shim_always_injected(self):
+        """垫片不挂在 keys 上：keys=False 的桥同样要为老浏览器补 API。
+
+        顺序也有契约：垫片必须排在 ⌘K 脚本之前（先补 API，再装功能脚本），
+        而 _inject 把它们整段放在 `</head>` 前，早于页面自己的 defer 模块脚本。
+        """
+        for kw in ({}, {"keys": False}, {"css": "<style>X</style>"}):
+            px = embed_proxy.EmbedProxy("t", "127.0.0.1", 1, listen_port=3299, **kw)
+            self.assertIn(b'id="agent-hub-compat"', px.extra, kw)
+            if b'id="agent-hub-keys"' in px.extra:
+                self.assertLess(px.extra.index(b'id="agent-hub-compat"'),
+                                px.extra.index(b'id="agent-hub-keys"'))
+
+    def test_compat_shim_covers_reported_apis(self):
+        """用户 2026-11-20 报障的名字必须逐个在垫片里出现，且带「缺失才补」的守卫。"""
+        js = embed_proxy.COMPAT_JS
+        for name in ("throwIfAborted", "AbortSignal.timeout", "structuredClone", "randomUUID"):
+            self.assertIn(name, js)
+        for guard in ("!sig.throwIfAborted", "!AbortSignal.timeout",
+                      "!crypto.randomUUID", "typeof structuredClone === 'undefined'"):
+            self.assertIn(guard, js, "必须只补缺失的实现，绝不覆盖原生")
+        for es6 in ("=>", "const ", "let "):
+            self.assertNotIn(es6, js, "垫片要先被老浏览器解析，只能写 ES5")
+
 
 class _FakeWriter:
     """最小 StreamWriter 桩：只收字节，够 _document 用。"""

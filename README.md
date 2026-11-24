@@ -139,8 +139,4 @@ Cloudflare Tunnel 发布、Skill 共享库、L1 自动提取（Hook 采集→LLM
 
 ## 外部项目引入记录
 
-- **KnifeLemon/Filee v2.5.0**（MIT，https://github.com/KnifeLemon/Filee ，2026-11-17 引入）
-  - 来源包 `Filee-2.5.0-linux-x64.tar.gz`，`sha256=ada7ee9cbb00452d93e58813543f223e53d362f9f6389ab83ad938d2a5264900`（上游 `SHA256SUMS.txt` 校验通过）。
-  - 落位 `/vol1/1000/filee/`（运行时资产，不进 git）；CLI 软链 `~/.local/bin/filee`。
-  - 引入理由：Filee 只有桌面 GUI + CLI、无 HTTP 端口，而 hub 的 panel/embed 入口要求 URL+端口 ⇒ 自建 `scripts/fileconv_web.py` 把 `filee convert` 包成本地转换服务（只绑 127.0.0.1:8085、noauth、走 hub 桥单登录），挂「基础设施 → 文件转换」子菜单。
-  - 许可证：MIT（宽松许可，`LICENSE` 原文在上游仓库）。
+（暂无。2026-11-20 删除 Filee v2.5.0「文件转换」子菜单，记录见 CHANGELOG v0.13.207。）

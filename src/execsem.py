@@ -76,7 +76,13 @@ OUTCOMES: Tuple[str, ...] = (
 STATUS_MAP: Dict[str, Dict[str, str]] = {
     "hub_chat": {"success": "ok", "fail": "failed"},
     "task_exec": {"success": "ok", "fail": "failed", "parked": "parked",
-                  "submitted": "parked"},
+                  "submitted": "parked",
+                  # 2026-11-21：过程事件（换模型/重试/升档/降档/自述与复核不符）不是
+                  # 子任务终态，但都表示「出过异常且已被处置」⇒ degraded。此前它们
+                  # 一律未映射，runlog 里显示 unknown，等于把「处置了」说成「看不懂」。
+                  "model_fallback": "degraded", "model_switch": "degraded",
+                  "retry": "degraded", "escalate": "degraded",
+                  "downgrade": "degraded", "mismatch": "degraded"},
     # v0.13.168：重拆只有两种写点 —— 成功生成下一轮（`replan`）、LLM/DAG 失败（`fail`）。
     # 闸门拒绝（complete/max_rounds/same_failure/budget）**不落事件**：那是正常结论，
     # 落成 failed 会让「重拆失败率」恒高且不可解释。

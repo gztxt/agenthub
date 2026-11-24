@@ -35,7 +35,7 @@ SCOPES = frozenset({
 })
 
 #: 键 = (模块名不含 .py, HTTP 方法, 路由字面量)。路由里的 `{param}` 原样保留。
-#: 105 条 = 2026-11-10 源码实测（PT-20261110-01 新增 6 条 MCP 源/安装/编排写路由）；加/删端点必须同步本表。
+#: 113 条 = 2026-11-20 源码实测（v0.13.209 新增 /api/system/shutdown）；加/删端点必须同步本表。
 WRITE_ROUTE_SCOPES = {
     ("actionplane", "POST", "/api/actions"): "hub.catalog.write",
     ("actionplane", "POST", "/api/actions/{action_id}/decide"): "hub.catalog.write",
@@ -56,18 +56,10 @@ WRITE_ROUTE_SCOPES = {
     ("api_sessions", "PATCH", "/api/sessions/{session_id}"): "hub.agent.write",
     ("api_summarize", "POST", "/api/summarize"): "hub.ops.write",
     ("api_system", "POST", "/api/system/restart"): "hub.ops.write",
+    ("api_system", "POST", "/api/system/shutdown"): "hub.ops.write",
     ("api_vitals", "POST", "/api/vitals/sweep"): "hub.ops.write",
     ("approvals", "POST", "/api/approvals/{aid}/approve"): "hub.ops.write",
     ("approvals", "POST", "/api/approvals/{aid}/deny"): "hub.ops.write",
-    # v0.13.201：积分签到远程管理（3 条写路由：机器元数据 upsert / 停用 / 远程触发）
-    ("checkinmgr", "POST", "/api/checkin/machines"): "hub.ops.write",
-    ("checkinmgr", "DELETE", "/api/checkin/machines/{name}"): "hub.ops.write",
-    ("checkinmgr", "POST", "/api/checkin/run"): "hub.ops.write",
-    # v0.13.204：多账号管理（短信发码 / 添加 / 导入本机登录态 / 删除）
-    ("checkinmgr", "POST", "/api/checkin/accounts/send-code"): "hub.ops.write",
-    ("checkinmgr", "POST", "/api/checkin/accounts/add"): "hub.ops.write",
-    ("checkinmgr", "POST", "/api/checkin/accounts/import"): "hub.ops.write",
-    ("checkinmgr", "POST", "/api/checkin/accounts/remove"): "hub.ops.write",
     ("cloudcli", "POST", "/start"): "hub.agent.write",
     ("cronjobs", "POST", "/api/jobs"): "hub.ops.write",
     ("cronjobs", "DELETE", "/api/jobs/{jid}"): "hub.ops.write",
@@ -163,7 +155,7 @@ EXEMPT_WRITE_ROUTES = frozenset({
     ("hook", "POST", "/telemetry/events/{source}"),
 })
 
-#: 32 条有副作用的写路由：起进程、发外网、改全局配置、调 LLM 或重扫。
+#: 33 条有副作用的写路由：起进程、发外网、改全局配置、调 LLM、重扫或关机。
 #: P0-3 只对这些强制 scope，其余保持登录放行，降低回归面。
 SIDE_EFFECT_ROUTES = frozenset({
     ("api_agents", "POST", "/api/agents/{agent_id}/chat"),
@@ -173,14 +165,8 @@ SIDE_EFFECT_ROUTES = frozenset({
     ("api_agents", "POST", "/api/agents/{agent_id}/ui-start"),
     ("api_summarize", "POST", "/api/summarize"),
     ("api_system", "POST", "/api/system/restart"),
+    ("api_system", "POST", "/api/system/shutdown"),
     ("api_vitals", "POST", "/api/vitals/sweep"),
-    # v0.13.201：远程触发签到会起 ssh/隧道进程并访问外网，属副作用
-    ("checkinmgr", "POST", "/api/checkin/run"),
-    # v0.13.204：多账号管理会登录第三方、发短信、写/删远端凭据，全部有副作用
-    ("checkinmgr", "POST", "/api/checkin/accounts/send-code"),
-    ("checkinmgr", "POST", "/api/checkin/accounts/add"),
-    ("checkinmgr", "POST", "/api/checkin/accounts/import"),
-    ("checkinmgr", "POST", "/api/checkin/accounts/remove"),
     ("cloudcli", "POST", "/start"),
     ("cronjobs", "POST", "/api/jobs/{jid}/run"),
     ("ghsettings", "POST", "/api/settings/github/apply"),

@@ -166,9 +166,13 @@ class TestResolveExecTargetDowngrade(unittest.TestCase):
         return base
 
     def test_timeout_downgrades_tier(self):
+        # 目录里必须含被测模型：v0.13.210 加的「派发前验选型是否在册」预检会在
+        # exec_model 不在目录时先换模型并写 model_planned，抢在本用例要验的降档 SQL 之前。
+        # 本用例只验降档，故让预检不介入。
         calls, events = [], []
         with mock.patch.object(r, "db") as m, \
-                mock.patch.object(r._tiers, "_catalog_snapshot", return_value=({"m1"}, True)), \
+                mock.patch.object(r._tiers, "_catalog_snapshot",
+                                  return_value=(("m1", "alibaba/qwen3.8-max"), True)), \
                 mock.patch.object(r._tiers, "escalate_target",
                                   side_effect=AssertionError("不该走升档")):
             m.execute.side_effect = lambda sql, params=None: calls.append((sql, params))
@@ -198,7 +202,8 @@ class TestResolveExecTargetDowngrade(unittest.TestCase):
 
     def test_non_timeout_uses_escalate(self):
         with mock.patch.object(r, "db") as m, \
-                mock.patch.object(r._tiers, "_catalog_snapshot", return_value=({"m1"}, True)), \
+                mock.patch.object(r._tiers, "_catalog_snapshot",
+                                  return_value=(("m1", "alibaba/qwen3.8-max"), True)), \
                 mock.patch.object(r._tiers, "_known_agent_ids", return_value={"codex"}), \
                 mock.patch.object(r._tiers, "escalate_target",
                                   return_value={"changed": False, "agent_id": "codex",
@@ -317,7 +322,10 @@ class TestModelPurityRealDB(_TmpDB):
         self._insert("t_fail", model_planned="m-exec", verify_kind="json_array")
         self._set_chat({"success": True, "response": "not-json",
                         "model": "m-reply", "usage": {"total_tokens": 7}})
-        self._run_once("t_fail")
+        # 目录含 m-exec ⇒ 派发前预检不介入，实发值才是我们在库里钉的值。
+        with mock.patch.object(r._tiers, "_catalog_snapshot",
+                              return_value=(("m-exec",), True)):
+            self._run_once("t_fail")
         row = self._row("t_fail")
         self.assertEqual(row["status"], "failed")
         self.assertEqual(row["model_sent"], "m-exec")
@@ -335,6 +343,8 @@ class TestTimeoutMarkerRealDB(_TmpDB):
             await asyncio.sleep(5)
         tasks.set_context(chat_fn=slow)
         with mock.patch.object(r, "_timeout_s_for", return_value=0.05), \
+                mock.patch.object(r._tiers, "_catalog_snapshot",
+                                  return_value=(("m3",), True)), \
                 mock.patch.object(tiercfg.timeout_for_tier, "__call__", create=True):
             row = self._row("t_to")
             asyncio.run(tasks._run_task(row["run_id"], row))
@@ -383,7 +393,8 @@ class TestTiercfgMissingFallback(_TmpDB):
         calls = []
         with self._without("prev_tier"), \
                 mock.patch.object(r, "db") as m, \
-                mock.patch.object(r._tiers, "_catalog_snapshot", return_value=({"m1"}, True)), \
+                mock.patch.object(r._tiers, "_catalog_snapshot",
+                                  return_value=(("m1", "m3"), True)), \
                 mock.patch.object(r._tiers, "_known_agent_ids", return_value={"codex"}), \
                 mock.patch.object(r._tiers, "escalate_target",
                                   return_value={"changed": False, "agent_id": "codex",

@@ -100,4 +100,3 @@ function evInterrupt() {
   if (typeof termSend !== 'function') { toast('终端未连接', 'err'); return; }
   termSend('\x03'); toast('已向当前会话发送 Ctrl+C', 'ok');
 }
-

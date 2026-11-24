@@ -195,27 +195,11 @@ class TestDagEscaped(unittest.TestCase):
                          "duration_ms 的数值拼接应保持原样")
 
 
-class TestTelemetryRowEscaped(unittest.TestCase):
-    """遥测表：source / event 与同行的 session_id 是同一个风险面。
-
-    同行已有 escapeHtml（session_id）却漏了这两个 —— 同型漏网。
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        src = strip_comments(TERM.read_text(encoding="utf-8"))
-        m = re.search(r"^function renderTelemetry\(.*?\n\}", src, re.M | re.S)
-        if not m:
-            # 函数名可能不同；退而求其次找 eventTable 的赋值块
-            m = re.search(r"\$?\(['\"]eventTable['\"]\)\.innerHTML.*", src, re.S)
-        assert m, "找不到遥测渲染点"
-        cls.body = m.group(0)
-
-    def test_source_escaped(self):
-        self.assertIn("escapeHtml(x.source)", self.body)
-
-    def test_event_escaped(self):
-        self.assertIn("escapeHtml(x.event)", self.body)
+# TestTelemetryRowEscaped 已删除（2026-11-24）：被测对象不存在。
+# 「遥测」页在 v0.13.206 前端瘦身里按实测（21 天 0~1 次调用）整页删除，
+# 04-terminal-ws.js 里既没有 renderTelemetry 也没有 eventTable 赋值块
+# ⇒ setUpClass 恒 assert 失败（2 个 ERROR）。渲染点没了，XSS 断言无处可落；
+# 若以后恢复遥测页，这条闸门要连同页面一起重建，不要只把类加回来。
 
 
 class TestCommandPanelIdEscaped(unittest.TestCase):

@@ -474,11 +474,12 @@ function cmdGo(sel) {
 const NAV_GROUPS = { agents: 'AGENTS', infra: '基础设施', system: '系统', settings: '设置' };
 const NAV_ICONS = { agents: 'hubmark', infra: 'server', system: 'sliders', settings: 'settings' };   // 收起成图标条时仍可辨认（sprite id）
 const NAV_ORDER = ['agents', 'infra', 'system', 'settings'];
-const NAV_SUB_KINDS = [['gateway', '网关'], ['service', '服务'], ['tool', '工具'], ['memory', '记忆'], ['file', '文件管理'], ['convert', '文件转换']];
-const SYS_PAGES = [['ports', '端口', 'share'], ['memory', '记忆中心', 'database'],
-                   ['skills', '技能中心', 'zap'], ['kb', '知识库', 'book'],
-                   ['mcp', 'MCP服务器', 'wrench'], ['jobs', '定时', 'clock'], ['tasks', '协同', 'flow'],
-                   ['checkin', '积分签到', 'star']];
+const NAV_SUB_KINDS = [['gateway', '网关'], ['service', '服务'], ['tool', '工具'], ['memory', '记忆'], ['file', '文件管理']];
+/* 2026-11-20：记忆/技能/MCP 三页改为 magpie 原生实现（同一份数据不再两处画）；
+   本机知识库（turbovec + TDAI）magpie 没有，保留。 */
+/* 2026-11-20 用户令：'magpie 统一' 从系统组删除（网关 magpie 卡的 panel 已等价，同页两份）。 */
+const SYS_PAGES = [['ports', '端口', 'share'],
+                   ['kb', '知识库', 'book'], ['jobs', '定时', 'clock'], ['tasks', '协同', 'flow']];
 /* v0.13.47：运行日志页删除，内容并入设置→日志。
    2026-11-20：遥测 / 资产 / Botboy 三页按实测（21 天 0~1 次调用）删除，端点保留。 */
 const MODE_LABEL = { embed: '嵌入', term: '终端', chat: '对话', detail: '详情', open: '新窗口' };
@@ -486,19 +487,22 @@ const MODE_LABEL = { embed: '嵌入', term: '终端', chat: '对话', detail: '�
    只是单独成组挂在「系统」之下；这三项此前是右侧抽屉里的三个 tab。 */
 const SET_PAGES = [['settings-github', 'GitHub', 'globe'],
                    ['settings-logs', '日志', 'activity'],
-                   ['settings-users', '用户授权', 'eye'], ['settings-modelcalls', '模型计量', 'radar'],
-                   ['settings-restart', '重启', 'refresh']];
+                   ['settings-users', '用户授权', 'eye'],
+                   ['settings-restart', '重启', 'refresh'],
+                   ['settings-shutdown', '关机', 'power']];
 /* 2026-10-25：「设置 · 记忆存储」并入「系统 · 记忆中心」（同一份本机记忆的读写入口
    不该分居两个菜单，设置组也不该为 4 条便签单占一个一级项）。 */
 const PAGE_LABELS = { classroom: '总览', chat: '统一对话', tasks: '协同', jobs: '定时',
-                      memory: '记忆中心', skills: '技能中心', kb: '知识库', mcp: 'MCP服务器', ports: '端口',
+                      magpie: 'magpie 统一',   /* 页面已删，label 留作旧链接兜底 */
+                      memory: '记忆中心', skills: '技能中心',
+                      kb: '知识库', mcp: 'MCP服务器', ports: '端口',
                       localprojects: '本机项目', github: 'GitHub 项目', resources: '资源监控',
-                      checkin: '积分签到',
                       'settings-github': '设置 · GitHub',
                       'settings-logs': '设置 · 日志',
                       'settings-users': '设置 · 用户授权',
                       'settings-modelcalls': '设置 · 模型计量',
-                      'settings-restart': '设置 · 重启' };
+                      'settings-restart': '设置 · 重启',
+                      'settings-shutdown': '设置 · 关机' };
 const navOpenStored = lsGet('hub.nav.open');
 let navOpen = navOpenStored === null ? 'agents' : navOpenStored;   // 首屏默认展开 AGENTS；'' = 用户主动全收起
 let curPage = '';

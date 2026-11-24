@@ -45,25 +45,23 @@ SPEC = {"sources": ["pi", "claude"], "require_events": True,
 
 class TestModelDiscipline(unittest.TestCase):
     def test_default_model_is_alive(self):
-        """2026-11-02 改判：agnes 已从 CCR 清单摘除，默认改成在册的 alibaba 档。
+        """2026-11-19 改判：CCR :3456 下线，默认改成 magpie 在册的 workbuddy 档。
 
-        只断言「不是 agnes」不够 —— 下次别的 ID 死了仍会通过。
-        真闸门是将配置模型与 `GET :3456/v1/models` 交叉校验（见 docs 第 12 点）。
+        只断言「不是旧 ID」不够 —— 下次别的 ID 死了仍会通过。
+        真闸门是将配置模型与 `GET :3425/v1/models` 交叉校验（见 docs 第 12 点）。
         """
-        self.assertEqual(dp.DEFAULT_MODEL, "alibaba/deepseek-v4.1-flash")
-        self.assertTrue(dp.DEFAULT_MODEL.startswith("alibaba/"))
+        self.assertEqual(dp.DEFAULT_MODEL, "workbuddy/deepseek-v4.1-flash")
+        self.assertTrue(dp.DEFAULT_MODEL.startswith("workbuddy/"))
 
     def test_auto_router_is_rejected(self):
         with self.assertRaises(ValueError):
             dp.assert_free_model("openrouter/auto")
 
-    def test_ccr_prefixed_model_is_accepted(self):
-        """2026-11-02：CCR 清单 `free_count = 0` ⇒ alibaba/* 是唯一可选集。
-
-        **代价必须写明**：它是 token-plan 网关，按军规按扣费处理。
-        """
-        dp.assert_free_model("alibaba/deepseek-v4.1-flash")
-        dp.assert_free_model("alibaba/qwen3.8-flash")
+    def test_magpie_models_are_accepted(self):
+        """2026-11-19：magpie 在册免费账号模型（workbuddy/raccoon）准入。"""
+        dp.assert_free_model("workbuddy/deepseek-v4.1-flash")
+        dp.assert_free_model("raccoon/sn-glm-5-3")
+        dp.assert_free_model("auto/glm-5.3-flash")
 
     def test_dead_agnes_is_rejected(self):
         """回归钉子：agnes 已被上游摘掉，留着它通过准入就会在运行时才炸。"""
@@ -78,12 +76,16 @@ class TestModelDiscipline(unittest.TestCase):
             dp.assert_free_model("qwen3.8-flash")
 
     def test_free_models_are_accepted(self):
-        dp.assert_free_model("openrouter/free")
         dp.assert_free_model("nvidia/nemotron-3-super-120b-a12b:free")
 
-    def test_ccr_form_of_free_router_is_accepted(self):
-        """工作区军规：**经 CCR 时写 `openrouter/openrouter/free`** —— 这种写法也得认。"""
-        dp.assert_free_model("openrouter/openrouter/free")
+    def test_dead_openrouter_routes_are_rejected(self):
+        """2026-11-19：OpenRouter 已在 magpie 关闭，旧写法必须被拒而不是静默改路。"""
+        with self.assertRaises(ValueError):
+            dp.assert_free_model("openrouter/free")
+        with self.assertRaises(ValueError):
+            dp.assert_free_model("openrouter/openrouter/free")
+        with self.assertRaises(ValueError):
+            dp.assert_free_model("alibaba/deepseek-v4.1-flash")
 
     def test_agnes_is_no_longer_accepted(self):
         """2026-11-02：`agnes/*` 已从 CCR 清单摘除 ⇒ 不再准入（旧测试反向）。"""

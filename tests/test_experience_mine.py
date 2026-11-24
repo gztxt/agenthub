@@ -41,8 +41,8 @@ def _exp(situation, action, precondition="", created="2026-10-01T00:00:00+00:00"
 
 class TestModelDiscipline(unittest.TestCase):
     def test_default_model_is_alive(self):
-        """2026-11-02 改判：agnes 已从 CCR 清单摘除，默认改成在册的 alibaba 档。"""
-        self.assertEqual(em.DEFAULT_MODEL, "alibaba/deepseek-v4.1-flash")
+        """2026-11-19 改判：CCR :3456 下线，默认改成 magpie 在册的 workbuddy 档。"""
+        self.assertEqual(em.DEFAULT_MODEL, "workbuddy/deepseek-v4.1-flash")
 
     def test_auto_router_rejected(self):
         with self.assertRaises(ValueError):

@@ -115,11 +115,12 @@ class AllUISingleLogin(unittest.TestCase):
             "0.0.0.0", hub_auth=True)
         self.assertEqual(no_flag, "127.0.0.1")
 
-    def test_basic_panel_gotty_is_bridged_with_its_own_user(self):
-        t = [x for x in profiles.embed_proxy_targets() if x["id"] == "gotty"]
-        self.assertEqual(len(t), 1, "gotty 没进桥 ⇒ 新窗口仍会弹原生 Basic 登录框")
-        self.assertEqual(t[0]["basic_user"], "gztxt")
-        self.assertTrue(os.path.exists(str(t[0]["secret"])))
+    # 2026-11-20 用户令：gotty / chromium 两卡删除（「桥接 Basic 面板」这套机制
+    # 仍由 proxy-panel（bridge_secret）+ codebuddy（upstream_cookie）覆盖，见下两条）。
+    def test_removed_cards_stay_removed(self):
+        ids = {p["id"] for p in profiles.PROFILES}
+        for gone in ("gotty", "chromium", "ollama", "ai_manager", "claude-mem"):
+            self.assertNotIn(gone, ids, "%s 卡已按 2026-11-20 裁定删除，又回来了" % gone)
 
     def test_codebuddy_upstream_login_is_preauthenticated_by_bridge(self):
         t = [x for x in profiles.embed_proxy_targets() if x["id"] == "codebuddy"]
@@ -128,12 +129,6 @@ class AllUISingleLogin(unittest.TestCase):
         self.assertTrue(f and os.path.exists(f),
                         "codebuddy 的 gateway_session Cookie 文件缺失 ⇒ 又会弹 Login 页")
         self.assertIn("gateway_session=", open(f, encoding="utf-8").read())
-
-    def test_chromium_is_a_documented_exception(self):
-        ids = {t["id"] for t in profiles.embed_proxy_targets()}
-        self.assertNotIn("chromium", ids)
-        p = [x for x in profiles.PROFILES if x["id"] == "chromium"][0]
-        self.assertIn("暂未接入", p["desc"], "例外必须写在卡面上，不能静默漏掉")
 
     def test_pi_agent_has_no_own_password_and_binds_loopback(self):
         pi = [p for p in profiles.PROFILES if p["id"] == "pi"][0]

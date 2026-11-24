@@ -33,6 +33,9 @@ from fastapi import FastAPI   # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 
+# 判据：造事件的时间戳一律用 SQLite 表达式取「近 1 小时」，不要写死日期。
+# 原写法写死 '2026-10-20T00:00:00+00:00' 且 usage 默认 days=30 ⇒ 2026-11-20 起
+# 四条用例被窗口过滤而必然红（时间炸弹，与被测逻辑无关）。
 def _mk_skill(root: pathlib.Path, name: str, desc: str = "测试技能") -> pathlib.Path:
     d = root / name
     d.mkdir(parents=True, exist_ok=True)
@@ -150,7 +153,7 @@ class TestUsageEndpoint(_WeightsCase):
         self.assertEqual(self._relevant().status_code, 200)
         self.assertEqual(self._relevant(caller="", via="").status_code, 200)
         db.execute("INSERT INTO profile_events(source,subject,status,duration_ms,detail,created_at)"
-                   " VALUES('rest','skill.relevant','success',1,?, '2026-10-20T00:00:00+00:00')",
+                   " VALUES('rest','skill.relevant','success',1,?, strftime('%Y-%m-%dT%H:%M:%S+00:00','now','-1 hour'))",
                    (json.dumps({"q": "旧账", "name": "demo", "route": "src"}),))
 
         b = self._usage(days=30)
@@ -262,7 +265,7 @@ class TestUsageEndpoint(_WeightsCase):
     def test_legacy_relevant_not_counted_as_auto(self):
         """无 mode/via 的旧事件不许算曝光：那可能是 UI 人工查询。"""
         db.execute("INSERT INTO profile_events(source,subject,status,duration_ms,detail,created_at)"
-                   " VALUES('rest','skill.relevant','success',1,?, '2026-10-20T00:00:00+00:00')",
+                   " VALUES('rest','skill.relevant','success',1,?, strftime('%Y-%m-%dT%H:%M:%S+00:00','now','-1 hour'))",
                    (json.dumps({"name": "ghost", "route": "src"}),))
         b = self._usage()
         row = next(x for x in b["items"] if x["name"] == "ghost")
@@ -282,7 +285,7 @@ class TestUsageEndpoint(_WeightsCase):
         self._relevant(caller="claude", via="hook")     # auto
         self._relevant(caller="", via="")               # query（人工）
         db.execute("INSERT INTO profile_events(source,subject,status,duration_ms,detail,created_at)"
-                   " VALUES('rest','skill.relevant','success',1,?, '2026-10-20T00:00:00+00:00')",
+                   " VALUES('rest','skill.relevant','success',1,?, strftime('%Y-%m-%dT%H:%M:%S+00:00','now','-1 hour'))",
                    (json.dumps({"name": "demo", "route": "src"}),))   # legacy
 
         # ⚠ 窗口必须显式对齐：`/invocations` 默认 7 天，而下面那行 fixture 的
@@ -319,7 +322,7 @@ class TestUsageEndpoint(_WeightsCase):
         _mk_skill(self.a, "demo", "权重技能演示")
         self._invoke()                                        # 有名 explicit=1
         db.execute("INSERT INTO profile_events(source,subject,status,duration_ms,detail,created_at)"
-                   " VALUES('rest','skill.invoke','success',1,?, '2026-10-20T00:00:00+00:00')",
+                   " VALUES('rest','skill.invoke','success',1,?, strftime('%Y-%m-%dT%H:%M:%S+00:00','now','-1 hour'))",
                    (json.dumps({"route": "src", "caller": "codex"}),))   # 无名 explicit
         b = self._usage()
         t = b["totals"]

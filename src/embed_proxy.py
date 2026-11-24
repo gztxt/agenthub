@@ -84,6 +84,260 @@ KEYS_JS = """<script id="agent-hub-keys">
 })();
 </script>"""
 
+VIEWPORT_CSS = """<style id="agent-hub-vh">
+/* 老引擎没有 dvh 时的整页高度兜底（2026-11-21，pi web 会话划不动）。
+ *
+ * 病根：pi-web 的 CSS 只在 @media (display-mode:standalone) 里定义
+ * --app-viewport-height:100vh，其余场合一律 var(--app-viewport-height, 100dvh)。
+ * 桌面 Chrome 有 dvh ⇒ 正常；Android WebView < Chrome 108 没有 dvh ⇒ 该声明在计算值
+ * 阶段失效、height 退回 auto ⇒ 聊天容器高度 = 内容高度（实测 10847px），
+ * 永远没有溢出 ⇒ 划不动；body 又是 overflow:hidden ⇒ 输入框被推到屏幕外。
+ * 实测（无头 Chromium 抹掉 dvh 后的同一页面）：聊天滚动区 clientHeight=scrollHeight=10847。
+ *
+ * 只在不支持 dvh 的引擎里生效；新浏览器 @supports not (...) 为假，样式零作用。
+ */
+@supports not (height: 100dvh) {
+  :root { --app-viewport-height: 100vh; }
+  html, body { height: 100vh; }
+}
+</style>"""
+COMPAT_JS = """<script id="agent-hub-compat">
+/* 老浏览器垫片（2026-11-20 用户报障：pi 对话框「模型错误 e?.throwIfAborted is not a function」）。
+ *
+ * 病根：pi-web 0.17 的模型加载回调里写 `e?.throwIfAborted()`（上游 page chunk 原文），
+ * 而 AbortSignal.throwIfAborted 是 Chrome 100 / Safari 15.4 才有的方法。用户的浏览器
+ * （或内嵌 WebView）没有它 ⇒ 该回调抛 TypeError，被 catch 当成模型加载失败，界面上就是
+ * 「模型错误」+ 空模型下拉。同一条推理下会缺的还有 AbortSignal.timeout（Chrome 103）、
+ * structuredClone（Chrome 98）、crypto.randomUUID（**要求安全上下文**，所以经 http 局域网
+ * 访问时连新版 Chrome 都没有 —— 这条与浏览器新旧无关，是这个桥的本职）。
+ *
+ * 为什么垫在桥里：嵌页只能经桥进入（各上游自身只绑回环），桥已经在每个 HTML 文档
+ * `</head>` 前插 ⌘K 脚本，复用同一注入点。只补缺失的原生实现，绝不覆盖已有的。
+ * 必须是 ES5 语法：垫片本身要先被老浏览器解析，写成 ES6 就白搭。
+ */
+(function () {
+  var sig = typeof AbortSignal !== 'undefined' ? AbortSignal.prototype : null;
+  if (sig && !sig.throwIfAborted) {
+    sig.throwIfAborted = function () {
+      if (this.aborted) {
+        throw this.reason !== undefined ? this.reason
+          : new DOMException('This operation was aborted', 'AbortError');
+      }
+    };
+  }
+  if (typeof AbortSignal !== 'undefined' && !AbortSignal.timeout) {
+    AbortSignal.timeout = function (ms) {
+      var c = new AbortController();
+      setTimeout(function () {
+        c.abort(new DOMException('signal timed out', 'TimeoutError'));
+      }, ms);
+      return c.signal;
+    };
+  }
+  if (typeof crypto !== 'undefined' && crypto && crypto.getRandomValues && !crypto.randomUUID) {
+    crypto.randomUUID = function () {
+      var b = crypto.getRandomValues(new Uint8Array(16)), out = '', hex = '0123456789abcdef';
+      b[6] = (b[6] & 0x0f) | 0x40;          /* version 4 */
+      b[8] = (b[8] & 0x3f) | 0x80;          /* RFC 4122 variant */
+      for (var i = 0; i < 16; i++) {
+        if (i === 4 || i === 6 || i === 8 || i === 10) out += '-';
+        out += hex[b[i] >> 4] + hex[b[i] & 15];
+      }
+      return out;
+    };
+  }
+  if (typeof structuredClone === 'undefined') {
+    window.structuredClone = function (value, seen) {
+      if (value === null || typeof value !== 'object') {
+        if (typeof value === 'function' || typeof value === 'symbol') {
+          throw new DOMException('could not be cloned', 'DataCloneError');
+        }
+        return value;
+      }
+      seen = seen || new Map();
+      if (seen.has(value)) return seen.get(value);
+      var tag = Object.prototype.toString.call(value), out, i, k;
+      if (value instanceof Date) return new Date(value.getTime());
+      if (value instanceof RegExp) return new RegExp(value.source, value.flags);
+      if (value instanceof Map) {
+        out = new Map(); seen.set(value, out);
+        value.forEach(function (v, kk) { out.set(window.structuredClone(kk, seen), window.structuredClone(v, seen)); });
+        return out;
+      }
+      if (value instanceof Set) {
+        out = new Set(); seen.set(value, out);
+        value.forEach(function (v) { out.add(window.structuredClone(v, seen)); });
+        return out;
+      }
+      if (value instanceof ArrayBuffer) return value.slice(0);
+      if (ArrayBuffer.isView(value)) return new value.constructor(value);
+      if (tag === '[object Array]') {
+        out = []; seen.set(value, out);
+        for (i = 0; i < value.length; i++) out[i] = window.structuredClone(value[i], seen);
+        return out;
+      }
+      out = {}; seen.set(value, out);
+      for (k in value) {
+        if (Object.prototype.hasOwnProperty.call(value, k)) {
+          out[k] = window.structuredClone(value[k], seen);
+        }
+      }
+      return out;
+    };
+  }
+
+  /* ── 2026-11-21 补第二批：Chrome<83 缺的数组/字符串/对象方法 ──────────────
+   * 判据（本地复现，非推测）：在无头 Chromium 里删掉这些方法模拟老 WebView，
+   * 打开旧会话直接 `n.findLastIndex is not a function` ⇒ 会话视图整块不渲染
+   * （正文 70 字符、无滚动容器）＝用户看到的「模型错误 + 划不动」；把垫片加回去
+   * 同一页面正常出正文并恢复滚动（clientHeight 673 / scrollHeight 6049）。
+   * findLastIndex/.at 都在 pi-web 的**消息渲染**与**模型加载回调**路径上，
+   * 所以新建会话（不渲染历史）正常、点旧会话才炸。
+   * 全部只在缺失时定义；defineProperty 保证不可枚举，不会污染 for..in。
+   */
+  function def(obj, name, fn) {
+    if (!obj || obj[name]) return;
+    try {
+      Object.defineProperty(obj, name, {
+        value: fn, writable: true, configurable: true, enumerable: false
+      });
+    } catch (e) { try { obj[name] = fn; } catch (e2) {} }
+  }
+
+  function relIdx(len, n) {
+    n = Math.trunc ? Math.trunc(n) : (n < 0 ? Math.ceil(n) : Math.floor(n));
+    if (n < 0) n += len;
+    return n;
+  }
+
+  def(Array.prototype, 'at', function (n) {
+    var i = relIdx(this.length, n);
+    return (i < 0 || i >= this.length) ? undefined : this[i];
+  });
+  def(String.prototype, 'at', function (n) {
+    var s = String(this);
+    var i = relIdx(s.length, n);
+    return (i < 0 || i >= s.length) ? undefined : s.charAt(i);
+  });
+  def(Array.prototype, 'findLast', function (fn, thisArg) {
+    for (var i = this.length - 1; i >= 0; i--) {
+      if (fn.call(thisArg, this[i], i, this)) return this[i];
+    }
+    return undefined;
+  });
+  def(Array.prototype, 'findLastIndex', function (fn, thisArg) {
+    for (var i = this.length - 1; i >= 0; i--) {
+      if (fn.call(thisArg, this[i], i, this)) return i;
+    }
+    return -1;
+  });
+  def(Array.prototype, 'toSorted', function (cmp) {
+    return Array.prototype.slice.call(this).sort(cmp);
+  });
+  def(Array.prototype, 'toReversed', function () {
+    return Array.prototype.slice.call(this).reverse();
+  });
+  def(Array.prototype, 'with', function (i, v) {
+    var out = Array.prototype.slice.call(this);
+    var k = relIdx(out.length, i);
+    if (k < 0 || k >= out.length) throw new RangeError('Invalid index');
+    out[k] = v;
+    return out;
+  });
+  def(String.prototype, 'replaceAll', function (from, to) {
+    if (from instanceof RegExp) return this.replace(from, to);
+    return this.split(String(from)).join(String(to));
+  });
+  def(Object, 'hasOwn', function (obj, key) {
+    return obj !== null && obj !== undefined &&
+      Object.prototype.hasOwnProperty.call(obj, key);
+  });
+  def(Object, 'groupBy', function (items, cb) {
+    var out = Object.create(null), i = 0;
+    for (var v of items) {
+      var k = cb(v, i++);
+      if (!Object.prototype.hasOwnProperty.call(out, k)) out[k] = [];
+      out[k].push(v);
+    }
+    return out;
+  });
+  def(Map, 'groupBy', function (items, cb) {
+    var m = new Map(), i = 0;
+    for (var v of items) {
+      var k = cb(v, i++);
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(v);
+    }
+    return m;
+  });
+  if (typeof Promise !== 'undefined') {
+    def(Promise, 'any', function (list) {
+      return new Promise(function (resolve, reject) {
+        var arr = Array.prototype.slice.call(list), n = arr.length;
+        var errs = new Array(n), left = n;
+        if (!n) return reject(new Error('All promises were rejected'));
+        arr.forEach(function (p, i) {
+          Promise.resolve(p).then(resolve, function (err) {
+            errs[i] = err;
+            if (--left === 0) {
+              var e = new Error('All promises were rejected');
+              e.errors = errs;
+              reject(e);
+            }
+          });
+        });
+      });
+    });
+  }
+  if (typeof AbortSignal !== 'undefined') {
+    def(AbortSignal, 'any', function (signals) {
+      var ctl = new AbortController();
+      Array.prototype.slice.call(signals).forEach(function (sig) {
+        if (ctl.signal.aborted) return;
+        if (sig.aborted) { ctl.abort(sig.reason); return; }
+        sig.addEventListener('abort', function () { ctl.abort(sig.reason); }, { once: true });
+      });
+      return ctl.signal;
+    });
+  }
+
+  /* ResizeObserver loop 垫片（2026-11-21 用户报障：pi-web 会话列表划不动 + 模型错误）。
+   * 病根：pi-web 会话树 useLayoutEffect 里 `new ResizeObserver(function(){ setProperty(...);
+   * k(clientHeight); setScrollTop() })` —— 回调内改样式/读尺寸又写样式，老引擎（Android 11
+   * WebView / Chrome 90）在同一帧同步递归到浏览器上限，抛 `ResizeObserver loop limit
+   * exceeded` 并**中断回调**，导致会话树高度没算完 ⇒ 无法滑动；同类回调在模型下拉路径
+   * 也有 ⇒ 模型错误。新浏览器把 loop 当良性警告并继续，所以浏览器正常。
+   * 修法：包装原生 RO，把回调延迟到下一帧（rAF）并同帧合并，打断同步递归。
+   * 保持 instanceof/原型链：ShimRO.prototype 指回原生 prototype。
+   *
+   * ⚠️ 2026-11-21 20:09 改判：旧实现用 `_oldEngine = !CSS.supports('height','100dvh')`
+   * 当门槛，实测垫片根本没装上却仍在报 loop —— hub 日志证明注入已送达
+   * （20:07:41 注入 11417B），3 秒后（20:07:54）继续 `ResizeObserver loop limit
+   * exceeded`。反推：APP 的 WebView 认识 dvh（Android System WebView 会自更新，
+   * 早已不是 Chrome 90）⇒ 门槛 false ⇒ 跳过包装。该 loop-limit 报错各版本浏览器
+   * 都会报，不是「老引擎专属」，门槛因此毫无道理 —— 改为**无条件**包装。
+   * 诊断标记：window.__hubRoShim（只读布尔，便于端侧确认是否装上）。
+   */
+  if (typeof ResizeObserver !== 'undefined' && !window.__roShimmed) {
+    var _NativeRO = ResizeObserver;
+    var ShimRO = function (cb) {
+      var raf = 0;
+      return new _NativeRO(function (entries, obs) {
+        if (raf) return;                       /* 同帧多次只跑最后一次，打断递归 */
+        raf = requestAnimationFrame(function () {
+          raf = 0;
+          try { cb(entries, obs); } catch (e) {}
+        });
+      });
+    };
+    ShimRO.prototype = _NativeRO.prototype;    /* 保 instanceof */
+    window.ResizeObserver = ShimRO;
+    window.__roShimmed = true;
+    window.__hubRoShim = 1;                    /* 端侧可查：垫片已装 */
+  }
+})();
+</script>"""
+
 _END = b"\r\n\r\n"
 _HDR_SPLIT = re.compile(rb"\r?\n")
 _HTML_PATH = re.compile(rb"\.html?$", re.I)
@@ -293,6 +547,138 @@ def _inject(body: bytes, extra: bytes) -> bytes:
     if i < 0:
         return body
     return body[:i] + extra + body[i:]
+
+
+# ── Chromium <99 的 CSS 兼容：拆掉 @layer 外壳（2026-11-21）──────────────
+# 病根（实测用户手机 WebView）：pi-web 0.17/0.18 用 Tailwind v4 出 CSS，**全部布局
+# 工具类**（.flex / .h-full / .min-h-0 / .flex-1 / .overflow-y-auto…）都写在
+# `@layer utilities{…}` 里。CSS 规范要求「不认识的 at-rule 连整块一起丢弃」，
+# 而 @layer 是 Chrome 99 才有 ⇒ 老 WebView 把 utilities 层整段扔掉：
+#   聊天记录容器没有 overflow、没有 flex-1/min-h-0，高度由内容撑开；
+#   外层 body 又是 overflow:hidden ⇒ **会话内容永远划不动**（用户报障原文），
+#   而同一份页面在桌面 Chrome 里完全正常。
+# 版本证据（2026-11-20 18:20 本机日志）：页面报 `structuredClone is not defined`
+# （Chrome 98 才有）⇒ WebView < 98；2026-11-21 日志里 `interactive-widget` 不被识别
+# （Chrome 108 才有）⇒ < 108。两条独立证据都指向没有 @layer 的老引擎。
+#
+# 修法：只对「确实不支持 @layer」的 Chromium 生效——
+#   1) `_bust_css_urls` 给文档里的 /_next/static/css/*.css 加 `?hubcss=1`：
+#      Next 对这些资源发的是 `max-age=1y, immutable`，不换 URL 的话浏览器根本
+#      不会回来请求，补丁永远到不了（缓存里那份仍是坏的）；
+#   2) `_stylesheet` 对带该标记的 CSS 去掉 @layer 外壳（层序 = 源码顺序，
+#      与作者写的顺序一致：properties → theme → base → utilities → 自定义 CSS）。
+# 新浏览器请求里没有 hubcss=1 ⇒ 一个字节都不经过这里，零回归。
+_LAYER_TOKEN = re.compile(rb"@layer\b", re.I)
+_CSS_HREF = re.compile(rb'(?i)(href=")(/_next/static/css/[^"?]+\.css)(")')
+_CHROME_UA = re.compile(rb"Chrome/(\d+)")
+
+
+def _needs_layer_flatten(header: bytes) -> bool:
+    """请求来自 Chromium <99（没有 @layer）⇒ 需要兼容改写。认不出引擎就不动。"""
+    m = _CHROME_UA.search(header)
+    if not m:
+        return False
+    try:
+        return int(m.group(1)) < 99
+    except ValueError:
+        return False
+
+
+def _bust_css_urls(body: bytes) -> bytes:
+    """给 <link href="/_next/static/css/…"> 加 ?hubcss=1（只改这一种路径）。"""
+    return _CSS_HREF.sub(rb"\1\2?hubcss=1\3", body)
+
+
+def _css_skip_string(b: bytes, i: int, n: int) -> int:
+    q = b[i:i + 1]
+    i += 1
+    while i < n:
+        ch = b[i:i + 1]
+        if ch == b"\\":
+            i += 2
+            continue
+        if ch == q:
+            return i + 1
+        i += 1
+    return n
+
+
+def _css_skip_comment(b: bytes, i: int, n: int) -> int:
+    j = b.find(b"*/", i + 2)
+    return n if j < 0 else j + 2
+
+
+def _css_match_brace(b: bytes, i: int, n: int) -> int:
+    """b[i] == '{'，返回配对 '}' 的下标（跳过字符串与注释里的花括号）。"""
+    depth = 0
+    while i < n:
+        if b[i:i + 2] == b"/*":
+            i = _css_skip_comment(b, i, n)
+            continue
+        ch = b[i:i + 1]
+        if ch in (b'"', b"'"):
+            i = _css_skip_string(b, i, n)
+            continue
+        if ch == b"{":
+            depth += 1
+        elif ch == b"}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return n
+
+
+def _flatten_layers(css: bytes) -> bytes:
+    """去掉 @layer 外壳，规则按源码顺序保留；`@layer a, b;` 这种声明直接删。
+
+    只删「层」这一层抽象，不动任何选择器/声明——老引擎丢掉的正是这一层。
+    幂等：没有 @layer 的 CSS 原样返回（同一对象）。
+    """
+    if b"@layer" not in css.lower():
+        return css
+    out = bytearray()
+    i, n = 0, len(css)
+    while i < n:
+        if css[i:i + 2] == b"/*":
+            j = _css_skip_comment(css, i, n)
+            out += css[i:j]
+            i = j
+            continue
+        ch = css[i:i + 1]
+        if ch in (b'"', b"'"):
+            j = _css_skip_string(css, i, n)
+            out += css[i:j]
+            i = j
+            continue
+        m = _LAYER_TOKEN.match(css, i)
+        if m:
+            j = m.end()
+            # 跳层名（`@layer utilities{` / `@layer a, b;`）：到第一个 { 或 ; 为止。
+            while j < n and css[j:j + 1] not in (b"{", b";"):
+                j += 1
+            if j < n and css[j:j + 1] == b"{":
+                end = _css_match_brace(css, j, n)
+                out += _flatten_layers(css[j + 1:end])
+                i = min(end + 1, n)
+                continue
+            k = css.find(b";", j)          # 声明式 `@layer a, b;`
+            i = n if k < 0 else k + 1
+            continue
+        out += ch
+        i += 1
+    return bytes(out)
+
+
+def _is_compat_stylesheet(head_line: bytes, header: bytes) -> bool:
+    """带 ?hubcss=1 的 .css 请求（只有老 Chromium 的文档会被 _bust_css_urls 改成这样）。"""
+    if not head_line.upper().startswith(b"GET ") or _is_upgrade(header):
+        return False
+    parts = head_line.split(b" ")
+    if len(parts) < 2:
+        return False
+    path, _, query = parts[1].partition(b"?")
+    return path.lower().endswith(b".css") and b"hubcss=1" in query
 
 
 def _strip_hop_headers(header: bytes) -> bytes:
@@ -512,6 +898,9 @@ async def _document(writer: asyncio.StreamWriter, head_line: bytes, header: byte
         log.warning("上游返回 %s 编码，跳过 style 注入（原样透传）", m.group("v").decode(errors="replace"))
         writer.write(raw)   # 注意：raw 已含结尾空行，别再补 _END，否则多一个 CRLF
     else:
+        # 老 Chromium 不认 @layer：先给样式表换 URL，_stylesheet 才有机会拆层。
+        if _needs_layer_flatten(header):
+            rb = _bust_css_urls(rb)
         rb = _inject(rb, extra)
         log.info("[embed] 文档注入: %s -> body %d bytes (注入 %d)" % (
             head_line.decode(errors="replace")[:38], len(rb), len(extra)))
@@ -534,6 +923,100 @@ async def _document(writer: asyncio.StreamWriter, head_line: bytes, header: byte
     except (ConnectionError, OSError):
         pass
     writer.close()
+
+
+async def _stylesheet(writer: asyncio.StreamWriter, head_line: bytes, header: bytes,
+                     up_w: asyncio.StreamWriter, up_r: asyncio.StreamReader,
+                     pre_body: bytes, authority: bytes) -> None:
+    """CSS：整份读回 → 拆 @layer → 重算 Content-Length（只处理 ?hubcss=1）。
+
+    与 `_document` 同一套取舍：上游强制 identity + close；拿不到明文 / 解析不了
+    chunked / 不是 text/css ⇒ 原样透传，绝不猜。正文改过就不许把 ETag /
+    Last-Modified 递回去（否则浏览器拿旧验证器来要 304，补丁等于没打）。
+    """
+    mh = re.search(rb"^host:\s*(?P<v>[^\r\n]+)", header, re.I | re.M)
+    host_hdr = mh.group("v").strip() if mh else authority
+    req = (head_line + b"\r\n" + _strip_hop_headers(header) +
+           b"\r\nHost: " + host_hdr +
+           b"\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n" + pre_body)
+    up_w.write(req)
+    await up_w.drain()
+    chunks = []
+    try:
+        # 上游必须回 Connection: close；万一某家不认，15s 后按已收字节继续（不挂住样式表）。
+        async with asyncio.timeout(15):
+            while True:
+                d = await up_r.read(65536)
+                if not d:
+                    break
+                chunks.append(d)
+    except TimeoutError:
+        log.warning("CSS 上游 15s 未收完，按已收 %d 字节继续", sum(map(len, chunks)))
+    up_w.close()
+    raw = b"".join(chunks)
+    if _END not in raw:
+        writer.close()
+        return
+    rh, rb = raw.split(_END, 1)
+    m_ct = _CT.search(rh)
+    if not m_ct or b"text/css" not in m_ct.group("v").lower():
+        writer.write(raw)
+        try:
+            await writer.drain()
+        except (ConnectionError, OSError):
+            pass
+        writer.close()
+        return
+    if re.search(rb"^transfer-encoding:\s*chunked", rh, re.I | re.M):
+        dec = _dechunk(rb)
+        if dec is None:
+            writer.write(raw)
+            try:
+                await writer.drain()
+            except (ConnectionError, OSError):
+                pass
+            writer.close()
+            return
+        rb = dec
+    m = _ENC.search(rh)
+    if m and m.group("v").strip().lower() not in (b"identity", b""):
+        log.warning("CSS 上游仍回 %s 编码，跳过 @layer 兼容（原样透传）",
+                    m.group("v").decode(errors="replace"))
+        writer.write(raw)
+        try:
+            await writer.drain()
+        except (ConnectionError, OSError):
+            pass
+        writer.close()
+        return
+    flat = _flatten_layers(rb)
+    if flat == rb:                      # 没有 @layer（或只在注释里）：原样透传，字节零改动
+        writer.write(raw)
+        try:
+            await writer.drain()
+        except (ConnectionError, OSError):
+            pass
+        writer.close()
+        return
+    log.info("[embed] @layer 兼容: %s -> %d bytes (原 %d)",
+             head_line.decode(errors="replace")[:52], len(flat), len(rb))
+    lines = [ln for ln in _HDR_SPLIT.split(rh)
+             if ln.strip()
+             and not _ENC.match(ln)
+             and not re.match(rb"^content-length:", ln, re.I)
+             and not re.match(rb"^transfer-encoding:", ln, re.I)
+             and not re.match(rb"^connection:", ln, re.I)
+             and not re.match(rb"^(etag|last-modified|age|cache-control):", ln, re.I)]
+    writer.write(b"\r\n".join(lines) + b"\r\n"
+                 + b"Cache-Control: no-store\r\n"
+                 + b"Content-Length: " + str(len(flat)).encode()
+                 + b"\r\nConnection: close\r\n\r\n" + flat)
+    try:
+        await writer.drain()
+    except (ConnectionError, OSError):
+        pass
+    writer.close()
+
 
 
 def _upstream_candidates(host: str) -> list[str]:
@@ -646,6 +1129,9 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     if doc:
         await _document(writer, head_line, rest, up_w, up_r, pre_body,
                         _authority(host, port), extra)
+    elif _is_compat_stylesheet(head_line, rest):
+        await _stylesheet(writer, head_line, rest, up_w, up_r, pre_body,
+                          _authority(host, port))
     elif rewrite_authority and b"upgrade:" not in rest.lower():
         # 非升级请求走逐请求改写；WS 升级后是全双工裸字节流，不能再按 HTTP 解析
         await _pump_rewritten(reader, writer, header + pre_body, up_w, up_r,
@@ -837,7 +1323,12 @@ class EmbedProxy:
         self.upstream = (upstream_host, int(upstream_port))
         self.listen = (listen_host, int(listen_port))
         self.server: asyncio.base_events.Server | None = None
-        self.extra = (css.encode() if css else b"") + (KEYS_JS.encode() if keys else b"")
+        # COMPAT_JS 与 css/keys 无关：它是「浏览器缺 API」的垫片，不是 ⌘K 功能的一部分。
+        # 只挂在 keys 上会让 keys=False 的桥（以及将来新加的桥）重新踩同一个坑。
+        self.extra = ((css.encode() if css else b"")
+                      + VIEWPORT_CSS.encode()
+                      + COMPAT_JS.encode()
+                      + (KEYS_JS.encode() if keys else b""))
         # 非空 ⇒ 这个桥代持上游 Basic（面板口令文件）。**不再**拿它当用户口令：
         # 用户只要在 hub 登录过，桥就自动补上（2026-11-07 用户裁定）。
         self.auth_secret = (auth_secret or "").strip()

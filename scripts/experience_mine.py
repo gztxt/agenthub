@@ -36,7 +36,7 @@ import db                                   # noqa: E402
 from config import config                   # noqa: E402
 from dataset_pipeline import assert_free_model  # noqa: E402
 
-DEFAULT_MODEL = "alibaba/deepseek-v4.1-flash"
+DEFAULT_MODEL = "workbuddy/deepseek-v4.1-flash"  # 2026-11-19：CCR 下线，改 magpie 在册模型
 EXPIRE_DAYS = 180
 
 

@@ -38,6 +38,10 @@ from tasks_tiers import (  # noqa: F401  —— 对外门面
     TASK_SKILL_INJECT, TASK_SKILL_MAX_CHARS, TASK_SKILL_TIMEOUT_S,
     TASK_TIMEOUT_S, MAX_CONCURRENCY, MAX_TASKS, LEADER_MAXN, LOOP_SLEEP_S, AUTO_ACCEPT,
     MAX_AUTO_RETRY, MAX_ROUNDS, WAIT_RESUME_S, MAX_WAKES,
+    # 2026-11-21 模型不可用 → 自动换模型（用户裁定）
+    MAX_MODEL_FALLBACK, is_model_failure, parse_models_tried, model_fallback_target,
+    is_channel_failure, AGENT_DEFAULT_MODEL,
+    is_agent_catalog_miss, prefers_agent_default,
     # 2026-11-03 协同页四框：轮次上限与配置模型归因（纯函数，测试直测）
     ROUNDS_CEILING, ROUND_CHOICES, clamp_rounds, error_bucket,
     set_context, budget_exceeded, set_run_budget, run_spent, run_budget_exceeded,

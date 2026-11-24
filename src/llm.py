@@ -12,11 +12,11 @@ agnes 三个 ID 已被上游从 CCR 清单摘掉（`GET :3456/v1/models` 实测 
 FCC→tokenrouter/qwen3.8-flash 的 tool_use 已由 PT-20260905-01 端到端验证。
 
 配置（.env）：
-  MANAGER_LLM_BASE_URL   默认 http://127.0.0.1:8082
-  MANAGER_LLM_API_KEY    FCC PROXY_AUTH token（Bearer）
-  MANAGER_LLM_MODEL      默认 alibaba/qwen3.8-flash
-  MEMORY_LLM_MODEL       非会话/后台工具调用的模型（默认 alibaba/deepseek-v4.1-flash）
-  MEMORY_LLM_FALLBACK_MODEL  兜底位（默认 alibaba/qwen3.8-flash；0731 已被摘，2026-11-02 23:05）
+  MANAGER_LLM_BASE_URL   默认 http://127.0.0.1:3425（2026-11-17 CCR :3456 下线 → magpie）
+  MANAGER_LLM_API_KEY    magpie caller key（Bearer）
+  MANAGER_LLM_MODEL      默认 workbuddy/deepseek-v4.1-flash（2026-11-24 改判：alibaba/* 已摘）
+  MEMORY_LLM_MODEL       非会话/后台工具调用的模型（默认 workbuddy/deepseek-v4.1-flash）
+  MEMORY_LLM_FALLBACK_MODEL  兜底位（默认 workbuddy/glm-5.3-flash；alg 系已不在 :3425 清单）
 
 【历史】2026-10-29 用户裁定：全部默认走 agnes-2.5-flash，取消 deepseek 与免费模型池。
 （该裁定前提=agnes 在网关上；前提已消失 ⇒ 2026-11-02 改判，见上倒幅。原文不删。）
@@ -39,7 +39,7 @@ import resilience
 
 BASE_URL = os.getenv("MANAGER_LLM_BASE_URL", "http://127.0.0.1:8082").rstrip("/")
 API_KEY = os.getenv("MANAGER_LLM_API_KEY", "")
-MODEL = os.getenv("MANAGER_LLM_MODEL", "alibaba/qwen3.8-flash")
+MODEL = os.getenv("MANAGER_LLM_MODEL", "workbuddy/deepseek-v4.1-flash")
 
 
 def memory_model() -> str:
@@ -57,7 +57,7 @@ def memory_model() -> str:
     失败语义：不可用时由 `complete_free()` 换兜底并把「不可用」显式返回，
     **不静默切成别的模型**（坏兜底比显式失败更贵）。
     """
-    return os.getenv("MEMORY_LLM_MODEL", "alibaba/deepseek-v4.1-flash")
+    return os.getenv("MEMORY_LLM_MODEL", "workbuddy/deepseek-v4.1-flash")
 
 
 def free_fallback_model() -> str:
@@ -70,7 +70,7 @@ def free_fallback_model() -> str:
     通过 MEMORY_LLM_FALLBACK_MODEL 环境变量仍可覆盖。
     """
     return os.getenv("MEMORY_LLM_FALLBACK_MODEL",
-                     "alibaba/qwen3.8-flash")
+                     "workbuddy/glm-5.3-flash")
 
 
 #: 后台输出「可用」的最小长度。低于此值按失败处理（宁可降级为机械拼接，
@@ -364,10 +364,21 @@ async def _create_message(system: Optional[str], messages: List[dict],
     return data
 
 
+def messages_url() -> str:
+    """The Anthropic Messages endpoint, with or without /v1 in the base URL.
+
+    2026-11-20: `.env` now points MANAGER_LLM_BASE_URL at magpie's OpenAI-style
+    base `http://127.0.0.1:3425/v1`; appending `/v1/messages` made
+    `/v1/v1/messages` (404) and every hub LLM call silently fell back. Accept
+    both shapes: a base ending in /v1 gets `/messages`, otherwise `/v1/messages`.
+    """
+    return f"{BASE_URL}/messages" if BASE_URL.endswith("/v1") else f"{BASE_URL}/v1/messages"
+
+
 async def _post_once(body: Dict[str, Any], request_id: Optional[str]) -> Dict[str, Any]:
     """单次 POST（**独立成函数作为测试接缝**：重试编排可被替身验证，而不必真连网关）。"""
     async with aiohttp.ClientSession() as s:
-        async with s.post(f"{BASE_URL}/v1/messages", headers=_headers(request_id),
+        async with s.post(messages_url(), headers=_headers(request_id),
                           json=body, timeout=TIMEOUT) as resp:
             if resp.status != 200:
                 text = (await resp.text())[:600]

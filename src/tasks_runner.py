@@ -37,6 +37,11 @@ _TASK_COLUMNS_EXTRA = (
     ("model_sent", "TEXT"),
     ("tokens_estimated", "INTEGER DEFAULT 0"),
     ("last_fail_kind", "TEXT"),
+    # 2026-11-21：模型不可用 → 自动换模型的记账面。
+    #   models_tried   = 已试过的模型（JSON 数组），防止换到重复的坏模型；
+    #   model_fallbacks= 已换模型次数，独立于 attempts（换模型不吃验证重试额度）。
+    ("models_tried", "TEXT"),
+    ("model_fallbacks", "INTEGER DEFAULT 0"),
     # —— 心跳判据（2026-11-03 混排取证后新增）——
     # 病根：claude-code 挂住不返回时，旧逻辑要等满 TASK_TIMEOUT_S(600s) 才升级，
     # 且这次隐藏重试既不进 attempts 也不进 duration_ms ⇒ 统计口径系统性低估
@@ -261,9 +266,19 @@ def _accepts_kwarg(fn, name: str) -> bool:
     return name in params or any(p.kind == p.VAR_KEYWORD for p in params.values())
 
 
+def _third_param_name(fn) -> str:
+    """第 3 个位置参数名（chat_fn 的第三位在历史上被当作 session/trace 混用）。"""
+    try:
+        params = [p for p in inspect.signature(fn).parameters.values()
+                  if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    except (TypeError, ValueError):
+        return ""
+    return params[2].name if len(params) >= 3 else ""
+
+
 async def _call_chat(chat_fn, agent_id: str, prompt: str, tag: str,
-                     model: Optional[str], tier=None):
-    """按 chat_fn 的实际签名决定要不要把选型模型传下去。
+                     model: Optional[str], tier=None, trace_id: Optional[str] = None):
+    """按 chat_fn 的实际签名决定要不要把选型模型/派发标签传下去。
 
     传不下去时**不报错**（拆解意图不等于执行契约），但这条事实是可查的：
     `model_choice` 有值而 `model`（实发回包）是另一个值，就是「选了没生效」的证据。
@@ -271,14 +286,26 @@ async def _call_chat(chat_fn, agent_id: str, prompt: str, tag: str,
     超时（2026-10-29）：adapter 一侧必须**晚于**外层 `asyncio.wait_for` 超时，
     否则 TASK_TIMEOUT_S 这道闸永不触发 —— 症状是所有长任务都被记成「执行者失败」，
     归因错一层（真实原因是客户端 120s 先断）。
+
+    `tag`（2026-11-21）：CLI 适配器把子进程登记到 `live_processes()` 时用它做键，
+    心跳判死（CPU ticks 无增长）靠 `"task-<run>-<task>"` 找回 pid。不传 ⇒ 登记表里
+    tag 恒空 ⇒ 心跳永远采不到 pid，600s 满超时升级形同虚设（实测 11-03 仍复现）。
     """
     kw: Dict[str, Any] = {}
     if _accepts_kwarg(chat_fn, "timeout_s"):
         # 2026-11-03 缺陷1：adapter 侧超时按档位走（tier 未知 ⇒ 回落 TASK_TIMEOUT_S）。
         kw["timeout_s"] = _timeout_s_for(tier) + 30
+    third = _third_param_name(chat_fn)
+    # 第三方 chat_fn 的第三位有的叫 session_id、有的叫 trace_id：按名字给值，
+    # 否则「tag 占位 + trace_id 关键字」会在 `trace_id` 形参上撞成 TypeError。
+    third_val = trace_id if (third == "trace_id" and trace_id is not None) else tag
+    if _accepts_kwarg(chat_fn, "tag") and third != "tag":
+        kw["tag"] = tag
+    if trace_id is not None and third != "trace_id" and _accepts_kwarg(chat_fn, "trace_id"):
+        kw["trace_id"] = trace_id
     if model and _chat_arity(chat_fn) >= 4:
-        return await chat_fn(agent_id, prompt, tag, model, **kw)
-    return await chat_fn(agent_id, prompt, tag, **kw)
+        return await chat_fn(agent_id, prompt, third_val, model, **kw)
+    return await chat_fn(agent_id, prompt, third_val, **kw)
 
 
 async def _prepare_prompt(run_id: str, row: dict) -> str:
@@ -321,7 +348,37 @@ def _resolve_exec_target(run_id: str, row: dict, attempts_done: int) -> Tuple[st
     # 三列三口径：model_planned（按档位决议）> model_choice（Leader 显式）>
     # None（用该 agent 自己的默认）。执行前一律以"决议值"为准。
     exec_model = row.get("model_planned") or row.get("model_choice")
+    # 模型回退是**已裁决的显式选择**：本次不再让「按 attempts 升档」把它覆盖掉，
+    # 否则自动换模型的结论会被下一档降级/升档改写（同一任务来回换）。
+    forced_fallback = str(row.get("tier_reason") or "").startswith("model_fallback")
+    if exec_model == _tiers.AGENT_DEFAULT_MODEL:
+        exec_model = None          # 哨兵：不传 --model，用 agent 自己的默认模型
     cat, cat_ok = _tiers._catalog_snapshot()
+    # ── 2026-11-21：派发前先验「选型还活着」──────────────────────────────
+    # 拆解→执行之间网关清单会变（实测 agnes 48h 内被摘牌）。不当场换，执行就以
+    # unknown model / 空输出收场，再靠失败路径换模型多烧一轮。这里提前一步；
+    # 换不动（清单不可用/非 CCR 域/候选已试尽）⇒ 不动，保持旧行为。
+    if exec_model and not forced_fallback and exec_agent in _tiers._ccr_model_agents():
+        if cat_ok and cat and exec_model not in cat:
+            tried = _tiers.parse_models_tried(row.get("models_tried"))
+            if exec_model not in tried:
+                tried.append(exec_model)
+            repl = _tiers.model_fallback_target(exec_agent, row.get("tier"), tried,
+                                                catalog=cat, catalog_checked=True)
+            if repl:
+                db.execute("UPDATE tasks SET model_planned=?,tier_reason=?,models_tried=?,"
+                           "updated_at=? WHERE run_id=? AND task_id=?",
+                           (repl, "model_unavailable:dispatch",
+                            json.dumps(tried, ensure_ascii=False), _tiers._now(),
+                            run_id, row["task_id"]))
+                db.log_profile_event("task_exec", exec_agent, "model_switch", 0,
+                                     trace_id=row["trace_id"],
+                                     detail={"task": row["task_id"],
+                                             "stage": "dispatch",
+                                             "from_model": exec_model, "to_model": repl,
+                                             "tried": tried})
+                row["model_planned"] = repl
+                exec_model = repl
     # ── 2026-11-03 缺陷2：超时后**降一档**（不是升档）──────────────────
     # 超时的语义是「任务太重 / 预算不够」，升档只会更慢更难在预算内跑完
     # （实测 run 159ae98077 t2：codex+t3 超时 600s → 升档 claude-code + t3 再超 600s，
@@ -342,8 +399,12 @@ def _resolve_exec_target(run_id: str, row: dict, attempts_done: int) -> Tuple[st
                                          "from_model": exec_model, "to_model": new_model,
                                          "attempt": attempts_done})
             return exec_agent, new_model
-    esc = _tiers.escalate_target(exec_agent, exec_model, attempts_done, _tiers._known_agent_ids(),
-                          tier=row.get("tier"), catalog=cat, catalog_checked=cat_ok)
+    if not forced_fallback:
+        esc = _tiers.escalate_target(exec_agent, exec_model, attempts_done,
+                              _tiers._known_agent_ids(),
+                              tier=row.get("tier"), catalog=cat, catalog_checked=cat_ok)
+    else:
+        esc = {"changed": False}
     if esc["changed"]:
         exec_agent, exec_model = esc["agent_id"], esc["model"]
         db.execute("UPDATE tasks SET agent_id=?,escalated_from_agent=?,escalated_from_model=?,"
@@ -621,7 +682,7 @@ async def _run_task(run_id: str, row: dict):
         result = await asyncio.wait_for(
             _call_chat(chat_fn, exec_agent, prompt,
                        f"task-{row['trace_id']}-{row['task_id']}",
-                       exec_model, row.get("tier")),
+                       exec_model, row.get("tier"), trace_id=row.get("trace_id")),
             timeout=_tout)
         dur = int((asyncio.get_event_loop().time() - t0) * 1000)
         spent_tokens = int(((result.get("usage") or {}).get("total_tokens")) or 0)
@@ -899,15 +960,21 @@ RECOVERY_NOTE = (
 #     还没真跑就重启）无法自证「动作到底跑没跑」，这是 at-most-once 的固有边界：
 #     宁可漏一次（落 failed 待人核对），也不重复对外动作。
 def _command_id_for(run_id: str, row: dict) -> str:
-    """稳定 run 级去重键：同一 (run, task, attempt) 在重启前后逐字相同（不随机）。
+    """稳定 run 级去重键：同一 (run, task, attempt, model) 在重启前后逐字相同。
 
     为什么要带 `attempts`：合法的自动重试 / 升档会 attempts+1 后重新派发，那是
     **应当**再发一次外部动作的新尝试；带上次数才不会把重试误去重成「跳过」。
     而重启恢复（`recover_interrupted_tasks`）不改 attempts ⇒ 恢复重放与被打断的
     首次派发命中同一个 command_id，从而实现「同一 run 重启恢复只产生一次外部动作」。
+
+    为什么还要带 `model`（2026-11-21）：模型不可用时的自动换模型**刻意不改
+    attempts**（它不占验证重试额度）。只按 (run,task,attempt) 做键 ⇒ 换模型后的
+    「新一次派发」命中上一模型的回执，被当成重启重放直接判 failed（实测新用例当场复现）。
+    模型进键后：同模型重启恢复仍只派一次，换模型则是新动作、允许再派。
     """
     attempt = int(row.get("attempts") or 0)
-    return "task-dispatch:%s:%s:%d" % (run_id, row["task_id"], attempt)
+    model = str(row.get("model_planned") or row.get("model_choice") or "-")
+    return "task-dispatch:%s:%s:%d:%s" % (run_id, row["task_id"], attempt, model)
 
 
 def claim_command(command_id: str, run_id: str, action: str) -> Tuple[bool, dict]:

@@ -183,5 +183,89 @@ class UsersL0(unittest.TestCase):
         self.assertEqual(rows[0]["user_id"], r["id"])
 
 
+    def test_12_superadmin_pw_syncs_to_env(self):
+        """回归（2026-11-21）：超管改密必须同步 .env + 进程环境，
+        否则 6 处机器侧消费端（intake/agent_sync/hublog/hubmcp…）恒 401。
+        测试全程用临时 .env，绝不碰生产凭据。"""
+        import asyncio
+        fd, p = tempfile.mkstemp(suffix=".env")
+        os.close(fd)
+        env = Path(p)
+        env.write_text("# head\nHUB_SUPERADMIN_PW=OldPass12345\nOTHER=keep\n", encoding="utf-8")
+        real_env_fn = users._env_file
+        users._env_file = lambda: env
+        old = os.environ.get("HUB_SUPERADMIN_PW")
+        try:
+            bak = users.sync_superadmin_pw_to_env("NewPass12345")
+            txt = env.read_text(encoding="utf-8")
+            self.assertIn("HUB_SUPERADMIN_PW=NewPass12345", txt)
+            self.assertIn("OTHER=keep", txt)          # 其它行不能丢
+            self.assertIn("# head", txt)
+            self.assertEqual(os.environ.get("HUB_SUPERADMIN_PW"), "NewPass12345")
+            self.assertEqual(env.stat().st_mode & 0o777, 0o600)
+            self.assertTrue(Path(bak).is_file())
+            self.assertIn("OldPass12345", Path(bak).read_text(encoding="utf-8"))
+            # 清密码 ⇒ 整行删除，防重启后 ensure_superadmin 回填
+            users._rewrite_env_pw("")
+            self.assertNotIn("HUB_SUPERADMIN_PW", env.read_text(encoding="utf-8"))
+        finally:
+            users._env_file = real_env_fn
+            if old is None:
+                os.environ.pop("HUB_SUPERADMIN_PW", None)
+            else:
+                os.environ["HUB_SUPERADMIN_PW"] = old
+            for f in env.parent.glob(env.name + ".bak-*-pwsync"):
+                f.unlink()
+            env.unlink()
+
+    def test_13_change_password_endpoint_syncs_env(self):
+        """端点级回归：改超管密码同步 .env，改普通用户不碰 .env。"""
+        import asyncio
+        fd, p = tempfile.mkstemp(suffix=".env")
+        os.close(fd)
+        env = Path(p)
+        env.write_text("HUB_SUPERADMIN_PW=OldPass12345\nOTHER=keep\n", encoding="utf-8")
+        real_env_fn = users._env_file
+        users._env_file = lambda: env
+        old = os.environ.get("HUB_SUPERADMIN_PW")
+        try:
+            rid = _mkuser(users.SUPERADMIN_USER, is_admin=True)
+            db.execute("UPDATE users SET pw_hash=? WHERE id=?",
+                       (users.hash_password("OldPass12345"), rid))
+
+            class _State:
+                user = {"id": rid, "username": users.SUPERADMIN_USER, "is_admin": True}
+
+            class _Req:
+                state = _State()
+
+            r = asyncio.run(users.change_password(
+                users.SUPERADMIN_USER, _Req(),
+                users.PasswordIn(old_password="OldPass12345", new_password="BrandNew12345")))
+            self.assertTrue(r["env_synced"])
+            row = db.query("SELECT pw_hash FROM users WHERE username=?", (users.SUPERADMIN_USER,))[0]
+            self.assertTrue(users.verify_password("BrandNew12345", row["pw_hash"]))
+            self.assertIn("HUB_SUPERADMIN_PW=BrandNew12345", env.read_text(encoding="utf-8"))
+
+            # 普通用户改密：DB 变，.env 不动
+            uid = _mkuser("bob", is_admin=False)
+            db.execute("UPDATE users SET pw_hash=? WHERE id=?",
+                       (users.hash_password("BobPass12345"), uid))
+            r2 = asyncio.run(users.change_password(
+                "bob", _Req(),
+                users.PasswordIn(old_password="BobPass12345", new_password="BobNew12345")))
+            self.assertFalse(r2["env_synced"])
+            self.assertIn("HUB_SUPERADMIN_PW=BrandNew12345", env.read_text(encoding="utf-8"))
+        finally:
+            users._env_file = real_env_fn
+            if old is None:
+                os.environ.pop("HUB_SUPERADMIN_PW", None)
+            else:
+                os.environ["HUB_SUPERADMIN_PW"] = old
+            for f in env.parent.glob(env.name + ".bak-*-pwsync"):
+                f.unlink()
+            env.unlink()
+
+
 if __name__ == "__main__":
     unittest.main()

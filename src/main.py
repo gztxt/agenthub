@@ -112,8 +112,8 @@ import ghsettings as ghsettings_mod  # GitHub 地址/key/落点（v0.13.42：设
 import hublog as hublog_mod        # 日志中心（v0.13.46：设置→日志子菜单，journald + 操作事件聚合）
 import api_dataset as api_dataset_mod  # P0-1：数据集/经验库只读门面（无写端点）
 import botboy as botboy_mod         # v0.13.170：DS Bot 团队只读概览（读 ~/.dsh/bot/state.json）
-import checkinmgr as checkin_mod    # v0.13.201：积分签到远程管理（A/B 两机 AIAutomator 只读投影 + 受控触发）
 import meta as meta_mod             # P4：GET /api/meta 协议能力协商（只读）
+import api_magpie as api_magpie_mod # 2026-11-20：/api/magpie/ui（前端映射 magpie 页面）
 
 # C2（2026-10-12）：领域路由从本文件抽成独立 module —— main 只留组装职责。
 import appstate                     # 组装方写、领域方读的共享可变状态（discovery）
@@ -128,8 +128,29 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.205"
+VERSION = "0.13.212"
 
+# v0.13.212（2026-11-22）：按用户令「系统菜单里面的积分签到 彻底删除 包括所有相关数据」
+#   删除范围：菜单叶子 / 前端页面与分片 / 后端路由与鉴权声明 / 模块与 L0 测试 / 库表
+#   （checkin_machines、checkin_runs）与 menu_items 行。历史版本注释保留在下方作归档。
+#   关键词锚：彻底删除 / 17-checkin.js / checkinmgr / checkin_machines / checkin_runs。
+# v0.13.210（2026-11-21）：协同派发实测闭环 —— 用户令「调用所有正常使用 rtk 的 agent 测试
+#   任务派发与执行；如果协同的 agent 模型不能正常使用，就自动切换调用可用模型」。
+#   ① 实测六家（claude-code/codex/pi/omp/codebuddy/cursor）：直连全通；DAG 混排 4 成功、
+#      pi/omp 因 `No API key found for vercel-ai-gateway` 失败、汇总被上游失败阻塞；
+#   ② 新增模型不可用自动切换：显式报错/空输出/通道无凭据 ⇒ 按「同档→高→低→agent 默认」
+#      换模型重试（models_tried/model_fallbacks 落库，独立于 attempts），通道故障优先回默认；
+#   ③ 修三处派发链路缺陷：tag 没传到适配器（心跳判死永远采不到 pid）、取消不杀 CLI 进程组
+#      （重试期间两个进程并发）、回执键缺 model（换模型被当成重启重放直接判 failed）；
+#   ④ 闸门：tests/test_task_model_fallback.py 18 例（含真进程取消回收）。
+#   关键词锚：model_fallback / AGENT_DEFAULT_MODEL / models_tried / _command_id_for / tag。
+# v0.13.209（2026-11-20）：设置→关机 —— 用户令「在设置菜单新建子菜单 关机 可以彻底关闭本机」。
+#   ① 菜单/页面：SET_PAGES + templates + users.MODULE_SET 四处同步，settings-shutdown 叶子可授权；
+#   ② 后端：POST /api/system/shutdown 必须带 confirm=poweroff，有活终端会话默认 409、force=1 才放行；
+#   ③ 执行者：user unit 无 poweroff 权限，`systemctl poweroff` 不在 NOPASSWD 白名单，改走
+#      `sudo -n /usr/bin/loginctl poweroff`，由 systemd 瞬态单元 sleep 1 后派发（脱离 agenthub cgroup）；
+#   ④ 闸门：authz 声明 hub.ops.write + 副作用集合，路由/路径计数与 tests 基线同步，新增 4 例端点测试。
+#   关键词锚：settings-shutdown / confirm=poweroff / loginctl / ah-poweroff / hub.ops.write。
 # v0.13.205（2026-11-16）：多账号三个实测缺陷修复（用户试运行后报「导入失败 / WorkBuddy 是扫码」）。
 #   ① account-import 被错误附加 --stdin（只有 send/add/remove 接受），远端 argparse 以
 #      exit 2 退出，hub 归类成 ssh-failed ⇒ 修正参数并补测试；
@@ -819,6 +840,20 @@ def _rate_prune(now: float) -> None:
         _api_rate.pop(oldest, None)
 
 
+#: 2026-11-20：这些域的 UI 已改由 magpie 提供；端点为老客户端保留一版，
+#: 响应带 Deprecation/Link，提醒调用方迁到 /api/magpie/ui 指向的 magpie 页面。
+_RETIRED_PREFIXES = ("/api/memory", "/api/skill", "/api/mcp", "/api/monitor/model-calls")
+
+
+@app.middleware("http")
+async def retired_endpoint_headers(request: Request, call_next):
+    resp = await call_next(request)
+    if any(request.url.path.startswith(p) for p in _RETIRED_PREFIXES):
+        resp.headers["Deprecation"] = "true"
+        resp.headers["Link"] = '</api/magpie/ui>; rel="successor-version"'
+    return resp
+
+
 @app.middleware("http")
 async def api_rate_limit(request: Request, call_next):
     # 只拦写方法；GET（前端 30s 轮询）与外部推送/健康检查/MCP（自带限流）不拦
@@ -939,7 +974,6 @@ app.include_router(cloudcli_mod.router)
 app.include_router(localprojects_mod.router)
 app.include_router(resources_mod.router)
 app.include_router(botboy_mod.router)          # v0.13.170：/api/botboy/overview（只读）
-app.include_router(checkin_mod.router)          # v0.13.201：/api/checkin/*（积分签到远程管理）
 app.include_router(github_mod.router)
 app.include_router(prefs_mod.router)
 app.include_router(modelcfg_mod.router)
@@ -949,6 +983,7 @@ app.include_router(approvals_mod.router)         # P1-2：/api/approvals（ASK �
 app.include_router(skill_assets_mod.router)      # P1-5：/api/skill-assets（资产登记与状态机）
 app.include_router(actionplane_mod.router)       # P2 A10：/api/actions（行动台账，只读为主）
 app.include_router(meta_mod.router)              # P4：GET /api/meta 协议能力协商（只读）
+app.include_router(api_magpie_mod.router)         # 2026-11-20：/api/magpie/ui（前端映射 magpie 页面）
 app.include_router(admission_mod.router)        # P2 C7：/api/admission（外部资产准入六阶段）
 app.include_router(hublog_mod.router)
 app.include_router(refscout_mod.router)          # PT-20261021-04：/api/ref/*（情报卡）
@@ -1533,7 +1568,8 @@ async def startup():
     users_mod.ensure_superadmin()   # 2026-11-07 内置超管 gztxt（幂等；pw 走 HUB_SUPERADMIN_PW env）
     users_mod.seed_menu_items()     # 2026-11-07 菜单配置表首灌（幂等；只插不存在的行）
     tasks_mod.set_context(
-        chat_fn=lambda a, m, s=None, mo=None, tr=None: _chat_dispatch(a, m, s, mo, tr),
+        chat_fn=lambda a, m, s=None, mo=None, tr=None, tag=None, trace_id=None:
+            _chat_dispatch(a, m, s, mo, tr, trace_id=trace_id, tag=tag),
         # 派发目标取**可执行池**而非菜单：① `AgentDiscovery` 从来没有
         # `all_configs()`（2026-10-27 实弹 500 的根因，单测因注入假 ctx 全绿）；
         # ② 菜单里 20 张卡只有 claude/jcode 能真跑 chat()，把菜单当池子
@@ -1572,7 +1608,8 @@ async def startup():
     _spawn(mcpgw_mod.mcpregistry.sync_loop())
     cronjobs_mod.ensure_schema()
     cronjobs_mod.set_context(
-        chat_fn=lambda a, m, s=None, mo=None, tr=None: _chat_dispatch(a, m, s, mo, tr))
+        chat_fn=lambda a, m, s=None, mo=None, tr=None, tag=None, trace_id=None:
+            _chat_dispatch(a, m, s, mo, tr, trace_id=trace_id, tag=tag))
     cronjobs_mod.start_engine()
     # 外框统一注入代理（用户 09-20 方案 b）：:3103 → qwenpaw :8088，HTML 出栈前插 <style>。
     # 起不来也不能影响 hub 本体：裹 try/except，顶多外框不统一（嵌入视图仍直连可用）。

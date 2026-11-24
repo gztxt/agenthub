@@ -51,16 +51,16 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 #: 与 `llm.py` 共用同一个网关与凭据（`.env` 的 MANAGER_LLM_*），零新增凭据。
-BASE_URL = os.getenv("MANAGER_LLM_BASE_URL", "http://127.0.0.1:3456").rstrip("/")
+BASE_URL = os.getenv("MANAGER_LLM_BASE_URL", "http://127.0.0.1:3425").rstrip("/")  # 2026-11-17：CCR 下线→magpie
 API_KEY = os.getenv("MANAGER_LLM_API_KEY", "")
 
 #: 钉死具体模型。经 CCR 需 provider 前缀；禁写 `openrouter/auto`（会自动选最便宜的
 #: 可用模型，最便宜可能是付费档）。2026-10-29 起默认 agnes-2.5-flash。
 #:
-#: 🚩 2026-11-02：agnes 已被上游摘掉（清单 9 个全 `alibaba/*`），改 `alibaba/qwen3.8-max`。
-#: 选最强档而不是 flash：judge 的产物是**判定结论**（~100 字 JSON），错了会污染
-#: `audit.first_pass` 这类决策指标；实测 1.5s 全量、30s 单题预算内很宽。
-MODEL = os.getenv("JUDGE_MODEL", "alibaba/qwen3.8-max")
+#: 2026-11-18：magpie 在册模型；原 alibaba/* 随 CCR :3456 下线已失效。
+#: 选 workbuddy/glm-5.3（非 flash 强档）：judge 产物是 ~100 字 JSON 判定，错了会污染
+#: `audit.first_pass` 这类决策指标；30s 单题预算内够用。
+MODEL = os.getenv("JUDGE_MODEL", "workbuddy/glm-5.3")
 
 #: 单题硬超时（秒）。agnes-2.5-flash 实测 2.0/6.5/3.4s；30s 给冷启动与排队留余量，
 #: 又能在 5 题 × 30s 内被 vitals 的 180s 兜住。

@@ -77,7 +77,7 @@ class TestCommandPaletteShortcut(unittest.TestCase):
         """切 agent / 开设置 / 开终端 三类入口都能从面板到达。"""
         for action in ("'terminal'", "'settings'", "'register'", "'scan'"):
             self.assertIn("id: " + action, JS05, "动作条目缺失：" + action)
-        for fn in ("gotoChat(pick, 'term')", "go('settings-model')",
+        for fn in ("gotoChat(pick, 'term')", "go('settings-github')",
                    "openRegister()", "runScan()"):
             self.assertIn(fn, JS05, "动作未接既有入口：" + fn)
 

@@ -47,7 +47,7 @@ DSH_ENV_FILE = "/fs/1000/ftp/技术文档/dsh-src/.env"
 #: 🚩 2026-11-02：原值 `agnes/agnes-2.5-flash` 已被上游从 CCR 清单摘掉（400
 #: `model_resolution`）⇒ 任何**未指定 model** 的任务派发都会静默返回空输出
 #: （`empty-output` 分支，`cli_agent.py` 会判失败但报的是「空输出」不是「模型不存在」）。
-PI_DEFAULT_MODEL = os.getenv("TASK_CLI_MODEL", "alibaba/qwen3.8-flash")
+PI_DEFAULT_MODEL = os.getenv("TASK_CLI_MODEL", "workbuddy/glm-5.3-flash")
 
 
 # ── argv 构造（每个 CLI 一行，便于逐条核对）────────────────────────────
@@ -516,6 +516,17 @@ class CliAgentAdapter(BaseAdapter):
         register_process(proc, str(kwargs.get("tag") or ""))
         try:
             out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+        except asyncio.CancelledError:
+            # 2026-11-21：心跳判死 / 外层 wait_for 超时都会 cancel 到这里。旧实现只接
+            # Exception ⇒ CancelledError 静默穿过，子进程组继续跑，而重试又起一份：
+            # 同一子任务两个进程并发改同一文件（实测 43 分钟孤儿）。必须杀组再上抛。
+            _kill_group(proc)
+            unregister_process(proc)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:  # noqa: BLE001 — 已判死，等回收失败不改变结论
+                pass
+            raise
         except asyncio.TimeoutError:
             _kill_group(proc)
             unregister_process(proc)

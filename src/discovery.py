@@ -29,6 +29,28 @@ RT_SUFFIX = {
 }
 
 
+#: 2026-11-20 用户令：「基础设施还是 16 项」的根因不在 scanner.py 的扫描函数，
+#: 而在 **custom_agents 表里的存量行** —— scan_* 扫一次就落库，删画像卡不会带走它。
+#: 只改 scanner 里的白名单（scan_systemd）对此完全无效（实测重启后仍 16 项）。
+#: 这里按同一份白名单（scanner.SCAN_SHOW_UNITS）过滤**读库结果**，不动 969MB 的 agents.db。
+#: 单元名从 description 抽（格式固定：`systemd(user) · <unit> · <desc>`，见 scanner.py:147）。
+_SCAN_UNIT_RE = re.compile(r"^systemd\(user\)\s*·\s*([^·]+?)\s*·", re.UNICODE)
+
+
+def _scan_row_visible(r) -> bool:
+    if (r.get("type") if hasattr(r, "get") else r["type"]) != "systemd-service":
+        return True
+    import os
+
+    import scanner
+    if os.getenv("HUB_SCAN_SHOW_ALL") == "1":
+        return True
+    desc = (r.get("description") if hasattr(r, "get") else r["description"]) or ""
+    m = _SCAN_UNIT_RE.match(desc)
+    unit = (m.group(1) if m else "").strip()
+    return unit in scanner.SCAN_SHOW_UNITS
+
+
 def _verdict_view(p: dict, vrec: Optional[dict]):
     """翻译 vitals 记录给前端。两层口径（2026-09-22 用户指令）：
 
@@ -283,6 +305,8 @@ class AgentDiscovery:
         out = []
         for r in rows:
             if r["port"] and r["port"] in prof_ports:
+                continue
+            if not _scan_row_visible(r):
                 continue
             out.append(r)
         return out

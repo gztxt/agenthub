@@ -27,10 +27,12 @@ sys.path.insert(0, str(_REPO))
 
 import llm  # noqa: E402
 
-#: 2026-11-02 起的两个通用默认值（经 CCR 需 provider 前缀）。
-#: 三者必须**不同源**：同源就是「上游一摘全死」，10-29 那次就是这么死的。
-_MEM = "alibaba/deepseek-v4.1-flash"
-_FB = "alibaba/qwen3.8-flash"   # 2026-11-02 23:05：0731 已被摘，兜底换到不同厂的 qwen
+#: 2026-11-24 改判：CCR（:3456）下线、网关换 magpie（:3425）后，provider 前缀由
+#: `alibaba/*` 变为 `workbuddy/*`。`alibaba/deepseek-v4.1-flash` 与 `alibaba/qwen3.8-flash`
+#: 均在 2026-11-24 的 `GET :3425/models`（52 条）里 **不在册** ⇒ 旧常量已是死 ID。
+#: 三者仍必须**不同源**：同源就是「上游一摘全死」，10-29 那次就是这么死的。
+_MEM = "workbuddy/deepseek-v4.1-flash"
+_FB = "workbuddy/glm-5.3-flash"   # 兜底位与主槽分属不同模型族（deepseek vs glm）
 
 
 def _func_body(path: pathlib.Path, name: str) -> str:
@@ -53,7 +55,7 @@ class TestMemoryModelDefault(unittest.TestCase):
         try:
             got = llm.memory_model()
             self.assertEqual(got, _MEM)
-            self.assertTrue(got.startswith("alibaba/"), f"必须带网关 provider 前缀: {got}")
+            self.assertTrue(got.startswith("workbuddy/"), f"必须带网关 provider 前缀: {got}")
         finally:
             if old is not None:
                 os.environ["MEMORY_LLM_MODEL"] = old
@@ -75,7 +77,7 @@ class TestMemoryModelDefault(unittest.TestCase):
         old_mem = os.environ.pop("MEMORY_LLM_MODEL", None)
         old_mgr = os.environ.get("MANAGER_LLM_MODEL")
         try:
-            os.environ["MANAGER_LLM_MODEL"] = "alibaba/qwen3.8-flash"
+            os.environ["MANAGER_LLM_MODEL"] = "workbuddy/glm-5.3-flash"
             self.assertNotEqual(llm.memory_model(), os.environ["MANAGER_LLM_MODEL"])
             self.assertEqual(llm.memory_model(), _MEM)
         finally:

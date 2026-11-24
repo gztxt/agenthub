@@ -93,12 +93,10 @@ def embed_proxy_targets() -> List[Dict[str, object]]:
                     # 放开的安全前提由 main.py 保证：仅 hub_auth=1 时生效。
                     "browser_entry": True,
                     # 按 Host 判来源的上游：dsh 的 /api 围栏只认 loopback / 绑定地址 /
-                    # --trusted-host；CCR 本体实测也只认 127.0.0.1:3458（其它 Host 403），
-                    # 原先靠 ccr-web-lan socat → 13458 的 Host 改写反代才能打开。
-                    # 现在 ccr 的种子地址也改成回环，就由桥统一改写 Host 到上游 authority。
-                    # 别的宿主用 Host 拼绝对跳转地址，跟着改写会把浏览器送到上游内网地址
-                    # ⇒ 只点名 dsh / ccr，不做成默认。
-                    "rewrite_host": p["id"] in ("dsh", "ccr")})
+                    # --trusted-host。别的宿主用 Host 拼绝对跳转地址，跟着改写会把浏览器
+                    # 送到上游内网地址 ⇒ 只点名 dsh，不做成默认。
+                    # 2026-11-17：CCR 已下线，其 rewrite_host 配对一并删除。
+                    "rewrite_host": p["id"] == "dsh"})
     return out
 
 
@@ -569,7 +567,7 @@ PROFILES: List[dict] = [
      "cli": "grok", "port": None, "ui": None,
      "terminal": {"cmd": "grok", "cwd": "/fs/1000/ftp/技术文档"},
      "chat": None,
-     "desc": "xAI Grok CLI（native TUI）；默认模型经本机 CCR :3456" +
+     "desc": "xAI Grok CLI（native TUI）；默认模型经本机网关 :3425（magpie）" +
              "（~/.grok/config.toml [models].default）→ 原生终端会话"},
     {"id": "qwenpaw", "name": "QwenPaw", "kind": "agent",
      "detect": {"proc": [r"qwenpaw app"]},
@@ -657,22 +655,29 @@ PROFILES: List[dict] = [
              "TUI 终端同命令按需拉起；模型走自定义 provider"},
 
     # ── Gateways（非 Agent，仅快捷方式）──────────────────────
-    {"id": "ccr", "name": "CCR Gateway", "kind": "gateway",
-     "detect": {"proc": [r"claude-code-router", r"ccr( |$)", "MainThread"]},
-     "proc_cwd_hint": "/home/gztxt/.ccr",
-     # 2026-11-12（用户令「IP 段自动判定、不写死硬地址」）：面板种子地址改用回环，
-     # 由前端 lanUrl 无条件改写成 location.hostname ⇒ 换网段后卡片仍指向当前
-     # 访问主机上的 3458 前端（LAN/ts4/ts6 各一层 socat）。原来写死
-     # 192.168.5.102:3458，换网段后既不在 own_addrs（lanUrl 不再改写）、
-     # 桥上游也指向失效地址。配合 embed_proxy_targets 的 rewrite_host
-     #（CCR 本体的 Host 围栏实测只认 127.0.0.1:3458，其它 Host 一律 403）。
-     "cli": None, "port": 3456, "ui": None, "panel": "http://127.0.0.1:3458/?ccr_web_token=ccr-web-fixed-token-gztxt-2026",
-     "desc": "Claude↔多模型路由网关 :3456/3457/3458（生命线，只观测）"},
-    {"id": "ccpocket", "name": "CCPocket Bridge", "kind": "gateway",
-     "detect": {"systemd": ["ccpocket-bridge"]},
-     "cli": None, "port": 8765, "ui": None, "panel": None,
-     "desc": "手机桥接 WebSocket :8765（无独立Web面板）"},
-
+    # 2026-11-17 用户令：CCR 彻底下线，网关位由 magpie 接替。
+    # magpie = 跨 agent 统一模型控制面 + 本地网关 :3425（用户级 systemd magpie.service，
+    # magpie serve 纯 gateway），面板经 magpie web（需 MAGPIE_WEB_KEY）或 CLI 管理。
+    {"id": "magpie", "name": "magpie Gateway", "kind": "gateway",
+     "detect": {"proc": [r"magpie serve", r"/magpie-bin/magpie"], "systemd": ["magpie"]},
+     # 2026-11-17：magpie serve --web 同进程提供网关 :3425 + web 面板 :3430。
+     # panel 带固定 MAGPIE_WEB_KEY（?k=），桥保留 query 代注入 ⇒ 嵌入免二次登录（单一登录=hub）。
+     "cli": "/vol1/magpie-bin/magpie", "port": 3425, "ui": None,
+     "panel": "http://127.0.0.1:3430/?k=magpie_hub_embed_key_20261117",
+     "desc": "跨 agent 统一模型网关 :3425 + web 面板 :3430（magpie serve --web，用户级常驻；provider 待手动添加）"},
+    # 2026-11-17：Agent2API 面板只绑回环 :3065（AGENT2API_HOST=127.0.0.1）。不给画像则 hub
+    # 无 embed entry、前端只能直连回环 ⇒ 远程浏览器指向用户自己机器 ERR_CONNECTION_REFUSED。
+    # 补 panel 让 hub 桥（绑 0.0.0.0、hub 会话把门）自动建入口；插在 magpie 之后 ⇒ 桥端口顺延，
+    # magpie 的 :3207 不变。面板自带独立登录，嵌入后在框内登录即可。
+    {"id": "agent2api", "name": "Agent2API Gateway", "kind": "gateway",
+     "detect": {"systemd": ["agent2api"]},
+     "cli": None, "port": 3065, "ui": None, "panel": "http://127.0.0.1:3065/",
+     "desc": "Agent2API 订阅/积分共享网关 :3065（用户级常驻，面板独立登录；小浣熊/CodeArts 等订阅在此聚合）"},
+    # 2026-11-20 用户令：CCPocket Bridge 彻底下线删除。
+    # 实测证据：服务 active 但 --public-ws-url 写死 ws://fnos.gztxt.asia:8765，
+    # 而该域名已过期（dig 无解析）⇒ 手机侧连不上，是本机「服务活着、对外地址死」
+    # 的典型形态。处置：unit stop+disable+rm、:8765 已关、健康探针同步摘除
+    # （~/bin/service-health-check.sh 第 7 段），画像不再出卡。
     # ── Services / Memory / Tools（仅快捷方式）────────────────
     # 2026-11-07 用户裁定：xray / openrung 不再单独出卡，两个面板已并入 proxy-panel
     # （:8083 一个页面管订阅、节点池、双线切换、OpenRung 启停）。
@@ -686,41 +691,15 @@ PROFILES: List[dict] = [
      "panel_auth": "basic",
      "bridge_secret": os.path.expanduser("~/.config/proxy-panel.secret"),
      "desc": "代理面板（融合）：xray 订阅/测速/节点池 + 双线切换（Xray ↔ OpenRung）+ OpenRung 启停 :8083"},
-    {"id": "claude-mem", "name": "claude-mem", "kind": "service",
-     "detect": {"systemd": ["claude-mem"], "proc": [r"claude-mem"]},
-     "cli": None, "port": 37700, "ui": None, "panel": "http://127.0.0.1:37700",
-     "desc": "Claude 记忆压缩 worker :37700（自带 Web viewer，可嵌入）"},
-    {"id": "gotty", "name": "GoTTY Terminal", "kind": "tool",
-     "detect": {"proc": [r"gotty"]},
-     "cli": None, "port": 12700, "ui": None,
-     "panel": "http://127.0.0.1:12700", "panel_auth": "basic",
-     # 2026-11-11「所有原生界面复用 hub 登录」：以前 Basic 面板默认不出桥，
-     # 新窗口直连会弹原生 Basic 框（第二套登录）。补上 bridge_secret 让桥代注入
-     # Basic，卡片入口改由 hub_session 把门。用户名取自 gotty 启动的 -c 凭据，
-     # 口令只落 ~/.config/gotty.secret（0600，不进代码/日志）。
-     "bridge_secret": os.path.expanduser("~/.config/gotty.secret"),
-     "bridge_basic_user": "gztxt",
-     "desc": "系统级 Web 终端 :12700（桥代注入 Basic，入口只认 hub 登录）"},
     {"id": "tdai", "name": "TDAI Memory", "kind": "memory",
      "detect": {"docker": ["tdai-memory-core"], "proc": []},
      "cli": None, "port": 8420, "ui": None, "panel": None,
      "desc": "向量记忆核心 :8420（API only，无 Web UI）"},
-    {"id": "ollama", "name": "Ollama", "kind": "tool",
-     "detect": {"docker": ["ollama"], "proc": [r"(^|/)ollama( |$)"]},
-     "cli": None, "port": 11434, "ui": None, "panel": None,
-     "desc": "本地模型运行时 :11434"},
-    {"id": "chromium", "name": "Chromium (容器)", "kind": "tool",
-     "detect": {"docker": ["chromium"]},
-     "cli": None, "port": 3000, "ui": None,
-     "panel": "http://127.0.0.1:3000", "panel_auth": "basic",
-     # 2026-11-11 例外（显式写明，不是静默漏掉）：容器当前未运行、且本机找不到
-     # nginx Basic 口令文件 ⇒ 无法给桥生成 bridge_secret，故仍保留直连新窗口。
-     # 若日后启用，按 gotty 的方式补口令文件 + bridge_secret 即可并入统一登录。
-     "desc": "无头浏览器服务 :3000（容器未运行/无口令文件，暂未接入 hub 登录桥）"},
-    {"id": "ai_manager", "name": "AI Manager (Trim)", "kind": "service",
-     "detect": {"proc": [r"/usr/trim/bin/ai_manager"]},
-     "cli": None, "port": None, "ui": None, "panel": None,
-     "desc": "Trim NAS 系统自带 AI 管理服务（root）"},
+    # 2026-11-20 用户令：ollama / chromium / ai_manager 三卡删除。
+    # 判据（当轮实测）：ollama :11434 down、chromium :3000 stopped 且容器未运行、
+    # ai_manager 是 Trim NAS 系统自带 root 进程（/usr/trim/bin/ai_manager，PID 2666），
+    # hub 无 port/panel/cli ⇒ 卡上只有状态，点不开也管不了。
+    # ⚠ 删的是**卡片**不是服务：三个进程若在跑，照旧跑；hub 只是不再登记。
 
     # 2026-11-13 用户令「安装 filebrowser + 加文件管理子菜单」。
     # 单登录=hub：上游跑 noauth（无登录页）且只绑 127.0.0.1:8082，open/embed 都经
@@ -737,20 +716,6 @@ PROFILES: List[dict] = [
      "panel": "http://127.0.0.1:8082",
      "desc": "filebrowser v2.63.23 只读文件浏览 :8082（noauth 无登录页，入口经 hub 桥"
              "统一 hub 登录；根=/fs/1000/ftp/技术文档，写权限已削；常驻 service）"},
-
-    # 2026-11-17 用户裁定 B：Filee 只有桌面 GUI + CLI、无 HTTP 端口，故自建本地转换
-    # Web 服务（scripts/fileconv_web.py，只绑 127.0.0.1:8085、noauth），入口全部经
-    # hub 桥把门（未登录 302 到 :3102/?next=…），全站只一套登录。
-    # 不设 panel_auth/bridge_secret ⇒ embed_proxy_targets() 自动建桥目标、entries_for
-    # 同出 open+embed。kind=convert 由前端 NAV_SUB_KINDS 的「文件转换」子分组收。
-    # 常驻 service（非 agent，不受「agent 不长驻」军规）：面板按钮带 probe_port，
-    # 停了按钮会消失，故 fileconv-web.service 为 enable + Restart=always 常驻。
-    {"id": "fileconv", "name": "文件转换", "kind": "convert",
-     "detect": {"systemd": ["fileconv-web"], "proc": [r"fileconv_web\.py"]},
-     "cli": None, "port": 8085, "ui": None,
-     "panel": "http://127.0.0.1:8085",
-     "desc": "Filee v2.5.0（MIT）本地文件转换 :8085：上传→filee convert→下载；"
-             "noauth 无登录页，入口经 hub 桥统一 hub 登录；270 格式离线转换，常驻 service"},
 ]
 
 # 系统 Shell 终端卡（①"使用原生终端"；env 可关）
@@ -826,16 +791,11 @@ AGENT_PROBE: Dict[str, dict] = {
     # qoder 卡片 id 是 qoder，实际可执行名 qodercli（WorkBuddy 21:51 的多候选名修正）
     "qoder":  {"aliases": ["qodercli", "qoder"], "verify_argv": ["qodercli", "-p", "{p}"]},
     # opencode：一次性非交互真请求 `opencode run -m <provider/model> "<提示>"`。
-    # rt_model 必须带 **provider 前缀** 且用 CCR 的斜杠形式（本机全局配置里 provider id = ccr）；
-    # 不能沿用默认 RT_MODEL —— 那是 claude/jcode 才认的裸 ID 写法。
-    # 选 stable 非 :free 模型：CCR 每日 12:00 轮换会摘掉 429/403 成员，写死免费模型必然中午失效。
-    # 2026-10-29 用户裁定统一 agnes-2.5-flash（deepseek 的 provider 已 402，会被网关回退到免费池）。
-    # 🚩 2026-11-02：agnes 已被上游摘掉，改 `ccr/alibaba/qwen3.8-flash`。
-    # 形状规则见 `modelcfg_shape.py` 的 `VALUE_PREFIX`：清单给**裸 ID**（`alibaba/xxx`），
-    # opencode 的 `-m` 收 `provider/model_id` ⇒ 两项拼起来才是合法值。
+    # 2026-11-17：CCR 已下线，原 `ccr/alibaba/qwen3.8-flash` 随 CCR 一并移除。
+    # magpie 0 模型（provider 待用户手动添加），暂不写死 rt_model ⇒ 回落系统默认 RT_MODEL；
+    # 用户配好 magpie provider 后如需专用验证模型，再按 `provider/model` 形状补回。
     "opencode": {"aliases": ["opencode", "fcc-opencode"],
-                 "verify_argv": ["opencode", "run", "-m", "{m}", "{p}"],
-                 "rt_model": "ccr/alibaba/qwen3.8-flash"},
+                 "verify_argv": ["opencode", "run", "-m", "{m}", "{p}"]},
 }
 
 

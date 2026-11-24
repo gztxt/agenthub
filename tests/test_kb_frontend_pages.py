@@ -92,8 +92,9 @@ class TestFrontendPages(unittest.TestCase):
         for pid in ("page-skills", "page-kb"):
             self.assertIn(pid, self.html, f"{pid} section 缺失 ⇒ go() 会静默退回总览")
 
-    def test_sys_pages_registry_has_both(self):
-        self.assertIn("['skills', '技能中心'", self.js)
+    def test_sys_pages_registry_has_kb(self):
+        # 2026-11-20 v0.13.206「前端瘦身」：「技能中心」页按实测（21 天 0~1 次调用）删除、
+        # 端点保留 ⇒ 本闸门只守仍在册的「知识库」。原方法名 has_both 已不成立。
         self.assertIn("['kb', '知识库'", self.js)
 
     def test_page_labels_cover_both(self):

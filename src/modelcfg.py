@@ -115,7 +115,8 @@ CATALOG_TTL_S = float(os.getenv("HUB_MODEL_CATALOG_TTL", "60"))
 
 
 def _ccr_base() -> str:
-    return os.getenv("CLAUDE_CCR_URL", "http://127.0.0.1:3456").rstrip("/")
+    # 2026-11-17：CCR 下线，网关位由 magpie :3425 接替
+    return os.getenv("CLAUDE_CCR_URL", "http://127.0.0.1:3425").rstrip("/")
 
 
 #: CCR config.sqlite 路径（readonly，与 memfed 同模式）。
@@ -540,19 +541,26 @@ def list_agents() -> List[dict]:
 
 
 def ccr_router_view() -> dict:
-    """CCR Router 五场景：只读（军规：不写网关配置）。"""
-    p = _home() / ".claude-code-router" / "config.json"
-    out = {"file": str(p), "router": {}, "fallback": {}, "read_only": True}
-    if not p.exists():
-        out["note"] = "未找到 ~/.claude-code-router/config.json"
-        return out
+    """网关只读视图（2026-11-17：CCR 已下线，改 magpie）。
+
+    ✨ 前端字段仍叫 `ccr`（兼容既有渲染），但内容来自 magpie 网关 :3425：
+    显示网关地址、模型数与「到 magpie web 面板配置」提示。绝不写网关配置。
+    """
+    base = _ccr_base()  # 已从 .env 指向 magpie :3425
+    out = {"file": base, "router": {}, "fallback": {}, "read_only": True,
+           "name": "magpie"}
     try:
-        d = json.loads(_read_text(p))
-    except json.JSONDecodeError as e:
-        out["note"] = f"config.json 解析失败：{e}"
-        return out
-    out["router"] = {k: str(v) for k, v in (d.get("Router") or {}).items()}
-    out["fallback"] = {k: list(v or []) for k, v in (d.get("fallback") or {}).items()}
+        import urllib.request
+        req = urllib.request.Request(base + "/v1/models",
+                                     headers={"Authorization": "Bearer " + os.getenv("CCR_AUTH_TOKEN", "")})
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            d = json.loads(resp.read().decode("utf-8"))
+        n = len(d.get("data") or [])
+        out["router"] = {"网关地址": base, "可用模型": str(n)}
+        out["note"] = ("magpie 尚未配置 provider（0 模型）。到 magpie web 面板（:3430）添加账号后即可用。"
+                       if n == 0 else "")
+    except Exception as e:
+        out["note"] = f"读不到 magpie 网关（{base}）：{type(e).__name__}。确认 magpie.service 在跑。"
     return out
 
 

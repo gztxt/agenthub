@@ -104,12 +104,12 @@ d = c.eval(STATE % (234, 234))
 chk("点「设置」组头 → 手风琴展开（不是开抽屉）", d["setGrpOpen"] == "true", why)
 chk("点「设置」组头 → 一个抽屉都没开", d["drawersOpen"] == [], str(d["drawersOpen"]))
 
-_, why = click(c, '[data-sys="settings-model"]')
+_, why = click(c, '[data-sys="settings-github"]')
 d = c.eval(STATE % (234, 234))
-chk("点「模型」子项 → 进正文页 page-settings-model", d["pageOn"] == "page-settings-model",
+chk("点「GitHub」子项 → 进正文页 page-settings-github", d["pageOn"] == "page-settings-github",
     "%s / page=%s" % (why, d["pageOn"]))
-chk("点「模型」子项 → 零浮层（抽屉形态已拆）", d["drawersOpen"] == [], str(d["drawersOpen"]))
-chk("点「模型」子项 → 侧栏自动收起且遮罩关掉（不叠两层）", d["collapsed"] and not d["maskOn"],
+chk("点「GitHub」子项 → 零浮层（抽屉形态已拆）", d["drawersOpen"] == [], str(d["drawersOpen"]))
+chk("点「GitHub」子项 → 侧栏自动收起且遮罩关掉（不叠两层）", d["collapsed"] and not d["maskOn"],
     "collapsed=%s mask=%s" % (d["collapsed"], d["maskOn"]))
 chk("★正文中心不再被任何浮层盖住", not d["coveringContent"],
     "残留层=%s / 中心命中=%s" % (d["coveringContent"], d["contentHit"]))

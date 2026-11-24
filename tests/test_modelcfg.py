@@ -49,7 +49,7 @@ def _mktmp(prefix: str) -> pathlib.Path:
 
 
 CLAUDE_JSON = {
-    "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:3456",
+    "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:3425",
             "ANTHROPIC_MODEL": "old/model-a",
             "CCR_CLAUDE_CODE_MODEL": "old/model-a"},
     "model": "old/model-a",
@@ -60,7 +60,7 @@ default_provider = "ccr"
 
 [providers.ccr]
 type = "open-ai-compatible"
-base_url = "http://127.0.0.1:3456/v1"
+base_url = "http://127.0.0.1:3425/v1"
 default_model = "old/model-a"
 """
 CODEX_TOML = """# BEGIN CCR managed profile
@@ -73,12 +73,12 @@ approval_policy = "never"
 """
 PI_SETTINGS = {"defaultProvider": "openrouter-direct", "defaultModel": "old/model-a"}
 PI_MODELS = {"providers": {"ccr-free": {"api": "openai-completions",
-                                        "baseUrl": "http://127.0.0.1:3456/v1",
+                                        "baseUrl": "http://127.0.0.1:3425/v1",
                                         "apiKey": "k-fixture",
                                         "models": [{"id": "old/model-b"}]}}}
 GROK_TOML = """[model.ccr-old]
 model = "old/model-a"
-base_url = "http://127.0.0.1:3456/v1"
+base_url = "http://127.0.0.1:3425/v1"
 api_key = "key-fixture-ccr"
 
 [models]
@@ -97,7 +97,7 @@ OPENCODE_JSON = {
     "$schema": "https://opencode.ai/config.json",
     "mcp": {"some-server": {"type": "local", "command": ["node", "x.js"], "enabled": True}},
     "provider": {"ccr": {"npm": "@ai-sdk/openai-compatible", "name": "CCR local router",
-                         "options": {"baseURL": "http://127.0.0.1:3456/v1", "apiKey": "k"},
+                         "options": {"baseURL": "http://127.0.0.1:3425/v1", "apiKey": "k"},
                          "models": {"old/model-b": {"name": "model-b"}}}},
     "model": "ccr/old/model-b",
     "small_model": "ccr/old/model-b",
@@ -125,7 +125,7 @@ DSH_PATCH = """# dsh profile user layer
 - id: llm-deepseek
   name: '@deepseek-ai/dsh-llm-deepseek-api-key'
   config:
-    baseURL: http://127.0.0.1:3456
+    baseURL: http://127.0.0.1:3425
     models:
       - id: old/model-a
         name: Old A
@@ -219,9 +219,15 @@ class AReadCurrent(_HomeFixture):
         self.assertIn("未找到", st["note"])
 
     def test_ccr_router_is_read_only_view(self):
+        # 2026-11-17 CCR 下线：视图改读 magpie 网关（字段名仍叫 ccr 以兼容前端渲染），
+        # `router` 现在是「网关地址+可用模型数」，不再有 CCR 的 router.default。
+        # 网关不可达时 router 为空 dict + note 说明原因 —— 那也是合法返回。
         v = modelcfg.ccr_router_view()
         self.assertTrue(v["read_only"], "Router 视图必须自带只读标记（军规：不写网关配置）")
-        self.assertEqual(v["router"]["default"], "alibaba,qwen3.8-flash")
+        self.assertEqual(v.get("name"), "magpie")
+        self.assertIn("router", v)
+        if v.get("router"):
+            self.assertIn("网关地址", v["router"])
 
 
 class BPreviewNoWrite(_HomeFixture):
@@ -273,7 +279,7 @@ class CApplyWritesWithBackup(_HomeFixture):
         self.assertEqual(d["env"]["CCR_CLAUDE_CODE_MODEL"], "new/model-z")
         self.assertEqual(d["env"]["CODEXL_CLAUDE_CODE_MODEL"], "new/model-z")
         # 无关键不许被动过（整文件重写会把它冲掉）
-        self.assertEqual(d["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:3456")
+        self.assertEqual(d["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:3425")
         baks = self._backups(".claude/settings.json")
         self.assertEqual(len(baks), 1, "必须留且只留一份备份")
         self.assertEqual(baks[0].read_text(encoding="utf-8"), json.dumps(CLAUDE_JSON),
@@ -284,7 +290,7 @@ class CApplyWritesWithBackup(_HomeFixture):
         modelcfg.apply_model("jcode", "new/model-z")
         text = self._read(".jcode/config.toml")
         self.assertIn('default_model = "new/model-z"', text)
-        self.assertIn('base_url = "http://127.0.0.1:3456/v1"', text, "无关键被整段重写了")
+        self.assertIn('base_url = "http://127.0.0.1:3425/v1"', text, "无关键被整段重写了")
         self.assertEqual(text.count("default_model"), 2, "provider 与 providers.ccr 各一处")
 
     def test_codex_only_touches_managed_block(self):
@@ -457,7 +463,7 @@ class PpiCatalogSync(_HomeFixture):
         models = [{"id": f"vendor/m{i}"} for i in range(10)]
         self._write(".pi/agent/models.json", json.dumps(
             {"providers": {"ccr-free": {"api": "openai-completions",
-                                        "baseUrl": "http://127.0.0.1:3456/v1",
+                                        "baseUrl": "http://127.0.0.1:3425/v1",
                                         "apiKey": "k-fixture", "models": models}}}))
         r = modelcfg._pi_sync_models(["vendor/m0", "brand/new"])
         self.assertTrue(r["ok"], r)
@@ -659,7 +665,7 @@ class IThreeNewAgents(_HomeFixture):
         # 无关面必须原样（整文件重写最容易冲掉这些）
         self.assertEqual(d["permission"], {"bash": "ask"})
         self.assertTrue(d["mcp"]["some-server"]["enabled"])
-        self.assertEqual(d["provider"]["ccr"]["options"]["baseURL"], "http://127.0.0.1:3456/v1")
+        self.assertEqual(d["provider"]["ccr"]["options"]["baseURL"], "http://127.0.0.1:3425/v1")
 
     def test_opencode_small_model_follows_only_when_it_matched(self):
         """small_model 与 model 原本同值 ⇒ 跟随（否则"主模型换了、轻量任务还走旧模型"）。"""
@@ -928,7 +934,7 @@ class NCodebuddyCatalogDrift(_HomeFixture):
     @staticmethod
     def _entry(mid: str) -> dict:
         return {"id": mid, "name": mid,
-                "url": "http://127.0.0.1:3456/v1/chat/completions"}
+                "url": "http://127.0.0.1:3425/v1/chat/completions"}
 
     def test_hub_model_present_but_not_first_is_not_drift(self):
         self._write(".workbuddy/models.json", json.dumps([
@@ -975,7 +981,7 @@ class NCodebuddyDualLanding(_HomeFixture):
     @staticmethod
     def _entry(mid: str) -> dict:
         return {"id": mid, "name": mid,
-                "url": "http://127.0.0.1:3456/v1/chat/completions"}
+                "url": "http://127.0.0.1:3425/v1/chat/completions"}
 
     def test_write_lands_in_both_files_and_keeps_shape(self):
         self._write(".codebuddy/models.json", json.dumps(
@@ -1395,7 +1401,7 @@ class NEffectiveState(_CatalogFixture):
 
 CLAUDE_4SP = """{
     "env": {
-        "ANTHROPIC_BASE_URL": "http://127.0.0.1:3456",
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:3425",
         "ANTHROPIC_MODEL": "old/model-a",
         "CCR_CLAUDE_CODE_MODEL": "old/model-a",
         "CODEXL_CLAUDE_CODE_MODEL": "old/model-a",
@@ -1570,7 +1576,7 @@ class MCodebuddy(_HomeFixture):
 
     def test_read_reports_ccr_entry_and_files(self):
         self._write(".workbuddy/models.json", json.dumps([
-            {"id": "alibaba/qwen3.8-flash", "name": "x", "url": "http://127.0.0.1:3456/v1/chat/completions"},
+            {"id": "alibaba/qwen3.8-flash", "name": "x", "url": "http://127.0.0.1:3425/v1/chat/completions"},
             {"id": "local-llama", "name": "y", "local": True,
              "url": "http://127.0.0.1:52741/v1/chat/completions"},
         ]))
@@ -1578,7 +1584,7 @@ class MCodebuddy(_HomeFixture):
         self.assertTrue(st["supported"], "codebuddy 已在册为可设置")
         self.assertTrue(st["writable"])
         self.assertEqual(st["current"], "alibaba/qwen3.8-flash",
-                         "current 只认指向本机 CCR 的条目；local:true 的桌面端模型不算")
+                         "current 只认指向本机网关（2026-11-17 起 magpie :3425）的条目；local:true 的桌面端模型不算")
         self.assertTrue(st["files"][0].endswith(".workbuddy/models.json"))
 
     def test_read_handles_missing_file(self):
@@ -1595,7 +1601,7 @@ class MCodebuddy(_HomeFixture):
         self.assertIsInstance(d, list, "必须是数组（桌面端按数组语义写回）")
         self.assertEqual(len(d), 1)
         self.assertEqual(d[0]["id"], "alibaba/deepseek-v4.1-flash")
-        self.assertIn("127.0.0.1:3456", d[0]["url"], "url 必须指向本机 CCR")
+        self.assertIn("127.0.0.1:3425", d[0]["url"], "url 必须指向本机网关（magpie :3425）")
 
     def test_write_is_idempotent_upsert_not_append(self):
         self._write(".workbuddy/models.json", "[]")
@@ -1609,7 +1615,7 @@ class MCodebuddy(_HomeFixture):
         keep_local = {"id": "local-llama", "name": "y", "local": True,
                       "url": "http://127.0.0.1:52741/v1/chat/completions"}
         keep_other = {"id": "alibaba/other", "name": "o",
-                      "url": "http://127.0.0.1:3456/v1/chat/completions"}
+                      "url": "http://127.0.0.1:3425/v1/chat/completions"}
         self._write(".workbuddy/models.json",
                     json.dumps([keep_local, keep_other]))
         modelcfg.apply_model("codebuddy", "alibaba/deepseek-v4.1-flash")
@@ -1624,7 +1630,7 @@ class MCodebuddy(_HomeFixture):
         """历史形态（对象 {models:[...]}）必须被转成数组，否则桌面端一启动就降级成 []。"""
         self._write(".workbuddy/models.json", json.dumps(
             {"models": [{"id": "alibaba/old", "name": "o",
-                         "url": "http://127.0.0.1:3456/v1/chat/completions"}]}))
+                         "url": "http://127.0.0.1:3425/v1/chat/completions"}]}))
         modelcfg.apply_model("codebuddy", "alibaba/deepseek-v4.1-flash")
         d = self._models()
         self.assertIsInstance(d, list, "对象格式必须转成数组")

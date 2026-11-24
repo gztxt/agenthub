@@ -51,7 +51,8 @@ class _Base(unittest.TestCase):
 
 class TestModelDiscipline(unittest.TestCase):
     def test_default_model_is_free(self):
-        self.assertEqual(de.DEFAULT_MODEL, "openrouter/free")
+        """2026-11-19：OpenRouter 已在 magpie 关闭，默认改 magpie 在册模型。"""
+        self.assertEqual(de.DEFAULT_MODEL, "workbuddy/deepseek-v4.1-flash")
 
     def test_auto_router_rejected(self):
         with self.assertRaises(ValueError):

@@ -40,9 +40,9 @@ SHARD15 = _REPO / "static" / "hub" / "15-workbench.js"
 
 #: 系统菜单（左栏「系统」手风琴）下的全部子菜单页 —— 本次重排的对象
 SYS_PAGES = ("ports", "memory", "skills", "kb",
-             "mcp", "tasks", "jobs", "checkin")   # v0.13.47：runlog 页删除，并入设置→日志
+             "mcp", "tasks", "jobs")   # v0.13.47：runlog 页删除，并入设置→日志
                                                   # 2026-11-20：telemetry/assets/botboy 三页按实测调用量删除
-                                                  # v0.13.201：checkin（积分签到远程管理）
+                                                  # v0.13.212：checkin（积分签到）整页删除
 
 #: 单表/单列表页：表格必须在限高盒（.sp-bd.box + .tscroll）里，sticky 表头才有滚动容器
 TABLE_PAGES = ("ports", "jobs", "tasks")

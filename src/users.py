@@ -43,8 +43,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import os as _os
 import secrets as _secrets
 import time as _time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
@@ -58,9 +60,10 @@ router = APIRouter()
 _login_fail: Dict[str, list] = {}
 
 MODULE_TOP = ["classroom", "localprojects", "github", "resources"]
-MODULE_SYS = ["ports", "memory", "skills", "kb", "mcp", "jobs", "tasks", "checkin"]
+MODULE_SYS = ["ports", "memory", "skills", "kb", "mcp", "jobs", "tasks"]
 MODULE_SET = ["settings-github", "settings-logs",
-              "settings-users", "settings-modelcalls", "settings-restart"]   # 2026-11-20：与前端 SYS_PAGES/SET_PAGES 对齐
+              "settings-users", "settings-modelcalls", "settings-restart",
+              "settings-shutdown"]   # 2026-11-20：与前端 SYS_PAGES/SET_PAGES 对齐
 #: 2026-11-08：左侧手风琴的分组本身也可授权（勾组头 = 整组可见）。
 #: 前缀 `group:` 与菜单叶子 id 不会撞（叶子 id 均无冒号）。
 MODULE_GROUPS = ["group:agents", "group:infra", "group:system", "group:settings"]
@@ -68,16 +71,15 @@ MODULE_GROUPS = ["group:agents", "group:infra", "group:system", "group:settings"
 #    逐条对齐，图标取已验证存在过的 sprite id）──
 TOP_ICONS = {"classroom": "school", "localprojects": "folder", "github": "globe", "resources": "boxes"}
 SYS_ICONS = {"ports": "share", "memory": "database", "skills": "zap",
-             "kb": "book", "mcp": "wrench", "jobs": "clock", "tasks": "flow",
-             "checkin": "star"}
+             "kb": "book", "mcp": "wrench", "jobs": "clock", "tasks": "flow"}
 SET_ICONS = {"settings-github": "globe",
              "settings-logs": "activity", "settings-users": "eye", "settings-modelcalls": "radar",
-             "settings-restart": "refresh"}
+             "settings-restart": "refresh", "settings-shutdown": "power"}
 _LABELS = {"classroom": "课堂", "localprojects": "本地项目", "github": "GitHub", "resources": "资源",
            "ports": "端口", "memory": "记忆中心", "skills": "技能中心",
-           "kb": "知识库", "mcp": "MCP服务器", "jobs": "定时", "tasks": "协同", "checkin": "积分签到",
+           "kb": "知识库", "mcp": "MCP服务器", "jobs": "定时", "tasks": "协同",
            "settings-github": "GitHub", "settings-logs": "日志", "settings-users": "用户授权",
-           "settings-modelcalls": "模型计量", "settings-restart": "重启"}
+           "settings-modelcalls": "模型计量", "settings-restart": "重启", "settings-shutdown": "关机"}
 
 
 def _sha(t: str) -> str:
@@ -261,6 +263,57 @@ def verify_password(pw: str, stored: str) -> bool:
 SUPERADMIN_USER = "gztxt"
 
 
+def _env_file() -> Path:
+    """.env 路径，与 config.py 的 env_path 同源（src/ 的上一级）。测试可 monkeypatch。"""
+    return Path(__file__).resolve().parent.parent / ".env"
+
+
+def _rewrite_env_pw(new_value: str) -> str:
+    """原子改写 .env 的 HUB_SUPERADMIN_PW 行（保留其它行 + 0600 + 时间戳备份）。
+
+    返回备份路径。口令不写日志、不进 argv；先写 temp 再 os.replace，避免半截文件
+    被并发的 hub-basic.sh / hubmcp.py 读到。new_value 为空 ⇒ 删除该行（清密码态）。
+    """
+    env = _env_file()
+    raw = env.read_text(encoding="utf-8")
+    key = "HUB_SUPERADMIN_PW="
+    out, found = [], False
+    for line in raw.splitlines(keepends=True):
+        if line.startswith(key):
+            found = True
+            if new_value:
+                nl = "\n" if line.endswith("\n") else ""
+                out.append(key + new_value + nl)
+            continue  # 空值 ⇒ 整行删除（重启时不再被 ensure_superadmin 回填）
+        out.append(line)   # 其它行逐字保留（漏掉会删光整个 .env 配置）
+    if new_value and not found:
+        out.append(key + new_value + "\n")
+    stamp = _time.strftime("%Y%m%d_%H%M%S")
+    bak = env.with_name(env.name + ".bak-" + stamp + "-pwsync")
+    bak.write_text(raw, encoding="utf-8")
+    _os.chmod(bak, 0o600)
+    tmp = env.with_name(env.name + ".tmp-" + str(_os.getpid()))
+    tmp.write_text("".join(out), encoding="utf-8")
+    _os.chmod(tmp, 0o600)
+    _os.replace(tmp, env)
+    return str(bak)
+
+
+def sync_superadmin_pw_to_env(new_password: str) -> str:
+    """改超管密码后同步 .env + 进程 os.environ，返回备份路径。
+
+    2026-11-21 用户裁定：改密入口必须同步所有引用，否则机器侧 6 处消费端
+    （hub-basic.sh / intake.sh / selfcheck_intake.sh / agent_sync.py /
+    hublog-cli.py / hubmcp.py）仍拿旧口令 ⇒ 恒 401。只在改 SUPERADMIN_USER
+    时调用；改普通用户不碰 .env。
+
+    失败即抛（DB 已改而 .env 未同步会更难查）——由调用方转成 500，不静默吞。
+    """
+    bak = _rewrite_env_pw(new_password)
+    _os.environ["HUB_SUPERADMIN_PW"] = new_password
+    return bak
+
+
 def ensure_superadmin() -> None:
     """启动时幂等保证超管存在。无 DB 连接则跳过（startup 在 init_db 后调用）。"""
     import db as _db
@@ -362,14 +415,23 @@ async def change_password(name: str, request: Request, body: PasswordIn):
         # 自己改必须验旧密码（除非还没设过——首设）
         if target.get("pw_hash") and not verify_password(body.old_password, target["pw_hash"]):
             raise HTTPException(401, "旧密码错误")
+    # 2026-11-21：超管改密须同步 .env（机器侧唯一权威源），失败即 500、不静默。
+    # 顺序：先写 .env（有备份）再改 DB —— .env 写失败抛异常时 DB 未动，状态一致。
+    synced = ""
+    if name == SUPERADMIN_USER:
+        try:
+            bak = sync_superadmin_pw_to_env(body.new_password)
+            synced = "; .env synced (bak=" + Path(bak).name + ")"
+        except OSError as e:
+            raise HTTPException(500, "改密已中止：.env 同步失败（%s），DB 未改动" % type(e).__name__)
     _db.execute("UPDATE users SET pw_hash=?, updated_at=? WHERE id=?",
                 (hash_password(body.new_password), _db._now(), target["id"]))
     _db.execute(
         "UPDATE user_credentials SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL AND name LIKE 'session-%'",
         (_db._now(), target["id"]))   # 改密后吊销该用户既有会话 token（防旧会话续用）
     _db.log_asset_event("user", name, "update", ("user:%s" % (me["username"] if me else "system")),
-                        {"detail": "password changed; session tokens revoked"})
-    return {"ok": True, "username": name}
+                        {"detail": "password changed; session tokens revoked" + synced})
+    return {"ok": True, "username": name, "env_synced": bool(synced)}
 
 
 @router.post("/api/users/{name}/password-clear")
@@ -381,9 +443,21 @@ async def clear_password(name: str, request: Request):
     rows = _db.query("SELECT id FROM users WHERE username=?", (name,))
     if not rows:
         raise HTTPException(404, "用户不存在")
+    # 2026-11-21：清超管密码时同步删掉 .env 的 PW 行，否则下次重启
+    # ensure_superadmin() 会从 .env 回填 ⇒ 清密码形同虚设。
+    synced = ""
+    if name == SUPERADMIN_USER:
+        try:
+            bak = _rewrite_env_pw("")
+            _os.environ.pop("HUB_SUPERADMIN_PW", None)
+            synced = "; .env PW row removed (bak=" + Path(bak).name + ")"
+        except OSError as e:
+            raise HTTPException(500, "清密码已中止：.env 同步失败（%s），DB 未改动" % type(e).__name__)
     _db.execute("UPDATE users SET pw_hash='', updated_at=? WHERE id=?",
                 (_db._now(), rows[0]["id"]))
-    return {"ok": True, "username": name, "note": "该用户现在只能走 token 登录"}
+    _db.log_asset_event("user", name, "update", ("user:%s" % (me["username"] if me else "system")),
+                        {"detail": "password cleared" + synced})
+    return {"ok": True, "username": name, "note": "该用户现在只能走 token 登录", "env_synced": bool(synced)}
 
 
 def _validate_perms(perms: List[str], entity_ids: List[str]) -> List[str]:

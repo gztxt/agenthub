@@ -240,7 +240,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.205"
+    CURRENT_VERSION = "0.13.212"
+    #: v0.13.212：本轮改的是「彻底删除积分签到」，不是终端滚动；版本钉照常跟版本号走。
+    #: 学到的：菜单叶子、前端分片、后端路由、鉴权声明、L0 测试与库表是**一条链**，
+    #: 只删页面会留下可直呼的 /api/checkin/* 与孤儿数据。
+    VERSION_ROOT_CAUSES["0.13.212"] = (
+        "彻底删除", "17-checkin.js", "checkin_machines", "checkin_runs",
+    )
     #: v0.13.205：本轮改的是「多账号导入与扫码登录态」，不是终端滚动；版本钉照常跟版本号走。
     #: 学到的：CLI 能跑 ≠ Web 能跑 —— 参数集是按 CLI 写的，多传一个开关就 exit 2；
     #: 同一解密 helper 服务多个字段时必须传字段路径，写死会把 refreshToken 解成 accessToken。

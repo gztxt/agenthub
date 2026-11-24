@@ -31,10 +31,10 @@ import db               # noqa: E402
 from config import config  # noqa: E402
 import hook             # noqa: E402
 
-#: 非会话调模默认（2026-11-02 改判：`agnes/*` 已不在 CCR 清单）。
+#: 非会话调模默认（2026-11-19 改判：CCR :3456 下线，`alibaba/*` 已不在 magpie 清单）。
 #    仍可通过 --model 或 MEMORY_LLM_MODEL 环境变量覆盖。
-#: ⚠️ 计费：`.env` 里 `MEMORY_LLM_MODEL`（alibaba/deepseek-v4.1-flash）与本处同一个槽。
-DEFAULT_MODEL = "alibaba/deepseek-v4.1-flash"
+#: ⚠️ 计费：`.env` 里 `MEMORY_LLM_MODEL` 与本处同一个槽；workbuddy 是免费账号额度，不扣钱。
+DEFAULT_MODEL = "workbuddy/deepseek-v4.1-flash"
 
 #: 轨迹 → 样本的默认声明（可被 spec 覆盖）。
 DEFAULT_SPEC = {
@@ -51,8 +51,8 @@ def assert_free_model(model) -> None:
     """非会话调模准入检查（2026-11-02 再次改判）。
 
     允许：
-    · 免费模型：`openrouter/free`、`openrouter/openrouter/free`、`*:free`（兜底用）
-    · 本机 CCR 在册的 `alibaba/*`（必须带前缀；清单 = `GET :3456/v1/models`）
+    · 免费账号额度：`workbuddy/*`、`raccoon/*`（清单 = `GET :3425/v1/models`）
+    · 免费模型：`*:free`（兜底用）
 
     **严禁 `openrouter/auto`**（军规第4条）：语义是「自动挑最便宜的」，最便宜可能是付费档。
 
@@ -63,11 +63,11 @@ def assert_free_model(model) -> None:
     函数名保留 `assert_free_model`（调用方 2 处 + 测试），语义已在本文档修正。
     """
     m = str(model or "")
-    if m in ("openrouter/free", "openrouter/openrouter/free") or m.endswith(":free"):
+    if m.endswith(":free"):
         return
-    if m.startswith("alibaba/"):
-        return  # 本机 CCR 在册模型（2026-11-02 起 CCR 无免费成员）
-    raise ValueError("非会话调模只允许 openrouter/free / *:free / alibaba/*，得到 %r（严禁 openrouter/auto）" % model)
+    if m.startswith(("workbuddy/", "raccoon/", "auto/")):
+        return  # magpie 在册的免费账号模型（2026-11-19 起）
+    raise ValueError("非会话调模只允许 workbuddy/* / raccoon/* / auto/* / *:free，得到 %r（严禁 openrouter/auto）" % model)
 
 
 def _sha(s: str) -> str:

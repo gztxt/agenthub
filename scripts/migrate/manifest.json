@@ -1,0 +1,48 @@
+{
+  "generated": "2026-11-20T02:25:00+08:00",
+  "magpie_version": "0.1.4549",
+  "backup": {
+    "dir": "data/_archive/p0-20261120",
+    "agents_sha256": "af9cc079de9751cdd427c90d950f9a1a2f5d04979595abf3d210a1de3aaa78a6",
+    "catalog_sha256": "52d83f834ff52b26fc1a755a5bb27b49e6de5e166783fe738843ead479074719",
+    "integrity": "ok"
+  },
+  "memory": {
+    "source": "data/agents.db memories(status!=deleted)+memory_docs",
+    "rows": 5,
+    "target": "~/.config/magpie/memory/*.md",
+    "status": "archived",
+    "tdai": {
+      "l1_records": 411,
+      "l0_conversations": 13229,
+      "decision": "not copied: TDAI is the authoritative memory store; existing magpie memory forbids a second token-paying copy"
+    }
+  },
+  "sessions": {
+    "source": "data/agents.db chat_sessions/chat_messages",
+    "sessions": 200,
+    "messages": 488,
+    "archive": "data/_archive/hub-chat-20261120.jsonl",
+    "magpie_native_visible": 2526
+  },
+  "skills": {
+    "source": "~/.agents/skills",
+    "shared": 68,
+    "target": "magpie Library",
+    "method": "POST /api/library/skills/import-all",
+    "library_count": 68
+  },
+  "mcp": {
+    "source": "data/agents.db mcp_servers",
+    "rows": 1,
+    "name": "ekko-studio-use",
+    "target": "~/.config/magpie/library.json mcp",
+    "library_count": 2
+  },
+  "usage": {
+    "source": "magpie /v1/magpie/usage",
+    "csv_rows": 2304,
+    "hub_local_rows": 2,
+    "decision": "magpie is the only ledger; hub logs are provenance"
+  }
+}

@@ -176,7 +176,10 @@ class SkillFuzzySearchTest(unittest.TestCase):
         """
         boxes = {
             "04-terminal-ws.js": ["renderSkillList", "renderPorts", "renderSkillInvocations"],
-            "05-chat-and-history.js": ["renderCmdList", "navMatch"],
+            # 导航搜索框（旧 `navMatch`）已于 v0.13.206「前端瘦身」整体移除：
+            # templates/index.html 不再有 navSearch 输入框，05 分片也没有对应匹配函数
+            # ⇒ 这里只守命令面板（renderCmdList）。若搜索框回来，闸门要跟着回来。
+            "05-chat-and-history.js": ["renderCmdList"],
             "09-local-projects.js": ["lpRenderList"],
             "10-github-projects.js": ["ghRenderList"],
         }

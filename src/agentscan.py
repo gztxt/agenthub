@@ -53,7 +53,7 @@ AGENT_WORDS = re.compile(
 #: 反向判据：自述里出现这些词，说明它是「给 agent 用的服务/检查器」，不是 agent 本体。
 #: 实测依据（2026-10-25 本机一轮扫描的 4 条假卡）：
 #:   ecc-agentshield  Security auditor for AI agent configurations  → 审计器
-#:   @ccpocket/bridge Bridge server that connects ... sessions       → 桥接服务
+#:   @acme/somebridge Bridge server that connects ... sessions     → 桥接服务
 #:   @agegr/pi-web    Web UI for the pi coding agent                 → 界面
 #:   hermes-web-ui    local-first AI workspace ... dashboard         → 工作台
 NOT_AGENT_BODY = re.compile(

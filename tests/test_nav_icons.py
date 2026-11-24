@@ -80,10 +80,11 @@ class NavIconCollisionTest(unittest.TestCase):
             seen[icon] = who
 
     def test_cpu_is_no_longer_used_three_times(self):
-        """`cpu` 曾被三处使用；本轮把「资源」与「AGENTS」迁走，只留「模型」。"""
+        """`cpu` 曾被三处使用；先迁走「资源」与「AGENTS」只留「模型」，
+           2026-11-17 删设置→模型子菜单后 cpu 归零（不再有任何导航项用它）。"""
         users = [(src, lb) for src, lb, ic in _all_nav_icons() if ic == "cpu"]
-        self.assertEqual([u for _s, u in users], ["模型"],
-                         "cpu 现在被 %s 使用；本轮只应保留设置里的「模型」" % users)
+        self.assertEqual([u for _s, u in users], [],
+                         "cpu 现在被 %s 使用；模型页已删，应零使用" % users)
 
     def test_new_icons_exist_in_sprite(self):
         """新换的图标必须在 sprite 里真实存在 —— 写了不存在的 id，

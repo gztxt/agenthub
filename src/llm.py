@@ -325,7 +325,14 @@ async def _create_message(system: Optional[str], messages: List[dict],
     用**调用方传入的 list**而不是返回值：`chat_tools_loop` 的 `(answer, steps)`
     返回形状被 memory.py / tasks.py 与前端步骤渲染同时依赖，改形状的爆炸半径远大于收益。
     追加整体包 try：账务断言绝不允许带倒一次真实 LLM 调用。
+
+    缺省 request_id 时在此自造一个：`_LLMMeter.start()` 只认真值 id，
+    调用方不传 ⇒ 单调钟不埋点 ⇒ duration_ms/request_id 两列全 NULL
+    （生产 23 行实测），usage_ledger.avg_ms 恒 0。在此一处补齐，
+    下游 meter / usage_sink / _post_once 同时拿到同一个关联 id。
     """
+    if not request_id:
+        request_id = new_request_id()
     body: Dict[str, Any] = {"model": model or MODEL, "max_tokens": MAX_TOKENS,
                             "messages": messages}
     if system:

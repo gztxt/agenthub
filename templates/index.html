@@ -2547,6 +2547,44 @@
             </div>
         </section>
 
+        <!-- 应用（CLI Apps）· 2026-11-25：后端是 vendored 的 nanobot/apps 模块（字节级），
+             本页只做列表与按钮；装/卸/跑都会真的改全机环境 ⇒ 每个动作都弹确认。 -->
+        <section class="page sys" id="page-apps">
+            <div class="sp">
+                <div class="sp-card">
+                    <div class="sp-hd">
+                        <h3>应用（CLI Apps）</h3>
+                        <div class="sp-r"><span class="hint" id="appsHint">未加载</span></div>
+                    </div>
+                    <div class="sp-tools">
+                        <div class="toolbar">
+                            <input id="appsQ" placeholder="搜应用名 / 描述" style="max-width:240px"
+                                   oninput="appsRender(null)">
+                            <button class="btn ghost" data-appact="refresh">刷新目录</button>
+                            <button class="btn ghost" id="appsOnlyBtn" data-appact="only">只看已装</button>
+                            <button class="btn ghost" data-appact="bridge"
+                                    title="把已装应用的技能软链进 skills/，修「装了但 agent 找不到」">重扫技能桥</button>
+                        </div>
+                        <div class="toolbar">
+                            <input id="appsArgs" placeholder="运行参数（空格分隔，如 --json search foo）" style="flex:1">
+                            <span class="hint">运行走已装应用；工作目录锁在工作区内</span>
+                        </div>
+                    </div>
+                    <div class="sp-bd box flush tscroll">
+                        <table><thead><tr><th>应用</th><th>分类</th><th>状态</th><th>说明</th><th>操作</th></tr></thead>
+                        <tbody id="appsBody"></tbody></table>
+                    </div>
+                </div>
+                <div class="sp-card" id="appsOutCard">
+                    <div class="sp-hd"><h3>输出</h3>
+                        <div class="sp-r"><span class="hint">安装/运行的真实回执，失败也在这里</span></div></div>
+                    <div class="sp-bd box flush tscroll">
+                        <pre id="appsOut" class="hint" style="display:none;white-space:pre-wrap;padding:10px;margin:0"></pre>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <!-- MCP 工具网关（v0.13.40 统一骨架）：
              ① 顺序改为「注册 → Servers/聚合工具 → ACL」：主体是 server 与工具的现状，
                 策略（ACL）是配置面，放最后；
@@ -3505,7 +3543,10 @@
           + '符号阶梯=' + ['mdInline', 'openOverlay', 'renderHomeStats', 'passEye', 'logQDebounced', 'logPageGo', 'settingsDelegates',
                           'termToast', 'termWriteReplay', 'termFindBind', 'termFontStep', 'startMemoryEdit', 'memQDebounced',
                           'skillQDebounced', 'renderSkillInvocations', 'kbQDebounced', 'dagZoom', 'navItemHtml', 'histHtml', 'navRow',
-                          'renderNav', 'navAccKeydown', 'initSidebar', 'lpQDebounced', 'lpClearFilter', 'ghQDebounced', 'ghClearFilter', 'termTouchBind']
+                          'renderNav', 'navAccKeydown', 'initSidebar', 'lpQDebounced', 'lpClearFilter', 'ghQDebounced', 'ghClearFilter', 'termTouchBind',
+                          /* 2026-11-25：新分片 17-apps.js 的尾部符号。阶梯必须覆盖到产物末尾，
+                             否则「响应体被截断」在最后 5% 里恒查不出（该用例会判红）。 */
+                          'loadApps', 'appsRender', 'appsAct']
               .map(function (k) { return k + ':' + (typeof window[k] === 'function' ? 1 : 0); }).join(' ') + '\n'
           + (L.length ? '异常清单(前8):\n' + L.slice(0, 8).join('\n') : '异常清单: 无');
       }
@@ -3549,7 +3590,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=e959154f';
+      var HUB_SRC = '/static/hub.js?v=d521dcf1';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

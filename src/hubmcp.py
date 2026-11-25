@@ -595,6 +595,101 @@ def hub_skill_remove(name: str, route: str) -> str:
                       ensure_ascii=False)
 
 
+# ── CLI Apps（2026-11-25：vendored nanobot 应用功能模块）───────────────────────
+# 这三个工具是「装好的应用资源让**所有** agent 自动能用」的 MCP 那一环：
+# 非 MCP 工具链（pi/codex/grok/jcode/opencode）走 `scripts/hub-apps.sh`，
+# 两边打的是同一组 /api/apps 端点，不各写一套实现。
+
+
+@server.tool()
+def hub_apps_list(q: str = "", installed_only: bool = False, limit: int = 40) -> str:
+    """列本机 CLI 应用（目录 + 已装状态）。**想知道「这台机器上有哪些能直接调的
+    命令行工具 / 某个活儿有没有现成 CLI」先调它**，别凭记忆或直接装包。
+
+    数据来源：`GET /api/apps`（远程注册表缓存 + 本地 installed.json），不出网
+    时也能回上一次的缓存（`catalog_updated_at` 是缓存时间，不是此刻）。
+    `installed_only=true` 只列**已装**（更小、更快，且与 `hub_apps_run` 的可用范围一致）。
+    装好的应用会同时生成一份 SKILL.md 并软链进 `技术文档/skills/`，所以
+    `hub_skill_list` / `hub_skill_auto` 也能检索到它——两条路看到的是同一个应用。
+
+    `count=0` 要分清三种：目录没缓存（跑一次 `refresh` 的 REST）/ 真的没装 /
+    `degraded`（返回里带 notes 时按它说）。"""
+    if installed_only:
+        data = _get("/api/apps/installed")
+    else:
+        data = _get("/api/apps")
+    if "error" in data:
+        return json.dumps(data, ensure_ascii=False)
+    rows = list(data.get("apps") or [])
+    ql = q.strip().lower()
+    if ql:
+        rows = [r for r in rows
+                if ql in str(r.get("name", "")).lower()
+                or ql in str(r.get("display_name", "")).lower()
+                or ql in str(r.get("description", "")).lower()]
+    total = len(rows)
+    return json.dumps({
+        "count": min(total, max(0, limit)),
+        "total": total,
+        "truncated": total > limit,
+        "installed_count": data.get("installed_count"),
+        "catalog_updated_at": data.get("catalog_updated_at"),
+        "items": [{
+            "name": r.get("name"),
+            "display_name": r.get("display_name"),
+            "installed": r.get("installed"),
+            "category": r.get("category"),
+            "entry_point": r.get("entry_point"),
+            "package_manager": r.get("package_manager"),
+            "description": (r.get("description") or "")[:200],
+        } for r in rows[:max(0, limit)]],
+    }, ensure_ascii=False)
+
+
+@server.tool()
+def hub_apps_run(name: str, args: str = "", timeout: int = 0) -> str:
+    """跑一个**已安装**的 CLI 应用，回真实输出（stdout/stderr/退出码）。
+
+    `args` 是 shell 风格的参数串（如 `"--json search foo"`），会按引号规则切分、
+    **不经 shell 执行**（无管道/重定向/变量展开）。`timeout=0` 用后端默认（60s，
+    上限 600s）。工作目录锁在工作区内，传工作区外路径会被拒。
+
+    失败态：400 未安装 / 不在 PATH / 参数不合法；503 vendored 模块不可用；
+    408 超时会回一行 `timed out after Ns`（不会静默变成空输出）。"""
+    import shlex
+    body = {"args": shlex.split(args or ""), "json_output": False}
+    if timeout:
+        body["timeout"] = int(timeout)
+    return json.dumps(_post("/api/apps/%s/run" % urllib.parse.quote(name), body,
+                            _timeout=max(30.0, float(timeout or 0) + 15.0)),
+                      ensure_ascii=False)
+
+
+if ALLOW_WRITE:
+    @server.tool()
+    def hub_apps_install(name: str) -> str:
+        """**装一个 CLI 应用**（会真的跑 npm/pip 全局安装）。默认不注册——
+        需 `HUB_MCP_ALLOW_WRITE=1` 才启用。
+
+        装完会做两件事：写 `技术文档/plugins/cli-app-<name>/` 一份技能，
+        并软链到 `技术文档/skills/cli-app-<name>` ⇒ 之后 `hub_skill_auto` 能命中它。
+        返回里的 `skill_bridge.linked=false` 是**降级不是失败**：应用已装好，
+        只是技能当时没能桥进发现点（看 `reason`，可用 `POST /api/apps/bridge` 重试）。
+
+        先 `hub_apps_list` 确认 name；装不存在的名字会 400（不回空结果）。"""
+        return json.dumps(_post("/api/apps/%s/install" % urllib.parse.quote(name), {},
+                                _timeout=330.0), ensure_ascii=False)
+
+    @server.tool()
+    def hub_apps_uninstall(name: str) -> str:
+        """**卸一个已装 CLI 应用**（跑 npm/pip 卸载）。默认不注册，需 `HUB_MCP_ALLOW_WRITE=1`。
+
+        ⚠️ **即时生效且不可自动回滚**：它会卸包、删技能目录、收掉 hub 加的软链。
+        动手前先 `hub_apps_list(installed_only=true)` 确认 name。"""
+        return json.dumps(_post("/api/apps/%s/uninstall" % urllib.parse.quote(name), {},
+                                _timeout=330.0), ensure_ascii=False)
+
+
 @server.tool()
 def hub_ref_scout(module: str, keywords: str = "", lang: str = "",
                   identifiers: str = "", allow_paid: bool = False) -> str:

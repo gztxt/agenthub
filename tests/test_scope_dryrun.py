@@ -51,7 +51,8 @@ class BScopeByPath(unittest.TestCase):
         # PT-20261110-01：新增 6 条 MCP 源/安装/编排写路由，路径互不撞 ⇒ 104。
         # v0.13.209：新增 /api/system/shutdown ⇒ 112。
         # v0.13.212：删除积分签到 7 条写路由（3 机器/触发 + 4 多账号）⇒ 105。
-        self.assertEqual(len(authz.SCOPE_BY_PATH), 105)
+        # 2026-11-25：+6 条 /api/apps 写路由（install/update/uninstall/test/run/bridge）⇒ 111。
+        self.assertEqual(len(authz.SCOPE_BY_PATH), 111)
 
     def test_known_and_unknown(self):
         self.assertEqual(authz.scope_for_path("put", "/api/memory/l3"), "hub.memory.write")

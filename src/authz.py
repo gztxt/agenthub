@@ -39,6 +39,14 @@ SCOPES = frozenset({
 WRITE_ROUTE_SCOPES = {
     ("actionplane", "POST", "/api/actions"): "hub.catalog.write",
     ("actionplane", "POST", "/api/actions/{action_id}/decide"): "hub.catalog.write",
+    # 2026-11-25：/api/apps（CLI Apps）。装/卸/跑都是「往机器上装包、起进程」，
+    # 风险档与 restart/kill 同级 ⇒ hub.ops.write，不是 settings.write。
+    ("api_apps", "POST", "/api/apps/{name}/install"): "hub.ops.write",
+    ("api_apps", "POST", "/api/apps/{name}/update"): "hub.ops.write",
+    ("api_apps", "POST", "/api/apps/{name}/uninstall"): "hub.ops.write",
+    ("api_apps", "POST", "/api/apps/{name}/test"): "hub.ops.write",
+    ("api_apps", "POST", "/api/apps/{name}/run"): "hub.ops.write",
+    ("api_apps", "POST", "/api/apps/bridge"): "hub.ops.write",
     ("actionplane", "POST", "/api/actions/{action_id}/settle"): "hub.catalog.write",
     ("admission", "POST", "/api/admission/scan"): "hub.catalog.write",
     ("admission", "POST", "/api/admission/tickets"): "hub.catalog.write",
@@ -163,6 +171,13 @@ SIDE_EFFECT_ROUTES = frozenset({
     ("api_events", "POST", "/api/agents/{agent_id}/chat/events"),
     ("api_events", "POST", "/api/agents/{agent_id}/interrupt"),
     ("api_agents", "POST", "/api/agents/{agent_id}/ui-start"),
+    # 2026-11-25：CLI Apps 六条。装/卸/跑 = 起子进程 + 出外网；bridge 写磁盘软链。
+    ("api_apps", "POST", "/api/apps/{name}/install"),
+    ("api_apps", "POST", "/api/apps/{name}/update"),
+    ("api_apps", "POST", "/api/apps/{name}/uninstall"),
+    ("api_apps", "POST", "/api/apps/{name}/test"),
+    ("api_apps", "POST", "/api/apps/{name}/run"),
+    ("api_apps", "POST", "/api/apps/bridge"),
     ("api_summarize", "POST", "/api/summarize"),
     ("api_system", "POST", "/api/system/restart"),
     ("api_system", "POST", "/api/system/shutdown"),

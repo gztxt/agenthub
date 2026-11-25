@@ -479,7 +479,10 @@ const NAV_SUB_KINDS = [['gateway', '网关'], ['service', '服务'], ['tool', '�
    本机知识库（turbovec + TDAI）magpie 没有，保留。 */
 /* 2026-11-20 用户令：'magpie 统一' 从系统组删除（网关 magpie 卡的 panel 已等价，同页两份）。 */
 const SYS_PAGES = [['ports', '端口', 'share'],
-                   ['kb', '知识库', 'book'], ['jobs', '定时', 'clock'], ['tasks', '协同', 'flow']];
+                   ['kb', '知识库', 'book'], ['jobs', '定时', 'clock'], ['tasks', '协同', 'flow'],
+                   /* 2026-11-25：应用（CLI Apps）页 —— vendored nanobot 应用模块的管理面。
+                      图标 layers：sprite 里已有且未被其它系统项占用（test_sprite_refs 会核）。 */
+                   ['apps', '应用', 'layers']];
 /* v0.13.47：运行日志页删除，内容并入设置→日志。
    2026-11-20：遥测 / 资产 / Botboy 三页按实测（21 天 0~1 次调用）删除，端点保留。 */
 const MODE_LABEL = { embed: '嵌入', term: '终端', chat: '对话', detail: '详情', open: '新窗口' };
@@ -494,7 +497,7 @@ const SET_PAGES = [['settings-github', 'GitHub', 'globe'],
    不该分居两个菜单，设置组也不该为 4 条便签单占一个一级项）。 */
 const PAGE_LABELS = { classroom: '总览', chat: '统一对话', tasks: '协同', jobs: '定时',
                       magpie: 'magpie 统一',   /* 页面已删，label 留作旧链接兜底 */
-                      memory: '记忆中心', skills: '技能中心',
+                      memory: '记忆中心', skills: '技能中心', apps: '应用',
                       kb: '知识库', mcp: 'MCP服务器', ports: '端口',
                       localprojects: '本机项目', github: 'GitHub 项目', resources: '资源监控',
                       'settings-github': '设置 · GitHub',

@@ -1,3 +1,42 @@
+## v0.13.213 — nanobot 应用模块（CLI Apps）字节级迁入 + 全 agent 可调用（2026-11-25）
+
+> 用户令：「nanobot 的应用功能模块 整个模块字节级复制到 agenthub 的基础设施」
+> + 「这个应用里面的资源 agenthub 的所有 agent 也要能自动调用和适配」。
+
+**迁入方式（字节级，可核）**
+
+| 层 | 内容 |
+|---|---|
+| 上游副本 | `src/vendor/cli_apps/nanobot/` 10 个文件**逐字节**拷贝（nanobot-ai 0.4.2，MIT）；md5 表在 `src/vendor/cli_apps/MANIFEST.md`，闸门 `tests/test_cliapps_l0.py::TestVendorByteIdentity` |
+| 依赖文件 | 同批拷入 `agent/skill_metadata.py`、`config/{home,paths}.py`、`utils/file_io.py`、`security/{__init__,workspace_policy}.py`（上游 `service.py` 硬 import，全是纯标准库小文件） |
+| 替身（登记在册） | `nanobot/__init__.py` 等 4 个包标记空壳；`nanobot/agent/plugins.py`（上游 537 行拖 pydantic 配置链，只用 `set_agent_plugin_enabled`）；`loguru.py`；`httpx.py`（转接 hub venv 的 `httpx2`） |
+| 适配层 | `src/cliapps.py`：workspace=`技术文档`、状态在 `data/cli-apps`、装完把技能软链进 `技术文档/skills/`、`run()` 锁工作区 |
+
+**让所有 agent 能调用（三条路，同一组端点）**：① 装好的应用自带 SKILL.md 并软链进
+`技术文档/skills/` ⇒ 命中 `SKILL_DIRS["techdocs"]`，`hub_skill_auto` 与各 agent 的
+`UserPromptSubmit` 注入自动可见；② MCP `hub_apps_list` / `hub_apps_run`（默认注册）、
+`hub_apps_install` / `hub_apps_uninstall`（`HUB_MCP_ALLOW_WRITE=1` 才有）；③ shell
+`scripts/hub-apps.sh`（pi/codex/grok/jcode/opencode）。
+
+**新增面**：`src/api_apps.py` 七端点（`/api/apps`、`/installed`、`/health`、
+`{name}/{install,update,uninstall,test,run}`、`bridge`）；系统菜单「应用」页
+（`#page-apps` + `static/hub/17-apps.js` + 符号阶梯项）；`docs/CLI-APPS-20261125.md`；
+`skills/cli-apps/SKILL.md`（工作区技能，全 agent 自动检索）。
+
+**依赖**：新增 PyYAML 6.0.4（MIT）到 hub venv —— 上游 SKILL.md frontmatter 解析用；
+缺它应用仍可用，但技能退化为 fallback 模板（`/api/apps/health` 会明示 `yaml=false`）。
+
+**基线同步**：`test_authz_scopes`（106→112 写路由 / 28→34 副作用）、`test_scope_dryrun`
+（105→111）、`test_ls_guard` 分片清单（+17-apps.js）、`test_sys_pages_layout`（+apps）。
+
+**验证**：`test_cliapps_l0` 7 例全绿（含「假装 install→技能落盘→软链→run→uninstall」全链，
+不出网不装真包）；相关闸门 61 例全绿；全量 `tests` 4311 passed，余下失败经主 checkout 基线
+逐条对照为既有问题（worktree 缺 venv/data 导致的 9 条环境性失败 + 技能台账 31≠26 既有红）。
+
+**边界**：前端用 hub 原生 JS 重画（上游那页是 React 编译产物，不能字节级塞进单文件
+`hub.js`）；本机没有「入口已在 PATH」的候选应用，**真装包未执行**——页面每个动作都弹确认，
+留给用户点。
+
 ## v0.13.212 — 彻底删除「积分签到」：菜单/页面/路由/模块/库表（2026-11-22）
 
 > 用户令：「系统菜单里面的积分签到 彻底删除 包括所有相关数据」。

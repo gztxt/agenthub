@@ -718,6 +718,9 @@ function go(page) {
   // 2026-11-03 四框改版：进页只调一个入口（Agent/模型/轮次三框 + 历史 + 汇总）
   if (page === 'tasks') enterTasksPage();
   if (page === 'jobs') { fillAgentSelect($('jobAgent'), false); loadJobs(); }
+  /* 2026-11-25：应用页。进页才拉目录（远程注册表 15s 超时，不放在总览首屏）。
+     已装状态会随着安装动作变，所以**每次进页都重读**，不像只读页那样只拉一次。 */
+  if (page === 'apps') { loadApps(); }
   if (page === 'mcp') { loadMcp(); loadAcl(); }
 }
 

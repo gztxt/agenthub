@@ -60,7 +60,7 @@ router = APIRouter()
 _login_fail: Dict[str, list] = {}
 
 MODULE_TOP = ["classroom", "localprojects", "github", "resources"]
-MODULE_SYS = ["ports", "memory", "skills", "kb", "mcp", "jobs", "tasks"]
+MODULE_SYS = ["ports", "memory", "skills", "kb", "mcp", "jobs", "tasks", "apps"]   # 2026-11-25：应用（CLI Apps）
 MODULE_SET = ["settings-github", "settings-logs",
               "settings-users", "settings-modelcalls", "settings-restart",
               "settings-shutdown"]   # 2026-11-20：与前端 SYS_PAGES/SET_PAGES 对齐
@@ -71,13 +71,15 @@ MODULE_GROUPS = ["group:agents", "group:infra", "group:system", "group:settings"
 #    逐条对齐，图标取已验证存在过的 sprite id）──
 TOP_ICONS = {"classroom": "school", "localprojects": "folder", "github": "globe", "resources": "boxes"}
 SYS_ICONS = {"ports": "share", "memory": "database", "skills": "zap",
-             "kb": "book", "mcp": "wrench", "jobs": "clock", "tasks": "flow"}
+             "kb": "book", "mcp": "wrench", "jobs": "clock", "tasks": "flow",
+             "apps": "layers"}
 SET_ICONS = {"settings-github": "globe",
              "settings-logs": "activity", "settings-users": "eye", "settings-modelcalls": "radar",
              "settings-restart": "refresh", "settings-shutdown": "power"}
 _LABELS = {"classroom": "课堂", "localprojects": "本地项目", "github": "GitHub", "resources": "资源",
            "ports": "端口", "memory": "记忆中心", "skills": "技能中心",
            "kb": "知识库", "mcp": "MCP服务器", "jobs": "定时", "tasks": "协同",
+           "apps": "应用",
            "settings-github": "GitHub", "settings-logs": "日志", "settings-users": "用户授权",
            "settings-modelcalls": "模型计量", "settings-restart": "重启", "settings-shutdown": "关机"}
 

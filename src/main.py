@@ -107,6 +107,7 @@ import localprojects as localprojects_mod  # 本机项目清单（多根 git 扫
 import resources as resources_mod          # 资源监控：Agent 进程资源列表 + 一键结束
 import githubprojects as github_mod  # GitHub 远端仓库清单 + 即时克隆（本机项目页的远端半程）
 import prefs as prefs_mod           # 应用级偏好 KV（v0.13.36）：两项目页收藏/隐藏落服务端
+import api_apps as apps_mod          # 2026-11-25：/api/apps（CLI Apps 应用功能模块，vendored nanobot/apps）
 import modelcfg as modelcfg_mod     # 各 Agent 默认模型统一设置（v0.13.41：设置→模型子菜单）
 import ghsettings as ghsettings_mod  # GitHub 地址/key/落点（v0.13.42：设置→GitHub 子菜单）
 import hublog as hublog_mod        # 日志中心（v0.13.46：设置→日志子菜单，journald + 操作事件聚合）
@@ -128,8 +129,17 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.212"
+VERSION = "0.13.213"
 
+# v0.13.213（2026-11-25）：按用户令「nanobot 的应用功能模块 整个模块字节级复制到 agenthub
+#   的基础设施」，把 nanobot 0.4.2 的 `apps`（agent-app.v1 / CLI Apps，MIT）**逐字节**搬进
+#   `src/vendor/cli_apps/`（md5 由 tests/test_cliapps_l0.py 钉死），配一层适配：
+#   ① `src/cliapps.py` 注入 workspace/data、装完把技能软链进 `技术文档/skills/`（让全部 agent
+#      的技能发现点看得到）、把 300/600s 子进程甩出事件循环；
+#   ② `src/api_apps.py` 七个端点（目录/已装/自检/install/update/uninstall/test/run/bridge）；
+#   ③ MCP `hub_apps_list` / `hub_apps_run`（默认）+ install/uninstall（HUB_MCP_ALLOW_WRITE=1）；
+#   ④ 前端系统菜单「应用」页（17-apps.js）+ shell 兜底 `scripts/hub-apps.sh`。
+#   关键词锚：agent-app.v1 / CLI Apps / cli-app- / 17-apps.js / hub_apps_list / vendor/cli_apps。
 # v0.13.212（2026-11-22）：按用户令「系统菜单里面的积分签到 彻底删除 包括所有相关数据」
 #   删除范围：菜单叶子 / 前端页面与分片 / 后端路由与鉴权声明 / 模块与 L0 测试 / 库表
 #   （checkin_machines、checkin_runs）与 menu_items 行。历史版本注释保留在下方作归档。
@@ -988,6 +998,7 @@ app.include_router(admission_mod.router)        # P2 C7：/api/admission（外�
 app.include_router(hublog_mod.router)
 app.include_router(refscout_mod.router)          # PT-20261021-04：/api/ref/*（情报卡）
 app.include_router(intake_mod.router)            # PT-20261022-01：/api/intake/task（四查一简报）
+app.include_router(apps_mod.router)              # 2026-11-25：/api/apps（CLI Apps 目录/安装/运行/技能桥）
 app.include_router(users_mod.router)             # 2026-11-07：/api/users（用户/按功能授权）
 app.include_router(modelcalls_mod.build_router())   # 2026-11-07：/api/monitor/model-calls/*（模型调用计量）
 if os.getenv("HUB_CATALOG", "0") == "1":

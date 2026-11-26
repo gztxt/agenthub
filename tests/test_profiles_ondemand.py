@@ -27,13 +27,26 @@ import vitals  # noqa: E402
 
 class OnDemandProfilesTest(unittest.TestCase):
     def test_ondemand_cards_document_start_command(self):
-        """按需卡的 desc 必须自带启动命令（用户裁定零代码入口）。"""
-        for pid in ("cloudcli", "pi", "dsh", "qwenpaw", "qoder"):
+        """按需卡的 desc 必须自带启动命令（用户裁定零代码入口）。
+
+        ⚠ 2026-10-28 起 **pi 不在本名单**：用户报「pi 无法用 IP:30141 直接拉起，
+        必须先到 agenthub 点，hub 挂了就全挂」⇒ pi-web/relay 改回**常驻**
+        （watchdog 看护）。本测试原来把 pi 也圈在"按需"里，会让正确文案被判红。
+        pi 的常驻口径单独由 test_pi_card_says_resident 守。
+        """
+        for pid in ("cloudcli", "dsh", "qwenpaw", "qoder"):
             desc = profiles.get_profile(pid).get("desc", "")
             self.assertIn("systemctl --user start", desc,
                           f"{pid} 卡 desc 必须写启动命令（零代码按需入口）")
             self.assertIn("不长驻", desc,
                           f"{pid} 卡 desc 必须声明不长驻口径")
+
+    def test_pi_card_says_resident(self):
+        """pi 卡必须写「常驻」（2026-10-28 用户令改回），不得再写按需/已摘除看护。"""
+        desc = profiles.get_profile("pi").get("desc", "")
+        self.assertIn("常驻", desc, "pi-web 已改回常驻，卡片文字必须与 ps/ss 一致")
+        self.assertNotIn("watchdog 已摘除", desc,
+                         "「watchdog 已摘除看护」是 10-24 旧态，现状看护已加回")
 
     def test_codebuddy_exemption_note(self):
         """codebuddy 卡必须带豁免注记（workbuddy 两单元 2026-10-24 用户裁定保留）。"""

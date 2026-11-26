@@ -68,6 +68,9 @@ AGENT_SOURCE_MAP: Dict[str, List[str]] = {
     "opencode": ["opencode_sessions"],
     "zcode": [], "qoder": [], "jcode": [], "dsh": [], "cloudcli": [],
     "omp": [], "qwenpaw": [],
+    # 2026-11-24：两家都是本轮/上轮新接入、尚无 memfed 会话源（nanobot 的
+    # ~/.nanobot/memory/history.jsonl 可作源，但要先在 memfed.REGISTRY 注册，未开工）。
+    "picoclaw": [], "nanobot": [],
 }
 
 #: hub-mcp 已知接线点（配置文件路径 → agent id）。**现探不写死**：读配置文件判断

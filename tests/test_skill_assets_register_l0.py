@@ -168,7 +168,13 @@ class TestRealTreeContract(unittest.TestCase):
     2026-10-25 加本地技能 agent-onboard ⇒ 22→23；
     2026-10-28 11:53 加 oss-audit-lookup ⇒ 23→24；
     2026-10-28 13:32 加 code-security-scan ⇒ 24→25；
-    2026-11-01 22:47 加 on-demand-execution ⇒ 25→26）。这个断言是
+    2026-11-01 22:47 加 on-demand-execution ⇒ 25→26；
+    2026-11-25 22:5x CLI Apps 迁入连带装技能 ⇒ 26→31：
+      cli-apps（新增，nanobot CLI Apps 的入口技能）、
+      dev-expert / find-skills / multi-search-engine（历史遗留从未入账）、
+      agent-dispatch（10-08 已在盘，此前未计入）、
+      agent-browser 与 agent-browser-cli 是两个目录但 `name` 相同（前者 name 也是 agent-browser，
+      后者 name=agent-browser，由下面两条断言守）。这个断言是
     **哨兵不是常量**：盘上变了就该红一次、催人同步，同步时只改这个数与本文档。
     """
 
@@ -176,7 +182,7 @@ class TestRealTreeContract(unittest.TestCase):
         if not reg.SKILLS_ROOT.is_dir():
             self.skipTest("本机无 技术文档/skills（运行器不在宿主机上）")
         items = reg.discover()
-        self.assertEqual(len(items), 26,
+        self.assertEqual(len(items), 31,
                          "盘上技能包数变了 ⇒ 台账与缺口注释要同步改（只改本数与本类 docstring）")
         names = {s: (f.get("name") or "") for s, _p, f in items}
         self.assertEqual(names.get("agent-browser-cli"), "agent-browser")

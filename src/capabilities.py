@@ -91,6 +91,20 @@ UI_RECIPES: Dict[str, dict] = {
     # resident=True 是给闸门的判据：常驻项允许 start 为空。
     "codebuddy": {"url": "http://127.0.0.1:35431", "port": 35431,
                   "start": None, "resident": True, "label": "CodeBuddy"},
+    # picoclaw（2026-11-24 接入）：上游自带 Web 控制台 picoclaw-launcher（:18800），
+    # 但 dashboard 是**自带密码登录**（bcrypt + 进程级随机会话 Cookie）⇒ 直接嵌会多一套登录。
+    # 起法是 scripts/picoclaw-ui-start.sh：拉起 launcher → 服务端建/用口令 → 登录 →
+    # 把 picoclaw_launcher_auth 写进 0600 Cookie 文件，桥按 upstream_cookie_file 注入。
+    # 绑定面（2026-11-24 用户令「所有 agenthub 网段 + VPN 网段都能访问」）：
+    # 起 launcher 用 -host 0.0.0.0，访问控制交给 launcher 自己的 IPAllowlist ——
+    # ~/.picoclaw/launcher-config.json 的 allowed_cidrs（192.168.5.0/24 / 100.64.0.0/10 /
+    # 172.16.0.0/22）+ allow_localhost_bypass（hub 桥从回环进）。实测非白名单源 403、
+    # 白名单源 200。dashboard 口令仍在（桥用 upstream_cookie_file 免手输）。
+    "picoclaw": {"url": "http://127.0.0.1:18800", "port": 18800,
+                 "start": {"cmd": ["/bin/bash",
+                                   "/fs/1000/ftp/技术文档/agenthub/scripts/picoclaw-ui-start.sh"],
+                           "cwd": "/fs/1000/ftp/技术文档", "port": 18800},
+                 "label": "PicoClaw"},
     # reasonix（2026-10-25 实测 `reasonix web --help` + 起进程）：真 Web UI（`/` 回
     # text/html、title=Reasonix），默认 `-addr 127.0.0.1:8787`。但默认 `auth: token`，
     # 且 token 是**进程级随机**、只出现在启动横幅的 `share:` 行里
@@ -103,6 +117,21 @@ UI_RECIPES: Dict[str, dict] = {
                  "url_token_re": r"#token=([A-Za-z0-9_\-]{8,})",
                  "url_token_log": "ui-start/reasonix.log",
                  "label": "Reasonix"},
+    # nanobot（2026-11-24 接入）：WebUI 由 gateway 进程内提供，与 health 口同进程
+    # （WebUI :18880 / gateway :18796，都在 ~/.nanobot/config.json 里可改端口）。
+    # 登录态不是 Cookie 而是 **URL fragment 的 bootstrapSecret**（换取 300s 短期 token，
+    # 见 channels.websocket.tokenIssueSecret）⇒ 地址必须带这一段，否则嵌页停在登录页。
+    # 与 dsh/reasonix 的区别只在拼接形态：它们是 `?token=`/`#token=`，nanobot 是
+    # `#/?bootstrapSecret=` ⇒ 用 url_token_fmt 显式给模板（见 url_for）。
+    # secret 落在 config.json、跨重启稳定，脚本每次拉起后把它打进 ui-start 日志供这里抓取。
+    "nanobot": {"url": "http://127.0.0.1:18880", "port": 18880,
+                "start": {"cmd": ["/bin/bash",
+                                  "/fs/1000/ftp/技术文档/agenthub/scripts/nanobot-ui-start.sh"],
+                          "cwd": "/fs/1000/ftp/技术文档", "port": 18880},
+                "url_token_re": r"bootstrapSecret=([A-Za-z0-9_\-]{16,})",
+                "url_token_log": "ui-start/nanobot.log",
+                "url_token_fmt": "{url}/#/?bootstrapSecret={token}",
+                "label": "nanobot"},
 }
 
 #: 探测说「疑似有界面」，但**人工判定过后不是可浏览 Web UI** 的，写在这里（带理由）。
@@ -182,8 +211,14 @@ def url_for(agent_id: str) -> Optional[str]:
             tail = p.read_text(encoding="utf-8", errors="replace")[-65536:]
             hits = re.findall(rex, tail)
             if hits:
-                sep = "&" if "?" in url else "#"
-                out = f"{url}{sep}token={hits[-1]}"
+                # 拼接形态因宿主而异：默认 `#token=`/`?token=`（dsh、reasonix），
+                # nanobot 要的是 `#/?bootstrapSecret=` ⇒ 配方可用 url_token_fmt 给模板。
+                fmt = r.get("url_token_fmt")
+                if fmt:
+                    out = str(fmt).format(url=url, token=hits[-1])
+                else:
+                    sep = "&" if "?" in url else "#"
+                    out = f"{url}{sep}token={hits[-1]}"
         except Exception:  # noqa: BLE001  取不到只降级
             out = url
     _URL_CACHE[agent_id] = (now, out)

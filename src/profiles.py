@@ -459,12 +459,14 @@ PROFILES: List[dict] = [
      # browser_entry / main.py 的监听面），pi 不再是特例。
      "terminal": {"cmd": "pi", "cwd": "/fs/1000/ftp/技术文档"},
      "chat": None,
-     # 2026-10-24 按需拉起：pi-web + pi-web-relay 两单元 stop+disable，
-     # watchdog（crontab 每 5 分钟）看护清单已摘除 ⇒ 停了不会自动回来。
-     # CLI 终端入口本就是按需形态（hub pty 拉 TUI），不受影响。
-     "desc": "Pi Coding Agent：CLI（v0.85.1，默认交互 TUI）按需拉起终端会话；"
-             "原生 Web 界面 :30141 按需启动 systemctl --user start pi-web"
-             "（2026-10-24 起不长驻，watchdog 已摘除看护）"},
+     # 2026-10-24 按需拉起，**2026-10-28 用户又改回常驻**（PT-20261028-02）：
+     # 报障「pi 无法用 IP:30141 直接拉起，必须先到 agenthub 点，hub 挂了就全挂」
+     # ⇒ `~/bin/agent-hub-watchdog.sh` 看护清单加回 pi-web|:30141 与 pi-web-relay|:8084，
+     # idle 杀清单删 pi-web。现状：两单元 enabled + Linger=yes + 常驻（≈310MB）。
+     # 卡片文字必须与 ps/ss 现状一致，不要再写「不长驻 / watchdog 已摘除」——那是 10-24 的旧态。
+     "desc": "Pi Coding Agent：CLI（v0.85.1，默认交互 TUI）终端会话按需拉起；"
+             "原生 Web 界面 :30141 **常驻**（2026-10-28 用户令改回，watchdog 看护中，"
+             "IP:30141 可直接打开；2026-10-24 的按需方案已废止）"},
     # oh-my-pi（omp）：Pi 的 coding-first 分支。2026-10-24 用户令接入（按需拉起、不常驻）。
     # 与现役 pi 三处全不同 ⇒ 可并存零迁移：包名 `@oh-my-pi/pi-coding-agent`（现役是
     # `@earendil-works/pi-coding-agent`）、配置根 `~/.omp/`（现役 `~/.pi/`）、命令 `omp`。
@@ -636,6 +638,60 @@ PROFILES: List[dict] = [
      "chat": None,
      "desc": "OpenCode：TUI 终端按需拉起；原生 Web 界面 :4096 由卡片「启动原生界面」"
              "按需起（`opencode web --hostname 0.0.0.0 --port 4096`，不长驻）"},
+
+    # PicoClaw（2026-11-24 用户令接入）：Go 写的超轻量 Agent（Sipeed，MIT），
+    # 本机安装态 /vol1/tools/picoclaw-0.3.1（`~/.local/bin/picoclaw` 软链，免 sudo 自更新），
+    # 数据根 ~/.picoclaw（config v3 + workspace/skills 已接 技术文档/skills），
+    # 默认模型走本机 magpie 网关 :3425（model_list 里的 `magpie` 一项，零新增凭据）。
+    # 两条入口：
+    #   · 终端 = `picoclaw agent`（自带上屏 TUI，按需拉起，不常驻；
+    #     ⚠ 必须绝对路径：hub 服务 PATH 不含 ~/.local/bin，与 omp/codex 同款坑）。
+    #   · 原生界面 = 上游 picoclaw-launcher :18800（dashboard 自带密码登录）。
+    #     直接嵌会弹第二套登录 ⇒ 走 scripts/picoclaw-ui-start.sh 服务端登录一次 +
+    #     bridge_cookie_file 注入会话 Cookie，用户侧只认 hub。
+    # 无 systemd 单元（符合「agent 不长驻」军规）；gateway :18790 只接通道时才有，
+    # 卡上不绑它（绑了会在通道常开时把卡片误亮成「界面在跑」）。
+    {"id": "picoclaw", "name": "PicoClaw", "kind": "agent",
+     "detect": {"proc": [r"(^|/)picoclaw( |$)", r"picoclaw-launcher"]},
+     "cli": "picoclaw", "port": 18800, "ui": "http://127.0.0.1:18800",
+     "terminal": {"cmd": "/vol1/tools/picoclaw-0.3.1/picoclaw agent",
+                  "cwd": "/fs/1000/ftp/技术文档"},
+     "chat": None,
+     # 与 codebuddy 同款：桥把这枚 Cookie 注给上游，dashboard 不再二次登录。
+     # 值随 launcher 进程变化 ⇒ 每次经卡片拉起都会由脚本重写（见 UI_RECIPES.start）。
+     "bridge_cookie_file": "/home/gztxt/.config/picoclaw-dashboard.cookie",
+     "desc": "PicoClaw：超轻量 Go Agent（v0.3.1）。终端 `picoclaw agent` 按需拉起；"
+             "原生 Web 控制台 :18800 由卡片「启动原生界面」拉起"
+             "（scripts/picoclaw-ui-start.sh，服务端登录后经 hub 桥嵌入，不长驻；"
+             "绑 0.0.0.0，白名单 局域网 192.168.5.0/24 / VPN 100.64.0.0/10 / 172.16.0.0/22，"
+             "非白名单源 403）；默认模型走本机 magpie :3425"},
+
+    # nanobot（2026-11-24 用户令接入）：HKUDS 的 Python 个人 Agent（MIT，PyPI 包 nanobot-ai），
+    # 安装态 /vol1/tools/nanobot-0.4.2/venv（python3.12；`~/.local/bin/nanobot` 软链），
+    # 数据根 ~/.nanobot（config.json + memory + logs），workspace 指本工作区。
+    # 模型走本机 magpie :3425 —— providers 里是**自定义 provider** `magpie`
+    # （apiBase=http://127.0.0.1:3425/v1，无需鉴权，零新增凭据），
+    # 模型名 `magpie/workbuddy/deepseek-v4.1-flash`：nanobot 只剥自己那段前缀
+    # （registry.create_dynamic_spec 的 strip_model_prefixes），送到网关的仍是
+    # `workbuddy/deepseek-v4.1-flash`。
+    # 两条入口：
+    #   · 终端 = `nanobot agent`（自带 TUI/对话，按需拉起，不常驻；绝对路径：hub 服务
+    #     PATH 不含 ~/.local/bin 与 /vol1，与 picoclaw/omp 同款坑）。
+    #   · 原生界面 = gateway 自带的 WebUI :18880（同进程还监听 gateway health :18796）。
+    #     登录态是 URL fragment 的 bootstrapSecret ⇒ 起法走 scripts/nanobot-ui-start.sh，
+    #     地址由 capabilities 的 url_token_fmt 拼成 `#/?bootstrapSecret=…`。
+    # 无 systemd 单元（符合「agent 不长驻」军规）；gateway --background 由启动脚本按需拉起。
+    {"id": "nanobot", "name": "nanobot", "kind": "agent",
+     "detect": {"proc": [r"nanobot-gateway", r"venv/bin/nanobot( |$)"]},
+     "cli": "nanobot", "port": 18880, "ui": "http://127.0.0.1:18880",
+     "terminal": {"cmd": "/vol1/tools/nanobot-0.4.2/venv/bin/nanobot agent",
+                  "cwd": "/fs/1000/ftp/技术文档"},
+     "chat": None,
+     "desc": "nanobot：HKUDS 的轻量 Python Agent（v0.4.2，MIT）。终端 `nanobot agent` "
+             "按需拉起；原生 WebUI :18880 由卡片「启动原生界面」拉起"
+             "（scripts/nanobot-ui-start.sh → gateway --background，bootstrapSecret 经 hub 桥代注，"
+             "不长驻；gateway health :18796）；默认模型走本机 magpie :3425"
+             "（magpie/workbuddy/deepseek-v4.1-flash）"},
 
     # ZCode（2026-10-25 用户报「有原生界面就要修复」）：官方 CLI 发行包自带
     # `zcode --web`（Web client + Agent 同一命令）；本机 `~/.local/bin/zcode` 是

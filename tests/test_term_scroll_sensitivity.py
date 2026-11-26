@@ -240,7 +240,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.212"
+    CURRENT_VERSION = "0.13.213"
+    #: v0.13.213：本轮改的是「nanobot CLI Apps 字节级迁入」，不是终端滚动；版本钉照常跟版本号走。
+    #: 学到的：把上游模块**整套**搬进来时，md5 钉死（tests/test_cliapps_l0.py）才是
+    #: 「字节级」的唯一证明；只比文件名/行数会在上游小改时假绿。
+    VERSION_ROOT_CAUSES["0.13.213"] = (
+        "agent-app.v1", "CLI Apps", "cli-app-", "vendor/cli_apps",
+    )
     #: v0.13.212：本轮改的是「彻底删除积分签到」，不是终端滚动；版本钉照常跟版本号走。
     #: 学到的：菜单叶子、前端分片、后端路由、鉴权声明、L0 测试与库表是**一条链**，
     #: 只删页面会留下可直呼的 /api/checkin/* 与孤儿数据。

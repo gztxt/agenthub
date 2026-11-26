@@ -37,19 +37,17 @@
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-#: 默认档位。ID 必须在 CCR 清单里（运行时逐个校验，不在就跳过并给原因）。
-#: 2026-11-02 重排：原 t1 第二员 agnes 与 t2 首位 deepseek/deepseek-v4-pro、t3 唯一成员
-#: openrouter/openai/gpt-6.1-terra-pro 均已不在网关清单 ⇒ 全部换掉。现全部为在役
-#: `alibaba/*`，且三档确实不同档（快 / 中 / 强），不再是三个同源 ID。
-#: 档内成员只做「挂了换一个」，所以同档成员能力应接近；跨档才是能力阶梯。
-#: 2026-11-02 23:05 再修：t1 第二员 `deepseek-v4-flash-0731` 也被从清单摘掉（清单现 11 个 ID，
-#: 无此条）⇒ 换成 `deepseek-v4.1-flash-1017`（同族、实测 871ms）。t2 的第二员换成
-#: `deepseek-v4-pro`（清单内、比 flash 强，充当中档降级位）。
-#: ⚠ 档位顺序本身**仍无测量支撑**（只有时延实测），别把本表当成能力排序的证据。
+#: 默认档位。ID 必须在网关清单里（运行时逐个校验，不在就跳过并给原因）。
+#: 2026-11-26 改判：CCR 于 11-17 下线、网关换 magpie :3425，`alibaba/*` 全部不在册
+#: （实测 53 个模型里 0 个 alibaba）⇒ model_gate=missing、档位阶梯空转。
+#: 换成 magpie 清单内在役的 `workbuddy/*`：t1 快/免费、t2 中、t3 强，仍是三档阶梯。
+#: 档内成员只做「挂了换一个」，同档能力接近；跨档才是阶梯。
+#: ⚠ 档位顺序本身**仍无测量支撑**（只有历史时延实测，且那是 alibaba 时代的），
+#:   别把本表当成能力排序的证据；真顺序由 audit 的 verdict 校验。
 DEFAULT_TIERS: Dict[str, Tuple[str, ...]] = {
-    "t1": ("alibaba/deepseek-v4.1-flash", "alibaba/deepseek-v4.1-flash-1017"),
-    "t2": ("alibaba/qwen3.8-flash", "alibaba/deepseek-v4-pro"),
-    "t3": ("alibaba/qwen3.8-max", "alibaba/deepseek-v4-pro-0813"),
+    "t1": ("workbuddy/hy4flash-free", "workbuddy/deepseek-v4.1-flash"),
+    "t2": ("workbuddy/deepseek-v4-pro", "workbuddy/glm-5.3-flash"),
+    "t3": ("workbuddy/glm-5.4", "workbuddy/kimi-k3.1-pro"),
 }
 
 #: difficulty 1/2/3 → 档位。

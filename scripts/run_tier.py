@@ -180,6 +180,53 @@ for _k in L0_SCRUBBED:
         _SAVED_SCRUB[_k] = os.environ.pop(_k)
 
 
+def _pending_file() -> Path:
+    """`pytest` 直通档的待清理清单（execv 前登记，下次启动时消费）。
+
+    为什么不直接改成 subprocess：execv 是为了让 pytest 直接接管 TTY/信号，
+    换 subprocess 会改变交互与 Ctrl-C 语义（直通档的核心用途就是"像原生 pytest 一样跑"）。
+    代价是 finally 不会执行 ⇒ 通过清单把清理推给下一个进程。
+    """
+    return _fixture_base() / ".pending-cleanup"
+
+
+def register_pending(path: str) -> None:
+    """登记一个待删的假 HOME（给 execv 前的 pytest 档用）。"""
+    if not path:
+        return
+    try:
+        f = _pending_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a", encoding="utf-8") as fh:
+            fh.write(str(path) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def consume_pending(log=print) -> int:
+    """删掉清单里登记的假 HOME（已不存在则直接跳过），返回删除数。"""
+    f = _pending_file()
+    if not f.is_file():
+        return 0
+    n = 0
+    try:
+        lines = [x.strip() for x in f.read_text(encoding="utf-8").splitlines() if x.strip()]
+        import shutil
+        for raw in lines:
+            p = Path(raw)
+            # 只删自己建的那种名字，防止清单被污染后 rmtree 掉别的目录
+            if p.is_dir() and p.name.startswith("hub-clean-home-"):
+                shutil.rmtree(p, ignore_errors=True)
+                if not p.exists():
+                    n += 1
+        f.unlink()
+    except Exception:  # noqa: BLE001
+        pass
+    if n:
+        log(f"[tier] 已清理 {n} 个上次直通档（pytest）遗留的假 HOME")
+    return n
+
+
 def isolate_home(saved_home: str | None, log=print) -> str:
     """把 HOME 换成一次性的空目录，返回该目录。
 
@@ -199,7 +246,98 @@ def isolate_home(saved_home: str | None, log=print) -> str:
     os.environ["HUB_TEST_HOME"] = tmp
     os.environ["HUB_HOST_TESTS"] = "0"      # 干净 runner 上 host 层必须整层跳过
     log(f"[tier] 已把 HOME 换成空目录 {tmp}（L0 不写真实 ~/.codebuddy / ~/.claude）")
+    global _ISOLATED_HOME
+    _ISOLATED_HOME = tmp
     return tmp
+
+
+#: 本次进程创建的假 HOME（供 cleanup 用）。模块级而非返回值：main 里两条路径
+#: （隔离档 / L1 段中途还原）都要能拿到同一个值，改签名会溢出到 4 个调用点。
+_ISOLATED_HOME: str | None = None
+
+#: 陈旧假 HOME 的保留时长。超过这个时间仍留在 fixture 根下的目录，只可能是
+#: 上一次进程被 SIGKILL / 断电（finally 没跑到）遗留的 —— 正常路径本次就会删掉。
+_STALE_HOURS = 24
+
+
+def _fixture_base() -> Path:
+    """fixture 根：与 `isolate_home` 同源（真实 HOME 下的 hub-l0test-fixtures）。"""
+    return Path(os.environ.get("HOME") or str(Path.home())) / "hub-l0test-fixtures"
+
+
+def sweep_stale(now: float | None = None, log=print) -> int:
+    """删掉 fixture 根下超过 `_STALE_HOURS` 的陈旧假 HOME，返回删除数。
+
+    为什么需要（2026-11-27 实测）：`isolate_home` 建目录、`restore_home` 从不删，
+    于是每跑一次测试就多一个 —— 累计 **2502 个 / 234M**。正常路径由
+    `cleanup_isolated_home` 本次就删，本函数只救「上次崩了没人收」的残留。
+    """
+    import time as _t
+    base = _fixture_base()
+    if not base.is_dir():
+        return 0
+    cutoff = (now if now is not None else _t.time()) - _STALE_HOURS * 3600
+    n = 0
+    for p in base.iterdir():
+        if not (p.is_dir() and p.name.startswith("hub-clean-home-")):
+            continue
+        if p == Path(_ISOLATED_HOME or ""):
+            continue                      # 本次的，由 cleanup 负责
+        try:
+            if p.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        try:
+            import shutil
+            shutil.rmtree(p, ignore_errors=True)
+            n += 1
+        except Exception:  # noqa: BLE001 — 清残留是卫生，绝不带倒测试
+            continue
+    if n:
+        log(f"[tier] 已清理 {n} 个超过 {_STALE_HOURS}h 的陈旧假 HOME（上次异常退出的残留）")
+    return n
+
+
+def write_summary(text: str) -> str:
+    """把本次测试摘要写到 fixture 根的 `LAST-RUN.md`（覆盖写，不累积）。
+
+    用户 2026-11-27 裁定：「仅保留测试摘要文档即可」——假 HOME 是临时环境，
+    跑完就删；但「刚才跑到哪、过没过」这份摘要要留下，否则清完就无从查起。
+    """
+    base = _fixture_base()
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        p = base / "LAST-RUN.md"
+        p.write_text(text, encoding="utf-8")
+        return str(p)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def cleanup_isolated_home(log=print) -> str:
+    """删掉本次隔离用的假 HOME，返回被删路径（没建过则空串）。
+
+    幂等：L1 段会先 `restore_home`（不删目录，因为 L0 结果还要落盘），
+    真正的删除只在这里做一次。
+    """
+    global _ISOLATED_HOME
+    tmp, _ISOLATED_HOME = _ISOLATED_HOME, None
+    if not tmp:
+        return ""
+    p = Path(tmp)
+    # 只删自己建的那种名字：绝不对任意路径 rmtree（写错一个字就是灾难）
+    if not (p.is_dir() and p.name.startswith("hub-clean-home-")):
+        return ""
+    try:
+        import shutil
+        shutil.rmtree(p, ignore_errors=True)
+        if not p.exists():
+            log(f"[tier] 已清理假 HOME {p}")
+        return tmp
+    except Exception as e:  # noqa: BLE001
+        log(f"[tier] ⚠ 假 HOME 清理失败（不影响测试结果）：{type(e).__name__}")
+        return ""
 
 
 def restore_home(saved_home: str | None, saved_host_tests: str | None) -> None:
@@ -224,6 +362,8 @@ def main(argv):
         # `run_tests.sh pytest` 的直通档：不走分层闸门，但**同样不许碰真实 HOME**
         # ——否则「只想快速看全绿」的人会用这条路径把测试会话写进用户历史。
         isolate_home(os.environ.get("HOME"))
+        # execv 后 finally 不会跑 ⇒ 先登记，交给下一个进程删（否则直通档跑一次漏一个）
+        register_pending(_ISOLATED_HOME or "")
         sys.stdout.flush()      # execv 不 flush：不打这一行，调用者就看不到自己已进隔离档
         os.execv(sys.executable, [sys.executable, "-m", "pytest", "tests", "-v", *argv[1:]])
         return 2    # execv 成功即进程已被替换；只有它被替身接管（测试）才走得到这行
@@ -281,6 +421,10 @@ def main(argv):
     # 判据：**只要这一趟会跑 L0，就默认隔离 HOME**；L1 需要真实安装，跑之前还原。
     isolate = (not real_home) and any(lbl.startswith("L0") for lbl, _ in pairs)
     if isolate:
+        # 先消费待清理清单（pytest 直通档遗留），再扫陈旧残留，最后建本次的。
+        # 顺序不能反：sweep 会跳过 _ISOLATED_HOME，先建会把自己当成"本次的"而漏扫别人
+        consume_pending()
+        sweep_stale()
         isolate_home(saved_home)
     elif real_home:
         print("[tier] ⚠ --real-home：HOME 保持真实值 —— L0 会读写 ~/.codebuddy / ~/.claude，"
@@ -330,6 +474,25 @@ def main(argv):
             os.environ.pop("MEMINDEX_DB", None)
         else:
             os.environ["MEMINDEX_DB"] = saved_memdb
+        # 假 HOME 自清理 + 摘要落盘（用户 2026-11-27 裁定：「仅保留测试摘要文档即可」）。
+        # 改前：建目录从不删，实测累积 2502 个 / 234M。
+        if isolate:
+            import datetime as _dt
+            _rc = locals().get("rc")
+            _lines = [
+                "# 最近一次测试（覆盖写，不累积）",
+                "",
+                "- 时间: " + _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "- 档位: " + str(tier),
+                "- rc: " + (str(_rc) if _rc is not None else "未知（提前退出）"),
+                "- 例数: L0={0} L1={1}".format(len(herm), len(host)),
+                "",
+                "> 假 HOME 已自动删除；逐例明细看本次 stdout/日志。",
+                "> 超过 {0}h 的陈旧残留会在下次启动时 sweep。".format(_STALE_HOURS),
+                "",
+            ]
+            write_summary("\n".join(_lines))
+            cleanup_isolated_home()
 
 
 if __name__ == "__main__":

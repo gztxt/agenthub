@@ -145,5 +145,78 @@ class HomeIsolationL0(unittest.TestCase):
         self.assertTrue(str(captured["env"].get("HOME")).startswith(self.real + os.sep))
 
 
+class FakeHomeSelfCleanup(unittest.TestCase):
+    """2026-11-27：假 HOME 建了从不删 ⇒ 实测累积 2502 个 / 234M。
+
+    用户裁定「单独立一条『测试后自清理』的修复，仅保留测试摘要文档即可」。
+    这组用例守四条：①本次跑完自删；②摘要落 LAST-RUN.md；③陈旧残留启动时 sweep；
+    ④pytest 直通档（execv 后 finally 不跑）用待清理清单兜住。
+    """
+
+    def setUp(self):
+        self.rt = _load_run_tier()
+        self.saved = {k: os.environ.get(k) for k in ("HOME", "HUB_TEST_HOME", "HUB_HOST_TESTS")}
+        self.real = tempfile.mkdtemp(prefix="rt-clean-")
+        self.base = Path(self.real) / "hub-l0test-fixtures"
+        os.environ["HOME"] = self.real
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        import shutil
+        shutil.rmtree(self.real, ignore_errors=True)
+
+    def test_isolated_home_is_removed_by_cleanup(self):
+        """① 本次建出来的假 HOME，cleanup 必须真删掉（这是 234M 的根因）。"""
+        p = self.rt.isolate_home(self.real, log=lambda *_: None)
+        self.assertTrue(Path(p).is_dir(), "先确保真建了")
+        self.rt.cleanup_isolated_home(log=lambda *_: None)
+        self.assertFalse(Path(p).exists(), "假 HOME 必须自清理")
+        self.assertEqual(self.rt.cleanup_isolated_home(log=lambda *_: None), "",
+                         "第二次调用必须是空操作（幂等），不能抛也不能再删")
+
+    def test_cleanup_refuses_foreign_dir(self):
+        """只删自己建的那种名字 —— 防清单/环境被污染后 rmtree 掉别人目录。"""
+        other = Path(self.real) / "not-a-fixture"
+        other.mkdir(parents=True, exist_ok=True)
+        self.rt._ISOLATED_HOME = str(other)
+        self.rt.cleanup_isolated_home(log=lambda *_: None)
+        self.assertTrue(other.is_dir(), "非 hub-clean-home-* 的目录绝不能删")
+
+    def test_summary_written_and_overwrites(self):
+        """② 摘要落 LAST-RUN.md，且是覆盖写（不累积成第二个日志库）。"""
+        self.rt.write_summary("第一次\n")
+        f = self.base / "LAST-RUN.md"
+        self.assertTrue(f.is_file())
+        self.rt.write_summary("第二次\n")
+        self.assertEqual(f.read_text(encoding="utf-8"), "第二次\n", "必须是覆盖写")
+
+    def test_sweep_removes_only_stale(self):
+        """③ 陈旧（超 _STALE_HOURS）删，新鲜的留 —— 并发跑测试时不能互删。"""
+        self.base.mkdir(parents=True, exist_ok=True)
+        old = self.base / "hub-clean-home-old1"
+        fresh = self.base / "hub-clean-home-new1"
+        old.mkdir()
+        fresh.mkdir()
+        os.utime(old, (0, 0))          # mtime = epoch ⇒ 必然陈旧
+        n = self.rt.sweep_stale(log=lambda *_: None)
+        self.assertEqual(n, 1)
+        self.assertFalse(old.exists(), "陈旧残留要清")
+        self.assertTrue(fresh.exists(), "新鲜目录绝不能动")
+
+    def test_pending_consumed_next_run(self):
+        """④ pytest 直通档 execv 后 finally 不跑 ⇒ 靠清单在下次删掉。"""
+        p = self.rt.isolate_home(self.real, log=lambda *_: None)
+        self.rt.register_pending(p)
+        self.assertTrue(Path(p).is_dir())
+        n = self.rt.consume_pending(log=lambda *_: None)
+        self.assertEqual(n, 1)
+        self.assertFalse(Path(p).exists(), "登记过的假 HOME 要在下次启动时被删")
+        self.assertFalse((self.base / ".pending-cleanup").exists(), "消费后清单必须清空")
+
+
 if __name__ == "__main__":
     unittest.main()

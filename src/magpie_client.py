@@ -40,6 +40,7 @@ def _base() -> str:
 
 MODELS_TTL_S = float(os.getenv("MAGPIE_MODELS_TTL", "60"))
 QUOTAS_TTL_S = float(os.getenv("MAGPIE_QUOTAS_TTL", "10"))
+LIBRARY_TTL_S = float(os.getenv("MAGPIE_LIBRARY_TTL", "30"))
 TIMEOUT_S = float(os.getenv("MAGPIE_HTTP_TIMEOUT", "6"))
 
 #: 额度低于此百分比即视为「耗尽」。
@@ -396,6 +397,63 @@ def derive_tiers(per_tier: int = 3, ttl: Optional[float] = None
         if not v:
             return None, "%s 档派生为空" % k
     return tiers, ""
+
+
+#: magpie 的技能/MCP/指令库（它是**分发者**：往各 agent 目录建软链）。
+#: 2026-11-27 实测：68 条技能的 source.dir 全部指向 `/fs/1000/ftp/技术文档/skills/<name>`，
+#: 与 hub 扫描到的是**同一批目录**（68/68 命中）——不是两份数据，所以不需要「写代理」，
+#: 需要的是把「这条技能被哪些 agent 启用」这个只有 magpie 知道的事实暴露出来。
+def _library_path() -> str:
+    """每次调用都重新读环境变量 —— 写死成模块常量会让测试/影子实例无法指向别的库。"""
+    return os.path.expanduser(
+        os.getenv("MAGPIE_LIBRARY", "~/.config/magpie/library.json"))
+_lib_cache: Tuple[float, dict, str] = (0.0, {}, "")
+
+
+def library(ttl: Optional[float] = None) -> Tuple[Optional[dict], str]:
+    """读 magpie 的 library.json（只读）。失败返回 (None, reason)。"""
+    global _lib_cache
+    now = time.monotonic()
+    ttl = LIBRARY_TTL_S if ttl is None else ttl
+    ts, cached, why = _lib_cache
+    if cached and (now - ts) < ttl:
+        return cached, why
+    path = _library_path()
+    if not os.path.isfile(path):
+        _lib_cache = (now, {}, "library.json 不存在：%s" % path)
+        return None, _lib_cache[2]
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as e:
+        _lib_cache = (now, {}, "library.json 读取失败：%s" % type(e).__name__)
+        return None, _lib_cache[2]
+    _lib_cache = (now, data, "")
+    return data, ""
+
+
+def library_skills_map() -> Tuple[Dict[str, dict], str]:
+    """真实目录（os.path.realpath）→ {name, agents, from, kind}。
+
+    用目录作键而不是名字：实测有 3 条**同名目录不同名**（`agent-browser-cli` 在 hub 叫
+    `agent-browser`），按名字 join 会漏。
+    """
+    data, why = library()
+    if data is None:
+        return {}, why
+    out: Dict[str, dict] = {}
+    for s in (data.get("skills") or []):
+        src = (s.get("source") or {})
+        d = src.get("dir") or ""
+        if not d:
+            continue
+        out[os.path.realpath(d)] = {
+            "name": s.get("name") or "",
+            "agents": list(s.get("agents") or []),
+            "from": s.get("from") or "",
+            "kind": src.get("kind") or "",
+        }
+    return out, ""
 
 
 def status() -> dict:

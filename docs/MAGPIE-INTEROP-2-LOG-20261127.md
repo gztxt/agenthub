@@ -18,7 +18,8 @@
 | 2 | T7 闸门与真渲染 | ⏳ 未开工 | — |
 | 3 | S1 读切 | ⛔ 改判合并进 S2 | — |
 | 3 | S2 写者收敛 | ✅ 已完工（默认仍 hub） | v0.13.218 |
-| 3 | S3–S5 技能/MCP/记忆/下线旧副本 | ⏳ 未开工 | — |
+| 3 | S3 技能托管关系 | ✅ 已完工（无需写代理） | v0.13.219 |
+| 3 | S4–S5 记忆/下线旧副本 | ⏳ 未开工 | — |
 
 ## 错误与未完成（只记事实，不记推测）
 
@@ -205,3 +206,29 @@ restore: writer=magpie verified=True → 回读 workbuddy/deepseek-v4.1-flash
 - S3 技能/MCP/指令 读 `library.json` + 写调 `magpie library …`
 - S4 记忆读写收敛到 magpie memory
 - S5 下线 hub 自研副本（保留只读兼容端点 + 改判横幅）
+
+## 波3 · S3 技能托管关系 — 2026-11-27 12:3x
+
+**先取证，结论推翻了计划**
+
+| 查什么 | 结果 |
+|---|---|
+| hub 技能条数 | 386（默认 limit=200 会截断，必须 `limit=1000` 才是全量） |
+| magpie library 条数 | 68，`source.dir` 全指向 `/fs/1000/ftp/技术文档/skills/<name>` |
+| 两者关系 | 68/68 目录命中 ⇒ **同一批数据**，magpie 是分发者不是副本 |
+| hub 技能写端点 | 不存在（只有 `skill_assets` 资产台账）⇒ **写代理无对象** |
+
+**改动**：`magpie_client.library()/library_skills_map()`（只读 + TTL 30s）、
+`skill._attach_magpie_managed()`、`/api/skill/list` 每条挂 `magpie` 段与汇总。
+
+**验收**
+```
+GET /api/skill/list?limit=1000
+count=386  magpie={managed:68, matched:68, error:""}
+ikuai-cli -> agents: claude,codebuddy,commandcode,devin,goose,grok,hermes,qoder,zcode
+```
+
+**踩坑**：`MAGPIE_LIBRARY` 写成模块常量 ⇒ 环境变量改了不生效（测试与影子实例都会读成生产库）。
+改为每次调用重解析。
+
+**未完成**：S4 记忆读写收敛、S5 下线 hub 自研副本（含 codex/pi 双写者的最终切换）。

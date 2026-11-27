@@ -574,6 +574,38 @@ def _is_nested_doc(cur: str, root) -> bool:
     return False
 
 
+def _attach_magpie_managed(items: List[dict]) -> dict:
+    """把 magpie library 的托管关系贴到技能条目上（只读，不写 magpie）。
+
+    判据：按**真实目录** join（实测 3 条不同名同目录，按名字会漏）。
+    读不到 library.json ⇒ 全部保持 `magpie=None` 并在返回里带 error，
+    不用「全部未托管」冒充正常（那会让用户以为技能都丢了）。
+    """
+    try:
+        import magpie_client
+        m, why = magpie_client.library_skills_map()
+    except Exception as e:  # noqa: BLE001 —— 互调失败不得让技能页 500
+        return {"managed": 0, "matched": 0, "error": "%s: %s" % (type(e).__name__, e)}
+    if not m:
+        return {"managed": 0, "matched": 0, "error": why or "library 为空"}
+    hit = 0
+    for it in items:
+        rp = it.get("realpath") or it.get("path") or ""
+        if not rp:
+            continue
+        d = os.path.realpath(os.path.dirname(rp))
+        info = m.get(d)
+        if not info:
+            # 未托管也显式写 None：调用方不必区分「没这个键」和「不在库里」
+            it["magpie"] = None
+            continue
+        it["magpie"] = {"managed": True, "agents": info["agents"],
+                        "from": info["from"], "kind": info["kind"],
+                        "name": info["name"]}
+        hit += 1
+    return {"managed": len(m), "matched": hit, "error": ""}
+
+
 def _scan_one(route: str, root) -> Dict[str, Any]:
     """扫一个技能目录（`root` 可为 str 或 list[str] —— glob 路会展开成多根）。同步。任何失败都变成结构化 error，不抛。"""
     if isinstance(root, (list, tuple)):
@@ -652,6 +684,9 @@ def _scan_one(route: str, root) -> Dict[str, Any]:
                 "bytes": st.st_size,
                 "mtime": round(st.st_mtime, 1),
                 "source": "disk",
+                # 2026-11-27（S3）：magpie 是技能分发者，它知道「这条被哪些 agent 启用」。
+                # 由 `/api/skill/list` 统一补（见 `_attach_magpie_managed`），单条扫描时留空。
+                "magpie": None,
                 "pkg_digest": pkg["digest"],
                 "pkg_files": pkg["files"],
                 "pkg_bytes": pkg["bytes"],
@@ -1008,9 +1043,15 @@ async def skill_list(request: Request,
                      "权威源未裁（PT-20260924-08 T2-1），本门面只读不灌")
     if skipped_all:
         notes.append(f"{len(skipped_all)} 个 SKILL.md 因 realpath 越界被拒读（明细见 skipped_outside）")
+    # 2026-11-27（S3）：把 magpie 的托管关系贴到条目上（只读）。
+    # 为什么在返回前统一补而不是扫描时补：同一条技能可能经多条 route 到达，
+    # 扫描层补会被覆盖多次；出口补只有一处真值。
+    mp = _attach_magpie_managed(merged)
     return {
         "items": merged,
         "count": len(merged),
+        # magpie 托管面：managed = library 里的条数，matched = 本次结果里命中的条数
+        "magpie": mp,
         # total/truncated 是一对：只有 count 时「200」既可能是全部也可能是截断，
         # 这正是 PT-20261019-03 的病灶。二者必须同时出现且口径一致。
         "total": total,

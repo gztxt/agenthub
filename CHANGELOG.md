@@ -1,3 +1,27 @@
+## v0.13.219 — 波 3 · S3：技能清单挂 magpie 托管关系（2026-11-27）
+
+**先查事实，结果推翻了计划里的写代理**
+
+实测：magpie `library.json` 的 68 条技能，`source.dir` **全部**指向
+`/fs/1000/ftp/技术文档/skills/<name>`，与 hub 扫描到的是**同一批目录**（68/68 命中）。
+⇒ 技能不是两份数据，magpie 是**分发者**（往各 agent 目录建软链），hub 是扫描者。
+计划里的「写代理」没有人需要：hub 根本没有技能的启用/禁用写端点
+（`grep @router.post.*api/skill` 结果为空，`skill_assets` 是另一套资产台账）。
+
+| 改动 | 判据 |
+|---|---|
+| `magpie_client.library()` / `library_skills_map()` | 只读 `library.json`；按 **realpath 目录** join（实测 3 条不同名同目录：`agent-browser-cli`↔`agent-browser`） |
+| `/api/skill/list` 每条增 `magpie` 段 | `{"managed":true,"agents":[...],"from":...,"kind":...}`；未托管显式 `None` |
+| 响应增 `magpie: {managed, matched, error}` | 读不到库时带 `error`，**不把「全部未托管」冒充正常** |
+
+**实测**：`GET /api/skill/list?limit=1000` → `count=386`、`magpie.managed=68`、`matched=68`，
+`ikuai-cli` 显示被 9 个 agent 启用（claude/codebuddy/commandcode/devin/goose/grok/hermes/qoder/zcode）。
+
+**踩坑**：`MAGPIE_LIBRARY` 路径最初写成模块常量 ⇒ 测试与影子实例改了环境变量也不生效。
+改为每次调用重解析（与其它 TTL 开关一致）。
+
+**测试**：`tests/test_skill_magpie_l0.py` 5 例。
+
 ## v0.13.218 — 波 3 · S2：模型配置写者收敛（2026-11-27）
 
 > 用户令：「magpie 的数据来源/存储都是 agents 的数据，agenthub 部分自研由 magpie 取代」。

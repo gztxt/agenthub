@@ -8,6 +8,7 @@
 2. 档位派生**默认关闭**，关着时与写死表逐字相同（kill switch 不许被悄悄绕过）。
 3. 额度闸门只挡被挡 provider；**读不到额度时不挡**（不把「不知道」当「没额度」）。
 """
+import json
 import os
 import pathlib
 import sys
@@ -61,7 +62,8 @@ class TestQuotaGate(unittest.TestCase):
             {"provider": "raccoon", "windows": [{"remaining": 0}]},
             {"provider": "dumate", "windows": [{"remaining": 60}]},
         ]
-        with mock.patch.object(mc, "quotas", lambda ttl=None: (cards, "")):
+        with mock.patch.object(mc, "quotas", lambda ttl=None: (cards, "")), \
+                mock.patch.object(mc, "recent_failures", lambda *a, **k: {}):
             health, err = mc.provider_health()
             self.assertEqual(err, "")
             self.assertEqual(health["workbuddy"]["state"], "ok")
@@ -117,6 +119,124 @@ class TestDeriveTiers(unittest.TestCase):
             tiers, err = mc.derive_tiers()
             self.assertIsNone(tiers)
             self.assertIn("down", err)
+
+
+class TestErrorWindow(unittest.TestCase):
+    """实时错误窗（2026-11-27 事故：dumate 连续 429 每次 38 秒，闸门只看额度 ⇒ 派发卡死）。"""
+
+    def _write(self, rows):
+        import tempfile
+        from datetime import datetime, timedelta, timezone
+        f = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8")
+        now = datetime.now(timezone.utc)
+        for i, (prov, status) in enumerate(rows):
+            f.write(json.dumps({"t": (now - timedelta(seconds=i * 10)).isoformat(),
+                                "provider": prov, "status": status,
+                                "model": "m", "req": "%s/m" % prov}) + "\n")
+        f.close()
+        return f.name
+
+    def test_ratio_blocks_only_bad_provider(self):
+        import os
+        from datetime import datetime, timedelta, timezone
+        path = self._write([("dumate", "429")] * 6 + [("workbuddy", "200")] * 6)
+        old = os.environ.get("MAGPIE_USAGE_PATH")
+        os.environ["MAGPIE_USAGE_PATH"] = path
+        try:
+            mc._err_cache = (0.0, {})
+            errs = mc.recent_failures()
+            blocked = mc._error_blocked(errs)
+        finally:
+            mc._err_cache = (0.0, {})
+            if old is None:
+                os.environ.pop("MAGPIE_USAGE_PATH", None)
+            else:
+                os.environ["MAGPIE_USAGE_PATH"] = old
+            os.unlink(path)
+        self.assertEqual(errs["dumate"]["ratio"], 1.0)
+        self.assertEqual(errs["workbuddy"]["ratio"], 0.0)
+        self.assertIn("dumate", blocked)
+        self.assertNotIn("workbuddy", blocked)
+
+    def test_missing_ledger_is_not_a_block(self):
+        import os
+        old = os.environ.get("MAGPIE_USAGE_PATH")
+        os.environ["MAGPIE_USAGE_PATH"] = "/nonexistent/usage.jsonl"
+        try:
+            mc._err_cache = (0.0, {})
+            errs = mc.recent_failures()
+        finally:
+            mc._err_cache = (0.0, {})
+            if old is None:
+                os.environ.pop("MAGPIE_USAGE_PATH", None)
+            else:
+                os.environ["MAGPIE_USAGE_PATH"] = old
+        self.assertEqual(errs, {})
+        self.assertEqual(mc._error_blocked(errs), {})
+
+    def test_degraded_provider_is_excluded_from_tiers(self):
+        with mock.patch.object(mc, "models", lambda ttl=None: (self._models(), "")), \
+                mock.patch.object(mc, "provider_health",
+                                  lambda ttl=None: (_fake_health(blocked=("dumate",)), "")):
+            tiers, err = mc.derive_tiers()
+            self.assertEqual(err, "")
+            self.assertFalse(any(m.startswith("dumate/")
+                                 for v in tiers.values() for m in v))
+
+    @staticmethod
+    def _models():
+        return [
+            {"id": "dumate/a-flash", "pricing": {"prompt": "0.0000001"}},
+            {"id": "raccoon/a-flash", "pricing": {"prompt": "0.0000002"}},
+            {"id": "raccoon/b", "pricing": {"prompt": "0.000002"}},
+        ]
+
+
+class TestFlashTilt(unittest.TestCase):
+    """flash 倾斜（2026-11-27 用户令）：t1 全 flash、t2 2 flash、t3 质量优先且档间不重复。"""
+
+    def test_off_is_unchanged(self):
+        env = {k: v for k, v in os.environ.items() if k != "TASK_TIERS_FLASH_FIRST"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(mc, "models", lambda ttl=None: (_FAKE_MODELS, "")), \
+                mock.patch.object(mc, "provider_health",
+                                  lambda ttl=None: (_fake_health(), "")):
+            tiers, err = mc.derive_tiers()
+            self.assertEqual(err, "")
+            self.assertFalse(mc._flash_first())
+
+    def test_on_fills_flash_and_dedupes(self):
+        env = dict(os.environ)
+        env["TASK_TIERS_FLASH_FIRST"] = "on"
+        # 三个 flash 候选（dumate 两个 + raccoon 一个），保证 t1 能装满三席
+        fake = _FAKE_MODELS + [
+            {"id": "raccoon/raccoon-flash", "pricing": {"prompt": "0.0000003"}},
+            {"id": "dumate/dumate-flash", "pricing": {"prompt": "0.0000002"}},
+            {"id": "dumate/dumate-flash2", "pricing": {"prompt": "0.0000004"}},
+        ]
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(mc, "models", lambda ttl=None: (fake, "")), \
+                mock.patch.object(mc, "provider_health",
+                                  lambda ttl=None: (_fake_health(), "")):
+            tiers, err = mc.derive_tiers()
+            self.assertEqual(err, "")
+            flat = [m for v in tiers.values() for m in v]
+            self.assertEqual(len(flat), len(set(flat)), "档间不许重复")
+            self.assertTrue(all(mc.is_flash(m) for m in tiers["t1"]))
+            # t3 首项必须是质量项（非 flash），不能为省钱把难题也压到 flash
+            self.assertFalse(mc.is_flash(tiers["t3"][0]))
+
+    def test_partial_tiers_are_rejected(self):
+        env = dict(os.environ)
+        env["TASK_TIERS_FLASH_FIRST"] = "on"
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(mc, "models",
+                                  lambda ttl=None: ([{"id": "dumate/x"}], "")), \
+                mock.patch.object(mc, "provider_health",
+                                  lambda ttl=None: ({"dumate": {"state": "ok", "reason": ""}}, "")):
+            tiers, err = mc.derive_tiers()
+            self.assertIsNone(tiers)
+            self.assertIn("不完整", err)
 
 
 class TestTiercfgWiring(unittest.TestCase):

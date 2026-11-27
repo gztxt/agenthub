@@ -50,6 +50,8 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
+import gwurl
+
 #: 与 `llm.py` 共用同一个网关与凭据（`.env` 的 MANAGER_LLM_*），零新增凭据。
 BASE_URL = os.getenv("MANAGER_LLM_BASE_URL", "http://127.0.0.1:3425").rstrip("/")  # 2026-11-17：CCR 下线→magpie
 API_KEY = os.getenv("MANAGER_LLM_API_KEY", "")
@@ -110,7 +112,9 @@ def _post(body: Dict[str, Any], timeout_s: float) -> Dict[str, Any]:
     headers = {"Content-Type": "application/json"}
     if API_KEY:
         headers["Authorization"] = "Bearer " + API_KEY
-    req = urllib.request.Request(BASE_URL + "/v1/chat/completions",
+    # 2026-11-27：`.env` 的 MANAGER_LLM_BASE_URL 已含 `/v1`，原来的硬拼会打成
+    # `/v1/v1/chat/completions`（网关 404）⇒ judge 一直静默降级。归一交给 gwurl。
+    req = urllib.request.Request(gwurl.chat_completions(BASE_URL),
                                  data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
                                  headers=headers)
     with urllib.request.urlopen(req, timeout=max(1.0, timeout_s)) as resp:

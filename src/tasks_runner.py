@@ -11,6 +11,7 @@ import inspect
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -451,6 +452,60 @@ async def _attach_retrieval(run_id: str, row: dict, prompt: str, exec_agent: str
     return prompt
 
 
+#: 已调度过的 run（进程内去重：同一 run 可能被重试/重拆反复收敛）。
+_cost_scheduled: set = set()
+
+#: 回填开关（用户令 2026-11-27：「成本自动回填」）。off 时只保留手动端点。
+_COST_AUTOFILL = ("1", "true", "yes", "on")
+
+
+def _cost_autofill_enabled() -> bool:
+    return (os.getenv("COST_AUTOFILL", "on") or "on").strip().lower() in _COST_AUTOFILL
+
+
+def _schedule_cost_backfill(run_id: str) -> None:
+    """run 收敛后在后台线程回填 magpie 账本成本（幂等，失败重试 1 次）。
+
+    为什么后台线程而不是 await：
+      ① 账本 `usage.jsonl` 落盘比 hub 记账晚 1~3 秒，立即读会得到「无候选」；
+      ② 回填要读 4.6MB 账本，同步做会把 run 收尾拖慢；
+      ③ `db` 是 `check_same_thread=False` + 全局锁（`src/db.py:288/385`），
+         后台线程写库是既有支持的用法，不是新开一条通道。
+    为什么去重：重拆/重试会让同一 run_id 多次收敛，重复调度只是白读账本。
+    """
+    if not _cost_autofill_enabled():
+        return
+    if run_id in _cost_scheduled:
+        return
+    _cost_scheduled.add(run_id)
+
+    def _work() -> None:
+        import time
+        try:
+            import cost_backfill
+        except Exception as e:  # noqa: BLE001
+            log.warning("[cost] 回填模块不可用：%s: %s", type(e).__name__, e)
+            return
+        for attempt, delay in ((1, 3.0), (2, 8.0)):
+            time.sleep(delay)
+            try:
+                out = cost_backfill.backfill_run(db, run_id)
+            except Exception as e:  # noqa: BLE001
+                log.warning("[cost] run=%s 第 %d 次回填异常：%s: %s",
+                            run_id, attempt, type(e).__name__, e)
+                continue
+            if out.get("updated"):
+                log.info("[cost] run=%s 回填 %d/%d（read_error=%s）",
+                         run_id, out["updated"], out.get("total"), out.get("read_error") or "-")
+                return
+            if attempt == 2:
+                log.info("[cost] run=%s 无可回填候选（%s）", run_id,
+                         (out.get("tasks") or [{}])[0].get("reason") or "-")
+
+    threading.Thread(target=_work, name="cost-backfill-%s" % run_id[:8],
+                     daemon=True).start()
+
+
 async def _settle_self_failure(run_id: str, row: dict, result: dict, attempts_done: int,
                              exec_agent: str, exec_model, dur: int, spent_tokens: int,
                              used_model) -> bool:
@@ -800,6 +855,12 @@ async def _execute_run(run_id: str):
                 # run 收尾必扫孤儿：2026-11-03 实测一条 run 在 01:53 已闭合，它派出的
                 # `claude -p`（PPID=hub）43 分钟后仍在跑并持续读写仓库 —— 产物无人收集，
                 # token 照烧。`_kill_group` 只覆盖超时分支，run 整体收敛时没有任何一处收子进程。
+                # 2026-11-27（T3）：run 收敛即回填真实成本。放 return 前最后一步 ——
+                # 账本写入与 hub 记账有秒级错位，由后台线程等几秒再读，绝不阻塞收尾。
+                try:
+                    _schedule_cost_backfill(run_id)
+                except Exception:  # noqa: BLE001 —— 回填是增强，不许带倒 run 收尾
+                    pass
                 try:
                     import adapters.cli_agent as _cli
                     killed = _cli.reap_orphans(os.getpid())

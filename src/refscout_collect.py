@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 import chain_judge
 import db
 import llm
+import gwurl
 import outbound
 import tdai_client
 import ghsettings
@@ -297,7 +298,7 @@ def _llm_text(prompt: str, model: str, timeout: int, max_tokens: int=1800) -> Tu
     if not key:
         return ('', 'no-key', '')
     body = json.dumps({'model': model, 'max_tokens': max_tokens, 'messages': [{'role': 'user', 'content': prompt}]}).encode()
-    req = urllib.request.Request(f'{base}/v1/messages', data=body, headers={'Content-Type': 'application/json', 'anthropic-version': '2023-06-01', 'Authorization': f'Bearer {key}'})
+    req = urllib.request.Request(gwurl.messages(base), data=body, headers={'Content-Type': 'application/json', 'anthropic-version': '2023-06-01', 'Authorization': f'Bearer {key}'})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.load(resp)

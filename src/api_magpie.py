@@ -95,6 +95,20 @@ def magpie_ui(request: Request,
 _summary_cache: dict[str, tuple[float, dict]] = {}
 
 
+@router.get("/api/magpie/status")
+def magpie_status():
+    """magpie 只读互调状态（模型数 / 各 provider 额度 / 被挡原因 / 档位来源）。
+
+    2026-11-27（T4）从 `tasks.py` 迁来：magpie 相关出口只留一个模块，
+    避免同一份状态有两个实现各自漂移。
+    """
+    import magpie_client
+    import tiercfg
+    out = magpie_client.status()
+    out["tiers_source"] = tiercfg.tiers_source()
+    return out
+
+
 def _read_json(base: str, path: str) -> dict:
     """Read a magpie web API with the page key's cookie (two steps: root, then API)."""
     jar = http.cookiejar.CookieJar()

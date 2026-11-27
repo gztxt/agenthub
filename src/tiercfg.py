@@ -35,6 +35,7 @@
 （`TASK_TIERS` 全量可覆盖，代码里不留第二份真值）。
 """
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 #: 默认档位。ID 必须在网关清单里（运行时逐个校验，不在就跳过并给原因）。
@@ -64,14 +65,102 @@ def _env(name: str, default: str = "") -> str:
     return (os.getenv(name) or default).strip()
 
 
-def parse_tiers(raw: Optional[str] = None) -> Dict[str, List[str]]:
+#: 派生档位的进程内缓存（秒）。网关清单本身已有 TTL，这里是二次保险：
+#: `parse_tiers()` 在每次 `/api/tasks/tiers`、每次拆解、每个子任务上都会被调用，
+#: 不加缓存会变成对网关的忙轮询。
+_DERIVE_TTL_S = 60.0
+_derive_cache: Tuple[float, Dict[str, List[str]], str] = (0.0, {}, "")
+
+
+def _derived_tiers() -> Dict[str, List[str]]:
+    """从 magpie 派生档位；失败返回 `{}`（调用方回落 DEFAULT_TIERS）。"""
+    global _derive_cache
+    now = time.monotonic()
+    ts, tiers, _why = _derive_cache
+    if tiers and (now - ts) < _DERIVE_TTL_S:
+        return {k: list(v) for k, v in tiers.items()}
+    try:
+        import magpie_client
+        derived, why = magpie_client.derive_tiers()
+    except Exception as e:  # noqa: BLE001 —— 派生是增强，任何异常都不许打死派发
+        derived, why = None, "%s: %s" % (type(e).__name__, e)
+    if not derived:
+        _derive_cache = (now, {}, why or "empty")
+        return {}
+    _derive_cache = (now, derived, "")
+    return {k: list(v) for k, v in derived.items()}
+
+
+#: 真值开关（与 _OFF 互补）。
+_ON = ("1", "true", "yes", "on")
+
+
+_quota_last_error = ""
+
+
+def quota_gate_enabled() -> bool:
+    return (_env("TASK_QUOTA_GATE", "off") or "off").lower() in _ON
+
+
+def blocked_providers() -> Dict[str, str]:
+    """额度闸门：被挡 provider → 原因。开关关闭或读不到额度 ⇒ `{}`（不猜）。
+
+    语义：**读不到额度不挡**（不把“不知道”当“没额度”），但会在
+    `/api/tasks/tiers` 的 `tiers_source` 里明确写出降级原因。
+    """
+    global _quota_last_error
+    if not quota_gate_enabled():
+        return {}
+    try:
+        import magpie_client
+        blocked, why = magpie_client.blocked_providers()
+    except Exception as e:  # noqa: BLE001 —— 闸门是增强，任何异常都不许打死派发
+        _quota_last_error = "quota_gate:%s" % type(e).__name__
+        return {}
+    if blocked is None:
+        # 读不到额度 === 不知道，不挡模型，但把原因留在 tiers_source 里。
+        _quota_last_error = why or "quotas_unavailable"
+        return {}
+    _quota_last_error = ""
+    return blocked
+
+
+def tiers_source() -> dict:
+    """给 `/api/tasks/tiers` 的一段：当前档位来自哪里、派生失败原因。"""
+    src = (_env("TASK_TIERS_SOURCE", "") or "off").lower()
+    out = {"source": src, "derived_reason": "",
+           "quota_gate": "on" if quota_gate_enabled() else "off",
+           "blocked_providers": blocked_providers(),
+           "quota_error": _quota_last_error}
+    if src == "magpie":
+        d = _derived_tiers()
+        out["derived"] = d
+        out["derived_reason"] = "" if d else (_derive_cache[2] or "unknown")
+    return out
+
+
+def parse_tiers(raw: Optional[str] = None, source: Optional[str] = None) -> Dict[str, List[str]]:
     """`t1=a,b;t2=c` → `{"t1": ["a","b"], "t2": ["c"]}`。
 
     格式错（没有 `=`、档位名为空）**整条忽略该项而不是整表丢弃**：
     一个手抖的档位不该让其余档位一起失效。
+
+    2026-11-27（magpie 互调 P1）：新增派生源。优先级从高到低：
+      1. `raw` 显式传入（含空串）——调用方说了算；
+      2. `TASK_TIERS` 环境变量非空——手写清单；
+      3. `TASK_TIERS_SOURCE=magpie`——从网关清单派生（每档每个可用 provider 一个代表）；
+      4. `DEFAULT_TIERS` 写死值（**kill switch**，派生失败也落回这里）。
+    派生是“声明不是测量”：档位顺序仍需 `audit` 用真实 verdict 校验。
     """
+    from_env = raw is None
     raw = _env("TASK_TIERS", "") if raw is None else raw
     if not raw:
+        if from_env:
+            src = (_env("TASK_TIERS_SOURCE", "") if source is None else source).lower()
+            if src == "magpie":
+                derived = _derived_tiers()
+                if derived:
+                    return derived
         return {k: list(v) for k, v in DEFAULT_TIERS.items()}
     out: Dict[str, List[str]] = {}
     for part in raw.split(";"):
@@ -273,19 +362,34 @@ def tier_for(difficulty: int, mapping: Optional[Dict[int, str]] = None,
 
 
 def first_usable(tier: str, tiers: Dict[str, List[str]],
-                 catalog: Optional[set], checked: bool) -> Tuple[Optional[str], str]:
+                 catalog: Optional[set], checked: bool,
+                 blocked: Optional[Dict[str, str]] = None
+                 ) -> Tuple[Optional[str], str]:
     """该档位下第一个**在清单里**的模型。返回 `(model, reason)`。
 
-    `checked=False`（清单取不到）⇒ 不返回任何模型：这时"选一个"与"编一个"没区别。
+    `checked=False`（清单取不到）⇒ 不返回任何模型：这时“选一个”与“编一个”没区别。
+
+    2026-11-27（magpie 互调 P2）：`blocked` = {provider: 原因}。被挡 provider 的模型
+    跳过并记 `provider_blocked:<prov>`；**一个都不剩时**才回 `all_provider_blocked`，
+    并把被挡原因按优先级带出去（不能报“没模型”而隐去“为什么没”）。
     """
     ids = tiers.get(tier) or []
     if not ids:
         return None, "tier_empty"
     if not checked or catalog is None:
         return None, "catalog_unavailable"
+    blocked = blocked or {}
+    skipped: List[str] = []
     for m in ids:
-        if m in catalog:
-            return m, "ok"
+        if m not in catalog:
+            continue
+        prov = m.split("/")[0] if "/" in m else ""
+        if prov and prov in blocked:
+            skipped.append(prov)
+            continue
+        return m, "ok"
+    if skipped:
+        return None, "provider_blocked:%s" % ",".join(dict.fromkeys(skipped))
     return None, "no_tier_model_in_catalog"
 
 
@@ -312,6 +416,8 @@ def plan(items: List[dict], *, catalog: Optional[set], checked: bool,
     top = order_[-1] if order_ else ""
 
     pool = pool if pool is not None else set()
+    # 2026-11-27（P2 额度闸门）：被挡 provider 只影响**选模型**，不影响选执行者。
+    blocked = blocked_providers()
     a_cfg = parse_agent_tiers() if agent_tiers is None else agent_tiers
     a_floor = parse_agent_floor() if agent_floor is None else agent_floor
     stats: Dict[str, int] = {}
@@ -338,7 +444,7 @@ def plan(items: List[dict], *, catalog: Optional[set], checked: bool,
         pinned = it.get("pinned_tier")
         if pinned:
             tier = pinned if pinned in order_ else top
-            model, why = first_usable(tier, tiers, catalog, checked)
+            model, why = first_usable(tier, tiers, catalog, checked, blocked)
             it.update(tier=tier, model_planned=model, tier_reason="pinned:%s" % why)
         elif it.get("model"):
             it.update(tier="explicit", model_planned=it["model"], tier_reason="explicit")
@@ -347,7 +453,7 @@ def plan(items: List[dict], *, catalog: Optional[set], checked: bool,
                       tier_reason="agent_model_domain_not_ccr")
         else:
             tier = tier_for(it.get("difficulty") or 2, mapping, floors, tiers)
-            model, why = first_usable(tier, tiers, catalog, checked)
+            model, why = first_usable(tier, tiers, catalog, checked, blocked)
             it.update(tier=tier or None, model_planned=model, tier_reason=why)
 
         key = it["tier_reason"] or "unknown"
@@ -358,7 +464,10 @@ def plan(items: List[dict], *, catalog: Optional[set], checked: bool,
                    "agent_counts": astats,
                    "agent_order": sorted(a_cfg.keys(), key=_rank_letter),
                    "agent_tiers": {k: list(v) for k, v in a_cfg.items()},
-                   "agent_floor": {str(k): v for k, v in sorted(a_floor.items())}}
+                   "agent_floor": {str(k): v for k, v in sorted(a_floor.items())},
+                   "quota_gate": {"enabled": quota_gate_enabled(),
+                                  "blocked": blocked,
+                                  "error": _quota_last_error}}
 
 
 # ── 执行者档位：本机唯一**真的会改变能力**的那根杠杆 ──────────────────────

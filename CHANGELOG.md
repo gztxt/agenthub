@@ -1,3 +1,51 @@
+## v0.13.215 — 协同改造波 1：flash 倾斜 / 实时错误窗 / 成本自动回填（2026-11-27）
+
+> 用户令：`TASK_TIERS_SOURCE` 转默认 magpie、`TASK_QUOTA_GATE` 转 on、成本自动回填、
+> **提高 flash 模型占用比例**。计划 `docs/MAGPIE-INTEROP-2-20261127.md`。
+
+| 改动 | 文件 | 判据 |
+|---|---|---|
+| flash 倾斜 | `src/magpie_client.py::derive_tiers` | t1 全 flash / t2 两 flash / t3 质量优先；实测 6/9 = 67%（基线 45.1%）；`TASK_TIERS_FLASH_FIRST=off` 时逐字回原分支 |
+| 实时错误窗 | `magpie_client.recent_failures()` + `_error_blocked()` | 近 10 分钟 fail ≥3 且占比 ≥0.5 ⇒ provider 标 `degraded`；读不到账本不挡 |
+| 成本自动回填 | `src/tasks_runner.py::_schedule_cost_backfill` | run 收敛后后台线程回填；实测 run `1a61a07531` 3/3（t3 exact 12.53 credits） |
+| 观测内联 | `tasks.py` `/api/tasks/pool` 增 `magpie` 段；`/api/magpie/status` 迁 `api_magpie.py` | 协同页一次取齐，少 3 个请求 |
+| 开关转默认 | `.env`（备份 `.env.bak-*-interop-defaults`） | `TASK_TIERS_SOURCE=magpie` / `TASK_QUOTA_GATE=on` / `TASK_TIERS_FLASH_FIRST=on` |
+
+**事故与修复（当天）**：dumate 上游 429，每次重试耗 38 秒，额度闸门只看额度 ⇒ run `500d58fd52`
+卡死 4 分钟（已 cancel）。修法为 provider 级实时错误窗，**不动** hub 的模型回退判据
+（429 不换模型是既定设计，避免把上游限流误判成模型问题）。
+
+**测试**：`tests/test_magpie_interop_l0.py` 27 例（含 flash 配额 / 错误窗 / 档间去重 / 回填匹配）。
+
+## v0.13.214 — agenthub × magpie 只读互调：模型池派生 / 额度闸门 / 成本回填（2026-11-27）
+
+> 用户裁定：「**不是合并代码，只是功能模块和数据存储互相调用**」。
+> 计划 `docs/MAGPIE-INTEROP-20261127.md`，执行日志 `docs/MAGPIE-INTEROP-LOG-20261127.md`，
+> 判例 `agent-knowledge/877`。magpie 侧**零改动**。
+
+**缺口（实测）**：派发池写死 6 条全 `workbuddy/*`，网关实际 53 模型 / 4 provider
+（workbuddy、raccoon、dumate、auto）⇒ 88% 模型不可选、raccoon/dumate 额度不可见，全程无报错。
+
+| 链 | 实现 | 开关（默认关） |
+|---|---|---|
+| L1 目录 | `src/magpie_client.py::derive_tiers()` → `tiercfg.parse_tiers()` | `TASK_TIERS_SOURCE=magpie` |
+| L2 额度 | `tiercfg.first_usable(blocked=…)` 跳过耗尽 provider | `TASK_QUOTA_GATE=on` |
+| L3 成本 | `src/cost_backfill.py` 读 `usage.jsonl` 回填 `credits/ttft_ms` | 手动端点 |
+| L4 反查 | `GET /api/tasks/costs?group_by=…`、`GET /api/magpie/status` | 无 |
+
+**顺带修掉的既存故障**：`.env` 两个网关 base 约定不同（`CLAUDE_CCR_URL` 裸主机 /
+`MANAGER_LLM_BASE_URL` 含 `/v1`），2 个消费方硬拼 `/v1/...` ⇒ `/v1/v1/chat/completions` 404，
+judge 静默降级（journal `judge_fail kind=chain`）。新增 `src/gwurl.py` 归一，
+`remote_judge` / `refscout_collect` 接入；实测修后 200。
+
+**闸门语义**：`remaining` 是百分比；同 provider 一张卡报错不算不可用；
+**读不到额度不挡**（不把「不知道」当「没额度」）。
+
+**成本可信度**：`exact`（时间窗内唯一同模型）/ `approx`（多条或后缀匹配）/ `none`（写 NULL，不写 0）。
+实测 run 908a6cd0ae：t1 `approx` 4.96 credits、t2 `exact` 5.44 credits。
+
+**测试**：`tests/test_magpie_interop_l0.py` 13 例（gwurl 归一 / 额度判定 / 派生 / 开关回落 / 成本三档）。
+
 ## v0.13.213 — nanobot 应用模块（CLI Apps）字节级迁入 + 全 agent 可调用（2026-11-25）
 
 > 用户令：「nanobot 的应用功能模块 整个模块字节级复制到 agenthub 的基础设施」

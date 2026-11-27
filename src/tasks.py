@@ -245,8 +245,23 @@ async def dispatch_pool():
     """
     import registry, tiercfg as tierlib
     status = registry.adapter_status()
+    # 2026-11-27（T4）：协同页一次取齐 —— 网关模型数/各 provider 额度/被挡原因/
+    # 档位来源都随池子下发，前端不必再发 3 个请求去拼。读不到时带 error 字段，
+    # 不用空对象冒充「一切正常」。
+    try:
+        import magpie_client
+        mstatus = magpie_client.status()
+        magpie = {"models": mstatus.get("models"),
+                  "models_error": mstatus.get("models_error") or "",
+                  "providers": mstatus.get("providers") or {},
+                  "blocked": mstatus.get("blocked") or {},
+                  "error": mstatus.get("quotas_error") or ""}
+    except Exception as e:  # noqa: BLE001 —— 观测段失败不得让池子 500
+        magpie = {"error": "%s: %s" % (type(e).__name__, e)}
     return {"ids": registry.dispatchable_ids(), "agents": status,
             "tiers": tierlib.parse_tiers(),
+            "tiers_source": tierlib.tiers_source(),
+            "magpie": magpie,
             # 2026-11-03：轮次档位与硬上限的**唯一真值**（前端下拉只渲染这份，
             # 不另存 [1,2,3,5]，否则后端调上限时前端仍挂旧档）。
             "rounds": {"choices": list(_tiers.ROUND_CHOICES),
@@ -335,6 +350,9 @@ async def dispatch_tiers():
             verdict = "难度与首轮成功率极差 %.3f（n≥10 的各档），映射值得保留并继续观察" % spread
 
     return {"ok": True, "order": tierlib.order(cfg), "tiers": cfg,
+            # 2026-11-27（magpie 互调 P1）：「这六条是写死的还是从网关派的」必须可读，
+            # 否则调了 TASK_TIERS_SOURCE 也看不出到底生效没有。
+            "tiers_source": tierlib.tiers_source(),
             "mapping": {str(k): v for k, v in sorted(mapping.items())},
             "floors": {str(k): v for k, v in sorted(tierlib.DEFAULT_FLOORS.items())},
             "catalog": {"checked": checked, "size": len(ids)},
@@ -729,6 +747,71 @@ async def run_chain(run_id: str):
     order.sort(key=lambda x: (x.get("round") or 1, x.get("created_at") or ""))
     return {"run_id": run_id, "chain": order, "rounds": len(order),
             "ceiling": _tiers.ROUNDS_CEILING}
+
+
+# ── 2026-11-27：magpie 互调（成本回填 + 反查）──────────────────────────────
+# 数据真源：magpie 的 usage.jsonl（账本）。hub 只读、只回填，不写 magpie。
+# 计划与执行日志：docs/MAGPIE-INTEROP-20261127.md / docs/MAGPIE-INTEROP-LOG-20261127.md
+
+@router.post("/api/tasks/{run_id}/cost-backfill")
+async def cost_backfill_run(run_id: str):
+    """把 magpie 账本里的真实成本回填到该 run 的 tasks。
+
+    为什么不做成「run 结束自动回填」：账本写入与 hub 记账有秒级错位，
+    自动回填会把「暂时还没落账」写成 `none`，此后不会重试。手动/定时回填可重跑。
+    """
+    import cost_backfill
+    row = db.query("SELECT 1 FROM tasks WHERE run_id=? LIMIT 1", (run_id,))
+    if not row:
+        raise HTTPException(404, "run not found")
+    out = cost_backfill.backfill_run(db, run_id)
+    return out
+
+
+@router.get("/api/tasks/costs")
+async def task_costs(run_id: str = Query(default=""),
+                     group_by: str = Query(default="run")):
+    """任务成本反查：run / agent / model / provider 四个维度。
+
+    只报**已回填**的成本；`cost_confidence` 原样带出（exact / approx），
+    不把近似值当精确值展示。未回填的任务不计入分母，另报 `unmatched`。
+    """
+    import cost_backfill
+    cost_backfill.ensure_schema(db)
+    key = (group_by or "run").strip().lower()
+    if key not in ("run", "agent", "model", "provider"):
+        raise HTTPException(400, "group_by 只支持 run|agent|model|provider")
+    model_expr = "COALESCE(NULLIF(t.model,''), NULLIF(t.model_planned,''), '')"
+    if key == "run":
+        sel = "t.run_id AS k"
+    elif key == "agent":
+        sel = "COALESCE(NULLIF(t.agent_id,''), '?') AS k"
+    elif key == "model":
+        sel = model_expr + " AS k"
+    else:
+        sel = ("CASE WHEN instr(" + model_expr + ", '/') > 0 THEN"
+               " substr(" + model_expr + ", 1, instr(" + model_expr + ", '/') - 1)"
+               " ELSE '?' END AS k")
+    where = "WHERE t.cost_confidence IN ('exact','approx')"
+    args = []
+    if run_id:
+        where += " AND t.run_id=?"
+        args.append(run_id)
+    rows = db.query(
+        "SELECT " + sel + ", COUNT(*) n,"
+        " SUM(COALESCE(t.credits,0)) credits,"
+        " SUM(CASE WHEN t.cost_confidence='exact' THEN 1 ELSE 0 END) exact_n,"
+        " SUM(CASE WHEN t.cost_confidence='approx' THEN 1 ELSE 0 END) approx_n,"
+        " SUM(COALESCE(t.spent_tokens,0)) tokens,"
+        " CAST(AVG(t.ttft_ms) AS INTEGER) ttft_avg_ms,"
+        " SUM(COALESCE(t.duration_ms,0)) ms"
+        " FROM tasks t " + where + " GROUP BY k ORDER BY credits DESC, n DESC", tuple(args))
+    unmatched = db.query(
+        "SELECT COUNT(*) n FROM tasks t WHERE COALESCE(t.cost_confidence,'')=''"
+        + (" AND t.run_id=?" if run_id else ""), tuple(args))[0]["n"]
+    return {"ok": True, "group_by": key, "run_id": run_id or None,
+            "rows": rows, "unmatched": int(unmatched or 0),
+            "note": "credits 来自 magpie 账本；exact=时间窗内唯一同模型调用，approx=多条或后缀匹配"}
 
 
 @router.get("/api/tasks/{run_id}")

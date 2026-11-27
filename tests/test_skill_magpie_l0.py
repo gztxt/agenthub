@@ -42,6 +42,9 @@ class TestLibraryMap(unittest.TestCase):
         ])
         old = os.environ.get("MAGPIE_LIBRARY")
         os.environ["MAGPIE_LIBRARY"] = path
+        mc._lib_cache = (0.0, {}, "")   # 2026-11-28：读之前清缓存。
+        # 旧实现只在 finally 里清 ⇒ 全量跑时若前面有用例刚读过真库（TTL 内），
+        # 这里拿到的是**真库**路径列表，断言失败且报错指向「映射不对」而非缓存。
         try:
             m, why = mc.library_skills_map()
         finally:

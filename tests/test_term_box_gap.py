@@ -32,6 +32,8 @@
 """
 import re
 import unittest
+
+from _narrow_media import block_containing
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -105,8 +107,8 @@ class MainPaddingNarrowedTest(unittest.TestCase):
         窄屏原基准是 8px 而非 12/16，所以**不是同一个绝对值** —— 写成 4.8/6.4
         会让窄屏只缩到 40%×(8/12)，不是用户要的 60%。
         """
-        m = re.search(r"@media \(max-width: 767px\) \{(.*?)\n        \}", HTML, re.S)
-        self.assertIsNotNone(m, "找不到窄屏 @media 块")
+        # 2026-11-28：按「块里实际含 --main-pad-y」定位，不再取第一个 767 块
+        narrow_body = block_containing(HTML, "--main-pad-y", what="窄屏 padding 基准")
         bodies = _rules("main")
         narrow = [b for b in bodies if "--main-pad" in b and b != bodies[0]]
         self.assertTrue(narrow, "窄屏档没有覆盖 --main-pad-*")
@@ -117,7 +119,7 @@ class MainPaddingNarrowedTest(unittest.TestCase):
                            [(_decl(b, "--main-pad-y"), _decl(b, "--main-pad-x"))
                             for b in narrow]))
         # 且窄屏那条必须在 @media 块内，否则宽屏也会拿到 3.2
-        self.assertIn("--main-pad-y: %s" % NARROW["y"], m.group(1),
+        self.assertIn("--main-pad-y: %s" % NARROW["y"], narrow_body,
                       "窄屏基准不在窄屏 @media 块内 ⇒ 宽屏会被误改成 3.2px")
 
     def test_padding_token_is_single_sourced(self):

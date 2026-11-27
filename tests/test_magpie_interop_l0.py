@@ -96,6 +96,17 @@ def _fake_health(blocked=()):
 
 
 class TestDeriveTiers(unittest.TestCase):
+    def setUp(self):
+        # 2026-11-28：本类断言的是 **flash 倾斜关闭时**的老分支。生产 `.env` 里有
+        # `TASK_TIERS_FLASH_FIRST=on`，`src/config` 导入时会把它灌进 os.environ
+        # ⇒ 全量跑走到 flash 分支（t2/t3 装满 flash 后报「档位不完整」）而假红；
+        # 单跑（未加载 .env）才是老分支。所以在类级别钉住 off，不依赖环境巧合。
+        _p = mock.patch.dict(os.environ,
+                             {k: v for k, v in os.environ.items()
+                              if k != "TASK_TIERS_FLASH_FIRST"}, clear=True)
+        _p.start()
+        self.addCleanup(_p.stop)
+
     def test_excludes_routing_groups_and_blocked(self):
         with mock.patch.object(mc, "models", lambda ttl=None: (_FAKE_MODELS, "")), \
                 mock.patch.object(mc, "provider_health",
@@ -122,6 +133,16 @@ class TestDeriveTiers(unittest.TestCase):
 
 
 class TestErrorWindow(unittest.TestCase):
+    def setUp(self):
+        # 2026-11-28：本类断言的是 **flash 倾斜关闭时**的老分支。生产 `.env` 里有
+        # `TASK_TIERS_FLASH_FIRST=on`，`src/config` 导入时会把它灌进 os.environ
+        # ⇒ 全量跑走到 flash 分支（t2/t3 装满 flash 后报「档位不完整」）而假红；
+        # 单跑（未加载 .env）才是老分支。所以在类级别钉住 off，不依赖环境巧合。
+        _p = mock.patch.dict(os.environ,
+                             {k: v for k, v in os.environ.items()
+                              if k != "TASK_TIERS_FLASH_FIRST"}, clear=True)
+        _p.start()
+        self.addCleanup(_p.stop)
     """实时错误窗（2026-11-27 事故：dumate 连续 429 每次 38 秒，闸门只看额度 ⇒ 派发卡死）。"""
 
     def _write(self, rows):

@@ -510,7 +510,19 @@ class TestFrontendQuartet(unittest.TestCase):
         i = self.js.find("async function loadAgents(")
         self.assertGreater(i, 0)
         seg = self.js[i:i + 2500]
-        for fn in renderers:
+        # 2026-11-28：判据按**数据源**收窄 —— 只有读全局 `AGENTS` 的渲染器才需要
+        # 在 loadAgents 里补画。`cbRenderAgents(pool)` 由 `/api/tasks/pool` 驱动
+        # （`cbEnterTasksPage` 里拉到 pool 后自己调，18-collab.js:322），
+        # 在 loadAgents 里补画既无参数可传也不该发生。按名字一刀切会把它误判成缺补画。
+        def _body(fn):
+            at = self.js.find(f"function {fn}(")
+            nxt = self.js.find("\nfunction ", at + 1)
+            return self.js[at:nxt if nxt > 0 else len(self.js)]
+
+        need = [fn for fn in renderers if re.search(r"\bAGENTS\b", _body(fn))]
+        self.assertGreaterEqual(len(need), 2,
+                                f"读 AGENTS 的渲染器实得 {need}（应至少 lp/gh 两个）")
+        for fn in need:
             self.assertIn(f"{fn}()", seg, f"{fn} 未在 loadAgents 的「清单到位」处补画")
 
     def test_start_posts_cwd(self):

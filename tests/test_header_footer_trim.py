@@ -24,6 +24,8 @@ import re
 import unittest
 from pathlib import Path
 
+from _narrow_media import block_containing
+
 _REPO = Path(__file__).resolve().parents[1]
 _HTML_RAW = (_REPO / "templates" / "index.html").read_text(encoding="utf-8")
 _JS_RAW = (_REPO / "static" / "hub" / "06-manager-tasks.js").read_text(encoding="utf-8")
@@ -145,9 +147,9 @@ class GithubLinkTest(unittest.TestCase):
         narrow-rail 那条同源的静默失效。
         """
         self.assertIn(".gh-link .gh-txt", HTML, "缺窄屏文字隐藏规则")
-        m = re.search(r"@media \(max-width: %dpx\) \{(.*?)\n        \}" % BREAKPOINT, HTML, re.S)
-        self.assertIsNotNone(m, "找不到窄屏 @media 块")
-        self.assertIn(".gh-link .gh-txt", m.group(1), "文字隐藏规则不在窄屏块内 ⇒ 宽屏也没地址")
+        # 2026-11-28：模板里有多个 767 块（按页面作用域写），取「哪个块含这条规则」而不是第一个
+        body = block_containing(HTML, ".gh-link .gh-txt", what="顶栏 GitHub 文字隐藏规则")
+        self.assertIn(".gh-link .gh-txt", body, "文字隐藏规则不在窄屏块内 ⇒ 宽屏也没地址")
 
     def test_visible_text_is_version_not_repo_name(self):
         """可见文字必须是版本号：`.gh-txt` 里既不许写死版本号，也不许留仓库名。

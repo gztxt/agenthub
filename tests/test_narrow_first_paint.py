@@ -28,6 +28,8 @@ import re
 import unittest
 from pathlib import Path
 
+from _narrow_media import block_containing
+
 _REPO = Path(__file__).resolve().parents[1]
 HTML = (_REPO / "templates" / "index.html").read_text(encoding="utf-8")
 
@@ -81,15 +83,15 @@ class NarrowFirstPaintTest(unittest.TestCase):
         """`html.narrow-rail .sidebar:not(.collapsed)` 必须落在窄屏块内。"""
         self.assertIn("html.narrow-rail .sidebar:not(.collapsed)", HTML,
                       "缺首帧图标条规则 ⇒ <head> 打的标记没人认")
-        m = re.search(r"@media \(max-width: 767px\) \{(.*?)\n        \}", HTML, re.S)
-        self.assertIsNotNone(m, "找不到窄屏 @media 块")
-        self.assertIn("html.narrow-rail .sidebar:not(.collapsed)", m.group(1),
+        m = block_containing(HTML, "html.narrow-rail .sidebar:not(.collapsed)",
+                             what="首帧图标条规则所属窄屏块")
+        self.assertIn("html.narrow-rail .sidebar:not(.collapsed)", m,
                       "narrow-rail 规则不在窄屏 @media 块内 ⇒ 宽屏也会被改成图标条")
 
     def test_real_drawer_rule_survives(self):
         """真正的「展开成抽屉」规则**必须还在** —— 首帧修复不得顺手改掉展开态。"""
-        m = re.search(r"@media \(max-width: 767px\) \{(.*?)\n        \}", HTML, re.S)
-        body = m.group(1)
+        body = block_containing(HTML, ".sidebar:not(.collapsed)",
+                                what="窄屏抽屉规则所属块")
         self.assertIn(".sidebar:not(.collapsed) { position: fixed;", body,
                       "窄屏抽屉规则被删了 ⇒ 用户点开侧栏将不再是覆盖式抽屉")
         self.assertIn("width: 236px", body, "抽屉宽度 236px 没了")
@@ -198,7 +200,7 @@ class NarrowFirstPaintTest(unittest.TestCase):
         （那会把「有意不匹配的类名」也一并炸出来，噪声大于收益）。
         以后往窄屏块里加选择器，就往这个列表里加一条。
         """
-        narrow_block = re.search(r"@media \(max-width: 767px\) \{(.*?)\n        \}", _code(), re.S).group(1)
+        narrow_block = block_containing(_code(), ".home-wrap", what="主页窄屏排版块")
         # 本批在窄屏块里新写的类选择器（不含 .sidebar / .header 等既有结构）
         NEW_SELECTORS = (".home-brand-txt", ".home-desc", ".home-kicker",
                          ".home-stat", ".home-wrap", ".only-wide", ".only-narrow")
@@ -276,7 +278,7 @@ class NarrowMemItemTest(unittest.TestCase):
     #: 一律从**剥掉注释**的模板里取窄屏块：注释里写着 `.mem-item > p { min-width: 0 }`
     #: 当反例，而正则会把它当成真规则扫进去 —— 本文件已经因此假红过一次
     #: （`localStorage` 只出现在「不碰 localStorage」这句注释里）。同一个坑不踩第二次。
-    NARROW = re.search(r"@media \(max-width: 767px\) \{(.*?)\n        \}", _code(), re.S).group(1)
+    NARROW = block_containing(_code(), ".mem-item", what="记忆条目窄屏块")
 
     def test_mem_item_wraps_at_narrow(self):
         self.assertRegex(self.NARROW, r"\.mem-item\s*\{[^}]*flex-wrap:\s*wrap",

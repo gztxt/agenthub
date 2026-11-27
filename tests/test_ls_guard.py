@@ -52,7 +52,8 @@ SHARDS_AFTER_RED = ["09-local-projects.js",
                     "10-github-projects.js", "11-resources.js", "12-activity.js",
                     "13-term-touch.js", "15-workbench.js",
                     "16-events-panel.js",
-                    "17-apps.js"]   # 2026-11-25：应用页分片
+                    "17-apps.js",   # 2026-11-25：应用页分片
+                    "18-collab.js"]  # 2026-11-27：协同页分片（v0.13.221 建、v0.13.222 扩）
 HUBJS = ROOT / "static" / "hub.js"   # 产物也一起纳入零丢行断言
 HUB = ROOT / "static" / "hub.js"
 TPL = ROOT / "templates" / "index.html"
@@ -302,7 +303,7 @@ class TestLsGuardStatic(unittest.TestCase):
                           "09-local-projects.js",
                           "10-github-projects.js", "11-resources.js", "12-activity.js",
                           "13-term-touch.js", "15-workbench.js",
-                          "16-events-panel.js", "17-apps.js"],
+                          "16-events-panel.js", "17-apps.js", "18-collab.js"],
                          "分片清单变了 ⇒ 逐文件计数与红基线要一起核")
 
     def test_R1_no_bare_localStorage_in_shards(self):

@@ -240,10 +240,13 @@ class TestScrollSensitivityPinned(unittest.TestCase):
     }
     #: v0.13.160：本轮改的是「记忆存储并入记忆中心」，不是终端滚动；版本钉的职责是
     #: 逼 bump 的人写清根因，所以照常跟版本号走。关键词取版本注释里实际写下的字句。
-    CURRENT_VERSION = "0.13.213"
+    CURRENT_VERSION = "0.13.223"   # 2026-11-28 跟上 main.py（此前停在 213 导致闸门恒红）
     #: v0.13.213：本轮改的是「nanobot CLI Apps 字节级迁入」，不是终端滚动；版本钉照常跟版本号走。
     #: 学到的：把上游模块**整套**搬进来时，md5 钉死（tests/test_cliapps_l0.py）才是
     #: 「字节级」的唯一证明；只比文件名/行数会在上游小改时假绿。
+    # 2026-11-28 补：0.13.223 的两条根因（关键字取自 main.py 该版注释原文）。
+    VERSION_ROOT_CAUSES["0.13.223"] = (
+        "兜底位换非 workbuddy 源", "派发产物落点三层强制", "TMPDIR", "事后搬运")
     VERSION_ROOT_CAUSES["0.13.213"] = (
         "agent-app.v1", "CLI Apps", "cli-app-", "vendor/cli_apps",
     )

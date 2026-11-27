@@ -235,7 +235,9 @@ class TestSysPagesLayout(unittest.TestCase):
         # 2026-10-25 v0.13.161：memFedSrcs 14→15（新增统一归档源 unified_archive）。
         # 这个钉子的职责是「前后端源清单同源」——后端 REGISTRY 加源时前端必须同步加，
         # 数字跟着源走，不是常量。
-        for sel, n in (("memFedSrcs", 15), ("kbRoutes", 5)):
+        # 2026-11-28：memFedSrcs 15→16（v0.13.220 的 magpie 长期记忆此前只进后端、
+        # 没进这个下拉 ⇒ 用户选不到；本次补上并同步这里）。
+        for sel, n in (("memFedSrcs", 16), ("kbRoutes", 5)):
             m = re.search(r'<select id="%s"[^>]*>(.*?)</select>' % sel, self.html, re.S)
             self.assertTrue(m, "#%s 原生 select 没了 ⇒ 数据源被换成自造状态" % sel)
             self.assertEqual(len(re.findall(r"<option", m.group(1))), n,

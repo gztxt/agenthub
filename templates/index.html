@@ -2268,6 +2268,9 @@
                                 <option value="local" selected>本地 L1</option>
                                 <option value="tdai" selected>TDAI L1</option>
                                 <option value="claude_mem" selected>claude-mem</option>
+                                <!-- v0.13.220 接入 magpie 长期记忆（第 8 路），此前只进后端没进这个下拉
+                                     ⇒ 用户选不到；test_center_ui_l0 的两条断言就是钉这个的 -->
+                                <option value="magpie_memory" selected>magpie 长期记忆</option>
                                 <option value="claude_projects" selected>claude 原生记忆</option>
                                 <option value="pi_sessions">pi 会话</option>
                                 <option value="codex_sessions">codex 会话</option>
@@ -3648,7 +3651,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=882cb16f';
+      var HUB_SRC = '/static/hub.js?v=ba02d213';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

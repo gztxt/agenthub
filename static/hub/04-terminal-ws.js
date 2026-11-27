@@ -368,7 +368,7 @@ async function cloudcliStart(path) {
  *   v0.9 设计系统「色相只出现在语义上」的约束；裸拼 `tag turbovec` 无 CSS 定义
  *   静默灰底的根因修复）。kb 路名短别名也入表（tdai/workspace/archived）。 */
 const SRC_ABBR = {
-  claude_mem: 'CM', claude_projects: 'CP', pi_sessions: 'PI', codex_sessions: 'CX',
+  magpie_memory: 'MG', claude_mem: 'CM', claude_projects: 'CP', pi_sessions: 'PI', codex_sessions: 'CX',
   codebuddy_sessions: 'CB',
   grok_memory: 'GK', hermes_memory: 'HM', workbuddy_memory: 'WB',
   workspace_files: 'WS', archived_sessions: 'AR', amr_memory: 'AM',

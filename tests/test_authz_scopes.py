@@ -40,7 +40,8 @@ class ScopeTable(unittest.TestCase):
         self.declared = set(authz.WRITE_ROUTE_SCOPES)
 
     def test_route_count_baseline(self):
-        self.assertEqual(len(self.routes), 112,
+        # 2026-11-28：112 → 113（`POST /api/tasks/{run_id}/cost-backfill` 补登 scope）
+        self.assertEqual(len(self.routes), 113,
                          "写路由数变了：新增/删除端点必须同步 authz.WRITE_ROUTE_SCOPES")
 
     def test_every_write_route_declared(self):

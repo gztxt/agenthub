@@ -228,6 +228,15 @@ def _structured_errors(stdout: str) -> List[str]:
     return out
 
 
+#: CLI 打到 stderr 的**非致命告警**：`[<agent>:<code>] {json}` 单行。
+#: 2026-11-28 实测（hub 适配器直调 claude-code）：标题生成子调用用
+#: `workbuddy/glm-5.3-flash[1m]` 时必打这一行，而主调用照常成功（exit 0 / 回文正常）。
+#: 旧实现把它当失败原因入库 ⇒ 库里 2 条任务的 error 只剩这行告警、真原因不可见
+#: （`exit:1: [claude-code:unrecognized_model] {...}`）。与 codex
+#: `Reading additional input from stdin...` 同族：**任何单个流都不得独占结论**。
+_AGENT_WARN_RE = re.compile(r"^\[[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+\]\s*\{.*\}\s*$")
+
+
 def _failure_tail(stderr: str, stdout: str, extra: Tuple[str, ...] = (),
                   limit: int = 500) -> str:
     """退出码非 0 时拼出**真正的失败原因**（优先级：结构化错误 > 显式报文 > stderr > stdout）。
@@ -242,10 +251,16 @@ def _failure_tail(stderr: str, stdout: str, extra: Tuple[str, ...] = (),
         if (m or "").strip():
             parts.append(str(m).strip())
     parts.extend(_structured_errors(stdout))
-    if (stderr or "").strip():
-        parts.append(stderr.strip())
+    err_lines = (stderr or "").splitlines()
+    informative = [ln for ln in err_lines if ln.strip() and not _AGENT_WARN_RE.match(ln.strip())]
+    warnings = [ln for ln in err_lines if ln.strip() and _AGENT_WARN_RE.match(ln.strip())]
+    if informative:
+        parts.append("\n".join(informative).strip())
     if not parts and (stdout or "").strip():
         parts.append(stdout.strip())
+    if not parts and warnings:
+        # 只剩非致命告警：仍保留原文，但标明它**不是**失败原因，避免下次再被当根因。
+        parts.append("\n".join(warnings).strip() + "（仅非致命告警，未捕获真原因）")
     text = " ‖ ".join(dict.fromkeys(p for p in parts if p))
     return text[-limit:] if len(text) > limit else text
 

@@ -359,6 +359,15 @@ async def tasks_overview(days: int = Query(default=1, ge=1, le=90)):
             "failures": fails}
 
 
+def _artifacts_enabled() -> bool:
+    """产物落地校验的开关（默认开）。取不到模块 ⇒ False（不假装开了）。"""
+    try:
+        import artifact_verify
+        return artifact_verify.enabled()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @router.get("/api/tasks/tiers")
 async def dispatch_tiers():
     """难度→档位的**配置**与**证伪数据**（v0.13.176）。
@@ -383,10 +392,18 @@ async def dispatch_tiers():
     pool = set(registry.dispatchable_ids())
     a_cfg = tierlib.parse_agent_tiers()
     a_floor = tierlib.parse_agent_floor()
+    # 2026-11-28（用户令 B）：档内顺序已按实测成功率接管 ⇒ 这个接口必须能自证，
+    # 否则「实测排序」又是一句看不见的话。perf 同时作为 first_usable 的排序输入，
+    # 页面看到的 model 就是派发时真的会先试的那个。
+    try:
+        import tier_perf
+        perf = tier_perf.model_perf()
+    except Exception:  # noqa: BLE001
+        perf = {}
     resolved = []
     for d in (1, 2, 3):
         t = tierlib.tier_for(d, mapping, tierlib.DEFAULT_FLOORS, cfg)
-        m, why = tierlib.first_usable(t, cfg, ids, checked)
+        m, why = tierlib.first_usable(t, cfg, ids, checked, perf=perf)
         # 用默认执行者（最常见的 jcode）走一遍地板，让"难度 3 会被抬到谁"直接可读。
         prom, frm, ar = tierlib.promote_agent("jcode", d, pool, a_cfg, a_floor)
         resolved.append({"difficulty": d, "tier": t, "model": m, "reason": why,
@@ -448,6 +465,11 @@ async def dispatch_tiers():
             "agent_tiers": a_cfg,
             "agent_floor": {str(k): v for k, v in sorted(a_floor.items())},
             "model_tier_effective": model_eff,
+            # 2026-11-28（用户令 B）：档内顺序由实测接管后，把表也放出来 ——
+            # 「按实测排序」必须能在页面上被核对，否则又是一句看不见的话。
+            "model_perf": {m: v for m, v in
+                           sorted(perf.items(), key=lambda kv: -kv[1].get("n", 0))[:12]},
+            "verify_artifacts": _artifacts_enabled(),
             "resolved": resolved, "audit": audit, "verdict": verdict}
 
 

@@ -123,3 +123,17 @@ class TestSwitchSurvives(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestObservable(unittest.TestCase):
+    """B 的可见面：`/api/tasks/tiers` 必须同时暴露「实测表」与「排序真的用了它」。
+
+    只测纯函数不够 —— 2026-11-28 之前「档内按实测排序」只是代码里的一句话，
+    页面上看不到任何证据。这两个键是把判据变成可核对量的最小面。
+    """
+
+    def test_endpoint_exposes_model_perf_and_artifact_switch(self):
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1] / "src" / "tasks.py").read_text(encoding="utf-8")
+        self.assertIn('"model_perf"', src)
+        self.assertIn('"verify_artifacts"', src)
+        self.assertIn("perf=perf", src, "排序输入必须真的传给 first_usable，否则表只是个装饰")

@@ -179,6 +179,33 @@ class TestFailureTail(unittest.TestCase):
     def test_plain_stderr_still_reported(self):
         self.assertEqual("boom", cli_agent._failure_tail("boom", ""))
 
+    # ── 2026-11-28：`[agent:code] {json}` 是**非致命告警**，不得当失败原因 ──
+    def test_agent_warning_is_not_sole_reason(self):
+        """claude-code 退出码 1 时 stderr 只有 unrecognized_model 告警、真原因在 stdout。
+
+        实测（2026-11-27 12:46 两条任务）：error 入库成
+        `exit:1: [claude-code:unrecognized_model] {...}`，而这条告警在主调用成功时也照打
+        （hub 适配器直调 exit 0 / 回文正常）⇒ 它不能独占结论。
+        """
+        warn = ('[claude-code:unrecognized_model] '
+                '{"model":"workbuddy/glm-5.3-flash[1m]","query_source":"sdk"}')
+        tail = cli_agent._failure_tail(warn, "网关返回 502 upstream connect error")
+        self.assertIn("502", tail, "真原因必须留在结论里")
+
+    def test_agent_warning_alone_is_labelled(self):
+        """两流都只有告警时仍保留原文，但必须标明「不是失败原因」。"""
+        warn = '[claude-code:unrecognized_model] {"model":"x[1m]"}'
+        tail = cli_agent._failure_tail(warn, "")
+        self.assertIn("unrecognized_model", tail)
+        self.assertIn("未捕获真原因", tail)
+
+    def test_agent_warning_does_not_shadow_real_stderr(self):
+        warn = '[claude-code:unrecognized_model] {"model":"x[1m]"}'
+        tail = cli_agent._failure_tail(warn + "\nHTTP 429 rate limit", "")
+        self.assertIn("429", tail)
+        self.assertNotIn("unrecognized_model", tail,
+                         "有真信息时告警只是噪音，不必并入")
+
 
 class TestVerifyShortCircuit(unittest.TestCase):
     """执行者自述失败且无产物：不跑 verifier，原因写成单项。"""

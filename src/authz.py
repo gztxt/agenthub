@@ -134,6 +134,9 @@ WRITE_ROUTE_SCOPES = {
     ("tasks", "DELETE", "/api/tasks/{run_id}"): "hub.task.write",
     ("tasks", "POST", "/api/tasks/{run_id}/accept"): "hub.task.write",
     ("tasks", "POST", "/api/tasks/{run_id}/cancel"): "hub.task.write",
+    # 2026-11-28 补登：v0.13.214 加了 magpie 成本回填端点却漏了 scope 声明
+    # ⇒ 该写路由**无鉴权**（authz 闸门只认表内条目），L0 基线一直是红的。
+    ("tasks", "POST", "/api/tasks/{run_id}/cost-backfill"): "hub.task.write",
     ("tasks", "POST", "/api/tasks/{run_id}/pause"): "hub.task.write",
     ("tasks", "POST", "/api/tasks/{run_id}/reject"): "hub.task.write",
     ("tasks", "POST", "/api/tasks/{run_id}/resume"): "hub.task.write",

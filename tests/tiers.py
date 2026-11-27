@@ -124,9 +124,75 @@ def module_level_test_functions(root: Path | None = None) -> list:
 
 
 def unittest_collected_count(root: Path | None = None) -> int:
-    """unittest discovery 在标准层收进多少例。"""
+    """unittest discovery 在标准层收进多少例。
+
+    ⚠️ **只适合“没跑过任何用例”的进程**（单元自检、独立脚本）。
+    全套跑完之后再调它，拿到的是**被前 4,300 例改过的 sys.modules/os.environ 之下**
+    的 discovery 结果，而不是 runner 的收集口径 —— 2026-11-28 实测：同一条闸门在
+    全量跑里 4420 ≠ pytest 4421，单独跑却 4421 = 4421。要跟 pytest 对账请用
+    `collected_parity()`（两边都开子进程）。
+    """
     d = (root or repo_root()) / "tests"
     return unittest.TestLoader().discover(str(d), pattern=STANDARD_PATTERN).countTestCases()
+
+
+#: 两边都用**干净子进程**收集：进程内 discovery 会受已跑用例的 sys.modules/env 影响。
+_UNIT_IDS_CODE = (
+    "import sys, unittest;"
+    "s = unittest.TestLoader().discover(r'%(tests)s', pattern='test_*.py');"
+    "out = []\n"
+    "def w(x):\n"
+    "    for t in x:\n"
+    "        if isinstance(t, unittest.TestSuite): w(t)\n"
+    "        else: out.append(t.__class__.__module__ + '.' + t.__class__.__qualname__ + '.' + t._testMethodName)\n"
+    "w(s)\n"
+    "print(chr(10).join(sorted(out)))\n"
+)
+
+
+def unittest_collected_ids(root: Path | None = None) -> Tuple[set, str]:
+    """`unittest discover` 的用例 id 集合（子进程，返回 (ids, 理由)）。"""
+    import subprocess
+    import sys
+    base = root or repo_root()
+    _t = str(base / "tests").replace("'", "\\'")
+    code = _UNIT_IDS_CODE % {"tests": _t}
+    r = subprocess.run([sys.executable, "-c", code], cwd=str(base),
+                       capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        return set(), "unittest 子进程 rc=%d: %s" % (r.returncode, (r.stderr or "")[-300:])
+    ids = set(x.strip() for x in r.stdout.splitlines() if x.strip())
+    return {x.split(".")[0] + "." + ".".join(x.split(".")[1:]) for x in ids}, ""
+
+
+def pytest_collected_ids(root: Path | None = None) -> Tuple[set, str]:
+    """`pytest --collect-only` 的用例 id 集合，归一化成 `mod.Class.method`。"""
+    import subprocess
+    import sys
+    base = root or repo_root()
+    r = subprocess.run([sys.executable, "-m", "pytest", "tests", "--collect-only", "-q"],
+                       cwd=str(base), capture_output=True, text=True, timeout=300)
+    out = set()
+    for line in r.stdout.splitlines():
+        if "::" not in line:
+            continue
+        f, rest = line.split("::", 1)
+        mod = f.split("/")[-1]
+        if mod.endswith(".py"):
+            mod = mod[:-3]
+        out.add(mod + "." + rest.replace("::", "."))
+    if not out:
+        return out, "pytest 收集不到任何用例（rc=%d）" % r.returncode
+    return out, ""
+
+
+def collected_parity(root: Path | None = None) -> Tuple[set, set, str]:
+    """两个 runner 的收集集合差异（两边都是干净子进程）。返回 (only_unit, only_pytest, 理由)。"""
+    u, why_u = unittest_collected_ids(root)
+    p, why_p = pytest_collected_ids(root)
+    why = "；".join(x for x in (why_u, why_p) if x)
+    return u - p, p - u, why
+
 
 
 def file_collected_count(fname: str, root: Path | None = None) -> int:

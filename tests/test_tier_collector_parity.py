@@ -83,18 +83,28 @@ class TestTierCollectorParity(unittest.TestCase):
             self.assertEqual(tiers.unittest.TestLoader().discover(td, pattern="test_*.py")
                              .countTestCases(), 0)
 
-    # ── ③ 两个收集器例数必须相等 ─────────────────────────────────────────
+    # ── ③ 两个收集器收集到的**集合**必须相等 ─────────────────────────────
     def test_pytest_and_unittest_collect_the_same_number_of_tests(self):
-        n_unit = tiers.unittest_collected_count()
-        n_pytest, why = tiers.pytest_collected_count()
-        if n_pytest is None:
+        """两个 runner 都要既“数量相同”又“收的是同一批”。
+
+        【2026-11-28 改判】旧实现用**进程内** `TestLoader().discover()` 对账，而这条
+        用例是在跑完 4,300 例之后执行的 —— 那时 sys.modules / os.environ 已被前面的
+        用例改过，discovery 看到的是“被污染后的进程”，不是 runner 口径：
+        全量跑 4420 ≠ pytest 4421，单独跑却 4421 = 4421。同一个事实两种读数 ⇒
+        判据本身不成立（不是用例少了，是尺子在量自己）。
+        现改为**两边都开子进程**收，并且比集合而不只比数字：只比数字会漏掉
+        “A 少一个、B 多一个、总数仍相等”的情况。
+        """
+        only_unit, only_pytest, why = tiers.collected_parity()
+        if why:
             raise unittest.SkipTest("SKIP(host-dependent): %s" % why)
         self.assertEqual(
-            n_unit, n_pytest,
-            "unittest=%d 与 pytest=%d 对不上 ⇒ 有用例只被其中一个 runner 收进来，"
-            "换台机器/换个入口就会静默少跑（详见 tests/tiers.py 收集器对账段）。"
-            % (n_unit, n_pytest))
-        print("[parity] 收集器对账：unittest=%d pytest=%d ✅（%s）" % (n_unit, n_pytest, why))
+            (sorted(only_unit), sorted(only_pytest)), ([], []),
+            "只 unittest 有：%s\n只 pytest 有：%s\n"
+            "⇒ 有用例只被其中一个 runner 收进来，换台机器/换个入口就会静默少跑"
+            "（详见 tests/tiers.py 收集器对账段）。" % (sorted(only_unit), sorted(only_pytest)))
+        n_unit, _ = tiers.unittest_collected_ids()
+        self.assertGreater(len(n_unit), 4000, "收集集合异常（少于 4000 例）——判据失效，不是绿")
 
     def test_collector_count_is_not_silently_zero(self):
         """判据自证 ③：对账两端都不能是 0（否则 '0==0' 也是绿）。"""

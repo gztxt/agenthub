@@ -52,7 +52,8 @@ class BScopeByPath(unittest.TestCase):
         # v0.13.209：新增 /api/system/shutdown ⇒ 112。
         # v0.13.212：删除积分签到 7 条写路由（3 机器/触发 + 4 多账号）⇒ 105。
         # 2026-11-25：+6 条 /api/apps 写路由（install/update/uninstall/test/run/bridge）⇒ 111。
-        self.assertEqual(len(authz.SCOPE_BY_PATH), 111)
+        # 2026-11-28：+1 条 POST /api/tasks/{run_id}/cost-backfill（v0.13.214 漏登 scope）⇒ 112。
+        self.assertEqual(len(authz.SCOPE_BY_PATH), 112)
 
     def test_known_and_unknown(self):
         self.assertEqual(authz.scope_for_path("put", "/api/memory/l3"), "hub.memory.write")

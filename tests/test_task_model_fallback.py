@@ -46,9 +46,19 @@ class TestModelFailureClassify(unittest.TestCase):
             self.assertTrue(tiers.is_model_failure(text), text)
 
     def test_generic_failures_are_not_model_failures(self):
-        for text in ("超时熔断 600s", "RATE_LIMIT 429", "upstream connect error",
+        # 2026-11-27：429 从本组移出 —— 用户裁定 429 也要自动换模型（见 is_rate_limit_failure）。
+        for text in ("超时熔断 600s", "upstream connect error",
                      "empty-output: 退出码 0 但无正文", "", None):
             self.assertFalse(tiers.is_model_failure(text), repr(text))
+
+    def test_rate_limit_is_its_own_signal(self):
+        """429/RATE_LIMIT 独立判据：触发换模型，但不混入 is_model_failure。"""
+        for text in ("RATE_LIMIT 429", "HTTP 429: Too Many Requests",
+                     "rate limited by provider", "限流", "请求过于频繁"):
+            self.assertTrue(tiers.is_rate_limit_failure(text), text)
+            self.assertFalse(tiers.is_model_failure(text), text)  # 不污染既有契约
+        for text in ("超时熔断 600s", "upstream connect error", "", None):
+            self.assertFalse(tiers.is_rate_limit_failure(text), repr(text))
 
     def test_channel_credential_failures(self):
         """模型 ID 合法、走的通道没凭据 —— 实测 pi/omp 的 alibaba 全系都这样。"""
@@ -123,6 +133,28 @@ class TestFallbackTarget(unittest.TestCase):
                 "pi", "t2", [], catalog=self.CAT, catalog_checked=True,
                 tiers_cfg=self.TIERS, prefer_agent_default=False))
 
+    def test_rate_limit_avoids_same_provider(self):
+        """429 是 provider 级限流 ⇒ 换到别家，绝不换同 provider 的另一个 ID。"""
+        tiers_cfg = {"t1": ["dumate/m1", "dumate/m1b", "raccoon/m2", "workbuddy/m3"]}
+        cat = set(tiers_cfg["t1"])
+        got = tiers.model_fallback_target(
+            "pi", "t1", [], catalog=cat, catalog_checked=True,
+            tiers_cfg=tiers_cfg, avoid_providers={"dumate"})
+        self.assertEqual("raccoon/m2", got,
+                         "同 provider 的 dumate/m1、m1b 必须跳过，换到 raccoon")
+
+    def test_rate_limit_never_falls_back_to_same_provider_default(self):
+        """429 时 agent 默认模型若也属被限流 provider，不能当安全网回退过去。"""
+        with mock.patch.object(tiers, "_agent_default_model", return_value="dumate/default"):
+            got = tiers.model_fallback_target(
+                "pi", "t1", ["dumate/m1", "raccoon/m2", "workbuddy/m3"],
+                catalog={"dumate/m1", "raccoon/m2", "workbuddy/m3", "dumate/default"},
+                catalog_checked=True,
+                tiers_cfg={"t1": ["dumate/m1", "raccoon/m2", "workbuddy/m3"]},
+                avoid_providers={"dumate"})
+            self.assertNotIn("dumate", str(got),
+                             "默认模型同属被限流 provider ⇒ 不许回退，交给升档路径")
+
 
 class TestRetrySchedulesModelFallback(unittest.TestCase):
     def setUp(self):
@@ -150,6 +182,27 @@ class TestRetrySchedulesModelFallback(unittest.TestCase):
         self.assertEqual("good/model", params[0])
         self.assertIn("model_fallbacks", sql)
         self.assertIn("bad/model", params[2], "tried 必须含失败模型，防换回同一个")
+
+    def test_rate_limit_falls_back_to_another_provider(self):
+        """429 触发换模型，且避开被限流的 provider（换同家另一个 ID 必再撞）。"""
+        row = dict(self.row, model_planned="dumate/bad", model_sent="dumate/bad")
+        with mock.patch.object(tiers, "_catalog_snapshot",
+                               return_value=({"dumate/bad", "raccoon/good"}, True)), \
+                mock.patch("tiercfg.parse_tiers",
+                           return_value={"t1": ["raccoon/good"],
+                                         "t2": ["dumate/bad", "raccoon/good"]}), \
+                mock.patch.object(db, "execute") as ex, \
+                mock.patch.object(db, "log_profile_event") as logev:
+            ok = tiers._schedule_exec_retry(
+                "run1", row, "RATE_LIMIT 429: All target providers failed",
+                "executor_claimed_failure", tiers.MAX_AUTO_RETRY, "pi", "dumate/bad",
+                used_model="dumate/bad", kind="nonempty")
+        self.assertTrue(ok, "429 没排换模型 ⇒ 可恢复故障被记成终态")
+        sql, params = ex.call_args[0][0], ex.call_args[0][1]
+        self.assertIn("model_planned=?", sql)
+        self.assertEqual("raccoon/good", params[0], "必须换到别家 provider")
+        detail = logev.call_args.kwargs["detail"]
+        self.assertIn("dumate/bad", detail["tried"], "被限流的失败模型必须记进 tried")
 
     def test_fallback_budget_is_bounded(self):
         row = dict(self.row, model_fallbacks=tiers.MAX_MODEL_FALLBACK)

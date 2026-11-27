@@ -11,9 +11,9 @@
 | 1 | T1 开关转默认 | ✅ 已上线 | 重启 pid 172121 |
 | — | 派发实测 | ✅ t1/t2 pass，t3 运行中 | 747722b6ec |
 | 1 | T3 成本自动回填 | ✅ 已完工 | 1a61a07531 |
-| 1 | T4 观测补齐 | 🔄 进行中 | — |
+| 1 | T4 观测补齐 | ✅ 已完工 | pool.magpie |
 | — | 事故：dumate 429 卡死 | ✅ 已修（实时错误窗） | 500d58fd52 |
-| 2 | T5 后端协同增强 | ⏳ 未开工 | — |
+| 2 | T5 后端协同增强 | ✅ 已完工 | v0.13.216 |
 | 2 | T6 前端工作台 | ⏳ 未开工 | — |
 | 2 | T7 闸门与真渲染 | ⏳ 未开工 | — |
 | 3 | S1–S5 数据面托管 | ⏳ 未开工 | — |
@@ -109,3 +109,28 @@ blocked 映射，`provider_health()` 合并为 `degraded`。环境变量
 **回滚**：`ERR_MIN_FAILS=999` 等效关闭；代码备份 `src/magpie_client.py.bak-20261127_11xxxx-errwindow`
 
 ---
+
+## T5 后端协同增强 — 2026-11-27 12:2x
+
+**改动**
+- `src/tasks_dag.py`：`DecomposeIn` 增 `agents[] / assign_mode / force_agents`；
+  新增 `_apply_forced_agents()`；`agents` 传了却全不在池 ⇒ 400；Leader 候选池收窄到多选项。
+- `src/tiercfg.py`：`plan()` 见 `agent_forced` 不再 `promote_agent`（记 `agent_tier_reason=forced`）。
+- `src/tasks.py`：新增 `GET /api/tasks/overview`（路由注册在 `/api/tasks/{run_id}` 之前）。
+
+**验收（真跑 dry_run，不花钱）**
+```
+agent_policy={"mode":"auto","pool":["codex"],"forced":1,"changed":[]}
+t1 agent=codex  pinned=None reason=forced        tier=t2 model=workbuddy/glm-5.3-flash
+t2 agent=codex  pinned=top  reason=already_at_floor tier=t3 model=dumate/kimi-k3
+```
+- 汇总节点（t2）**未被强制**，仍走顶层 ✓
+- `overview?days=7`：`magpie.models=53 blocked={} cost.credits=22.95 flash.planned=0.667` ✓
+
+**踩坑（第一版写错，已修）**：force 最初排在 `ensure_synthesis` 之前 ⇒ 汇总节点拿不到
+`pinned_tier=top`，被一起钉成用户选的执行者（实测出现 `reason=forced` 的汇总）。
+移到 `ensure_synthesis` 之后、`_plan_tiers` 之前才同时满足两个边界。
+
+**测试**：`tests/test_collab_force_agents_l0.py` 7 例；合计 34 passed。
+**回滚**：`agents/force_agents` 不传即老行为；代码备份 `src/tasks_dag.py.bak-*-t5`、
+`src/tiercfg.py.bak-*-t5-forced`、`src/tasks.py.bak-*-t4`。

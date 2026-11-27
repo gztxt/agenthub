@@ -13,7 +13,7 @@
 HTTP 出口；`tasks.X` 一律是门面重导出，改实现请去对应层。
 """
 import json
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -269,6 +269,94 @@ async def dispatch_pool():
                        "default": 1},
             "escalate": {"models": _tiers._csv_env("TASK_ESCALATE_MODELS"),
                          "ladder": _tiers._csv_env("TASK_ESCALATE_LADDER", "claude-code,codex")}}
+
+
+@router.get("/api/tasks/overview")
+async def tasks_overview(days: int = Query(default=1, ge=1, le=90)):
+    """协同工作台的一屏数据（T5，2026-11-27）。
+
+    为什么单开一个端点：工作台顶部要同时显示「网关还能用哪些 provider / 今天花了多少
+    credits / flash 占比 / 失败前五」，原来是 4 个端点各取一段，前端拼 4 次、口径也容易漂。
+    这里一次给齐，并**明确标出不可用的那一路**（`*_error` 字段），不用空对象冒充正常。
+    """
+    import magpie_client
+    import tiercfg as _tierlib
+
+    win = int(days)
+    magpie: Dict[str, Any] = {}
+    try:
+        st = magpie_client.status()
+        magpie = {"models": st.get("models"), "providers": st.get("providers") or {},
+                  "blocked": st.get("blocked") or {},
+                  "error": st.get("models_error") or st.get("quotas_error") or ""}
+    except Exception as e:  # noqa: BLE001 —— 观测段失败不得让整页 500
+        magpie = {"error": "%s: %s" % (type(e).__name__, e)}
+
+    def _scalar(sql: str, args=(), key: str = "v"):
+        try:
+            rows = db.query(sql, args)
+            return rows[0][key] if rows else 0
+        except Exception:  # noqa: BLE001
+            return None
+
+    # 时间窗一律 UTC（与 tasks.created_at 同口径；本地时差 8 小时会把边界任务算错）
+    runs_running = _scalar(
+        "SELECT COUNT(DISTINCT run_id) v FROM tasks WHERE status IN"
+        " ('running','pending','verifying','submitted')")
+    runs_window = _scalar(
+        "SELECT COUNT(DISTINCT run_id) v FROM tasks WHERE created_at > datetime('now', ?)",
+        ("-%d day" % win,))
+    cost_row = {}
+    try:
+        cost_row = db.query(
+            "SELECT COALESCE(SUM(credits),0) credits,"
+            " SUM(CASE WHEN cost_confidence='exact' THEN 1 ELSE 0 END) exact_n,"
+            " SUM(CASE WHEN cost_confidence IN ('exact','approx') THEN 1 ELSE 0 END) costed,"
+            " COUNT(*) total"
+            " FROM tasks WHERE created_at > datetime('now', ?)", ("-%d day" % win,))[0]
+    except Exception:  # noqa: BLE001 —— 存量库还没补列时不让整页挂
+        cost_row = {}
+
+    def _flash(v):
+        v = str(v or "")
+        return 1 if "flash" in v.lower() else 0
+    plan_tiers = _tierlib.parse_tiers()
+    planned = [m for ids in plan_tiers.values() for m in ids]
+    planned_flash = sum(_flash(m) for m in planned)
+    obs = []
+    try:
+        obs = db.query(
+            "SELECT COALESCE(NULLIF(model,''), NULLIF(model_planned,'')) m, COUNT(*) n"
+            " FROM tasks WHERE created_at > datetime('now', ?)"
+            " AND COALESCE(model,model_planned,'')<>'' GROUP BY m", ("-%d day" % win,))
+    except Exception:  # noqa: BLE001
+        obs = []
+    obs_total = sum(int(r["n"] or 0) for r in obs)
+    obs_flash = sum(int(r["n"] or 0) for r in obs if _flash(r["m"]))
+
+    fails = []
+    try:
+        fails = db.query(
+            "SELECT error_bucket k, COUNT(*) n FROM tasks WHERE created_at > datetime('now', ?)"
+            " AND status='failed' AND COALESCE(error_bucket,'')<>''"
+            " GROUP BY error_bucket ORDER BY n DESC LIMIT 5", ("-%d day" % win,))
+    except Exception:  # noqa: BLE001
+        fails = []
+
+    return {"ok": True, "window_days": win,
+            "magpie": magpie,
+            "tiers_source": _tierlib.tiers_source(),
+            "tiers": plan_tiers,
+            "runs": {"running": int(runs_running or 0), "window": int(runs_window or 0)},
+            "cost": {"credits": round(float(cost_row.get("credits") or 0), 4),
+                     "costed": int(cost_row.get("costed") or 0),
+                     "exact": int(cost_row.get("exact_n") or 0),
+                     "unmatched": int(cost_row.get("total") or 0) - int(cost_row.get("costed") or 0)},
+            "flash": {"planned": {"n": planned_flash, "total": len(planned),
+                                  "ratio": round(planned_flash / len(planned), 3) if planned else None},
+                      "observed": {"n": obs_flash, "total": obs_total,
+                                   "ratio": round(obs_flash / obs_total, 3) if obs_total else None}},
+            "failures": fails}
 
 
 @router.get("/api/tasks/tiers")

@@ -1,3 +1,21 @@
+## v0.13.216 — 协同波 2 后端：指定执行者作数 / 轮转混排 / 一屏看板（2026-11-27）
+
+> 用户令：「**派发实际就是 agenthub 的协同**，优化协同前后端」。本版只动后端，前端见下一版。
+
+| 能力 | 入口 | 判据 |
+|---|---|---|
+| 指定执行者硬生效 | `POST /api/tasks/decompose` 的 `agents[]` + `force_agents` | 返回 `agent_policy.changed` 逐条记 `from→to`；实测 Leader 想派 claude-code，强制成 codex |
+| 轮转混排 | `assign_mode=spread` | 第 i 个任务派给 `agents[i % n]`；汇总节点不参与 |
+| 难度不越权 | `tiercfg.plan` 见 `agent_forced` 停止升档 | 之前的缺陷：`--agent pi` 被 `promote_agent` 静默换掉 |
+| 一屏看板 | `GET /api/tasks/overview?days=N` | 网关模型数 / provider 状态 / 被挡原因 / credits / flash 占比 / 失败前五，一次取齐 |
+| run 详情带成本 | `GET /api/tasks/{run_id}` | 逐任务含 `credits / ttft_ms / cost_confidence / tier_reason`（SELECT * 自动带上） |
+
+**边界**：`force_agents` 在 `ensure_synthesis` **之后**才执行（否则汇总节点会被钉成 a1/a2）；
+`agents` 传了但全不在池里 ⇒ 400，不静默退回全集（那是「假生效」）。
+
+**测试**：`tests/test_collab_force_agents_l0.py` 7 例（auto/spread/汇总豁免/纯文本警告/
+plan 尊重强制）+ 既有 27 例 = 34 passed。
+
 ## v0.13.215 — 协同改造波 1：flash 倾斜 / 实时错误窗 / 成本自动回填（2026-11-27）
 
 > 用户令：`TASK_TIERS_SOURCE` 转默认 magpie、`TASK_QUOTA_GATE` 转 on、成本自动回填、

@@ -46,6 +46,15 @@ class DecomposeIn(BaseModel):
     # 轮次框：1 = 不自动重拆（默认），2/3/5 = 未达标自动重拆，代码夹到 `ROUNDS_CEILING`。
     # `None` 时回落到老开关 `auto_rounds`（true→2，false→1），保证 MCP 老路径逐字不变。
     rounds: Optional[int] = None
+    # ── 2026-11-27（T5 协同改造）：多 Agent 混排 ──────────────────────────
+    # `agents` 非空 = 收窄候选池（Leader 只能从里面挑）；配合 `force_agents` 才是硬约束。
+    #   · assign_mode=auto   ：仍是 Leader 按难度分配，但池子被收窄（默认）
+    #   · assign_mode=spread ：轮转强制混排，第 i 个任务派给 agents[i % n]
+    # 为什么要 `force_agents`：2026-11-27 实测 `--agent pi` 被 Leader 的 per-task agent_id
+    # 静默覆盖（run 908a6cd0ae 两跳都派给 claude-code）。用户显式指定执行者时必须能作数。
+    agents: Optional[List[str]] = None
+    assign_mode: str = "auto"          # auto | spread
+    force_agents: bool = False
 
 
 LEADER_PROMPT = """你是任务编排器。把用户目标拆解为子任务 DAG，只输出 JSON 数组（不要围栏、不要解释）。
@@ -257,6 +266,48 @@ def serialize_file_overlaps(items: List[dict]) -> tuple:
         "warning": ("%d 个子任务的文件集相交，已自动改为串行（后写覆盖先写会让产物互相抹掉）：%s"
                     % (len(added), "；".join("%s 等 %s" % (a["task"], a["after"]) for a in added[:4]))),
     }
+
+
+def _apply_forced_agents(items: List[dict], agents: List[str],
+                         mode: str) -> tuple:
+    """把用户选定的执行者**硬钉**到子任务上（T5，2026-11-27）。
+
+    返回 `(items, note)`；`note.changed` 逐条记录 `from → to`，供界面显示
+    「Leader 原本想派谁、被你改成了谁」—— 没有这列，「强制生效了没有」只能靠猜。
+
+    规则：
+      · `auto`：全部非汇总节点用 `agents[0]`；
+      · `spread`：第 i 个非汇总节点用 `agents[i % len]`（轮转混排）；
+      · **汇总节点不碰**：它靠 `pinned_tier` 被抬到顶层执行者，钉成 a1/a2 会直接做不了汇总。
+      · 钉死 `agent_forced=True`，`tiercfg.plan` 见它就不再做难度升档（否则用户的
+        选择会被「难度 3 必须 a3」静默改写）。
+    """
+    pool = [a for a in dict.fromkeys(agents or []) if a]
+    if not pool:
+        return items, {"mode": mode, "pool": [], "forced": 0, "changed": [],
+                       "warnings": ["agents 为空，未强制"]}
+    changed, warned = [], []
+    idx = 0
+    for it in items:
+        if it.get("pinned_tier"):
+            continue
+        want = pool[idx % len(pool)] if mode == "spread" else pool[0]
+        idx += 1
+        before = it.get("agent_id") or ""
+        it["agent_forced"] = True
+        it["agent_forced_from"] = before
+        it["agent_id"] = want
+        if before != want:
+            changed.append({"id": it.get("id") or it.get("task_id"),
+                            "from": before, "to": want})
+        # 纯文本端点（a1）带 files 的子任务必编造 —— 用户有权这么选，但必须警告。
+        if want in ("claude", "jcode") and (it.get("files") or []):
+            warned.append("%s: %s 是纯文本端点，但该子任务要读写文件"
+                          % (it.get("id") or "?", want))
+    note = {"mode": mode, "pool": pool, "forced": idx, "changed": changed}
+    if warned:
+        note["warnings"] = warned
+    return items, note
 
 
 def _validate_dag(items: list, known_agents: set, default_agent: str,
@@ -495,7 +546,25 @@ async def decompose(body: DecomposeIn):
     known = set()
     if _tiers._ctx.get("agent_ids_fn"):
         known = set(_tiers._ctx["agent_ids_fn"]())
-    default = body.default_agent or ("jcode" if "jcode" in known else (sorted(known)[0] if known else "jcode"))
+    # 2026-11-27：多选执行者收窄候选池。传了却全不在池里 ⇒ 400，不静默退回全集
+    # （退回全集会让「我选了 3 个」变成「其实 11 个都能上」，是最难发现的那种假生效）。
+    pool_agents: List[str] = []
+    if body.agents:
+        pool_agents = [a for a in dict.fromkeys(body.agents) if a in known]
+        unknown = [a for a in body.agents if a not in known]
+        if unknown:
+            raise HTTPException(400, "执行者不在池里：%s（可用 %s）"
+                                % (", ".join(unknown), ", ".join(sorted(known)) or "-"))
+        if not pool_agents:
+            raise HTTPException(400, "agents 为空（传了就至少给一个）")
+    if body.assign_mode not in ("auto", "spread"):
+        raise HTTPException(400, "assign_mode 只支持 auto|spread")
+    if body.force_agents and not pool_agents:
+        raise HTTPException(400, "force_agents=true 需要同时给 agents")
+    leader_pool = pool_agents or sorted(known)
+    default = (body.default_agent
+               or (pool_agents[0] if pool_agents else None)
+               or ("jcode" if "jcode" in known else (sorted(known)[0] if known else "jcode")))
     allowed = _allowed_models_for(known)
     messages = [{"role": "system", "content": (
         LEADER_PROMPT
@@ -518,6 +587,14 @@ async def decompose(body: DecomposeIn):
     items, file_note = serialize_file_overlaps(items)
     # 汇总节点在 try 之外补：它抛错是**我们的** bug，不该被报成「Leader 拆解失败」。
     items, synth = ensure_synthesis(items, default)
+    # 2026-11-27（T5）：强制执行者放在这里 —— 两个边界都必须满足：
+    #   · 在 `ensure_synthesis` **之后**：汇总节点靠 `pinned_tier=top` 被抬到顶层执行者，
+    #     先强制会把汇总也钉成用户选的 a1/a2（实测第一版就出了 `reason=forced` 的汇总节点）；
+    #   · 在 `_plan_tiers` **之前**：模型按执行者的模型域算，先算模型再换执行者
+    #     会得到不属于该 agent 域的模型 ID。
+    agent_note = {"mode": body.assign_mode, "pool": pool_agents, "forced": 0, "changed": []}
+    if body.force_agents:
+        items, agent_note = _apply_forced_agents(items, pool_agents, body.assign_mode)
     items, tier_note = _tiers._plan_tiers(items, known)
     # 钉死模型必须在档位层**之后**（见 `_apply_pinned_model` 文档串）：档位层会提升执行者，
     # 先钉再抬可能把 CCR 模型 ID 抬到一个不吃它的 agent 上。
@@ -551,7 +628,7 @@ async def decompose(body: DecomposeIn):
     if body.dry_run:
         return {"run_id": None, "goal": body.goal, "tasks": items, "running": False,
                 "dry_run": True, "round": 1, "synthesis": synth, "tiers": tier_note,
-                "model_policy": pin_note,
+                "model_policy": pin_note, "agent_policy": agent_note, "agent_policy": agent_note,
                 "parallelism_warning": (par_note or {}).get("warning"),
                 "file_serialization": file_note,
                 "auto_rounds": auto_rounds, "rounds": rounds, "max_rounds": rounds,

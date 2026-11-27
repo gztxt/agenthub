@@ -437,8 +437,14 @@ def plan(items: List[dict], *, catalog: Optional[set], checked: bool,
             top_a = sorted(a_cfg, key=_rank_letter)[-1]
             floor_i = dict(a_floor)
             floor_i[int(it.get("difficulty") or 2)] = top_a
-        it["agent_id"], it["agent_promoted_from"], it["agent_tier_reason"] = promote_agent(
-            it.get("agent_id") or "", it.get("difficulty") or 2, pool, a_cfg, floor_i)
+        if it.get("agent_forced"):
+            # 2026-11-27（T5）：用户在协同页显式选了执行者 ⇒ 难度升档**不许**改写它。
+            # 之前的缺陷正是这里：`--agent pi` 被 promote_agent 静默换成 claude-code。
+            it["agent_promoted_from"] = ""
+            it["agent_tier_reason"] = "forced"
+        else:
+            it["agent_id"], it["agent_promoted_from"], it["agent_tier_reason"] = promote_agent(
+                it.get("agent_id") or "", it.get("difficulty") or 2, pool, a_cfg, floor_i)
         astats[it["agent_tier_reason"]] = astats.get(it["agent_tier_reason"], 0) + 1
 
         pinned = it.get("pinned_tier")

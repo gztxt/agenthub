@@ -129,8 +129,9 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.215"
+VERSION = "0.13.216"
 
+# v0.13.216（2026-11-27）：协同波2 后端 —— force_agents / spread / overview / run 详情带成本。
 # v0.13.215（2026-11-27）：协同改造波1 —— flash 倾斜 / 实时错误窗 / 成本自动回填 / 观测内联。
 # v0.13.214（2026-11-27）：agenthub × magpie 只读互调（模型池派生 / 额度闸门 / 成本回填）。
 # v0.13.213（2026-11-25）：按用户令「nanobot 的应用功能模块 整个模块字节级复制到 agenthub

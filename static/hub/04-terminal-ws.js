@@ -3249,16 +3249,28 @@ function bindTaskAcc() {
 function runSubsHtml(runId) {
   var tasks = runSubsCache[runId];
   if (!tasks) return '<div class="run-sub run-sub-hint">展开后加载该 run 的拆解任务…</div>';
-  if (!tasks.length) return '<div class="run-sub run-sub-hint">这个 run 没有拆解任务</div>';
-  return tasks.map(function (t) {
+  if (!tasks.length) return '<div class="run-sub run-sub-hint">这个主任务没有拆解任务</div>';
+  /* 2026-11-28 用户重申：历史必须一眼看出「主任务（目标框输入的）→ 拆解子任务」。
+     旧渲染只给「task_id + 状态 + prompt 一整句」，看不出谁跑的/哪个模型/多久/为什么挂。
+     现在每条子任务分两行：行1 = 编号 + 状态 + 执行者·模型·耗时；行2 = 指令全文（可折行）；
+     失败时再加一行原因（截断，title 带全文）。数据全部来自同一份 /api/tasks/{runId}。 */
+  var head = '<div class="run-subs-h">共 ' + tasks.length + ' 个子任务（拆解结果）</div>';
+  return head + tasks.map(function (t) {
     var p = t.prompt || '(无 prompt)';
+    var who = [t.agent_id || '-',
+               (String(t.model || t.model_sent || t.model_planned || '') || '-').split('/').pop(),
+               (t.duration_ms == null ? '' : taskFmtDur(t.duration_ms))]
+              .filter(Boolean).join(' · ');
+    var err = String(t.error || '').replace(/\s+/g, ' ').trim();
     return '<div class="run-sub">' +
-      '<span class="run-sub-id">' + escapeHtml(t.task_id || '-') + '</span>' +
-      /* 状态徽章（2026-11-03 需求①）：展开的每个子任务都要能看出跑到哪一步。
-         status 来自 GET /api/tasks/{runId} 的 d.tasks[]，已在 runSubsCache 里；
-         字段缺失时 taskStatePill 回退「未知」，不会渲染成空白也不会抛错。 */
-      taskStatePill(t.status) +
-      '<span class="run-sub-txt" title="' + escapeHtml(p) + '">' + escapeHtml(p) + '</span>' +
+      '<div class="run-sub-h">' +
+        '<span class="run-sub-id">' + escapeHtml(t.task_id || '-') + '</span>' +
+        taskStatePill(t.status) +
+        '<span class="run-sub-who" title="执行者 · 模型 · 耗时">' + escapeHtml(who) + '</span>' +
+      '</div>' +
+      '<div class="run-sub-txt" title="' + escapeHtml(p) + '">' + escapeHtml(p) + '</div>' +
+      (err ? '<div class="run-sub-err" title="' + escapeHtml(err) + '">' + escapeHtml(err.slice(0, 160)) +
+             (err.length > 160 ? '…' : '') + '</div>' : '') +
       '</div>';
   }).join('');
 }
@@ -3488,7 +3500,7 @@ async function loadRuns(append) {
       var agents = (r.agents || '').split(',').filter(Boolean).slice(0, 3).join('+') || '-';
       var models = (r.models || '').split(',').filter(Boolean);
       var modelTxt = models.length ? (models[0].split('/').pop() + (models.length > 1 ? ' +' + (models.length - 1) : '')) : '-';
-      var roundTxt = (r.round || 1) + '/' + (r.max_rounds || '?');
+      var roundTxt = '第' + (r.round || 1) + '/' + (r.max_rounds || '?') + '轮';
       var st = runStatePill(r.state);
       var act = ((r.failed || 0) + (r.blocked || 0) > 0
           ? '<button class="btn sm danger" data-run-act="retry" data-run-id="' + escapeHtml(rid) +
@@ -3507,18 +3519,28 @@ async function loadRuns(append) {
         '<div class="run-hd" role="button" tabindex="0" aria-expanded="' + (open ? 'true' : 'false') + '"' +
         ' data-run-toggle="' + escapeHtml(rid) + '" title="点击展开该 run 的拆解任务">' +
         '<span class="run-caret" aria-hidden="true">▸</span>' +
-        '<span class="run-title" title="' + escapeHtml(r.goal || '') + '">' + escapeHtml(r.goal || '(无目标)') + '</span>' +
+        /* 2026-11-28：显式写出「主任务」——用户的原话是「主任务 = 目标框输入的那条」，
+           之前的行头只有一段 goal 文字，读起来像日志而不是一次任务。标签是
+           `aria-hidden` 的视觉锚（读屏由 run-hd 的 role/title 承担，不重复念）。 */
+        '<span class="run-title" title="' + escapeHtml(r.goal || '') + '">' +
+          '<span class="run-kicker" aria-hidden="true">主任务</span>' +
+          escapeHtml(r.goal || '(无目标)') + '</span>' +
+        /* 2026-11-28：元信息按「先结论、后过程、再标识」排，一次只读一段：
+           ① 状态徽章 + 子任务数（成败拆开写，只给 0/5 得让用户自己算）
+           ② 过程量：轮次 / 耗时
+           ③ 执行者 / 模型
+           ④ 标识：run_id + 时间（排查时才用，放最后不挡视线） */
         '<span class="run-meta">' +
-        '<span class="run-id">' + escapeHtml(rid) + '</span>' +
         '<span>' + st + '</span>' +
-        /* 成败必须显式拆开写：只给 0/5 这种比值，用户得自己算才知道「哪几项挂了」。 */
-        '<span>' + (r.success || 0) + '/' + (r.total || 0) + '</span>' +
+        '<span>' + (r.total || 0) + ' 子任务</span>' +
+        '<span class="stat-ok">' + (r.success || 0) + ' 成功</span>' +
         (r.failed ? '<span class="stat-fail">' + r.failed + ' 失败</span>' : '') +
         (r.blocked ? '<span class="stat-block">' + r.blocked + ' 阻塞</span>' : '') +
         '<span>' + escapeHtml(roundTxt) + (r.stop_reason ? ' · ' + escapeHtml(r.stop_reason) : '') + '</span>' +
-        '<span>' + taskFmtDur(r.duration_ms) + '</span>' +
+        (r.duration_ms ? '<span>' + taskFmtDur(r.duration_ms) + '</span>' : '') +
         '<span>' + escapeHtml(agents) + '</span>' +
         '<span>' + escapeHtml(modelTxt) + '</span>' +
+        '<span class="run-id">' + escapeHtml(rid) + '</span>' +
         '<span>' + escapeHtml((r.created_at || '').slice(5, 16).replace('T', ' ')) + '</span>' +
         '</span>' +
         '<span class="run-acts">' + act + '</span>' +

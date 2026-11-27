@@ -846,10 +846,13 @@
         .run-subs { max-height: 0; overflow: hidden; transition: max-height .2s ease;
                     background: var(--surface-2); }
         .run-item.open .run-subs { max-height: 420px; overflow-y: auto; }
-        .run-sub { display: flex; gap: 8px; padding: 7px 12px 7px 34px;
-                   font-size: var(--fs-sm); color: var(--text-2);
-                   border-top: 1px solid var(--divider); }
-        .run-sub-id { flex: none; font-family: var(--font-mono); color: var(--muted); }
+        /* 2026-11-28：行头「主任务」标签 + 子任务两行（编号/状态/执行者·模型·耗时 → 指令 → 失败原因） */
+        .run-kicker{display:inline-block;margin-right:6px;padding:0 6px;border-radius:4px;background:var(--sel-bg);color:var(--accent-2);font-size:var(--fs-xs);font-weight:600;vertical-align:1px}
+        .run-subs-h{padding:8px 12px 2px;font-size:var(--fs-xs);color:var(--muted);border-top:1px solid var(--divider)}
+        .run-sub-h{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
+        .run-sub-who,.run-sub-id{font-size:var(--fs-xs);color:var(--muted);font-family:var(--font-mono)}
+        .run-sub-err{margin-top:3px;font-size:var(--fs-xs);color:var(--danger);overflow-wrap:anywhere}
+        .stat-ok{color:var(--ok);font-weight:600}
         /* 副标题是展开后才看的正文：原来单行 ellipsis 把 prompt 切成半句，
            展开等于没展开。改为整句折行，超高由 .run-subs 的 max-height 兜底滚动。 */
         .run-sub-txt { flex: 1; min-width: 0; white-space: normal; overflow-wrap: anywhere;
@@ -2542,6 +2545,10 @@
                                     <button class="fchip" data-run-chip="success">成功 <span class="fchip-n" data-chip-n="success">–</span></button>
                                 </div>
                             </div>
+                            <div class="hint" id="runsHint">
+                                每个条目 = <b>一次主任务</b>（你在上方目标框输入的那条）；
+                                点开展开它的<b>拆解子任务</b>（编号 · 状态 · 执行者·模型·耗时 · 指令 · 失败原因）。
+                            </div>
                             <div class="cb-scroll"><div id="runsBody" class="runs-acc"></div></div>
                             <div class="cb-tools"><span class="hint" id="runsMore"></span></div>
                         </div>
@@ -3651,7 +3658,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=ba02d213';
+      var HUB_SRC = '/static/hub.js?v=1efac297';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

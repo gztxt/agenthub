@@ -146,6 +146,25 @@ class TestScan(_Base):
         r = agentscan.scan(dirs=[zdir], register=False, prober=lambda p: "claude 2.0")
         self.assertNotIn("claude", [i["id"] for i in r["found"]])
 
+    def test_backup_artifact_is_not_registered(self):
+        """判例 2026-11-28：升级时留下的 `.bak-*` 启动器软链被按包名登记成 `pi-coding-agent`。
+
+        复现形状：`omp.bak-<时间戳>-symlink1921` → `@oh-my-pi/pi-coding-agent/dist/cli.js`。
+        basename 不匹配签名名 `omp`，于是走「按包元数据发现」分支；包名是
+        `pi-coding-agent` ⇒ 多出一张与 `omp` 重复、且 detect 永远匹配不上、从 hub
+        起不来的假卡。备份件一律不扫 —— 且**不能**退化成 unknown（unknown 会进
+        「待确认」清单，仍然是一条噪声）。
+        """
+        zdir = self.tmp / "bin"
+        real = self.pkg("node_modules/pi-coding-agent", "@oh-my-pi/pi-coding-agent",
+                        "Coding agent CLI with read, bash, edit, write tools.")
+        zdir.mkdir(parents=True, exist_ok=True)
+        os.symlink(real, zdir / "omp.bak-20261128_010129-symlink1921")
+        with mock.patch.object(agentscan, "_covered", return_value=(set(), set())):
+            r = agentscan.scan(dirs=[zdir], register=False, prober=lambda p: "")
+        self.assertEqual([i["id"] for i in r["found"]], [])
+        self.assertEqual([u["name"] for u in r["unknown"]], [])
+
 
 class TestRegister(_Base):
     def setUp(self):

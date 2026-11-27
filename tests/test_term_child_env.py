@@ -25,6 +25,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import profiles                                       # noqa: E402
 import term                                           # noqa: E402
+import vitals                                         # noqa: E402
 
 
 class TestChildEnvPrependsNvm(unittest.TestCase):
@@ -115,6 +116,35 @@ class TestChildEnvPrependsNvm(unittest.TestCase):
         term.child_env()
         self.assertEqual(os.environ["PATH"],
                          "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+
+
+class TestVitalsLaunchEnvMatchesCli(unittest.TestCase):
+    """2026-11-27 回归：omp 19.2.1 入口变成 `#!/usr/bin/env bun` 的软链后，
+    `vitals.launch_env()` 自己抄的那份 PATH 漏了 `~/.bun/bin` ⇒ 探针 `--version`
+    rc=127 ⇒ verdict=not_installed ⇒ 整张卡从菜单消失（现象是「agent 突然少了 omp」）。
+    判据：探针环境必须等于运行环境（`profiles.cli_env()`），不许再各存一份。"""
+
+    def setUp(self):
+        self.fake_bun = Path("/home/someone/.bun/bin")
+        self.patchers = [
+            mock.patch.object(profiles, "_nvm_bins", return_value=[]),
+            mock.patch.object(profiles, "_bun_bin", return_value=self.fake_bun),
+            mock.patch.object(profiles, "_kimi_code_bin", return_value=None),
+        ]
+        for p in self.patchers:
+            p.start()
+        self._saved_path = os.environ["PATH"]
+        os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+    def tearDown(self):
+        for p in self.patchers:
+            p.stop()
+        os.environ["PATH"] = self._saved_path
+
+    def test_probe_path_equals_cli_env(self):
+        probe = vitals.launch_env()["PATH"]
+        self.assertIn(str(self.fake_bun), probe.split(os.pathsep))
+        self.assertEqual(probe, profiles.cli_env()["PATH"])
 
 
 if __name__ == "__main__":

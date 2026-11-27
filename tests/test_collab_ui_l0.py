@@ -116,3 +116,28 @@ class TestOutcomeBar(unittest.TestCase):
         s04 = (_REPO / "static" / "hub" / "04-terminal-ws.js").read_text(encoding="utf-8")
         self.assertIn('data-run-act="retry"', s04)
         self.assertIn("'retry'", s04)
+
+
+class TestMainVsSubTask(unittest.TestCase):
+    """2026-11-28 用户重申：历史必须分清「主任务（目标框输入的）」与「拆解后的子任务」。
+
+    实测现状（CDP，登录态）：20 行历史、`.run-kicker` 全部为「主任务」、点开第一行后
+    `.run-subs-h` = 「共 1 个子任务（拆解结果）」、子任务行含 执行者·模型 与失败原因。
+    这里把「结构」钉住，防止下次重构把两级信息压回一行。
+    """
+
+    def setUp(self):
+        self.s04 = (_REPO / "static" / "hub" / "04-terminal-ws.js").read_text(encoding="utf-8")
+
+    def test_history_row_labels_main_task(self):
+        self.assertIn('class="run-kicker"', self.s04)
+        self.assertIn(">主任务<", self.s04)
+        self.assertIn('id="runsHint"', _HTML, "历史卡头要有「主任务 → 子任务」说明行")
+
+    def test_subtask_rows_carry_who_and_reason(self):
+        self.assertIn('class="run-subs-h"', self.s04)
+        self.assertIn("个子任务（拆解结果）", self.s04)
+        self.assertIn('class="run-sub-who"', self.s04, "子任务行必须显示执行者·模型·耗时")
+        self.assertIn('class="run-sub-err"', self.s04, "失败子任务必须就地显示原因")
+        for cls in ("run-kicker", "run-subs-h", "run-sub-h", "run-sub-who", "run-sub-err"):
+            self.assertIn("." + cls, _HTML, "%s 缺 CSS ⇒ 渲染出来是裸文本" % cls)

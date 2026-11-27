@@ -16,7 +16,9 @@
 | 2 | T5 后端协同增强 | ✅ 已完工 | v0.13.216 |
 | 2 | T6 前端工作台 | ✅ 已完工 | v0.13.217 |
 | 2 | T7 闸门与真渲染 | ⏳ 未开工 | — |
-| 3 | S1–S5 数据面托管 | ⏳ 未开工 | — |
+| 3 | S1 读切 | ⛔ 改判合并进 S2 | — |
+| 3 | S2 写者收敛 | ✅ 已完工（默认仍 hub） | v0.13.218 |
+| 3 | S3–S5 技能/MCP/记忆/下线旧副本 | ⏳ 未开工 | — |
 
 ## 错误与未完成（只记事实，不记推测）
 
@@ -168,3 +170,38 @@ t2 agent=codex  pinned=top  reason=already_at_floor tier=t3 model=dumate/kimi-k3
 **测试**：62 passed（`sys_pages_layout` / `hubjs_split` / `collab_force_agents` / `magpie_interop` / parity）。
 
 **回滚**：`templates/index.html.bak-*-collab-t6`；`18-collab.js` 可整体删除（04 三处委派有兜底）。
+
+## 波3 · S1 改判 + S2 写者收敛 — 2026-11-27 12:2x
+
+**S1 改判（不执行「读切」）**
+计划里的 S1 是「modelcfg 读 agent 模型改走 `magpie ls`」。实测 `magpie ls --json` **不支持**
+（把 `--json` 当 agent 名），只能解析人类可读文本。更重要的是：读写指向**同一份文件**，
+换读取实现不会减少任何写冲突，只会引入一个脆弱文本解析器。
+⇒ 撤销 S1，价值并入 S2（写者收敛 + 回读验证）。这条改动已写进本日志，不是静默跳过。
+
+**S2 改动**
+- `src/modelcfg.py`：新增 `writer_mode()` / `_apply_via_magpie()` / `MAGPIE_WRITABLE`；
+  `apply_model()` 开头按 `MODELCFG_WRITER` 分流（默认 `hub`，生产不变）。
+- `src/api_magpie.py`：`/api/magpie/status` 增 `model_writer` / `model_writer_agents`。
+
+**A/B 实测（jcode）**
+```
+before : workbuddy/deepseek-v4.1-flash
+apply  : writer=magpie verified=True → 回读 workbuddy/hy4flash-free
+restore: writer=magpie verified=True → 回读 workbuddy/deepseek-v4.1-flash
+文件 diff：与原文件**逐字节一致**
+```
+
+**踩坑**：第一版把 `set_hub_model()` 放在验证之后直接裸调，独立脚本里 db 未初始化即抛异常
+⇒ 文件已被 magpie 改好，调用方却收到「失败」（会让人重复点）。
+改为记账失败只写 `bookkeeping_error` 字段，`verified` 仍如实返回。
+
+**为什么默认仍是 hub**：切换写者会让 codex/pi 的配置改由 magpie 落笔，属共享配置变更；
+按军规须显式改 .env + 重启 + 端到端验证。当前留开关，等 S3 一起切。
+
+**测试**：`tests/test_modelcfg_writer_l0.py` 6 例。
+
+**未完成（波3 剩余）**
+- S3 技能/MCP/指令 读 `library.json` + 写调 `magpie library …`
+- S4 记忆读写收敛到 magpie memory
+- S5 下线 hub 自研副本（保留只读兼容端点 + 改判横幅）

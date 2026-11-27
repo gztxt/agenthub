@@ -129,8 +129,9 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.217"
+VERSION = "0.13.218"
 
+# v0.13.218（2026-11-27）：波3 S2 —— agent 模型配置写者收敛（magpie 写 / hub 回读验证）。
 # v0.13.217（2026-11-27）：协同工作台前端改版 —— 左参数 / 右看板 + 三 tab + Agent 多选 + 成本列。
 # v0.13.216（2026-11-27）：协同波2 后端 —— force_agents / spread / overview / run 详情带成本。
 # v0.13.215（2026-11-27）：协同改造波1 —— flash 倾斜 / 实时错误窗 / 成本自动回填 / 观测内联。

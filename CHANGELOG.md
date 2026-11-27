@@ -1,3 +1,32 @@
+## v0.13.218 — 波 3 · S2：模型配置写者收敛（2026-11-27）
+
+> 用户令：「magpie 的数据来源/存储都是 agents 的数据，agenthub 部分自研由 magpie 取代」。
+
+**双写者证据**：hub `modelcfg.apply_model()` 直写 5 类配置文件（`src/modelcfg.py:17-21`），
+而 magpie 的 `applied.json` 里有 codex / dsh / omp / opencode / pi ⇒ **codex 与 pi 两边都写**，
+谁后写谁生效，出事无法归因。
+
+| 改动 | 判据 |
+|---|---|
+| `MODELCFG_WRITER`（默认 `hub`） | 默认值下行为逐字不变；生产当前仍是 hub |
+| `=magpie` 时改由 `magpie <agent> <model>` 落笔 | 只对 `MAGPIE_WRITABLE`（claude/codex/pi/jcode/grok）生效，其余回落 hub |
+| 回读验证 | magpie 返回 0 但文件读不到新值 ⇒ **判失败**（不信自述） |
+| 记账隔离 | `set_hub_model` 失败只写 `bookkeeping_error`，**不反过来报设置失败**（文件已改） |
+| 可见面 | `GET /api/magpie/status` 增 `model_writer` / `model_writer_agents` |
+
+**A/B 实测（jcode，写入后立即还原）**
+```
+before = workbuddy/deepseek-v4.1-flash
+apply  = writer:magpie verified:true  → read back: workbuddy/hy4flash-free
+restore= writer:magpie verified:true  → final: workbuddy/deepseek-v4.1-flash
+配置文件 diff：与原文件逐字节一致
+```
+
+**S1 改判（不执行「读切」）**：读写指向同一份文件，读切不会减少写冲突；真正的风险在写者。
+故 S1 合并进 S2，只做写者收敛 + 回读验证。
+
+**测试**：`tests/test_modelcfg_writer_l0.py` 6 例（默认 hub / 名单路由 / 非零 rc / 读不到判失败 / 记账失败不算写失败）。
+
 ## v0.13.217 — 协同工作台前端改版：左参数 / 右看板 / 三 tab（2026-11-27）
 
 > 用户令：「派发实际就是 agenthub 的协同，重新设计前端 UI」。本版只动前端，后端见 v0.13.216。

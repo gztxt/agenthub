@@ -635,11 +635,75 @@ def preview(agent_id: str, model: str) -> dict:
             "argv": terminal_argv(agent_id, model), "files": files}
 
 
+# ── 写代理（2026-11-27 波3 S2）：把「改 agent 模型」的写者收敛到 magpie ──
+# 背景：hub 的 `apply_model()` 与 magpie 都在写同样 5 类配置文件
+#     （hub: src/modelcfg.py:17-21；magpie: ~/.config/magpie/applied.json 里有 codex/pi/…）
+# ⇒ codex 与 pi 存在**双写者**：谁后写谁生效，出问题两边日志都「成功」。
+# 处置：`MODELCFG_WRITER=magpie` 时改由 `magpie <agent> <model>` 落笔，hub 只读回验证。
+# 默认仍是 `hub`（生产行为不变），切换须显式改 .env 并重启。
+MAGPIE_BIN = os.getenv("MAGPIE_BIN", "/vol1/magpie-bin/magpie")
+#: magpie CLI 认得的 agent 键（`magpie ls` 的 id 列）。不在表里的仍走 hub 写手。
+MAGPIE_WRITABLE = {"claude", "codex", "pi", "jcode", "grok"}
+
+
+def writer_mode() -> str:
+    return (os.getenv("MODELCFG_WRITER", "hub") or "hub").strip().lower()
+
+
+def _apply_via_magpie(agent_id: str, model: str) -> dict:
+    """让 magpie 落笔，再用 hub 自己的读取器回读验证（**不信任何一方的自述**）。"""
+    import subprocess
+    spec = _spec_or_raise(agent_id)
+    before = ""
+    try:
+        before = str((spec["read"]() or {}).get("current") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        cp = subprocess.run([MAGPIE_BIN, agent_id, model], capture_output=True,
+                            text=True, timeout=float(os.getenv("MAGPIE_APPLY_TIMEOUT", "25")))
+    except (OSError, subprocess.SubprocessError) as e:
+        raise ModelCfgError("magpie 写入调用失败：%s: %s" % (type(e).__name__, e), 500)
+    if cp.returncode != 0:
+        raise ModelCfgError("magpie 拒绝写入（rc=%d）：%s" % (
+            cp.returncode, (cp.stderr or cp.stdout or "").strip()[:300]), 502)
+    # 回读验证：文件里读到的必须就是刚设的值（含 bare id 形状差异时用子串兜底）
+    got = ""
+    try:
+        got = str((spec["read"]() or {}).get("current") or "")
+    except Exception:  # noqa: BLE001
+        got = ""
+    ok = got == model or (got and (got.endswith(model) or model.endswith(got)))
+    if not ok:
+        raise ModelCfgError(
+            "magpie 返回成功但文件里读不到 %s（读到 %s）⇒ 判失败，未记入 hub"
+            % (model, got or "空"), 502)
+    # 记 hub 侧账（agent_models / model_writes）。**失败不许反过来报「设置失败」**：
+    # 文件已经被 magpie 改了，此时报错会让用户以为没生效、再点一次。
+    # 记账失败单独带出，由前端决定要不要提示。
+    book_err = ""
+    try:
+        set_hub_model(agent_id, model)
+        _record_write(agent_id, before, [{"file": "magpie:%s" % agent_id, "backup": "",
+                                          "changes": [{"op": "set", "to": model}]}])
+    except Exception as e:  # noqa: BLE001
+        book_err = "%s: %s" % (type(e).__name__, e)
+    return {"agent_id": agent_id, "model": model, "mode": "set", "writer": "magpie",
+            "verified": True, "before": before, "bookkeeping_error": book_err,
+            "applied": [{"file": "magpie:%s" % agent_id, "changes": [{"op": "set", "to": model}]}],
+            "write_mode": WRITE_MODE.get(agent_id, "argv"),
+            "argv": terminal_argv(agent_id, model), "at": _now()}
+
+
 def apply_model(agent_id: str, model: str) -> dict:
     """落笔：先备份 → 再写 → 再存 Hub 侧。任一步失败即抛错（不半写）。"""
     if not (model or "").strip():
         return clear_model(agent_id)
     model = validate_model(model)
+    # 2026-11-27（S2）：写者收敛。只有显式 MODELCFG_WRITER=magpie 且该 agent 在
+    # magpie 的写名单里才走代理；否则逐字走原路径（默认值，生产不变）。
+    if writer_mode() == "magpie" and agent_id in MAGPIE_WRITABLE:
+        return _apply_via_magpie(agent_id, model)
     spec = _spec_or_raise(agent_id)
     # ⚠ 顺序要紧：**先让写手做它自己的形状校验，再问清单**。
     # 反过来的话，opencode 的「缺 provider 前缀」会被清单闸门抢先报成 409

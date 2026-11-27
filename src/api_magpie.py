@@ -106,6 +106,15 @@ def magpie_status():
     import tiercfg
     out = magpie_client.status()
     out["tiers_source"] = tiercfg.tiers_source()
+    # 2026-11-27（波3 S2）：当前谁在写 agent 模型配置。双写者消除的可见面 ——
+    # 不显示这个值，「写者到底是 hub 还是 magpie」只能靠读 .env 猜。
+    try:
+        import modelcfg
+        out["model_writer"] = modelcfg.writer_mode()
+        out["model_writer_agents"] = sorted(modelcfg.MAGPIE_WRITABLE)
+    except Exception as e:  # noqa: BLE001
+        out["model_writer"] = "unknown"
+        out["model_writer_error"] = "%s: %s" % (type(e).__name__, e)
     return out
 
 

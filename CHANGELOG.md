@@ -1,3 +1,30 @@
+## 波 3 · S5 取证结论：写者**不切换**（2026-11-27）
+
+**用 shadow 实例 + 真 API 做 A/B（不改生产默认）**
+
+```
+shadow :3217  MODELCFG_WRITER=magpie
+POST /api/settings/model/apply {jcode → workbuddy/hy4flash-free}
+  → writer=magpie verified=true before=workbuddy/deepseek-v4.1-flash
+  → 文件第 141 行 [provider].default_model 已改，
+    第 160 行 [providers.ccr].default_model **仍是旧值**
+还原 → diff 与操作前逐字节一致
+```
+
+**结论：magpie 的写面小于 hub 的写面，不能整体切换。**
+
+| agent | hub 写手覆盖 | magpie 覆盖（实测） |
+|---|---|---|
+| jcode | `[provider]` + `[providers.ccr]` 两处 | 只改前一处的 1 个键 |
+| claude | model + 3 个 env 键 | 单处 |
+| pi | defaultModel/defaultProvider（+models.json） | 单处 |
+
+一旦 jcode 走 ccr provider 块就拿到旧模型 —— 这是「配置看起来对、行为不对」的典型面。
+**判定**：`MODELCFG_WRITER` 默认保持 `hub`；`=magpie` 保留为开关，并在返回值里带
+`surface_warning`（jcode 明确提示副键可能陈旧），不再声称「可整体替代」。
+
+**顺带确认**：`magpie jcode <model>` 写入后 hub 的读取器能读到新值、还原能逐字节回退
+⇒ 写代理机制本身可用，问题只在覆盖面。
 ## v0.13.220 — 波 3 · S4：magpie 长期记忆进入联邦检索（2026-11-27）
 
 **缺口**：hub 的联邦检索有 7 路（local / tdai / claude_mem / workbuddy_memory /

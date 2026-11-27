@@ -688,8 +688,18 @@ def _apply_via_magpie(agent_id: str, model: str) -> dict:
                                           "changes": [{"op": "set", "to": model}]}])
     except Exception as e:  # noqa: BLE001
         book_err = "%s: %s" % (type(e).__name__, e)
+    # 2026-11-27 实测差异（S5 取证）：magpie 的写面**小于** hub 的写面。
+    # 例：jcode 的 `[provider].default_model` 与 `[providers.ccr].default_model` 是两个键，
+    # `magpie jcode <model>` 只改前者，后者保持陈旧 —— 一旦 jcode 走 ccr provider 块，
+    # 拿到的就是旧模型。hub 原写手两个键都改（`src/modelcfg.py:18`）。
+    # 结论：magpie 写手**不完整**，因此（a）默认仍是 hub；（b）走 magpie 时把差异说出去。
+    surface = ""
+    if agent_id == "jcode":
+        surface = ("jcode 有 [provider] 与 [providers.ccr] 两处 default_model，"
+                   "magpie 只改前者 ⇒ 后者可能陈旧；需要一致时用 MODELCFG_WRITER=hub")
     return {"agent_id": agent_id, "model": model, "mode": "set", "writer": "magpie",
             "verified": True, "before": before, "bookkeeping_error": book_err,
+            "surface_warning": surface,
             "applied": [{"file": "magpie:%s" % agent_id, "changes": [{"op": "set", "to": model}]}],
             "write_mode": WRITE_MODE.get(agent_id, "argv"),
             "argv": terminal_argv(agent_id, model), "at": _now()}

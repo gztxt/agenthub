@@ -20,7 +20,7 @@
 | 3 | S2 写者收敛 | ✅ 已完工（默认仍 hub） | v0.13.218 |
 | 3 | S3 技能托管关系 | ✅ 已完工（无需写代理） | v0.13.219 |
 | 3 | S4 记忆检索并入 | ✅ 已完工 | v0.13.220 |
-| 3 | S5 下线旧副本 | ⏳ 未开工 | — |
+| 3 | S5 写者评估 | ✅ 结论=不切换（写面不全） | v0.13.221 |
 
 ## 错误与未完成（只记事实，不记推测）
 
@@ -255,3 +255,30 @@ GET /api/memory/search?q=FCC&sources=magpie_memory -> count=3，命中 hub-mem-1
 **测试**：`tests/test_memory_magpie_l0.py` 5 例（注册/启用/目标路径/权重≥0.8/进快路与白名单）。
 
 **未完成**：S5 下线 hub 自研副本（技能扫描双源、modelcfg 写者最终切换、记忆本地 L1 与 magpie 的分工书面化）。
+
+## 波3 · S5 写者评估：**不切换** — 2026-11-27 12:5x
+
+**做法**：shadow 实例（`:3217`，`MODELCFG_WRITER=magpie`）+ 真 API 走一遍，不改生产默认。
+
+**实测**
+```
+POST /api/settings/model/apply {jcode → workbuddy/hy4flash-free}
+ → {writer:"magpie", verified:true, before:"workbuddy/deepseek-v4.1-flash"}
+ → ~/.jcode/config.toml:141  [provider].default_model      = 新值 ✅
+   ~/.jcode/config.toml:160  [providers.ccr].default_model = 旧值 ❌（magpie 没动）
+POST 还原 → diff 与操作前**逐字节一致**
+```
+
+**结论**：magpie 写面 < hub 写面。hub 的 jcode 写手同时改两处（`src/modelcfg.py:18`），
+magpie 只改 `[provider]`。若切换，jcode 走 ccr provider 块时拿到旧模型 —— 典型的
+「配置看着对、行为不对」。
+
+**处置**
+- `MODELCFG_WRITER` 默认保持 `hub`（生产不变）
+- 保留 `=magpie` 开关，但返回值加 `surface_warning`，不再声称「可整体替代」
+- 文档与 CHANGELOG 记录差异表，避免下次有人当成「开关没生效」
+
+**未完成（本轮不做，已登记）**
+- 技能扫描双源：hub 386 条 / magpie 托管 68 条，重叠 68 —— hub 的多源扫描不能删
+  （其余 318 条来自包/扩展目录，magpie 不管）
+- 记忆三层分工书面化（TDAI 本机事实 / magpie memory 跨 agent 成文 / hub local L1）

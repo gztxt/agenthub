@@ -1,3 +1,17 @@
+## v0.13.221 — 协同收尾：自动打开 / 成本×成功率 / 技能双源口径（2026-11-27）
+
+| 项 | 实现 | 判据 |
+|---|---|---|
+| 进页自动打开非终态 run | `cbAutoOpenRunning()` | 取最近 5 条、挑第一条非终态；实测打开 `pending` 状态的 run（`panelShown=true`） |
+| 汇总「成本 × 成功率」 | `cbLoadCostPerf()` | 两块数据分别来自 `/api/tasks/stats` 与 `/api/tasks/costs?group_by=model`，前端只 join；实测 16 行 |
+| 技能双源口径 | `/api/skill/list` 的 `magpie` 段 | `managed=68 / matched=68 / unmanaged=318` + 一句说明 |
+
+**踩坑**：自动打开最初只查 `state=running`，而刚拆解未开跑的 run 状态是 `pending`
+（实测 `5e9a6c2a18`：`running=[]` 但页面有活任务）⇒ 改为「非终态」判定。
+
+**测试**：`tests/test_collab_ui_l0.py` 7 例（自动打开不用 running-only / 不抢已开 run /
+两块数据 join / tab 触发加载 / 新交互走 data-* 委托）。本轮合计 **79 passed**。
+
 ## 波 3 · S5 取证结论：写者**不切换**（2026-11-27）
 
 **用 shadow 实例 + 真 API 做 A/B（不改生产默认）**

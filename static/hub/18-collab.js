@@ -84,7 +84,10 @@ function cbTab(name) {
     p.classList.toggle('on', p.getAttribute('data-cpanel') === cbTabKey);
   });
   /* 切到「汇总」才拉统计（近 30 天聚合，首屏不需要） */
-  if (cbTabKey === 'stats' && typeof loadTaskStats === 'function') loadTaskStats();
+  if (cbTabKey === 'stats') {
+    if (typeof loadTaskStats === 'function') loadTaskStats();
+    cbLoadCostPerf();
+  }
 }
 
 function cbBindTabs() {
@@ -152,6 +155,52 @@ async function cbFillTaskModelSelect() {
   }
 }
 
+
+/* ── 汇总：成本 × 成功率（T6 收尾，2026-11-27）───────────────
+   为什么要两块数据 join：`/api/tasks/stats` 有成功率没有成本，
+   `/api/tasks/costs` 有成本没有成功率。按模型做 key 合并，各取各的真源，
+   不在前端重算任何一边的比率。 */
+async function cbLoadCostPerf() {
+  var host = $('statsCostPerf');
+  if (!host) return;
+  var days = ($('statsDays') || {}).value || '30';
+  var q = days === '0' ? '' : '?days=' + encodeURIComponent(days);
+  var perf = {}, cost = {};
+  try {
+    var d = await api('/api/tasks/stats' + (q ? q + '&' : '?') + 'days=' + encodeURIComponent(days));
+    (d.combos || []).forEach(function (c) {
+      var k = c.model_eff || c.model || '';
+      if (!k) return;
+      var slot = perf[k] || (perf[k] = { n: 0, ok: 0 });
+      slot.n += Number(c.n || 0);
+      slot.ok += Number(c.ok || 0);
+    });
+  } catch (e) { /* 成功率取不到就只显示成本，不编造 */ }
+  try {
+    var c2 = await api('/api/tasks/costs?group_by=model');
+    (c2.rows || []).forEach(function (r) {
+      var k = r.k || '';
+      if (k) cost[k] = { credits: Number(r.credits || 0), n: Number(r.n || 0) };
+    });
+  } catch (e) { /* 同理 */ }
+  var keys = Object.keys(perf).concat(Object.keys(cost).filter(function (k) { return !perf[k]; }));
+  if (!keys.length) { host.innerHTML = '<tr><td colspan="6" class="hint">暂无数据</td></tr>'; return; }
+  var rows = keys.map(function (k) {
+    var p = perf[k] || { n: 0, ok: 0 };
+    var c = cost[k] || { credits: 0, n: 0 };
+    var rate = p.n ? Math.round(p.ok / p.n * 100) + '%' : '—';
+    var per = c.n ? (Math.round(c.credits / c.n * 1000) / 1000) : '—';
+    return { k: k, n: p.n, ok: p.ok, rate: rate, credits: Math.round(c.credits * 1000) / 1000, per: per,
+             sortKey: c.credits };
+  });
+  rows.sort(function (a, b) { return b.sortKey - a.sortKey; });
+  host.innerHTML = rows.map(function (r) {
+    return '<tr><td style="font-family:var(--font-mono);font-size:var(--fs-xs)">' + escapeHtml(r.k) +
+      '</td><td>' + r.n + '</td><td>' + r.ok + '</td><td>' + r.rate + '</td><td>' +
+      r.credits + '</td><td>' + r.per + '</td></tr>';
+  }).join('');
+}
+
 /* ── 进页入口（覆盖 04 的同名函数：旧的读 taskAgent 单选，已不存在）── */
 async function cbEnterTasksPage() {
   cbBindTabs();
@@ -174,6 +223,7 @@ async function cbEnterTasksPage() {
   if (typeof bindRunPanelOutside === 'function') bindRunPanelOutside();
   if (typeof bindRunActions === 'function') bindRunActions();
   refreshTasks();
+  cbAutoOpenRunning();
 }
 
 /* 把 overview 的响应喂给状态条（与 cbLoadStatus 同一渲染，避免两套口径） */
@@ -216,3 +266,22 @@ function cbPatchOpenRun() {
   };
 }
 document.addEventListener('DOMContentLoaded', cbPatchOpenRun);
+
+/* ── 进页自动打开最近一条运行中的 run（T6 收尾）──────────────
+   为什么做：旧流程要点「历史 → 查看」才能看到活的那条，用户的用法是
+   「跑着的时候盯进度」，那一步是纯摩擦。只在**没有已选 run** 且确有运行中时触发，
+   不抢用户已经打开的详情。 */
+async function cbAutoOpenRunning() {
+  if (currentRun) return;
+  try {
+    /* 不能只查 state=running：刚拆解还没开跑时状态是 `pending`（实测 run 5e9a6c2a18），
+       只按 running 查会「有活任务但页面空白」。取最近 5 条，挑第一条非终态的。 */
+    var d = await api('/api/tasks/runs?limit=5');
+    var terminal = { success: 1, failed: 1, partial: 1, cancelled: 1 };
+    var live = (d.runs || []).filter(function (r) { return !terminal[r.state]; });
+    if (!live.length) return;
+    var id = live[0].run_id;
+    if (!id) return;
+    if (typeof openRun === 'function') openRun(id);
+  } catch (e) { /* 自动打开失败不影响手动路径 */ }
+}

@@ -603,7 +603,15 @@ def _attach_magpie_managed(items: List[dict]) -> dict:
                         "from": info["from"], "kind": info["kind"],
                         "name": info["name"]}
         hit += 1
-    return {"managed": len(m), "matched": hit, "error": ""}
+    # 2026-11-27（收尾项1）：双源并存的**书面口径** ——
+    # hub 扫描 386 条（含包/扩展/各 agent 目录），magpie 托管 68 条（全部来自
+    # `/fs/1000/ftp/技术文档/skills`）。重叠 68 条，其余 318 条 magpie 不管。
+    # 这里把两个数一起报出来，避免有人看到 managed=68 就以为「hub 少了 318 条」。
+    return {"managed": len(m), "matched": hit, "unmanaged": max(0, len(items) - hit),
+            "error": "",
+            "note": ("magpie 托管 %d 条（全部来自 技术文档/skills）；其余 %d 条由 hub 从"
+                     "包/扩展/各 agent 目录扫描得到，magpie 不管这类来源"
+                     % (len(m), max(0, len(items) - hit)))}
 
 
 def _scan_one(route: str, root) -> Dict[str, Any]:

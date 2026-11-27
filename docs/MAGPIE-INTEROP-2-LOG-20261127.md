@@ -15,7 +15,7 @@
 | — | 事故：dumate 429 卡死 | ✅ 已修（实时错误窗） | 500d58fd52 |
 | 2 | T5 后端协同增强 | ✅ 已完工 | v0.13.216 |
 | 2 | T6 前端工作台 | ✅ 已完工 | v0.13.217 |
-| 2 | T7 闸门与真渲染 | ⏳ 未开工 | — |
+| 2 | T7 闸门与真渲染 | ✅ 并入 T6 | 62→79 passed |
 | 3 | S1 读切 | ⛔ 改判合并进 S2 | — |
 | 3 | S2 写者收敛 | ✅ 已完工（默认仍 hub） | v0.13.218 |
 | 3 | S3 技能托管关系 | ✅ 已完工（无需写代理） | v0.13.219 |
@@ -282,3 +282,21 @@ magpie 只改 `[provider]`。若切换，jcode 走 ccr provider 块时拿到旧�
 - 技能扫描双源：hub 386 条 / magpie 托管 68 条，重叠 68 —— hub 的多源扫描不能删
   （其余 318 条来自包/扩展目录，magpie 不管）
 - 记忆三层分工书面化（TDAI 本机事实 / magpie memory 跨 agent 成文 / hub local L1）
+
+## 收尾（未完成 1/2/3 执行）— 2026-11-27 13:0x
+
+**① 技能双源口径**：`/api/skill/list` 的 `magpie` 段新增 `unmanaged` 与一句话说明
+（`managed=68 matched=68 unmanaged=318`）。不删 hub 的多源扫描 —— 其余 318 条来自
+包/扩展目录，magpie 不管理。
+
+**② 记忆三层分工**：落 `agent-knowledge/878` §3（L1 hub local / L2 TDAI / L3 magpie memory），
+含写入边界判据与两条「不做」（不复制、不自动注入）。
+
+**③ 协同页两项**
+- 进页自动打开最近非终态 run：`cbAutoOpenRunning()`，**实测 `panelShown=true`**
+- 汇总「成本 × 成功率」：`cbLoadCostPerf()` 两个端点 join，**实测 16 行**
+
+**踩坑**：自动打开第一版只查 `state=running`，而刚拆解未开跑的 run 是 `pending`
+（run 5e9a6c2a18 实测 `running=[]` 但有 3 个 pending 任务）⇒ 改为「非终态」过滤。
+
+**测试**：新增 `tests/test_collab_ui_l0.py` 7 例；本轮相关面 79 passed。

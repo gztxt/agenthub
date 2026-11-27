@@ -2501,6 +2501,8 @@
                             </div>
                             <div id="taskStatsVerdict" class="cb-verdict"><span class="hint">加载中…</span></div>
                             <div class="cb-scroll"><div id="statsAgents" class="runs-acc"></div></div>
+                            <div class="cb-tools"><span class="hint">成本 × 成功率（credits 来自 magpie 账本，按模型聚合）</span></div>
+                            <div class="cb-scrollbox"><table><thead><tr><th>模型</th><th>次数</th><th>成功</th><th>成功率</th><th>credits</th><th>credits/次</th></tr></thead><tbody id="statsCostPerf"></tbody></table></div>
                             <details id="statsRaw">
                                 <summary class="hint" style="padding:8px 14px;cursor:pointer">原始数据（Agent × 模型 融合表 + 轮次分布）</summary>
                                 <div class="cb-scrollbox sp-bd box flush tscroll">
@@ -3594,7 +3596,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=bf8523cc';
+      var HUB_SRC = '/static/hub.js?v=7992ada4';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

@@ -71,3 +71,48 @@ class TestDelegatedInteractions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHistoryVisible(unittest.TestCase):
+    """2026-11-27 用户报「历史页面无历史任务记录」。
+
+    实测根因：flex 链断 ⇒ `.cb-right` 没有确定高度 ⇒ `.cb-view` 算出 0
+    ⇒ 20 条历史渲染了但被裁到看不见（桌面 histViewH=0、窄屏 top=928 在视口外）。
+    判据：.cb-right 只靠 min-height:0 跟随高度（不能写 height:0，那会算出 0）。
+    """
+
+    def test_cb_right_has_min_height_not_fixed_height(self):
+        css = _HTML[_HTML.index(".cb-right {"):_HTML.index(".cb-right {") + 600]
+        # 只看**声明**，不看注释（注释里会写「加 height:0 反把…」这句教训）
+        self.assertIn("min-height: 0", css)
+        self.assertIsNone(re.search(r"^\s*height:\s*0(px)?\s*;", css, re.M),
+                          "写死 height:0 会让 .cb-view 高度算出 0")
+
+    def test_narrow_tab_scrolls_right_pane_into_view(self):
+        self.assertIn("cbScrollToRight", _JS)
+        self.assertIn("HUB_NARROW_MQ", _JS, "断点必须复用全站唯一 matchMedia")
+
+    def test_narrow_left_panel_collapses(self):
+        seg = _collab_segment()
+        self.assertIn('id="cbLeftToggle"', seg)
+        self.assertIn("cbBindLeftToggle", _JS)
+
+
+class TestOutcomeBar(unittest.TestCase):
+    """2026-11-27 用户令：执行情况摘要要显眼；失败项后面直接带「继续执行」。"""
+
+    def test_four_chips_present(self):
+        self.assertIn('id="cbOutcome"', _collab_segment())
+        for label in ("成功", "失败", "运行中", "待执行"):
+            self.assertIn(label, _JS)
+
+    def test_failed_task_has_retry_button(self):
+        self.assertIn("data-cb-retry", _JS)
+        self.assertIn("/retry", _JS)
+        # 单条重试必须带 task_id（整条重试是另一回事）
+        self.assertIn("task_id: taskId", _JS)
+
+    def test_history_row_has_retry(self):
+        s04 = (_REPO / "static" / "hub" / "04-terminal-ws.js").read_text(encoding="utf-8")
+        self.assertIn('data-run-act="retry"', s04)
+        self.assertIn("'retry'", s04)

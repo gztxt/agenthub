@@ -3365,6 +3365,9 @@ function bindRunActions() {
       if (act === 'open') openRun(id);
       else if (act === 'start') startRun(id);
       else if (act === 'replan') replanRun(id);
+      /* 2026-11-27 用户令：「可以点击历史任务后重新执行」—— 失败/阻塞的 run 直接
+         把失败项拉回待执行队列并启动，不必先点「查看」再点两下。 */
+      else if (act === 'retry') retryRun(id);
     });
     /* 键盘可达（role=button + tabindex=0 只是承诺，Enter/Space 得自己接） */
     host.addEventListener('keydown', function (ev) {
@@ -3487,7 +3490,11 @@ async function loadRuns(append) {
       var modelTxt = models.length ? (models[0].split('/').pop() + (models.length > 1 ? ' +' + (models.length - 1) : '')) : '-';
       var roundTxt = (r.round || 1) + '/' + (r.max_rounds || '?');
       var st = runStatePill(r.state);
-      var act = '<button class="btn sm ghost" data-run-act="open" data-run-id="' + escapeHtml(rid) + '">查看</button>' +
+      var act = ((r.failed || 0) + (r.blocked || 0) > 0
+          ? '<button class="btn sm danger" data-run-act="retry" data-run-id="' + escapeHtml(rid) +
+            '" title="把失败/阻塞的子任务拉回待执行队列并启动">重新执行</button>'
+          : '') +
+          '<button class="btn sm ghost" data-run-act="open" data-run-id="' + escapeHtml(rid) + '">查看</button>' +
         (r.state === 'running' || r.state === 'pending' || r.state === 'waiting'
           ? '<button class="btn sm ghost" data-run-act="start" data-run-id="' + escapeHtml(rid) + '">续跑</button>' : '') +
         ((r.state === 'failed' || r.state === 'partial') && (r.round || 1) < (r.max_rounds || 2)

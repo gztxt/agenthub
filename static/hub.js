@@ -7836,6 +7836,9 @@ function bindRunActions() {
       if (act === 'open') openRun(id);
       else if (act === 'start') startRun(id);
       else if (act === 'replan') replanRun(id);
+      /* 2026-11-27 用户令：「可以点击历史任务后重新执行」—— 失败/阻塞的 run 直接
+         把失败项拉回待执行队列并启动，不必先点「查看」再点两下。 */
+      else if (act === 'retry') retryRun(id);
     });
     /* 键盘可达（role=button + tabindex=0 只是承诺，Enter/Space 得自己接） */
     host.addEventListener('keydown', function (ev) {
@@ -7958,7 +7961,11 @@ async function loadRuns(append) {
       var modelTxt = models.length ? (models[0].split('/').pop() + (models.length > 1 ? ' +' + (models.length - 1) : '')) : '-';
       var roundTxt = (r.round || 1) + '/' + (r.max_rounds || '?');
       var st = runStatePill(r.state);
-      var act = '<button class="btn sm ghost" data-run-act="open" data-run-id="' + escapeHtml(rid) + '">查看</button>' +
+      var act = ((r.failed || 0) + (r.blocked || 0) > 0
+          ? '<button class="btn sm danger" data-run-act="retry" data-run-id="' + escapeHtml(rid) +
+            '" title="把失败/阻塞的子任务拉回待执行队列并启动">重新执行</button>'
+          : '') +
+          '<button class="btn sm ghost" data-run-act="open" data-run-id="' + escapeHtml(rid) + '">查看</button>' +
         (r.state === 'running' || r.state === 'pending' || r.state === 'waiting'
           ? '<button class="btn sm ghost" data-run-act="start" data-run-id="' + escapeHtml(rid) + '">续跑</button>' : '') +
         ((r.state === 'failed' || r.state === 'partial') && (r.round || 1) < (r.max_rounds || 2)
@@ -11980,6 +11987,10 @@ function cbTab(name) {
   [].slice.call(document.querySelectorAll('#page-tasks .cb-view')).forEach(function (p) {
     p.classList.toggle('on', p.getAttribute('data-cpanel') === cbTabKey);
   });
+  /* 2026-11-27 实测（390×844）：窄屏下左栏在上、右栏 top=928 已在视口 844 之外
+     ⇒ 用户点了「历史」仍看到空，主观就是「没有历史记录」。
+     切 tab 时把右栏滚进视口；宽屏两栏并排，不需要也不该动滚动位置。 */
+  cbScrollToRight();
   /* 切到「汇总」才拉统计（近 30 天聚合，首屏不需要） */
   if (cbTabKey === 'stats') {
     if (typeof loadTaskStats === 'function') loadTaskStats();
@@ -11994,6 +12005,34 @@ function cbBindTabs() {
   tabs.addEventListener('click', function (ev) {
     var b = ev.target.closest('[data-ctab]');
     if (b) cbTab(b.getAttribute('data-ctab'));
+  });
+}
+
+
+/* 窄屏把右栏（结果/历史）滚进视口。宽屏两栏并排，不需要也不该动滚动位置。 */
+function cbScrollToRight() {
+  try {
+    if (typeof HUB_NARROW_MQ === 'undefined' || !HUB_NARROW_MQ.matches) return;
+    var right = document.querySelector('#page-tasks .cb-right');
+    var cb = document.querySelector('#page-tasks .cb');
+    if (!right || !cb) return;
+    var off = right.getBoundingClientRect().top - cb.getBoundingClientRect().top;
+    cb.scrollTop = Math.max(0, cb.scrollTop + off - 6);
+  } catch (e) { /* 滚动只是便利，失败不影响内容 */ }
+}
+
+/* 窄屏左栏折叠（2026-11-27：参数占 490px，把结果挤出视口） */
+function cbBindLeftToggle() {
+  var hd = $('cbLeftToggle'), left = $('cbLeft');
+  if (!hd || !left || hd.dataset.bound) return;
+  hd.dataset.bound = '1';
+  hd.addEventListener('click', function () {
+    var on = !left.classList.contains('open');
+    left.classList.toggle('open', on);
+    hd.setAttribute('aria-expanded', on ? 'true' : 'false');
+    var h = $('cbLeftHint');
+    if (h) h.textContent = on ? '点收起' : '点开展开参数';
+    if (on) { var t = $('taskGoal'); if (t) t.focus(); }
   });
 }
 
@@ -12053,6 +12092,82 @@ async function cbFillTaskModelSelect() {
 }
 
 
+
+/* ── 执行结果摘要条（2026-11-27 用户令）─────────────────────────
+   「任务执行情况摘要不够明显，例如哪些执行成功、哪些执行失败，
+     执行失败的后面有继续执行按钮，即可重新加入待执行任务列表」
+   判据：
+   ① 四格计数一眼可读（成功/失败/运行中/待执行），颜色编码；
+   ② 失败项逐条列出（task_id + 原因），每条带「继续执行」；
+   ③ 「继续执行」= POST /api/tasks/{run}/retry 带 task_id（后端已支持单条重试），
+      点完即回 pending ⇒ 由 runner 逐步执行，不重跑整条 run。 */
+var cbOutcomeBound = false;
+
+function cbRenderOutcome(runId, tasks) {
+  var host = $('cbOutcome');
+  if (!host) return;
+  var n = { success: 0, failed: 0, running: 0, pending: 0, blocked: 0 };
+  var fails = [];
+  (tasks || []).forEach(function (t) {
+    var st = t.status || '';
+    if (st === 'success') n.success++;
+    else if (st === 'failed') { n.failed++; fails.push(t); }
+    else if (st === 'running' || st === 'verifying' || st === 'submitted') n.running++;
+    else if (st === 'blocked') { n.blocked++; fails.push(t); }
+    else n.pending++;
+  });
+  var html = ''
+    + '<span class="cb-oc ok">✓ 成功 ' + n.success + '</span>'
+    + '<span class="cb-oc bad">✗ 失败 ' + n.failed + '</span>'
+    + (n.blocked ? '<span class="cb-oc bad">⛔ 阻塞 ' + n.blocked + '</span>' : '')
+    + '<span class="cb-oc run">▶ 运行中 ' + n.running + '</span>'
+    + '<span class="cb-oc wait">⧗ 待执行 ' + n.pending + '</span>';
+  if (fails.length) {
+    html += '<div class="cb-fails">' + fails.map(function (t) {
+      var why = (t.error || t.verdict_reason || t.verify_reason || '无原因记录');
+      if (why.length > 90) why = why.slice(0, 90) + '…';
+      return '<div class="cb-fail"><span class="tid">' + escapeHtml(t.task_id) + '</span>'
+        + '<span class="why" title="' + escapeHtml(t.error || t.verdict_reason || '') + '">'
+        + escapeHtml(why) + '</span>'
+        + '<button class="btn ghost sm" data-cb-retry="' + escapeHtml(t.task_id) + '"'
+        + ' data-cb-run="' + escapeHtml(runId) + '">继续执行</button></div>';
+    }).join('') + '</div>';
+  }
+  host.innerHTML = html;
+  cbBindOutcome();
+}
+
+function cbBindOutcome() {
+  var host = $('cbOutcome');
+  if (!host || cbOutcomeBound) return;
+  cbOutcomeBound = true;
+  host.addEventListener('click', function (ev) {
+    var b = ev.target.closest('[data-cb-retry]');
+    if (!b) return;
+    ev.stopPropagation();
+    cbRetryTask(b.getAttribute('data-cb-run'), b.getAttribute('data-cb-retry'), b);
+  });
+}
+
+async function cbRetryTask(runId, taskId, btn) {
+  if (!runId || !taskId) return;
+  if (btn) { btn.disabled = true; btn.textContent = '加入中…'; }
+  try {
+    await api('/api/tasks/' + runId + '/retry', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId })
+    });
+    toast(taskId + ' 已重新加入待执行', 'ok');
+    /* 立刻重绘：状态已变 pending，按钮消失；不用等 6s 轮询 */
+    runSigLast = '';
+    if (typeof openRun === 'function') openRun(runId);
+    if (typeof refreshTasks === 'function') refreshTasks();
+  } catch (e) {
+    toast('重新加入失败：' + e.message, 'err');
+    if (btn) { btn.disabled = false; btn.textContent = '继续执行'; }
+  }
+}
+
 /* ── 汇总：成本 × 成功率（T6 收尾，2026-11-27）───────────────
    为什么要两块数据 join：`/api/tasks/stats` 有成功率没有成本，
    `/api/tasks/costs` 有成本没有成功率。按模型做 key 合并，各取各的真源，
@@ -12103,6 +12218,7 @@ async function cbEnterTasksPage() {
   cbBindTabs();
   cbTab(cbTabKey);
   cbBindAgents();
+  cbBindLeftToggle();
   var pool = null;
   try { pool = await api('/api/tasks/pool'); } catch (e) { pool = null; }
   if (pool && pool.rounds) fillRoundSelect(pool.rounds);
@@ -12157,12 +12273,41 @@ function cbPatchOpenRun() {
   var orig = window.openRun;
   window.openRun = function (id) {
     cbTab('live');
+    cbScrollToRight();
     var empty = $('cbLiveEmpty');
     if (empty) empty.style.display = 'none';
-    return orig.apply(this, arguments);
+    var p = orig.apply(this, arguments);
+    /* 04 的 renderTaskTable 会把逐条任务塞进 currentRunTasks；
+       这里等它渲染完再画摘要条，数据同源、不多发请求。 */
+    Promise.resolve(p).then(function () {
+      var byId = window.currentRunTasks || {};
+      var list = Object.keys(byId).map(function (k) {
+        /* currentRunTasks 里是 {task_id,status,...}，但 04 存的是 t 本身 */
+        var t = byId[k] || {};
+        if (!t.task_id) t = Object.assign({ task_id: k }, t);
+        return t;
+      });
+      /* 兜底：04 的缓存可能只存了 task_id→task，缺 status 时从 DOM 读不到，
+         那就再拉一次详情（只在条数>0 时）。 */
+      if (!list.length || list.every(function (t) { return !t.status; })) {
+        return api('/api/tasks/' + id).then(function (d) {
+          cbRenderOutcome(id, d.tasks || []);
+        }).catch(function () {});
+      }
+      cbRenderOutcome(id, list);
+    });
+    return p;
   };
 }
-document.addEventListener('DOMContentLoaded', cbPatchOpenRun);
+/* 2026-11-27 实测：写成 `addEventListener('DOMContentLoaded', …)` **永不执行** ——
+   hub.js 的同步脚本执行完毕时 DOMContentLoaded 已经发生过（实测 cbOpenRunPatched
+   恒为 false、window.openRun 仍是原始实现，摘要条因此一直空白）。
+   本文件在 hub.js 末尾，此时 04 已定义 openRun ⇒ 直接调用。 */
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', cbPatchOpenRun);
+} else {
+  cbPatchOpenRun();
+}
 
 /* ── 进页自动打开最近一条运行中的 run（T6 收尾）──────────────
    为什么做：旧流程要点「历史 → 查看」才能看到活的那条，用户的用法是

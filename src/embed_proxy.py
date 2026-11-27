@@ -321,12 +321,18 @@ COMPAT_JS = """<script id="agent-hub-compat">
   if (typeof ResizeObserver !== 'undefined' && !window.__roShimmed) {
     var _NativeRO = ResizeObserver;
     var ShimRO = function (cb) {
-      var raf = 0;
+      var raf = 0;                             /* 每个实例独立节流 */
+      var last = null;                         /* 本实例最近一次回调，供同帧合并 */
       return new _NativeRO(function (entries, obs) {
-        if (raf) return;                       /* 同帧多次只跑最后一次，打断递归 */
+        last = [entries, obs];
+        if (raf) return;                       /* 只合并本实例同帧的多次触发 */
         raf = requestAnimationFrame(function () {
           raf = 0;
-          try { cb(entries, obs); } catch (e) {}
+          var cur = last; last = null;
+          if (!cur) return;
+          /* 不吞异常：上游 useLayoutEffect 首帧抛错必须冒泡，否则状态没初始化 ⇒
+           * pi-web 0.19 首屏白屏（刷新后才走增量路径恢复）。2026-11-27 首屏白屏根因。 */
+          cb(cur[0], cur[1]);
         });
       });
     };
@@ -913,7 +919,25 @@ async def _document(writer: asyncio.StreamWriter, head_line: bytes, header: byte
                  # 响应侧同理：不能把 ETag / Last-Modified 递回浏览器，否则它就拿着验证器来要 304。
                  # 正文已被我们改过（多一段 <style>），任何跟上游原文对的缓存校验都是错的。
                  and not re.match(rb"^(etag|last-modified|age):", ln, re.I)]
-        # 注：只剥验证器，不动 status 行与其他头；no-store 由上游自己发的 cache-control 保证。
+        # pi-web 0.19.0（2026-11-27 升级）起上游发 frame-ancestors 'self' +
+        # X-Frame-Options: SAMEORIGIN；桥端口与 hub 跨端口即跨源，浏览器据此拒渲染 iframe
+        # ⇒ 用户在 agenthub 里打开 pi 看到空白。桥是受控嵌入代理（hub 自带 CSP/X-Frame-Options
+        # 把门），上游的"禁止被嵌"头在这里必须剥掉，否则桥失去存在意义。
+        _clean = []
+        for ln in lines:
+            low = ln.strip().lower()
+            if low.startswith(b"x-frame-options:"):
+                continue
+            if low.startswith(b"content-security-policy"):
+                k, _, v = ln.partition(b":")
+                parts = [p.strip() for p in v.split(b";")
+                         if p.strip() and not p.strip().lower().startswith(b"frame-ancestors")]
+                if parts:
+                    _clean.append(k + b": " + b"; ".join(parts))
+                continue
+            _clean.append(ln)
+        lines = _clean
+        # 注：剥验证器与上游的禁止嵌入头，不动 status 行与其他头；no-store 由上游 cache-control 保证。
         writer.write(b"\r\n".join(lines) + b"\r\n"
                      + b"Cache-Control: no-store\r\n"
                      + b"Content-Length: " + str(len(rb)).encode()

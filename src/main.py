@@ -129,8 +129,10 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.222"
+VERSION = "0.13.223"
 
+# v0.13.223（2026-11-27）：未闭合两项收口 —— .env 兜底位换非 workbuddy 源；
+#   派发产物落点三层强制（TMPDIR 指向 work/ + prompt 契约 + /tmp 事后搬运记账）。
 # v0.13.222（2026-11-27）：协同故障复盘 —— 模型级 provider 回退 / 熔断键按 provider /
 #   CLI 失败文本不再被 stderr 提示独占 / 执行者无产物时不再跑复核。
 # v0.13.221（2026-11-27）：协同收尾 —— 自动打开非终态 run、成本×成功率、技能双源口径。

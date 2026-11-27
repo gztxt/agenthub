@@ -1,3 +1,21 @@
+## v0.13.223 — 未闭合收口：兜底位不同源 / 派发产物落点三层强制（2026-11-27）
+
+| 项 | 改动 | 判据 |
+|---|---|---|
+| 记忆槽兜底位 | `.env` `MEMORY_LLM_FALLBACK_MODEL` `workbuddy/glm-5.3-flash` → **`dumate/deepseek-v4-flash-0731`**（改前 `cp .env .env.bak-<ts>-fallback`） | 主槽 `workbuddy/*` 与该值不同 provider；v0.13.222 的 provider 回退链不再依赖同源兜底 |
+| 派发产物落点（PT-20261127-02） | 新 `src/dispatch_artifacts.py` 三层强制：① 子进程 `TMPDIR/TMP/TEMP` → `work/tmp/<run>/<task>/`；② prompt 末尾 `[产物落点]` 契约（绝对路径）；③ 任务后扫 `/tmp` 顶层新增：含 run/task 标识的**搬到** `work/artifacts/<run>/<task>/`，其余只记 `tmp_leak` | 只在**派发**调用启用（tag=`task-<run>-<task>`）；交互式聊天 env/argv 逐字不变（L0 钉住） |
+
+**实弹踩到的两个自身的坑（同版修）**：① `names[:max_items]` 截断 —— `/tmp` 有 **3,422** 项时
+目标文件可能排在 200 名之外，扫描等于没扫（现改为扫全集，cap 只限返回条数）；② 用 monotonic
+时钟比 `st_mtime`（墙钟）—— 守卫的「任务开始时间」必须换算成墙钟，否则时间窗判据静默失效。
+
+**为什么不是「prompt 里写一句」**：2026-11-27 实测 agent 仍往 `/tmp/magpie_models_raw.json` 写；
+声明层没有强制力，必须有环境层与事后层兜底（判据同 `agent-knowledge/879` §6）。
+
+**验证**：新 L0 `tests/test_dispatch_artifacts_l0.py` 11 例（env 指向且有目录 / 契约含绝对路径 /
+搬归属文件 / 不搬他人文件 / 旧文件与目录不动 / tag 解析 / 适配器真接线 / 普通聊天不注入）；
+相关回归 **114 例**全绿。真实派发：见本轮 PT-20261127-02 验收记录。
+
 ## v0.13.222 — 协同故障复盘：provider 级回退 / 真实错误文本 / 复核短路（2026-11-27）
 
 **实弹**：`143d8aa483` / `bea1cc672a` 两条协同 run 全 failed。两条错误各自独立：

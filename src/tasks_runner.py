@@ -767,6 +767,19 @@ async def _run_task(run_id: str, row: dict):
         used_model = result.get("model") or None
         _fix_retry_columns(run_id, row["task_id"], exec_model, used_model,
                            tokens_estimated, None)
+        # 派发产物落点守卫（PT-20261127-02 / v0.13.223）：动作清单来自 adapter 的事后扫描。
+        # `moved` = 已搬到 work/artifacts（**真删掉 /tmp 副本**）；`flagged` = 无法确认归属，
+        # 只记账不搬（并发会话的文件不能动）。事件落在 `task_exec` 上，界面/巡检可查。
+        _leaks = result.get("tmp_leaks") or []
+        if _leaks:
+            try:
+                db.log_profile_event(
+                    "task_exec", row["agent_id"],
+                    "tmp_relocated" if any(x.get("action") == "moved" for x in _leaks)
+                    else "tmp_leak", dur, trace_id=row["trace_id"],
+                    detail={"task": row["task_id"], "items": _leaks[:20]})
+            except Exception as e:  # noqa: BLE001 —— 记账失败不许带倒任务
+                log.warning("[artifacts] tmp_leak 记账失败：%s: %s", type(e).__name__, e)
         # ① 等待态：执行者说「卡在等人/等批」⇒ 让出执行资源，不占槽、不算终态。
         waiting = result.get("waiting")
         if waiting in _tiers.PARKED_STATUSES:

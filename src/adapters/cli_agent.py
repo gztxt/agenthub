@@ -542,6 +542,21 @@ class CliAgentAdapter(BaseAdapter):
 
         prompt = self._build_prompt(message, history)
 
+        # ── 派发产物落点守卫（PT-20261127-02 / v0.13.223）─────────────────
+        # 只在**派发**调用上启用（tag=`task-<run>-<task>` 或显式 run_id/task_id）；
+        # 交互式终端聊天不带 tag ⇒ scope 为空 ⇒ 行为逐字不变。
+        art_run, art_task = "", ""
+        tmp_before: set = set()
+        try:
+            import dispatch_artifacts as _art
+            art_run, art_task = _art.scope_from(dict(kwargs, tag=kwargs.get("tag") or ""))
+            if art_run and art_task:
+                prompt += _art.contract_note(art_run, art_task)
+                tmp_before = _art.snapshot_tmp()
+        except Exception as e:  # noqa: BLE001 —— 守卫是增强层，绝不带倒派发
+            print("[artifacts] 守卫初始化失败（不影响派发）：%s: %s" % (type(e).__name__, e))
+            art_run, art_task = "", ""
+
         used_model = self.resolve_model(model)
         argv = [self.bin_path()] + self.spec["argv"](prompt, used_model,
                                                      _approve_flags(self.agent_id))
@@ -551,12 +566,19 @@ class CliAgentAdapter(BaseAdapter):
             timeout_s = 600.0
 
         t0 = time.monotonic()
+        env_vars = self.env()
+        if art_run and art_task:
+            try:
+                import dispatch_artifacts as _art
+                env_vars.update(_art.env(art_run, art_task))
+            except Exception as e:  # noqa: BLE001
+                print("[artifacts] TMPDIR 注入失败：%s: %s" % (type(e).__name__, e))
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv, stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 cwd=cwd or self.spec.get("cwd") or DEFAULT_CWD,
-                env=self.env(), start_new_session=True)
+                env=env_vars, start_new_session=True)
         except Exception as e:  # noqa: BLE001
             return {"success": False, "agent": self.agent_id,
                     "error": "spawn_failed: %s: %s" % (type(e).__name__, str(e)[:200])}
@@ -582,9 +604,18 @@ class CliAgentAdapter(BaseAdapter):
                 await asyncio.wait_for(proc.wait(), timeout=10)
             except Exception:  # noqa: BLE001
                 pass
+            leaks: list = []
+            if art_run and art_task:
+                try:
+                    import dispatch_artifacts as _art
+                    leaks = _art.sweep_run(art_run, art_task, before=tmp_before,
+                                           since=time.time() - (time.monotonic() - t0))
+                except Exception:  # noqa: BLE001 —— 守卫失败不许改结论
+                    pass
             return {"success": False, "agent": self.agent_id,
                     "error": "timeout(%ds)：进程组已终止" % int(timeout_s),
-                    "ms": int((time.monotonic() - t0) * 1000)}
+                    "ms": int((time.monotonic() - t0) * 1000),
+                    "tmp_leaks": leaks}
         except Exception as e:  # noqa: BLE001
             _kill_group(proc)
             unregister_process(proc)
@@ -600,6 +631,18 @@ class CliAgentAdapter(BaseAdapter):
         base = {"agent": self.agent_id, "ms": dur, "exit_code": rc,
                 "model": used_model if self.spec.get("model_path") == "ccr" else "native",
                 "usage": usage, "raw_chars": len(stdout)}
+        # 事后层（第 3 层强制）：把归属本任务的 /tmp 产物搬走；其余新增只记账。
+        if art_run and art_task:
+            try:
+                import dispatch_artifacts as _art
+                # `t0` 是 monotonic 时钟，`st_mtime` 是墙钟 —— 必须换算，否则时间窗判据
+                # 在长运行机器上会静默失效（本次实测即被 `names[:200]` 与时钟混用一起掩盖）。
+                wall_start = time.time() - (time.monotonic() - t0)
+                leaks = _art.sweep_run(art_run, art_task, before=tmp_before, since=wall_start)
+                if leaks:
+                    base["tmp_leaks"] = leaks
+            except Exception as e:  # noqa: BLE001 —— 守卫失败不许改结论
+                print("[artifacts] 扫 /tmp 失败：%s: %s" % (type(e).__name__, e))
         if rc != 0:
             tail = _failure_tail(stderr, stdout)
             base.update({"success": False,

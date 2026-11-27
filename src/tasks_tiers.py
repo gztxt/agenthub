@@ -490,6 +490,24 @@ def is_model_failure(*texts: Any) -> bool:
     return False
 
 
+#: 「provider 限流」——429 / RATE_LIMIT / too many requests。
+#: 2026-11-27 用户裁定：429 也要自动换模型再试（以前只升档换 agent，不换模型）。
+#: 刻意与 `is_model_failure` 分开：那是「模型 ID 不可用」，这是「provider 太挤」；
+#: 两者都导向换模型，但 429 必须**避开同一个 provider**（换同家另一个 ID 只会再撞限流）。
+#: 只认明确限流写法，不把 generic 的 "upstream connect error" 算进来（避免白烧）。
+_RATE_LIMIT_RE = re.compile(
+    r"(?i)(\b429\b|rate[\s_\-]*limit|too\s+many\s+requests"
+    r"|RATE_LIMIT|限流|请求过于频繁)")
+
+
+def is_rate_limit_failure(*texts: Any) -> bool:
+    """回包/异常里是否在说「provider 限流 429」⇒ 换模型且避开同一 provider。"""
+    for t in texts:
+        if t and _RATE_LIMIT_RE.search(str(t)):
+            return True
+    return False
+
+
 #: 「模型本身在册，但它走的**通道**不可用」——2026-11-21 实弹：pi/omp 派 `alibaba/*`
 #: 报 `No API key found for vercel-ai-gateway`，模型 ID 完全合法。这类失败换同档模型
 #: 几乎必然再撞同一通道，正确动作是先回落到 agent 自己的默认模型（实测可用），
@@ -591,7 +609,8 @@ def model_fallback_target(agent_id: str, tier: Optional[str], tried: Any, *,
                           catalog: Optional[set] = None,
                           catalog_checked: bool = False,
                           tiers_cfg: Optional[Dict[str, List[str]]] = None,
-                          prefer_agent_default: bool = False) -> Optional[str]:
+                          prefer_agent_default: bool = False,
+                          avoid_providers: Optional[set] = None) -> Optional[str]:
     """模型不可用时，下一条**在册且没试过**的模型；None = 无可换（交给升档/失败）。
 
     选择顺序（每档都跳过 `tried`）：
@@ -624,6 +643,10 @@ def model_fallback_target(agent_id: str, tier: Optional[str], tried: Any, *,
         seq = list(order_)
 
     bad_providers = _unhealthy_providers()
+    # 429 场景：调用方传入「本次限流的 provider」，必须和账本里的坏 provider 合并排除 ——
+    # 换同家另一个模型 ID 只是换个名字撞同一道闸（实测 dsh 连吃两次 RATE_LIMIT 429）。
+    if avoid_providers:
+        bad_providers = set(bad_providers) | {str(p) for p in avoid_providers if p}
 
     def _tier_candidates():
         for name in seq:
@@ -633,8 +656,16 @@ def model_fallback_target(agent_id: str, tier: Optional[str], tried: Any, *,
 
     default = _agent_default_model(agent_id)
     default_cand = default if (default and default not in tried_set) else None
-    if not default_cand and AGENT_DEFAULT_MODEL not in tried_set:
-        default_cand = AGENT_DEFAULT_MODEL
+    # 429 时 agent 默认模型如果也属于被限流 provider，同样不能回退过去。
+    if default_cand and not _provider_ok(default_cand, bad_providers):
+        default_cand = None
+    # AGENT_DEFAULT_MODEL 哨兵不带具体 ID，无法判 provider；限流场景下不让它是唯一安全网，
+    # 否则「换模型」实际可能还是同一家 —— 交给升档路径处理。
+    fallback_sentinel = AGENT_DEFAULT_MODEL if AGENT_DEFAULT_MODEL not in tried_set else None
+    if avoid_providers:
+        fallback_sentinel = None
+    if not default_cand and fallback_sentinel:
+        default_cand = fallback_sentinel
     if prefer_agent_default:
         if default_cand:
             return default_cand
@@ -657,8 +688,10 @@ def _schedule_exec_retry(run_id: str, row: dict, err: str, reason: str,
     超时、任意异常），各写一遍重试必然漂移（2026-10-29 就是只给 verifier 失败
     写了重试，执行失败三处全漏 ⇒ dsh 429 直接终态、汇总永远跑不到）。
     """
+    rate_limited = is_rate_limit_failure(err, reason, row.get("error"))
     model_like = (is_model_failure(err, reason, row.get("error"))
-                  or prefers_agent_default(err, reason, row.get("error")))
+                  or prefers_agent_default(err, reason, row.get("error"))
+                  or rate_limited)
     # CLI 的 `empty-output` 也按模型问题处理：pi 的注记写着「模型被摘牌 ⇒ 静默空输出」，
     # 而空正文没有别的可判据。非 CCR 域（codebuddy/cursor/dsh）没有可换的 model 通道，
     # 该判据不会触发它们。
@@ -681,10 +714,18 @@ def _schedule_exec_retry(run_id: str, row: dict, err: str, reason: str,
                 m = str(m or "").strip()
                 if m and m != "native" and m not in tried:
                     tried.append(m)
+            # 429：从失败模型的 provider 提取出来显式排除，换到别家才有效。
+            avoid = set()
+            if rate_limited:
+                for m in (exec_model, used_model, row.get("model_sent"), row.get("model")):
+                    p = str(m or "").split("/", 1)[0] if m else ""
+                    if p and p != "@agent-default":
+                        avoid.add(p)
             nxt = model_fallback_target(
                 exec_agent, row.get("tier"), tried,
                 catalog=cat, catalog_checked=checked,
-                prefer_agent_default=prefers_agent_default(err, reason, row.get("error")))
+                prefer_agent_default=prefers_agent_default(err, reason, row.get("error")),
+                avoid_providers=avoid)
             if nxt:
                 db.execute(
                     "UPDATE tasks SET status='pending',model_planned=?,tier_reason=?,"

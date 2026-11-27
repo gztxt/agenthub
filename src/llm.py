@@ -28,9 +28,11 @@ FCC→tokenrouter/qwen3.8-flash 的 tool_use 已由 PT-20260905-01 端到端验�
 """
 import json
 import os
+import re
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import asyncio
 import aiohttp
 import time
 
@@ -118,6 +120,140 @@ async def complete_free(system: str, user: str,
         if _usable_llm_text(out):
             return out.strip(), m
     return "", ""
+def _switch_text_re():
+    """文本形态的「这个模型/通道不能用」判据（401 被包成 200/400 的上游）。
+
+    只收**已有实测样本**的写法，不泛化到 4xx 全部：
+      · `unrecognized_model` —— claude-code 实测（11-27 12:46 两条任务）；
+      · `unknown model` / `model not found` / `model_resolution` —— pi/omp/网关；
+      · `refused this account's sign-in` —— WorkBuddy 401 原话；
+      · `no available channel/provider/model` —— 网关侧无可用通道；
+      · 中文「模型不存在/不支持」—— 上游本地化报文。
+    """
+    global _SWITCH_TEXT_RE
+    if _SWITCH_TEXT_RE is None:
+        _SWITCH_TEXT_RE = re.compile(
+            r"(?i)(unrecognized_model|unknown\s+model"
+            r"|model[\s_\-]*(?:not\s+found|not\s+exist|invalid|unsupported)"
+            # 2026-11-27 实测 WorkBuddy 原话：`model [xxx] service info not found`
+            # —— 中间隔着模型名，上面的紧邻写法匹配不到，必须允许中间有字。
+            r"|model[^\n]{0,80}(?:not\s+found|not\s+exist|not\s+available)"
+            r"|service\s+info\s+not\s+found"
+            r"|model_resolution|refused\s+this\s+account'?s\s+sign-?in"
+            r"|no\s+available\s+(?:channel|provider|model)"
+            r"|模型(?:不存在|不可用|不支持)|不支持(?:该|此)?模型)")
+    return _SWITCH_TEXT_RE
+
+
+def _switchable(exc: BaseException) -> bool:
+    """这次失败是否值得**换一个模型/provider**再试（纯函数）。
+
+    与 `resilience.is_retryable` 的分工：那个判「同一条链路再发一次」，本函数判
+    「换一条链路」。401 在 resilience 里是 `abort`（token 死了重试无用），
+    但在这里是**可切换**——换 provider 就活，11-27 实测 dumate/raccoon 同时 200。
+    """
+    if isinstance(exc, LLMGatewayError):
+        if exc.status in _SWITCH_STATUS:
+            return True
+        return bool(_switch_text_re().search(str(exc)))
+    if isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError)):
+        return True
+    return bool(_switch_text_re().search(str(exc) or ""))
+
+
+def _provider_of(model: Optional[str]) -> str:
+    """`workbuddy/deepseek-v4.1-flash` → `workbuddy`（无前缀返空串）。"""
+    m = (model or "").strip()
+    return m.split("/", 1)[0] if "/" in m else ""
+
+
+#: 路由组前缀：`auto/*` 是「别的模型的包装」，它自己也会被路由到坏 provider ⇒
+#: 不能作为固定回退位（军规：任何位置禁 `openrouter/auto`，这里是同族判据）。
+_ROUTE_GROUP_PREFIXES = ("auto/",)
+
+
+def model_candidates(preferred: Optional[str] = None,
+                     limit: Optional[int] = None) -> List[str]:
+    """模型回退链：`[preferred] + 健康 provider 的在册模型`（**只读网关，不写**）。
+
+    排序依据（依次）：
+      ① 调用方指定的模型本身（永远是第一个，成功就不往下走）；
+      ② **同一 provider** 的其它在册模型（同通道换档，最不容易触发新故障）；
+      ③ 其它 `state=ok` 的 provider 各取一个（**广度优先**：本次事故就是 provider
+         级故障，同 provider 内多试几个只会连续 401）；
+      ④ `free_fallback_model()`（清单取不到时的最后安全网）。
+
+    硬约束：
+      · `blocked_providers()` / `provider_health()` 说坏的 provider **不进链**；
+      · `auto/*` 路由组不进链（它会再路由回坏 provider）；
+      · 清单或健康信息取不到 ⇒ **不猜**，只回 preferred + free_fallback；
+      · 任何异常都不许带倒调用方（回退是增强，不是前提）。
+    """
+    cap = max(1, int(limit or LLM_MODEL_FALLBACKS))
+    base = (preferred or MODEL or "").strip()
+    chain: List[str] = [base] if base else []
+    ids: List[str] = []
+    healthy: Optional[Dict[str, dict]] = None
+    try:
+        import magpie_client as _mc
+        ms, _why = _mc.models()
+        if ms:
+            ids = [str(m.get("id") or "") for m in ms if m.get("id")]
+        healthy, _hwhy = _mc.provider_health()
+    except Exception:  # noqa: BLE001 —— 取不到清单就不扩链
+        ids, healthy = [], None
+
+    def _ok(prov: str) -> bool:
+        if not prov:
+            return False
+        if not healthy:
+            return True                 # 健康读不到 ⇒ 不挡（不知道不等于坏）
+        h = healthy.get(prov)
+        return True if h is None else (h.get("state") == "ok")
+
+    usable = [m for m in ids
+              if not any(m.startswith(p) for p in _ROUTE_GROUP_PREFIXES)]
+    # 档位表作为「哪个模型值得优先试」的提示（t1 → t2 → t3）。
+    # 不用它就成了「清单里随便第一个」——实测会先选到 `raccoon/raccoon-090dd3`
+    # 这种非对话模型（11-27 model_candidates 首次取值就是它）。
+    tier_hint: List[str] = []
+    try:
+        import tiercfg as _tierlib
+        _tiers = _tierlib.parse_tiers()
+        for name in ("t1", "t2", "t3"):
+            tier_hint.extend(m for m in (_tiers.get(name) or []) if m)
+    except Exception:  # noqa: BLE001 —— 档位只做排序提示，取不到就按清单顺序
+        tier_hint = []
+
+    def _ordered(cands: List[str]) -> List[str]:
+        """档位提示里的靠前，其余保持原顺序（稳定排序）。"""
+        rank = {m: i for i, m in enumerate(tier_hint)}
+        return sorted(cands, key=lambda m: rank.get(m, len(rank)))
+
+    base_prov = _provider_of(base)
+    # ② 同 provider 其它模型（同通道换档，只取 1 个）
+    if base_prov and _ok(base_prov):
+        same = [m for m in usable if _provider_of(m) == base_prov and m not in chain]
+        for m in _ordered(same)[:1]:
+            chain.append(m)
+    # ③ 其它健康 provider，各取一个（**广度优先**：本次故障是 provider 级）
+    seen_prov = {base_prov} if base_prov else set()
+    for m in _ordered(usable):
+        prov = _provider_of(m)
+        if not prov or prov in seen_prov or not _ok(prov):
+            continue
+        if m not in chain:
+            chain.append(m)
+            seen_prov.add(prov)
+        if len(chain) >= cap:
+            break
+    # ④ 兜底位（与主槽不同源才有意义）
+    fb = free_fallback_model()
+    if fb and fb not in chain and len(chain) < cap:
+        chain.append(fb)
+    return chain[:cap]
+
+
 TIMEOUT = aiohttp.ClientTimeout(total=240)
 MAX_TOKENS = int(os.getenv("MANAGER_LLM_MAX_TOKENS", "4096"))
 
@@ -128,6 +264,22 @@ MAX_TOKENS = int(os.getenv("MANAGER_LLM_MAX_TOKENS", "4096"))
 # 退避不许把一次工具调用拖成用户可见的卡顿。
 LLM_ATTEMPTS = max(1, int(os.getenv("LLM_ATTEMPTS", "2")))
 LLM_RETRY_BUDGET_S = float(os.getenv("LLM_RETRY_BUDGET_S", "2.0"))
+
+# ── 模型级回退（2026-11-27，协同失败复盘 P0）─────────────────────────────────
+# 实测事故：本机全部 AI 会话走 magpie，11-27 12:46~12:58 WorkBuddy 上游
+# `refused this account's sign-in (401)`；hub 自己的 LLM 客户端只绑一个模型
+# `workbuddy/deepseek-v4.1-flash`，`LLM_ATTEMPTS=2` 又只是**同模型重试**（401 本来
+# 就不可重试）⇒ 协同的两条 run 全部 `replan_error: LLM 网关 HTTP 401`，而同一时刻
+# dumate / raccoon 两个 provider 实测 200。
+#
+# 判据：**provider 级故障必须换 provider，不是重试同一条链路**。
+# 回退链**懒计算**（只在首个模型失败后取），成功路径零额外开销（不查网关清单）。
+LLM_MODEL_FALLBACKS = max(1, int(os.getenv("LLM_MODEL_FALLBACKS", "3")))
+
+#: 单模型失败后值得换模型的信号（显式闭集，不做模糊匹配）：
+#: · 401/403 = 账号级故障；404 = 模型被摘牌；408/429 = 限流/超时；5xx = 上游坏
+_SWITCH_STATUS = frozenset({401, 403, 404, 408, 429, 500, 502, 503, 504})
+_SWITCH_TEXT_RE = None  # 延迟编译，见 _switch_text_re()
 
 
 class LLMGatewayError(RuntimeError):
@@ -154,11 +306,26 @@ def _record_attempt(rec: Dict[str, Any]) -> None:
         pass
 
 
-def _llm_breaker_key() -> str:
-    return resilience.breaker_key(BASE_URL, "llm")
+#: 本进程用过的熔断键 → provider（供 `breaker_state()` 汇总；不用猜键名格式）。
+_BREAKER_KEYS: Dict[str, str] = {}
 
 
-def breaker_state() -> Dict[str, Any]:
+def _llm_breaker_key(model: Optional[str] = None) -> str:
+    """熔断键**按 provider 分开**（2026-11-27 改）。
+
+    旧实现是 `breaker_key(BASE_URL, "llm")` —— 全站一个键。后果：WorkBuddy 一个
+    provider 连续 401 就把 `magpie` 整条通道判死，dumate/raccoon 明明 200 也用不了
+    （实测 11-27：3 次 401 后所有 LLM 调用都撞同一个熔断）。
+    判据：熔断的作用域必须与故障的作用域对齐 —— 故障是 provider 级，键就分 provider。
+    `model=None` 时仍给一个基座键（兼容旧调用/健康页汇总）。
+    """
+    prov = _provider_of(model) if model else ""
+    key = resilience.breaker_key(BASE_URL, "llm:%s" % prov if prov else "llm")
+    _BREAKER_KEYS[key] = prov or "(base)"
+    return key
+
+
+def breaker_state(model: Optional[str] = None) -> Dict[str, Any]:
     """只读暴露 LLM 通道的熔断状态（供调用方**如实报**「现在是被熔断挡住的」）。
 
     为什么要有它：`complete_free()` 在熔断打开时会静默返回 `("", "")` —— 那与
@@ -166,11 +333,24 @@ def breaker_state() -> Dict[str, Any]:
     误判成「模型不给 JSON」，真相是**上游熔断中**（`CancelledError` 触发的）。
     判据必须能分开这两件事（同族旧例：外部 jev 的 `enabled` ≠ 可用——
     端点已 2026-10-23 下线删除，判据保留）。
+
+    2026-11-27：改按 provider 汇总。`state` 取**主模型 provider**的状态（兼容旧调用方），
+    另附 `providers` 明细，让界面能说清「是哪个 provider 被熔断」。
     """
     try:
-        key = _llm_breaker_key()
-        return {"key": key, "state": resilience.instance.state_of(key),
-                "cooldown_s": resilience.instance.cooldown_remaining_s(key)}
+        key = _llm_breaker_key(model or MODEL)
+        out = {"key": key, "state": resilience.instance.state_of(key),
+               "cooldown_s": resilience.instance.cooldown_remaining_s(key)}
+        provs: Dict[str, Any] = {}
+        for k, prov in list(_BREAKER_KEYS.items()):
+            try:
+                provs[prov] = {"state": resilience.instance.state_of(k),
+                               "cooldown_s": resilience.instance.cooldown_remaining_s(k)}
+            except Exception:  # noqa: BLE001 —— 单个键查不到不影响总体
+                continue
+        if provs:
+            out["providers"] = provs
+        return out
     except Exception as e:  # noqa: BLE001 —— 状态查询失败不许带倒调用方
         return {"error": "%s: %s" % (type(e).__name__, e)}
 
@@ -349,25 +529,74 @@ async def _create_message(system: Optional[str], messages: List[dict],
     import modelcalls as _modelcalls  # 延迟导入：modelcalls 只依赖 db（底层），不引 llm ⇒ 不成环
     _modelcalls.ensure_schema()   # 幂等建表（db.init_db 已跑过则 no-op；L0 独立调 llm 时兜底）
     _llm_meter.start(request_id)
-    try:
-        data = await resilience.instance.acall(
-            _llm_breaker_key(),
-            lambda: _post_once(body, request_id),
-            attempts=LLM_ATTEMPTS, sleep_budget_s=LLM_RETRY_BUDGET_S,
-            record=_record_attempt, call_id=resilience.new_call_id())
-    except Exception as _e:
-        _llm_meter.record_error(body.get("model") or MODEL, request_id, str(_e)[:300])
-        raise
+    # ── 模型级回退（2026-11-27）─────────────────────────────────────────
+    # 分两层：① 同一模型内的运输层重试（resilience，处理 429/5xx）；
+    # ② 一个模型彻底不可用 ⇒ 换链上的下一个（**先换 provider**，见 model_candidates）。
+    # 回退链懒计算：成功路径不查网关清单，也不多一次请求。
+    tried: List[str] = []
+    cur = body.get("model") or MODEL
+
+    while True:
+        tried.append(cur)
+        one = dict(body, model=cur)
+        try:
+            data = await resilience.instance.acall(
+                _llm_breaker_key(cur),
+                lambda b=one: _post_once(b, request_id),
+                attempts=LLM_ATTEMPTS, sleep_budget_s=LLM_RETRY_BUDGET_S,
+                record=_record_attempt, call_id=resilience.new_call_id())
+            break
+        except Exception as _e:  # noqa: BLE001 —— 下面重新抛
+
+            _llm_meter.record_error(cur, request_id, str(_e)[:300])
+            if len(tried) >= LLM_MODEL_FALLBACKS or not _switchable(_e):
+                # 多模型都试过还失败：把「试过谁」一并写进异常文本，否则台账上
+                # 只看得见最后一个模型的报错，回退过程被静默掉（同 11-27 replan_error）。
+                if len(tried) > 1:
+                    _record_attempt({"call_id": resilience.new_call_id(),
+                                     "attempt": len(tried), "kind": "model_fallback",
+                                     "action": "exhausted", "retryable": False,
+                                     "ok": False, "tried": list(tried),
+                                     "error": str(_e)[:300]})
+                    raise LLMGatewayError(
+                        getattr(_e, "status", 0) or 502,
+                        "模型回退全部失败（%s）：%s" % ("、".join(tried), str(_e)))
+                raise
+            nxt = next((m for m in model_candidates(cur) if m and m not in tried), None)
+            if not nxt:
+                # 链上已经没得换了：同样要把「试过谁」写进异常，否则台账只剩最后一条报错。
+                if len(tried) > 1:
+                    _record_attempt({"call_id": resilience.new_call_id(),
+                                     "attempt": len(tried), "kind": "model_fallback",
+                                     "action": "exhausted", "retryable": False,
+                                     "ok": False, "tried": list(tried),
+                                     "error": str(_e)[:300]})
+                    raise LLMGatewayError(
+                        getattr(_e, "status", 0) or 502,
+                        "模型回退全部失败（%s）：%s" % ("、".join(tried), str(_e)))
+                raise
+            # 留痕：换模型是**真实事件**，不记为一行日志就会变成「同一模型重试了两次」。
+            _record_attempt({"call_id": resilience.new_call_id(), "attempt": len(tried),
+                             "kind": "model_fallback", "action": "switch",
+                             "retryable": True, "ok": False,
+                             "from_model": cur, "to_model": nxt,
+                             "error": str(_e)[:300]})
+            cur = nxt
+    body["model"] = cur
     if mask_map:
         data = mask.unmask_obj(data, mask_map)
-    _llm_meter.record_success(body.get("model") or MODEL, data.get("usage"),
-                               request_id)
+    _llm_meter.set_scene(cur, _llm_meter.scene_of(model or MODEL))
+    _llm_meter.record_success(cur, data.get("usage"), request_id)
     if usage_sink is not None:
         try:
-            usage_sink.append({"model": body["model"], "request_id": request_id,
+            usage_sink.append({"model": cur, "request_id": request_id,
                                "usage": data.get("usage") or {}})
         except Exception:  # noqa: BLE001
             pass
+    # 真实使用的模型回给上层（`chat_tools_loop` 下一轮要用同一个，不然工具环会漂）
+    data["_model_used"] = cur
+    if tried[1:]:
+        data["_model_fallback_from"] = tried[:-1]
     return data
 
 
@@ -417,6 +646,10 @@ class _LLMMeter:
         import modelcalls as _mc
         if scene in _mc.SCENES:
             self._scene_by_model[model] = scene
+
+    def scene_of(self, model: str) -> str:
+        """该模型已标注的计量场景（未标注 ⇒ 'other'）。回退时用来让新模型继承场景。"""
+        return self._scene_by_model.get(model, "other")
 
     def set_scene_direct(self, model: str, scene: str) -> None:
         """L0 测试直通钩子（不过 SCENES 白名单——测试要验证非法场景落 other 的路径）"""
@@ -532,6 +765,18 @@ async def chat_tools_loop(messages: List[dict], tools: List[dict],
             _llm_meter.set_scene(active_model, scene)   # 计量场景标注（过 SCENES 白名单；'chat'/'free' 已入表）
         data = await _create_message(system, convo, tools or None, model=active_model,
                                      request_id=request_id, usage_sink=usage_sink)
+        # 2026-11-27：模型级回退后必须**钉住实际命中的模型**，否则下一轮又打回死 provider
+        # （工具环每轮都重发 model，且 tool_use 的回填必须发给同一个模型）。
+        active_model = data.pop("_model_used", active_model) or active_model
+        fell_from = data.pop("_model_fallback_from", None)
+        if fell_from:
+            s_fb = {"kind": "thought",
+                    "content": "[模型回退] %s 不可用，已切到 %s 继续" % (
+                        "、".join(str(x) for x in fell_from), active_model)}
+            steps.append(s_fb)
+            if on_step:
+                await on_step(s_fb)
+            _llm_meter.set_scene(active_model, scene)
         content_blocks = data.get("content") or []
         # v0.5.4 sub-α Fix 1：text 剥离 raw tool_call XML。
         # 部分上游（Nemotron/FCC Anthropic-compatible）把 tool_call 当 text 块直出，

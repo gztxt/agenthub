@@ -1,3 +1,27 @@
+## v0.13.222 — 协同故障复盘：provider 级回退 / 真实错误文本 / 复核短路（2026-11-27）
+
+**实弹**：`143d8aa483` / `bea1cc672a` 两条协同 run 全 failed。两条错误各自独立：
+
+| 错误（实测原文） | 根因 | 修法（本版） |
+|---|---|---|
+| `replan_error: LLM 网关 HTTP 401 … WorkBuddy refused this account's sign-in` ×2 | hub LLM 客户端只绑一个模型 `workbuddy/deepseek-v4.1-flash`，`LLM_ATTEMPTS` 只是**同模型**重试；同刻 `dumate/*`、`raccoon/*` 实测 200 | `llm.model_candidates()` + `_create_message` 模型级回退：**先换 provider**、广度优先、跳过 degraded、`auto/*` 不进链；链耗尽时异常文本带全名单 |
+| 熔断键 `(BASE_URL,"llm")` 全站一个 | 一家 401 把整条 magpie 通道熔断，健康 provider 一起不可用 | `_llm_breaker_key(model)` 按 provider 分键；`breaker_state()` 附 `providers` 明细 |
+| `exit:1: Reading additional input from stdin...` ×4（codex） | 真错误（401）在 stdout NDJSON，`tail=(stderr or stdout)` 只要 stderr 非空就丢掉 stdout | `cli_agent._failure_tail()`：结构化错误 > stderr > stdout 拼接后截断 |
+| `[claude-code:unrecognized_model] …` ×2 | `_MODEL_FAIL_RE` 不含 `unrecognized_model` / `refused … sign-in` ⇒ 不当模型故障，不触发换模型 | 两支加入 `is_model_failure`；`model_fallback_target` / `escalate_target` 同步跳过已知坏 provider |
+| `executor_claimed_failure; verifier insufficient (nonempty): no_output` | 执行者根本没回产物，仍跑一遍 verifier，一行里写成「两件事都出错」 | 无产物直接短路：`executor_claimed_failure; no_output（执行者自述失败且未回产物）` |
+
+**补充（同日实测）**：WorkBuddy 摘牌时回的是 **HTTP 400** `model [xxx] service info not found`
+（不是 401）⇒ `_switchable` 除状态码外还认「模型级报文」，否则这条会被记成终态失败。
+
+**观测**：`model_call_logs.scene` 新增 `decompose` / `replan` —— 控制面失败不再和「用户在聊」混在一格。
+
+**验证**：新 L0 `tests/test_collab_fallback_l0.py` 11 例（坏 provider 不进链 / 401 换家 /
+400 不换 / 链耗尽报全名单 / codex 结构化错误优先 / unrecognized_model 判模型故障 /
+回退目标跳过坏 provider）；相关旧用例 156 例回归全绿。真实探针：钉死已 401 的
+`workbuddy/deepseek-v4.1-flash` 调 `chat_tools_loop` ⇒ 回退 `dumate/deepseek-v4-flash-0731` 回答成功。
+
+**未闭合**：派发中间产物落 `/tmp` 无代码级强制（PT-20261127-02）；L0-hermetic 既有红灯（PT-20261127-01，本轮未新增）。
+
 ## v0.13.221 — 协同收尾：自动打开 / 成本×成功率 / 技能双源口径（2026-11-27）
 
 | 项 | 实现 | 判据 |

@@ -520,24 +520,35 @@ async def _settle_self_failure(run_id: str, row: dict, result: dict, attempts_do
     if not result.get("success"):
         err = (result.get("error") or "unknown")[:500]
         kind = row.get("verify_kind") or verifier.DEFAULT_KIND
-        # §7-①：复核走**线程**（`to_thread`）而非就地同步调用 —— 否则协程从不 yield，
-        # 置下的 `verifying` 在 DB 上没人读得到。
-        db.execute("UPDATE tasks SET status='verifying',verify_started_at=?,updated_at=?"
-                   " WHERE run_id=? AND task_id=?", (_tiers._now(), _tiers._now(), run_id, row["task_id"]))
-        v0 = asyncio.get_event_loop().time()
-        verdict = await asyncio.to_thread(verifier.verify, kind,
-                                          output=result.get("response"),
-                                          expect=row.get("verify_expect"))
-        verify_ms = int((asyncio.get_event_loop().time() - v0) * 1000)
-        status_v = verdict["status"]
-        if status_v == verifier.STATUS_PASS:
-            reason = ("executor_claimed_failure_but_output_verified: %s" % err)[:500]
-            event = "mismatch"
+        produced = str(result.get("response") or "")
+        if not produced.strip():
+            # 2026-11-27（协同失败复盘）：**没产物就没有可复核的东西**。
+            # 旧实现仍跑一遍 verifier，得到 `insufficient(nonempty): no_output` 并写进
+            # 同一行 ⇒ 读起来像「执行者失败 + verifier 也失败」两件事，实际只有一件：
+            # 执行者根本没回产物（实测 4 条任务都是这样）。此处直接记单项原因，
+            # 同时**不置 verifying**（避免界面上看一眼「复核中」又立刻变失败）。
+            reason = ("executor_claimed_failure; no_output"
+                      "（执行者自述失败且未回产物）: %s" % err)[:500]
+            status_v, verify_ms, event = "skipped", 0, "fail"
         else:
-            gaps = "; ".join("%s: %s" % (g["id"], g["detail"]) for g in verdict["gaps"])
-            reason = ("executor_claimed_failure; verifier %s (%s): %s"
-                      % (status_v, kind, gaps))[:500]
-            event = "fail"
+            # §7-①：复核走**线程**（`to_thread`）而非就地同步调用 —— 否则协程从不 yield，
+            # 置下的 `verifying` 在 DB 上没人读得到。
+            db.execute("UPDATE tasks SET status='verifying',verify_started_at=?,updated_at=?"
+                       " WHERE run_id=? AND task_id=?", (_tiers._now(), _tiers._now(), run_id, row["task_id"]))
+            v0 = asyncio.get_event_loop().time()
+            verdict = await asyncio.to_thread(verifier.verify, kind,
+                                              output=produced,
+                                              expect=row.get("verify_expect"))
+            verify_ms = int((asyncio.get_event_loop().time() - v0) * 1000)
+            status_v = verdict["status"]
+            if status_v == verifier.STATUS_PASS:
+                reason = ("executor_claimed_failure_but_output_verified: %s" % err)[:500]
+                event = "mismatch"
+            else:
+                gaps = "; ".join("%s: %s" % (g["id"], g["detail"]) for g in verdict["gaps"])
+                reason = ("executor_claimed_failure; verifier %s (%s): %s"
+                          % (status_v, kind, gaps))[:500]
+                event = "fail"
         # ── 执行者自身失败也走升档重试（v0.13.177）──
         # 2026-10-29 实弹：dsh 连吃两次 `RATE_LIMIT 429` → 这条分支**直接写 failed**，
         # 绕过了下面 verifier 失败分支的 `should_retry` ⇒ 整条 run 的 t2/t3 一次都不重试，

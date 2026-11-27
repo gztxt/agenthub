@@ -574,7 +574,8 @@ async def decompose(body: DecomposeIn):
         .replace("{maxn}", str(_tiers.LEADER_MAXN)))},
         {"role": "user", "content": body.goal}]
     try:
-        answer, _ = await llm.chat_tools_loop(messages, [], None, max_rounds=1)
+        answer, _ = await llm.chat_tools_loop(messages, [], None, max_rounds=1,
+                                              scene="decompose")
         items = _validate_dag(_extract_json_array(answer), known, default, allowed)
     except HTTPException:
         raise

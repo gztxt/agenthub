@@ -129,8 +129,10 @@ from api_system import router as system_router   # 系统级：前端「需重�
 log.info(f"[agenthub] 配置: PORT={config.port}, HOST={config.host}")
 
 # 单一版本源：/health、FastAPI 元数据、启动横幅与页脚都取这里
-VERSION = "0.13.221"
+VERSION = "0.13.222"
 
+# v0.13.222（2026-11-27）：协同故障复盘 —— 模型级 provider 回退 / 熔断键按 provider /
+#   CLI 失败文本不再被 stderr 提示独占 / 执行者无产物时不再跑复核。
 # v0.13.221（2026-11-27）：协同收尾 —— 自动打开非终态 run、成本×成功率、技能双源口径。
 # v0.13.220（2026-11-27）：波3 S4 —— magpie 长期记忆进入 hub 联邦检索（第 8 路）。
 # v0.13.219（2026-11-27）：波3 S3 —— 技能清单挂 magpie 托管关系（只读，判明无需写代理）。

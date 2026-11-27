@@ -184,7 +184,8 @@ async def _replan_once(run_id: str, auto: bool = False,
             "总目标：%s\n\n上一轮（第 %s 轮）的执行结果：\n%s" % (goal, meta.get("round") or 1,
                                                         _replan_digest(rows))}]
     try:
-        answer, _ = await llm.chat_tools_loop(messages, [], None, max_rounds=1)
+        answer, _ = await llm.chat_tools_loop(messages, [], None, max_rounds=1,
+                                                  scene="replan")
         raw = _dag._extract_json_array(answer)
     except Exception as e:  # noqa: BLE001
         # 重拆失败**不改上一轮的结论**（它已经收敛），只如实记一笔。

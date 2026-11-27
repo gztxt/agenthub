@@ -202,6 +202,54 @@ def _clean_dsh(out: str) -> Tuple[str, Optional[dict]]:
     return s, None
 
 
+def _structured_errors(stdout: str) -> List[str]:
+    """从 NDJSON 尾巴里抽**结构化错误**（codex `--json` 的 error/turn.failed 行）。
+
+    为什么单独抽：这些行的正文才是真原因（如 401 报文），而 stderr 只有进程提示。
+    """
+    out: List[str] = []
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        typ = str(ev.get("type") or "")
+        if typ not in ("error", "turn.failed", "failure", "stream_error"):
+            continue
+        e = ev.get("error")
+        msg = (e.get("message") if isinstance(e, dict) else str(e or "")) or ev.get("message")
+        if msg:
+            out.append("%s: %s" % (typ, str(msg)))
+    return out
+
+
+def _failure_tail(stderr: str, stdout: str, extra: Tuple[str, ...] = (),
+                  limit: int = 500) -> str:
+    """退出码非 0 时拼出**真正的失败原因**（优先级：结构化错误 > 显式报文 > stderr > stdout）。
+
+    2026-11-27 实测反例：codex 把 `Reading additional input from stdin...`（纯进程提示）
+    写在 stderr，真正的 401 在 stdout 的 NDJSON 里；旧实现 `(stderr or stdout)` 只要
+    stderr 非空就**把 stdout 整段丢掉** ⇒ 库里 4 条任务的 error 全是这句提示，
+    根因不可见。判据：任何单个流都不能独占结论，拼起来再截断。
+    """
+    parts: List[str] = []
+    for m in extra:
+        if (m or "").strip():
+            parts.append(str(m).strip())
+    parts.extend(_structured_errors(stdout))
+    if (stderr or "").strip():
+        parts.append(stderr.strip())
+    if not parts and (stdout or "").strip():
+        parts.append(stdout.strip())
+    text = " ‖ ".join(dict.fromkeys(p for p in parts if p))
+    return text[-limit:] if len(text) > limit else text
+
+
 # ── 规格表 ───────────────────────────────────────────────────────────
 
 # CodeBuddy CLI 位置（2026-11-09）：官方 native 安装 ~/.local/bin（2.181.0，自更新）优先；
@@ -553,7 +601,7 @@ class CliAgentAdapter(BaseAdapter):
                 "model": used_model if self.spec.get("model_path") == "ccr" else "native",
                 "usage": usage, "raw_chars": len(stdout)}
         if rc != 0:
-            tail = (stderr or stdout).strip()[-400:]
+            tail = _failure_tail(stderr, stdout)
             base.update({"success": False,
                          "error": ("exit:%d: %s" % (rc, tail))[:500]})
             return base
@@ -732,7 +780,9 @@ class CliAgentAdapter(BaseAdapter):
             yield em.emit("turn_completed", success=False, reason="interrupted", ms=dur)
             return
         if rc != 0:
-            tail = (bytes(stderr_buf).decode("utf-8", "ignore") or "").strip()[-400:]
+            tail = _failure_tail(bytes(stderr_buf).decode("utf-8", "ignore"),
+                                 "\n".join(plain),
+                                 extra=((got_error or ""),))
             yield em.error("provider_error", ("exit:%d: %s" % (rc, tail))[:500], ms=dur)
             yield em.emit("turn_completed", success=False, reason="provider_error", ms=dur)
             return

@@ -233,7 +233,7 @@ class TestAutoReplan(unittest.TestCase):
     def _stub_llm(self, answer):
         llm.configured = lambda: True
 
-        async def fake_loop(messages, tools, stop, max_rounds=1):
+        async def fake_loop(messages, tools, stop, max_rounds=1, **kw):
             return answer, {}
         llm.chat_tools_loop = fake_loop
 
@@ -313,7 +313,7 @@ class TestAutoReplan(unittest.TestCase):
 
     def test_llm_failure_does_not_touch_parent_conclusion(self):
         """重拆失败只记 stop_reason，不改上一轮已收敛的结论，也不生成子 run。"""
-        async def boom(messages, tools, stop, max_rounds=1):
+        async def boom(messages, tools, stop, max_rounds=1, **kw):
             raise RuntimeError("gateway 502")
         llm.configured = lambda: True
         llm.chat_tools_loop = boom

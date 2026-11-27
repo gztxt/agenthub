@@ -438,6 +438,10 @@ def escalate_target(agent_id: str, model_choice: Optional[str], attempts: Any,
         nxt = tierlib.next_tier(tier, cfg)
         if nxt and agent_id in (ccr_agents if ccr_agents is not None else _ccr_model_agents()):
             m, why = tierlib.first_usable(nxt, cfg, catalog, catalog_checked)
+            # 2026-11-27：升档不能档位升级但 provider 降级 —— 目标模型属于已知坏
+            # provider 时等于把「升档」做成「必失败」（同 model_fallback_target）。
+            if m and not _provider_ok(m, _unhealthy_providers()):
+                m = None
             if m and m != (model_choice or ""):
                 return dict(base, agent_id=agent_id, model=m, changed=True,
                             reason="tier:%s:%s" % (nxt, m))
@@ -461,17 +465,25 @@ def escalate_target(agent_id: str, model_choice: Optional[str], attempts: Any,
 # 只认**显式**的模型报文：generic 失败（429/超时/空输出）不在此列 —— 误判会白烧一次
 # 调用。空输出单独由 CLI 适配器判失败，交给正常升档路径。
 _MODEL_FAIL_RE = re.compile(
-    r"(?i)(unknown\s+model"
+    r"(?i)(unrecognized_model"
+    r"|unknown\s+model"
     r"|model[\s_\-]*(?:not\s+found|not\s+exist|invalid|unsupported|not\s+supported)"
     r"|model[^\n]{0,120}(?:not\s+found|not\s+exist)"
     r"|(?:invalid|unsupported|unknown)[^\n]{0,24}model"
     r"|model_resolution|please\s+use\s+--model|model_not_found"
     r"|no\s+available\s+(?:channel|provider|model)"
+    r"|refused\s+this\s+account'?s\s+sign-?in"
     r"|模型(?:不存在|不可用|不支持)|不支持(?:该|此)?模型|没有可用(?:的)?模型)")
 
 
 def is_model_failure(*texts: Any) -> bool:
-    """回包/异常里是否在说「这个模型不能用」。空值安全，纯函数可 L0 直测。"""
+    """回包/异常里是否在说「这个模型不能用」。空值安全，纯函数可 L0 直测。
+
+    2026-11-27 补两支实测写法（以前漏掉 ⇒ 不触发换模型，直接记终态 failed）：
+      · `unrecognized_model` —— claude-code 的原话（11-27 12:46 两条任务 t1/t3）；
+      · `refused this account's sign-in` —— magpie 透传的 WorkBuddy 401 原话
+        （同刻 dumate/raccoon 实测 200 ⇒ 确实是这家 provider 不能用，换就活）。
+    """
     for t in texts:
         if t and _MODEL_FAIL_RE.search(str(t)):
             return True
@@ -555,6 +567,26 @@ def parse_models_tried(raw: Any) -> List[str]:
     return out
 
 
+def _unhealthy_providers() -> set:
+    """当前被额度闸门 / 错误窗判坏的 provider（读不到 ⇒ 空集，**不挡**）。
+
+    2026-11-27：旧实现换模型时只看「在册且没试过」，会从
+    `workbuddy/deepseek-v4.1-flash`（401）换到 `workbuddy/glm-5.3-flash`（同一个
+    死 provider）—— 换了个 ID、撞同一把锁。故障域是 provider，筛选条件也必须是 provider。
+    """
+    try:
+        import magpie_client as mc
+        blocked, _why = mc.blocked_providers()
+        return {str(p) for p in (blocked or {})}
+    except Exception:  # noqa: BLE001 —— 读不到不挡（不知道不等于坏）
+        return set()
+
+
+def _provider_ok(model_id: str, bad: set) -> bool:
+    prov = (model_id or "").split("/", 1)[0]
+    return bool(prov) and prov not in bad
+
+
 def model_fallback_target(agent_id: str, tier: Optional[str], tried: Any, *,
                           catalog: Optional[set] = None,
                           catalog_checked: bool = False,
@@ -591,10 +623,12 @@ def model_fallback_target(agent_id: str, tier: Optional[str], tried: Any, *,
     else:
         seq = list(order_)
 
+    bad_providers = _unhealthy_providers()
+
     def _tier_candidates():
         for name in seq:
             for m in tiers.get(name) or []:
-                if m and m not in tried_set and m in catalog:
+                if m and m not in tried_set and m in catalog and _provider_ok(m, bad_providers):
                     yield m
 
     default = _agent_default_model(agent_id)

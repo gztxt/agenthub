@@ -43,7 +43,10 @@ import usage_ledger
 TABLE = "model_call_logs"
 
 # 场景白名单（仅 record()/model_call_logs 明细用；overview 的分组维度是 CCR 的 client）
-SCENES = ("agent_chat", "manager", "memory", "kb", "refscout", "chat", "free", "other")
+# 2026-11-27：新增 decompose / replan —— 这两条是协同的**控制面**，失败会让整个 run 死，
+# 以前都记成 "chat"，故障时从台账上分不开「用户在聊」和「编排器在拆任务」。
+SCENES = ("agent_chat", "manager", "memory", "kb", "refscout", "chat", "free",
+          "decompose", "replan", "other")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS model_call_logs (

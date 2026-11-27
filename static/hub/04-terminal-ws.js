@@ -3003,6 +3003,7 @@ function fillRoundSelect(d) {
 /* 模型下拉：按当前 Agent 的 `/api/models` 填充。未选 Agent（自动混排）时不列任何具体模型
    —— 自动混排下「钉死一个模型」与「让不同 agent 各自最合适」是互斥的，列出就是误导。 */
 async function fillTaskModelSelect() {
+  if (typeof cbFillTaskModelSelect === 'function') return cbFillTaskModelSelect();
   var sel = $('taskModel');
   if (!sel) return;
   var agent = $('taskAgent') ? $('taskAgent').value : '';
@@ -3036,6 +3037,9 @@ async function fillTaskModelSelect() {
 function onTaskAgentChange() { fillTaskModelSelect(); }
 
 function taskBodyFromUi() {
+  // 2026-11-27（T6）：协同工作台的实现移到 18-collab.js。这里只做委派 + 兜底，
+  // 不复制第二份逻辑（跨分片同名会让 test_hubjs_split 判红，也会让两处口径漂移）。
+  if (typeof cbTaskBodyFromUi === 'function') return cbTaskBodyFromUi();
   var body = { goal: $('taskGoal').value.trim(), auto_run: true };
   if ($('taskAgent') && $('taskAgent').value) body.default_agent = $('taskAgent').value;
   if ($('taskModel') && $('taskModel').value) body.model = $('taskModel').value;
@@ -3846,8 +3850,12 @@ function renderTaskTable(tasks) {
   $('taskBody').innerHTML = (tasks || []).map(t =>
     '<tr><td><b>' + escapeHtml(t.task_id) + '</b></td><td>' + escapeHtml(t.agent_id || '-') + '</td>' +
     '<td style="font-family:var(--font-mono);font-size:var(--fs-xs)">' + escapeHtml(t.model || t.model_planned || t.model_choice || '默认') + '</td>' +
+    '<td>' + escapeHtml(t.tier || (t.tier_reason ? '' : '-')) + '</td>' +
     '<td>' + escapeHtml((t.deps || []).join(',')) + '</td><td>' + taskStatePill(t.status) + '</td>' +
     '<td>' + taskFmtDur(t.duration_ms) + '</td>' +
+    /* 2026-11-27（T6）：成本列。credits 来自 magpie 账本（cost_backfill），
+       没有回填时显示「-」而不是 0 —— 0 会被读成「零成本」。 */
+    '<td>' + (t.credits == null ? '-' : '<span title="' + escapeHtml(t.cost_confidence || '') + '">' + t.credits + '</span>') + '</td>' +
     /* 摘要截 50 字并补省略号（子任务③：截断要看得见），展开仍是全文 <pre>。 */
     '<td><details><summary class="hint">' + escapeHtml((t.output || t.error || '').slice(0, 50)) + ((t.output || t.error || '').length > 50 ? '…' : '') + '</summary><pre style="white-space:pre-wrap;font-size:var(--fs-sm);max-height:220px;overflow:auto">' + escapeHtml(t.output || t.error || '') + '</pre></details></td>' +
     '<td><button class="btn ghost sm" data-bb-copy="' + escapeHtml(t.task_id) + '" title="生成可粘贴到 DS Bot 的派活文本">复制派活</button></td></tr>').join('');
@@ -3929,6 +3937,7 @@ async function replanRun(id) {
 /* 进入协同页的**唯一入口**（boot 里只调这一个）：先拉 Agent/轮次/模型三框，再拉历史+汇总。
    顺序有依赖：模型下拉靠 Agent 清单判定域，所以 fillAgentSelect 必须先行。 */
 async function enterTasksPage() {
+  if (typeof cbEnterTasksPage === 'function') return cbEnterTasksPage();
   fillAgentSelect($('taskAgent'), true);
   try {
     var pool = await api('/api/tasks/pool');

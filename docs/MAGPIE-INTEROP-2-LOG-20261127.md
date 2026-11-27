@@ -14,7 +14,7 @@
 | 1 | T4 观测补齐 | ✅ 已完工 | pool.magpie |
 | — | 事故：dumate 429 卡死 | ✅ 已修（实时错误窗） | 500d58fd52 |
 | 2 | T5 后端协同增强 | ✅ 已完工 | v0.13.216 |
-| 2 | T6 前端工作台 | ⏳ 未开工 | — |
+| 2 | T6 前端工作台 | ✅ 已完工 | v0.13.217 |
 | 2 | T7 闸门与真渲染 | ⏳ 未开工 | — |
 | 3 | S1–S5 数据面托管 | ⏳ 未开工 | — |
 
@@ -134,3 +134,37 @@ t2 agent=codex  pinned=top  reason=already_at_floor tier=t3 model=dumate/kimi-k3
 **测试**：`tests/test_collab_force_agents_l0.py` 7 例；合计 34 passed。
 **回滚**：`agents/force_agents` 不传即老行为；代码备份 `src/tasks_dag.py.bak-*-t5`、
 `src/tiercfg.py.bak-*-t5-forced`、`src/tasks.py.bak-*-t4`。
+
+## T6 前端工作台改版 — 2026-11-27 11:5x-12:1x
+
+**改动**
+- 新 `static/hub/18-collab.js`（约 200 行）：状态条、Agent 多选、tab 切换、请求体组装。
+- `templates/index.html`：`#page-tasks` 换成 `.cb-main > .cb-left + .cb-right`；新增 `.cb-*` CSS。
+- `static/hub/04-terminal-ws.js`：`taskBodyFromUi / fillTaskModelSelect / enterTasksPage`
+  改为「有 `cb*` 实现就委派」——不复制第二份逻辑，也不产生跨分片重名。
+- 任务表新增「档」「credits」两列（`renderTaskTable`）。
+
+**验收（真渲染，CDP 驱动 chromium headless）**
+| 判据 | 1440×900 | 390×844 |
+|---|---|---|
+| `#page-tasks.on` | true | true |
+| 两栏宽度 | left 484 / right 663 | left 308（单栏堆叠） |
+| tab / view 数 | 3 / 3 | 3 / 3 |
+| Agent 芯片 | 11 | 11 |
+| 页级滚动 | false | false |
+| 横向溢出 | false | false |
+| 状态条真实数据 | 53 模型 / 48.8%-100%-91.2% / 22.95 credits / flash 50%-67% | 同 |
+
+**390 宽实测修掉的三处（都是真渲染才看得见）**
+1. `.cb-agents` 有 `overflow:auto` ⇒ 作为 flex 项 `min-height` 归零 ⇒ 芯片整块消失。
+   修法 `.cb-box > * { flex: 0 0 auto; }`。
+2. 左栏 `max-height:46vh` 把底部按钮裁掉一半 ⇒ 放宽到 60vh（内容仍在栏内滚）。
+3. tab 标签换行成两行 ⇒ `white-space:nowrap` + 容器横向滚；`runsCount` 从 tab 移到历史工具条。
+
+**未做（记入待办）**
+- 进页自动打开最近一条运行中 run（当前需去「历史」点「查看」）
+- 汇总 tab 的成本-成功率散点（当前只有表格 + flash 占比）
+
+**测试**：62 passed（`sys_pages_layout` / `hubjs_split` / `collab_force_agents` / `magpie_interop` / parity）。
+
+**回滚**：`templates/index.html.bak-*-collab-t6`；`18-collab.js` 可整体删除（04 三处委派有兜底）。

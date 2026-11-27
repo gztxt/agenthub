@@ -1,3 +1,34 @@
+## v0.13.217 — 协同工作台前端改版：左参数 / 右看板 / 三 tab（2026-11-27）
+
+> 用户令：「派发实际就是 agenthub 的协同，重新设计前端 UI」。本版只动前端，后端见 v0.13.216。
+
+**布局**：`#page-tasks` 从「四张手风琴卡」改为两栏工作台 ——
+左栏参数（目标 / Agent 多选芯片 / 混排方式 / 模型 / 轮次 / token 预算 / 按钮），
+右栏三 tab（运行中 / 历史 / 汇总）。窄屏（≤767px，沿用全站唯一断点）折叠成单栏。
+
+| 能力 | 实现 | 判据 |
+|---|---|---|
+| 顶部状态条 | `#cbStatus` ← `GET /api/tasks/overview` | 网关模型数 / 三 provider 额度 / credits / flash 占比 / 运行中，一次取齐 |
+| Agent 多选 | `#cbAgents` 芯片（不可用灰显 + 原因） | 选中即 `force_agents=1` 下发，修掉「指定执行者被静默覆盖」 |
+| 混排方式 | `auto` / `spread` | 轮转由后端 `_apply_forced_agents` 执行 |
+| 成本可见 | 任务表新增「档」「credits」两列 | 未回填显示 `-`，不写 0 |
+| 代码归属 | 新文件 `static/hub/18-collab.js` | 04 的三个入口改为「委派 + 兜底」，跨分片不重名（`test_hubjs_split` 守住） |
+
+**真渲染验收**（CDP + chromium headless，登录后 `go('tasks')`）
+```
+1440×900 : 两栏 left=484 right=663，3 tab，11 agent 芯片，pageScroll=false，overflowX=false
+390×844  : 单栏 left=308，3 tab，11 芯片，pageScroll=false，overflowX=false
+状态条  : 网关 53 个模型 / workbuddy 48.8% · raccoon 100% · dumate 91.2% /
+          近 7 天 22.95 credits（19 条未回填）/ flash 实测 50% · 档位 67%
+```
+
+**390 宽实测修掉三处**：Agent 芯片被 flex 压成 0 高（`overflow:auto` 让 flex 项
+`min-height` 归零）、底部按钮被 46vh 裁掉一半、tab 标签换行成两行。
+
+**闸门变更**：`test_sys_pages_layout` 的协同页断言由「四卡手风琴」改为「两栏 + 三 tab +
+独立滚动容器 + 旧手风琴残迹清零」，并新增 `SKELETON_EXEMPT = {"tasks"}`（豁免 .sp 骨架，
+但用新闸门守，判据未放松）。
+
 ## v0.13.216 — 协同波 2 后端：指定执行者作数 / 轮转混排 / 一屏看板（2026-11-27）
 
 > 用户令：「**派发实际就是 agenthub 的协同**，优化协同前后端」。本版只动后端，前端见下一版。

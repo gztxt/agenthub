@@ -126,8 +126,14 @@ class TestSysPagesLayout(unittest.TestCase):
                                     self.html.index('id="page-%s"' % p)],
                           "#page-%s 必须带 sys 类（页级滚动的那一半靠它）" % p)
 
+    #: 2026-11-27（T6）：协同页改为「左参数 / 右看板」两栏工作台，**刻意**不用 .sp 单列骨架。
+    #: 豁免不等于没闸门 —— 它的结构由 `test_collab_workbench_two_column` 单独守。
+    SKELETON_EXEMPT = {"tasks"}
+
     def test_every_system_page_uses_shared_skeleton(self):
         for p in SYS_PAGES:
+            if p in self.SKELETON_EXEMPT:
+                continue
             seg = self.sections[p]
             self.assertIn('class="sp"', seg, "#page-%s 没有 .sp 骨架" % p)
             self.assertGreaterEqual(seg.count('class="sp-card"'), 1,
@@ -156,34 +162,36 @@ class TestSysPagesLayout(unittest.TestCase):
             self.assertIn("sp-bd box flush tscroll", self.sections[p],
                           "#page-%s 的表格缺少 .sp-bd.box.flush.tscroll（表头将不再钉住）" % p)
 
-    def test_collab_page_scrolls_inside_cards_not_page(self):
-        """协同页（2026-11-03 用户报「整页滚动，鼠标很难控制」）。
+    def test_collab_workbench_two_column(self):
+        """协同工作台（2026-11-27 T6 改版后）。
 
-        判据分三层，任一被改回去都要判红：
-          ① 页级不再滚：#page-tasks 关掉纵向滚动（高度由 section.page.on 的 flex:1 给，
-             不许写 calc(100vh - 常数) 这种拍脑袋值）；
-          ② 四张卡都是手风琴项（data-task-acc + data-task-acc-head），卡体是 .sp-scroll
-             且展开卡里 .sp-bd.box 的限高被解除 —— 否则「卡体 + 盒内」两层竖向滚动条；
-          ③ 点「查看」把详情卡设为展开态：不这样，详情会以第 4 张卡的身份把页高再撑 1000px。
+        历史：2026-11-03 用户报「整页滚动，鼠标很难控制」，当时用「四张手风琴卡」解决。
+        2026-11-27 改版为「左参数 / 右看板 + 三个 tab」——手风琴是单开，看历史时详情会被
+        压扁；tab 各自保留滚动位置。**判据跟着设计走，但一条都没放松**：
+
+          ① 页级仍不滚（用户那条原始诉求不变）；
+          ② 两栏结构齐备：.cb-main > .cb-left + .cb-right；
+          ③ 右栏三个视图各带独立滚动容器 .cb-scroll（内容再长也不撑页）；
+          ④ 旧手风琴残迹必须清零（data-task-acc-head / .sp-card）——半迁移最难查。
         """
         self.assertIn("#page-tasks { overflow: hidden; }", self.css,
-                      "#page-tasks 又整页滚了（用户明确要求只滚卡内）")
+                      "#page-tasks 又整页滚了（用户明确要求只滚容器内）")
         seg = self.sections["tasks"]
-        for key in ("new", "hist", "stats", "run"):
-            self.assertIn('data-task-acc-head="%s"' % key, seg,
-                          "协同页 %s 卡没有手风琴卡头" % key)
-            self.assertIn('data-task-acc="%s"' % key, seg,
-                          "协同页 %s 卡没有手风琴标记" % key)
-        self.assertEqual(seg.count('class="sp-scroll"'), 4,
-                         "四张卡的卡体必须都是 .sp-scroll（多/少一个都会让某张卡退回整页滚动）")
-        self.assertIn("#page-tasks .sp-card.open .sp-bd.box { max-height: none; overflow: visible; }",
-                      self.css, "展开卡里的限高盒必须退化，否则一张卡两条竖向滚动条")
-        self.assertIn("function setTaskAcc(", strip_comments(self.s04),
-                      "协同页手风琴的 setTaskAcc 没了")
-        m = re.search(r"async function openRun\(.*?\n\}", strip_comments(self.s04), re.S)
-        self.assertTrue(m, "openRun 缺失")
-        self.assertIn("setTaskAcc('run')", m.group(0),
-                      "openRun 没把详情卡设为展开态 ⇒ 详情又变成整页往下长")
+        self.assertIn('class="cb-main"', seg, "协同页缺 .cb-main 两栏容器")
+        self.assertIn('class="cb-left"', seg, "协同页缺左栏（参数）")
+        self.assertIn('class="cb-right"', seg, "协同页缺右栏（看板）")
+        self.assertGreaterEqual(seg.count('class="cb-view'), 3, "右栏视图不足三个")
+        self.assertGreaterEqual(seg.count("cb-scroll"), 3, "视图缺独立滚动容器")
+        for tab in ("live", "hist", "stats"):
+            self.assertIn('data-ctab="%s"' % tab, seg, "缺 tab：%s" % tab)
+        self.assertNotIn("data-task-acc-head", seg, "旧手风琴残迹未清")
+        self.assertNotIn('class="sp-card"', seg, "旧 .sp-card 残迹未清")
+
+    def test_table_pages_use_bounded_scroll_box(self):
+        """单表页的表格进限高盒：盒是 sticky 表头的滚动容器，卡片留在视口里。"""
+        for p in TABLE_PAGES:
+            self.assertIn("sp-bd box flush tscroll", self.sections[p],
+                          "#page-%s 的表格缺少 .sp-bd.box.flush.tscroll（表头将不再钉住）" % p)
 
     def test_shared_kit_css_present(self):
         for rule in (".sp-card", ".sp-hd h3", ".sp-tools", ".sp-bd.box", ".sp-note",

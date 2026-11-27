@@ -718,34 +718,56 @@
         .sp-sub { font-size: var(--fs-sm); font-weight: 600; color: var(--text-2); margin-bottom: 8px; }
         .sp-list { display: flex; flex-direction: column; }
         .sp-list > .mem-item:last-child { border-bottom: 0; }
-        /* ── 协同页（2026-11-03）：整页不滚，卡头手风琴 ────────────────────
-           用户报「协同页要整页滚动，鼠标很难控制」。照左侧菜单 7150fef 的做法改：
-           卡头常驻、点开的那一张吃满剩余高度、内容只在卡体里滚 —— 页级滚动彻底关掉。
-           四张卡 = 四个手风琴项（data-task-acc），单开；展开态由 JS 写 .open。
-           ① #page-tasks 的高度是 section.page.on 的 flex:1 给的 ⇒ 这里 overflow:hidden
-             即可，不需要算 calc(100vh - 常数) 这种拍脑袋值；
-           ② 展开卡里的 .sp-bd.box 必须退化成普通块：否则「卡体滚 + 盒内滚」两层竖向
-             滚动条，滚轮到底滚谁又变成新的「难控制」（.run-subs 同理）；
-           ③ 窄屏不另开断点：手风琴本身与宽度无关，390 宽实测同样只滚一张卡。 */
+        /* ── 协同工作台（2026-11-27 T6）：左参数 / 右看板 ──────────────────────
+           为什么不再用手风琴：手风琴是「单开」，看历史时详情被压扁；tab 各自保留
+           滚动位置，切回来还在原处。窄屏断点沿用全站唯一值 767px（与
+           01-core-boot.js 的 matchMedia 同源），这里不新增第二个断点。 */
         #page-tasks { overflow: hidden; }
-        #page-tasks .sp { flex: 1 1 auto; min-height: 0; }
-        #page-tasks .sp-card { flex: 0 0 auto; min-height: 0; }
-        #page-tasks .sp-card > .sp-scroll { display: none; }
-        #page-tasks .sp-card.open { flex: 1 1 auto; }
-        #page-tasks .sp-card.open > .sp-scroll { display: flex; flex-direction: column;
-                                                flex: 1 1 auto; min-height: 0; overflow: auto;
-                                                overscroll-behavior: contain; }
-        /* 卡体是滚动容器，子块不许被压扁（flex-shrink 默认 1 会把表格/列表挤成一条缝） */
-        #page-tasks .sp-card.open > .sp-scroll > * { flex: 0 0 auto; }
-        #page-tasks .sp-card.open .sp-bd.box { max-height: none; overflow: visible; }
-        #page-tasks .sp-card.open .run-item.open .run-subs { max-height: none; overflow: visible; }
-        /* 卡头整行可点（与 .nav-acc-head 同语义）：hover 高亮 + 键盘焦点框 + 箭头旋转 */
-        #page-tasks .sp-hd[data-task-acc-head] { cursor: pointer; user-select: none; }
-        #page-tasks .sp-hd[data-task-acc-head]:hover { background: var(--row-hover); }
-        #page-tasks .sp-hd[data-task-acc-head]:focus-visible { outline: 2px solid var(--accent-2);
-                                                              outline-offset: -2px; }
-        .acc-caret { flex: none; align-self: center; color: var(--muted); transition: transform .18s ease; }
-        #page-tasks .sp-card.open > .sp-hd .acc-caret { transform: rotate(90deg); }
+        #page-tasks .cb { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0;
+                          gap: 8px; padding: 10px 14px; }
+        .cb-status { display: flex; gap: 6px; flex-wrap: wrap; flex: 0 0 auto; }
+        .cb-chip { font-size: var(--fs-xs); color: var(--text-2); border: 1px solid var(--border);
+                   border-radius: 999px; padding: 2px 9px; white-space: nowrap; }
+        .cb-chip.warn { color: var(--warn, #c58a00); border-color: currentColor; }
+        .cb-chip.bad { color: var(--danger, #d9534f); border-color: currentColor; }
+        .cb-main { display: flex; gap: 10px; flex: 1 1 auto; min-height: 0; }
+        .cb-left { flex: 0 0 320px; display: flex; min-height: 0; }
+        .cb-box { display: flex; flex-direction: column; gap: 6px; width: 100%; overflow: auto;
+                  border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+        /* 2026-11-27 实测（390 宽）：.cb-agents 有 overflow:auto ⇒ flex 项 min-height 归零
+           ⇒ 芯片整块被压到 0 高、看起来「没渲染」。子项一律 flex:0 0 auto。 */
+        .cb-box > * { flex: 0 0 auto; }
+        .cb-lab { font-size: var(--fs-xs); color: var(--muted); margin-top: 2px; }
+        .cb-row { display: flex; gap: 6px; }
+        .cb-row > * { flex: 1 1 0; min-width: 0; }
+        .cb-agents { display: flex; flex-wrap: wrap; gap: 4px; max-height: 132px; overflow: auto; }
+        .cb-ag { font-size: var(--fs-xs); padding: 2px 8px; border-radius: 999px; cursor: pointer;
+                 border: 1px solid var(--border); background: transparent; color: var(--text-2); }
+        .cb-ag.on { background: var(--sel-bg); border-color: var(--sel-border); color: var(--text-1); font-weight: 600; }
+        .cb-ag[disabled] { opacity: .45; cursor: not-allowed; }
+        .cb-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+        .cb-right { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column;
+                    min-height: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+        .cb-tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--border);
+                   flex: 0 0 auto; overflow-x: auto; }
+        .cb-tab { white-space: nowrap; border: 1px solid transparent; border-bottom: none; background: transparent; cursor: pointer;
+                  color: var(--text-2); padding: 5px 14px; border-radius: 8px 8px 0 0; font-size: var(--fs-sm); }
+        .cb-tab.on { background: var(--sel-bg); border-color: var(--border); color: var(--text-1); font-weight: 600; }
+        .cb-view { display: none; flex: 1 1 auto; min-height: 0; flex-direction: column; }
+        .cb-view.on { display: flex; }
+        .cb-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 12px; flex: 0 0 auto; }
+        .cb-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0 12px 8px; }
+        .cb-scrollbox { max-height: 420px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; margin: 8px 0; }
+        .cb-runhead { padding: 10px 12px 4px; }
+        .cb-verdict { padding: 8px 12px; }
+        /* 窄屏：参数在上、看板在下（同一断点 767px，不新增第二套） */
+        @media (max-width: 767px) {
+            #page-tasks .cb-main { flex-direction: column; }
+            .cb-left { flex: 0 0 auto; }
+            .cb-box { max-height: 60vh; }
+            .cb-right { min-height: 260px; }
+            .cb-left { flex: 0 0 auto; }
+        }
         /* ── 协同历史手风琴（主标题 = run.goal，副标题 = tasks[].prompt）──
            为什么不用 display:none 收起：它让高度瞬间归零，下面的卡片会跟着上下跳；
            这里用 max-height 过渡，展开后放开纵向滚动，任务多也不撑破卡片。
@@ -2363,149 +2385,131 @@
              #runPanel 显隐只切 inline 值（.sp-card 是 flex 列，写 display:block 会错位，
              tests/test_sys_pages_layout.py 钉着这一条）。 -->
         <section class="page sys" id="page-tasks">
-            <div class="sp">
-                <div class="sp-card" data-task-acc="new">
-                    <div class="sp-hd" data-task-acc-head="new" role="button" tabindex="0"
-                         aria-expanded="false" aria-controls="taskAccNew">
-                        <svg class="i xs acc-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg>
-                        <h3>新建协同</h3>
-                        <div class="sp-r"><span class="hint">Leader 拆解 · 多 agent 混排 · 未完成自动重拆（SQLite 状态机，重启可恢复）</span></div>
-                    </div>
-                    <div class="sp-scroll" id="taskAccNew">
-                        <div class="sp-tools">
-                            <div class="toolbar">
-                                <textarea id="taskGoal" class="doc" style="min-height:64px" placeholder="复杂任务目标，例如：分别介绍 A 与 B（并行），再汇总对比"></textarea>
+            <!-- 协同工作台（2026-11-27 T6）：左参数 / 右看板两栏。
+                 设计判据：
+                 ① 一次取齐 —— 顶部状态条只读 /api/tasks/overview，不再 4 个请求拼一屏；
+                 ② 参数与结果分左右，改参数不用把结果滚出视野（窄屏 <1024px 折叠成单栏）；
+                 ③ 三段看板用 tab 而非手风琴：手风琴要求「单开」，看历史时详情必被压扁；
+                     tab 保留各自的滚动位置，切回来还在原处。 -->
+            <div class="cb">
+                <div class="cb-status" id="cbStatus">
+                    <span class="cb-chip" id="cbModels">网关 …</span>
+                    <span class="cb-chip" id="cbProviders">provider …</span>
+                    <span class="cb-chip" id="cbCredits">credits …</span>
+                    <span class="cb-chip" id="cbFlash">flash …</span>
+                    <span class="cb-chip" id="cbRunning">运行中 …</span>
+                </div>
+                <div class="cb-main">
+                    <aside class="cb-left">
+                        <div class="cb-box">
+                            <div class="cb-lab">目标</div>
+                            <textarea id="taskGoal" class="doc" style="min-height:72px"
+                                placeholder="复杂任务目标，例如：分别介绍 A 与 B（并行），再汇总对比"></textarea>
+                            <div class="cb-lab">执行 Agent <span class="hint" id="cbAgentsHint">未选 = 自动</span></div>
+                            <div class="cb-agents" id="cbAgents"><span class="hint">载入中…</span></div>
+                            <div class="cb-row">
+                                <select id="cbMode" title="自动 = Leader 按难度在所选 Agent 里分配；轮转 = 按顺序轮流派给你选的 Agent">
+                                    <option value="auto">自动分配</option>
+                                    <option value="spread">轮转混排</option>
+                                </select>
+                                <select id="taskRounds" title="未完成时最多自动重拆几轮"></select>
                             </div>
-                            <div class="toolbar">
-                                <select id="taskAgent" style="max-width:200px" onchange="onTaskAgentChange()"><option value="">自动选择执行 Agent</option></select>
-                                <select id="taskModel" style="max-width:280px" title="钉死模型只对模型域是 CCR 的 Agent 生效"><option value="">模型：自动（按难度 t1/t2/t3）</option></select>
-                                <select id="taskRounds" style="max-width:220px" title="未完成时最多自动重拆几轮"></select>
+                            <div class="cb-row">
+                                <select id="taskModel" title="钉死模型只对模型域是网关的 Agent 生效">
+                                    <option value="">模型：自动（t1/t2/t3 档位）</option>
+                                </select>
+                            </div>
+                            <div class="cb-row">
+                                <input id="cbBudget" type="number" min="0" placeholder="token 预算（可选，空=不限）">
+                            </div>
+                            <div class="hint" id="taskPreview" style="padding:2px 0">未指定 Agent = 自动混排：模型由难度→档位决定。</div>
+                            <div class="cb-actions">
                                 <button class="btn" id="btnDecompose" onclick="decomposeRun()">拆解并启动</button>
                                 <button class="btn ghost" id="btnPreview" onclick="previewRun()">仅预览</button>
-                                <button class="btn ghost" onclick="refreshTasks()"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
-                            </div>
-                            <div class="hint" id="taskPreview" style="padding-bottom:4px">未指定 Agent = 自动混排：模型由难度→档位决定。要钉死模型请先选一个 Agent。</div>
-                        </div>
-                    </div>
-                </div>
-                <div class="sp-card open" data-task-acc="hist">
-                    <div class="sp-hd" data-task-acc-head="hist" role="button" tabindex="0"
-                         aria-expanded="true" aria-controls="taskAccHist">
-                        <svg class="i xs acc-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg>
-                        <h3>协同历史</h3>
-                        <div class="sp-r"><span class="hint" id="runsCount"></span></div>
-                    </div>
-                    <div class="sp-scroll" id="taskAccHist">
-                    <div class="sp-tools">
-                        <div class="toolbar">
-                            <input id="runQ" placeholder="搜 run / 目标关键字（回车）" style="max-width:300px" onkeydown="if(event.key==='Enter'){refreshTasks();}">
-                            <!-- 状态筛选：下拉换成一排带计数的芯片（2026-11-03）。
-                                 下拉的毛病是「得点开才知道有几个失败」——先把数量摆在脸上，
-                                 点一下即筛。计数由 loadRunCounts() 用**同一个列表接口**
-                                 +limit=1 取 total（沿用当前搜索词），不另开口径。
-                                 选中态只有一个：runStateFilter（JS 变量），DOM 的 .on 只是投影。 -->
-                            <div class="fchips" id="runChips">
-                                <button class="fchip on" data-run-chip="">全部 <span class="fchip-n" data-chip-n="all">–</span></button>
-                                <button class="fchip" data-run-chip="running">执行中 <span class="fchip-n" data-chip-n="running">–</span></button>
-                                <button class="fchip" data-run-chip="failed">失败 <span class="fchip-n" data-chip-n="failed">–</span></button>
-                                <button class="fchip" data-run-chip="partial">部分 <span class="fchip-n" data-chip-n="partial">–</span></button>
-                                <button class="fchip" data-run-chip="success">成功 <span class="fchip-n" data-chip-n="success">–</span></button>
+                                <button class="btn ghost" onclick="refreshTasks()">刷新</button>
                             </div>
                         </div>
-                    </div>
-                    <div class="sp-bd box flush tscroll">
-                        <!-- 协同历史：主副标题手风琴（v0.13.183）。一行一个 run，goal 作主标题，
-                             点行展开该 run 的 tasks[].prompt 作副标题。容器仍是 #runsBody（JS 与
-                             事件委托都按这个 id 找），只是从 <tbody> 换成 <div>。
-                             展开态只活在内存（runOpenSet），库表无此字段，不加后端字段。 -->
-                        <div id="runsBody" class="runs-acc"></div>
-                    </div>
-                    <div class="sp-tools" style="padding-top:8px">
-                        <div class="toolbar" style="margin-bottom:0"><span class="hint" id="runsMore"></span></div>
-                    </div>
-                    </div>
-                </div>
-                <div class="sp-card" data-task-acc="stats">
-                    <div class="sp-hd" data-task-acc-head="stats" role="button" tabindex="0"
-                         aria-expanded="false" aria-controls="taskAccStats">
-                        <svg class="i xs acc-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg>
-                        <h3>执行结果汇总</h3>
-                        <div class="sp-r">
-                            <select id="statsDays" style="max-width:130px" onchange="loadTaskStats()">
-                                <option value="7">近 7 天</option>
-                                <option value="30" selected>近 30 天</option>
-                                <option value="0">全部</option>
-                            </select>
+                    </aside>
+                    <section class="cb-right">
+                        <div class="cb-tabs" id="cbTabs">
+                            <button class="cb-tab on" data-ctab="live">运行中</button>
+                            <button class="cb-tab" data-ctab="hist">历史</button>
+                            <button class="cb-tab" data-ctab="stats">汇总</button>
                         </div>
-                    </div>
-                    <div class="sp-scroll" id="taskAccStats">
-                    <div class="sp-bd" id="taskStatsVerdict"><span class="hint">加载中…</span></div>
-                    <!-- t4（2026-11-03）：主线视图改成「按 agent 分组的可展开列表」。
-                         为什么不再直接上表：原来一张融合表里 Agent 列与模型列并排，
-                         同一个 agent 换了模型就裂成多行，失败原因还折在行尾 <details> 里 ——
-                         「谁出了问题」要横着扫一整列才拼得出来。现在一个 agent 一行头部
-                         （总次数/成功率/失败/阻塞/重试/均耗时 + 成功率徽章配色），点开看
-                         该 agent 的失败原因明细与各模型组合。失败多的 agent 排在最前。
-                         容器 #statsAgents 复用 .runs-acc/.run-item 那套（与协同历史
-                         同一手风琴语义：同容器内单开、点头部切换、箭头旋转一致），
-                         展开态各自分桶 ⇒ 点开 agent 不会把协同历史里已展开的 run 收起。
-                         数据仍只来自 GET /api/tasks/stats 一次响应，前端上卷，无新接口。 -->
-                    <div class="sp-bd box flush tscroll">
-                        <div id="statsAgents" class="runs-acc"></div>
-                    </div>
-                    <!-- ⑤ 原始数据不丢：2026-11-03 那次「三表融合」的产物（单 tbody，
-                         combo × 失败原因折叠列 + 表尾轮次分布）整体收进折叠区，默认收起。
-                         tbody 仍是 #statsCombos —— loadTaskStats 里那段渲染照旧写它，
-                         废弃这个 id 会静默打断渲染（轮次分布是 run 级全局量，只能待在这里）。 -->
-                    <details class="sp-bd flush" id="statsRaw">
-                        <summary class="sp-sub" style="margin:0;padding:10px 14px;cursor:pointer">原始数据（Agent × 模型 融合表 + 轮次分布）</summary>
-                        <div class="sp-bd box flush tscroll" style="max-height:420px">
-                            <table><thead><tr><th>Agent</th><th>模型（实测优先）</th><th>n</th><th>成功</th><th>失败</th><th>阻塞</th><th>成功率</th><th>均耗时</th><th>失败原因</th></tr></thead>
-                            <tbody id="statsCombos"></tbody></table>
+                        <div class="cb-view on" data-cpanel="live">
+                            <div class="hint" id="cbLiveEmpty" style="padding:10px 14px">还没有选中的 run。去「历史」里点「查看」。</div>
+                            <div id="runPanel" style="display:none">
+                                <div class="cb-runhead">
+                                    <h3 id="runTitle"></h3>
+                                    <div class="hint" id="runSummary"></div>
+                                </div>
+                                <details class="sum-more" id="runSummaryMore" style="display:none">
+                                    <summary>更多指标</summary><div class="hint" id="runSummaryDetail"></div>
+                                </details>
+                                <div class="cb-scroll">
+                                    <div class="hint" id="runChain"></div>
+                                    <div class="cb-tools">
+                                        <button class="btn ghost sm" onclick="dagZoom('fit')">适配宽度</button>
+                                        <button class="btn ghost sm" onclick="dagZoom('100')">100%</button>
+                                        <button class="btn ghost sm" onclick="dagZoom('in')">放大</button>
+                                        <button class="btn ghost sm" onclick="dagZoom('out')">缩小</button>
+                                    </div>
+                                    <div id="dagSvg" class="tscroll"></div>
+                                    <div class="cb-scrollbox sp-bd box flush tscroll">
+                                        <table><thead><tr><th>任务</th><th>Agent</th><th>档</th><th>模型</th><th>依赖</th><th>状态</th><th>耗时</th><th>credits</th><th>输出/错误</th><th>操作</th></tr></thead>
+                                        <tbody id="taskBody"></tbody></table>
+                                    </div>
+                                    <details>
+                                        <summary class="hint">执行时间线（派发 / 升档 / 验证 / 重拆）</summary>
+                                        <button class="btn ghost sm" id="runEventsExpand" onclick="var e=document.getElementById('runEvents');e.classList.toggle('expanded');this.textContent=e.classList.contains('expanded')?'收起':'展开'">展开</button>
+                                        <div id="runEvents" class="tscroll" style="max-height:240px;padding-top:8px"></div>
+                                    </details>
+                                </div>
+                                <div class="cb-tools">
+                                    <button class="btn ghost sm" onclick="startRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-play"/></svg>启动/续跑</button>
+                                    <button class="btn ghost sm" onclick="retryRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>重试失败项</button>
+                                    <button class="btn ghost sm" onclick="replanRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>重拆下一轮</button>
+                                    <button class="btn ghost sm" onclick="copyAllHandoff()"><svg class="i xs" aria-hidden="true"><use href="#i-copy"/></svg>复制全部派活文本</button>
+                                    <button class="btn danger sm" onclick="delRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-trash"/></svg>删除</button>
+                                </div>
+                            </div>
                         </div>
-                    </details>
-                    </div>
-                </div>
-                <div class="sp-card" id="runPanel" data-task-acc="run" style="display:none">
-                    <!-- 精简渲染（2026-11-03 子任务③）：#runSummary 只留 1 行结论
-                         （轮次 · 成功/失败 · 停因），耗时/tokens/阻塞/总数收进默认收起的
-                         #runSummaryMore ——数据一个不删，只挪进折叠区。 -->
-                    <div class="sp-hd" data-task-acc-head="run" role="button" tabindex="0"
-                         aria-expanded="false" aria-controls="taskAccRun">
-                        <svg class="i xs acc-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg>
-                        <h3 id="runTitle"></h3><div class="sp-r"><span class="hint" id="runSummary"></span><details class="sum-more" id="runSummaryMore" style="display:none"><summary>更多指标</summary><div class="hint" id="runSummaryDetail"></div></details></div>
-                    </div>
-                    <div class="sp-scroll" id="taskAccRun">
-                    <div class="sp-bd"><div id="runChain" class="hint"></div></div>
-                    <div class="sp-bd">
-                        <div class="toolbar" style="margin-bottom:4px">
-                            <button class="btn ghost sm" onclick="dagZoom('fit')">适配宽度</button>
-                            <button class="btn ghost sm" onclick="dagZoom('100')">100%</button>
-                            <button class="btn ghost sm" onclick="dagZoom('in')">放大</button>
-                            <button class="btn ghost sm" onclick="dagZoom('out')">缩小</button>
+                        <div class="cb-view" data-cpanel="hist">
+                            <div class="cb-tools">
+                                <input id="runQ" placeholder="搜 run / 目标关键字（回车）" style="max-width:280px"
+                                    onkeydown="if(event.key==='Enter'){refreshTasks();}">
+                                <span class="hint" id="runsCount"></span>
+                                <div class="fchips" id="runChips">
+                                    <button class="fchip on" data-run-chip="">全部 <span class="fchip-n" data-chip-n="all">–</span></button>
+                                    <button class="fchip" data-run-chip="running">执行中 <span class="fchip-n" data-chip-n="running">–</span></button>
+                                    <button class="fchip" data-run-chip="failed">失败 <span class="fchip-n" data-chip-n="failed">–</span></button>
+                                    <button class="fchip" data-run-chip="partial">部分 <span class="fchip-n" data-chip-n="partial">–</span></button>
+                                    <button class="fchip" data-run-chip="success">成功 <span class="fchip-n" data-chip-n="success">–</span></button>
+                                </div>
+                            </div>
+                            <div class="cb-scroll"><div id="runsBody" class="runs-acc"></div></div>
+                            <div class="cb-tools"><span class="hint" id="runsMore"></span></div>
                         </div>
-                        <div id="dagSvg" class="tscroll"></div>
-                    </div>
-                    <div class="sp-bd box flush tscroll">
-                        <table><thead><tr><th>任务</th><th>Agent</th><th>模型</th><th>依赖</th><th>状态</th><th>耗时</th><th>输出/错误（点击行展开）</th><th>操作</th></tr></thead>
-                        <tbody id="taskBody"></tbody></table>
-                    </div>
-                    <div class="sp-bd">
-                        <details><summary class="hint">执行时间线（派发 / 升档 / 验证 / 重拆）</summary>
-                            <button class="btn ghost sm" id="runEventsExpand" onclick="var e=document.getElementById('runEvents');e.classList.toggle('expanded');this.textContent=e.classList.contains('expanded')?'收起':'展开'">展开</button>
-                            <div id="runEvents" class="tscroll" style="max-height:240px;padding-top:8px"></div>
-                        </details>
-                    </div>
-                    </div>
-                    <div class="sp-tools" style="padding-top:12px">
-                        <div class="toolbar" style="margin-bottom:0">
-                            <button class="btn ghost sm" onclick="startRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-play"/></svg>启动/续跑</button>
-                            <button class="btn ghost sm" onclick="retryRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>重试失败项</button>
-                            <button class="btn ghost sm" onclick="replanRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-refresh"/></svg>重拆下一轮</button>
-                            <button class="btn ghost sm" onclick="copyAllHandoff()"><svg class="i xs" aria-hidden="true"><use href="#i-copy"/></svg>复制全部派活文本</button>
-                            <button class="btn danger sm" onclick="delRun(currentRun)"><svg class="i xs" aria-hidden="true"><use href="#i-trash"/></svg>删除</button>
+                        <div class="cb-view" data-cpanel="stats">
+                            <div class="cb-tools">
+                                <select id="statsDays" style="max-width:130px" onchange="loadTaskStats()">
+                                    <option value="7">近 7 天</option>
+                                    <option value="30" selected>近 30 天</option>
+                                    <option value="0">全部</option>
+                                </select>
+                                <span class="hint">口径：同一 run 的多轮与升档都计入，成功率按终态算</span>
+                            </div>
+                            <div id="taskStatsVerdict" class="cb-verdict"><span class="hint">加载中…</span></div>
+                            <div class="cb-scroll"><div id="statsAgents" class="runs-acc"></div></div>
+                            <details id="statsRaw">
+                                <summary class="hint" style="padding:8px 14px;cursor:pointer">原始数据（Agent × 模型 融合表 + 轮次分布）</summary>
+                                <div class="cb-scrollbox sp-bd box flush tscroll">
+                                    <table><thead><tr><th>Agent</th><th>模型（实测优先）</th><th>n</th><th>成功</th><th>失败</th><th>阻塞</th><th>成功率</th><th>均耗时</th><th>失败原因</th></tr></thead>
+                                    <tbody id="statsCombos"></tbody></table>
+                                </div>
+                            </details>
                         </div>
-                    </div>
+                    </section>
                 </div>
             </div>
         </section>
@@ -3590,7 +3594,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=d521dcf1';
+      var HUB_SRC = '/static/hub.js?v=bf8523cc';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

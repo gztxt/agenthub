@@ -352,8 +352,16 @@ def _plan_tiers(items: List[dict], pool: set) -> tuple:
     """
     import tiercfg as tierlib
     ids, checked = _catalog_snapshot()
+    # 2026-11-28（用户令 B）：档内顺序交给**实测**——近 30 天同模型首轮成败的
+    # Wilson 下界。取不到（读库异常/样本不足）⇒ 空表 ⇒ tiercfg 保持清单原序，
+    # 「不知道」不伪装成「更差」。tiercfg 仍不读库（分数注入，纯函数可单测）。
+    try:
+        import tier_perf
+        perf = tier_perf.model_perf()
+    except Exception:  # noqa: BLE001 —— 排序是增强，绝不带倒派发
+        perf = {}
     out = tierlib.plan(items, catalog=ids, checked=checked, ccr_agents=_ccr_model_agents(),
-                        pool=pool)
+                        pool=pool, perf=perf)
     _shadow_dispatch_note(items, pool)
     return out
 

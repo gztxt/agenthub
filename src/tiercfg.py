@@ -54,9 +54,14 @@ DEFAULT_TIERS: Dict[str, Tuple[str, ...]] = {
 #: difficulty 1/2/3 → 档位。
 DEFAULT_MAP: Dict[int, str] = {1: "t1", 2: "t2", 3: "t3"}
 
-#: 难度地板：3 分任务**永远不落 t1**。即使有人把 mapping 改坏，地板仍然生效 ——
+#: 难度地板：3 分任务**永远不落 t1/t2**。即使有人把 mapping 改坏，地板仍然生效 ——
 #: 这是"难任务别省钱"的唯一硬约束（软约束是 mapping，改一下就没了）。
-DEFAULT_FLOORS: Dict[int, str] = {3: "t2"}
+#:
+#: 2026-11-28 由 `{3: "t2"}` 抬到 `{3: "t3"}`，依据是本机 audit 实测（不是直觉）：
+#: 按难度分档的首轮成功率 d1 **72.5%**(n=51) / d2 **45.8%**(n=59) / d3 **7.7%**(n=26)。
+#: d3 落 t2 时首轮几乎必败 ⇒ 后续靠升档补救，等于用「一次失败 + 一次重跑」换档位，
+#: 比直接起点 t3 更贵。地板只影响**起点**，不影响失败后的升档链。
+DEFAULT_FLOORS: Dict[int, str] = {3: "t3"}
 
 _OFF = ("0", "false", "no", "off")
 
@@ -363,7 +368,8 @@ def tier_for(difficulty: int, mapping: Optional[Dict[int, str]] = None,
 
 def first_usable(tier: str, tiers: Dict[str, List[str]],
                  catalog: Optional[set], checked: bool,
-                 blocked: Optional[Dict[str, str]] = None
+                 blocked: Optional[Dict[str, str]] = None,
+                 perf: Optional[Dict[str, Dict[str, float]]] = None
                  ) -> Tuple[Optional[str], str]:
     """该档位下第一个**在清单里**的模型。返回 `(model, reason)`。
 
@@ -379,6 +385,13 @@ def first_usable(tier: str, tiers: Dict[str, List[str]],
     if not checked or catalog is None:
         return None, "catalog_unavailable"
     blocked = blocked or {}
+    # 2026-11-28：档内顺序允许由**实测**接管（`rank` 注入，纯函数不读库）。
+    # 只在样本够（n>=3）时重排：不足 3 次的胜率是噪声，拿噪声换掉清单顺序
+    # 等于把「声明」换成「运气」。排序键 = (wilson 下界, 原序)，同分保持清单顺序。
+    if perf:
+        ids = sorted(enumerate(ids),
+                     key=lambda kv: (-(perf.get(kv[1], {}) or {}).get("score", 0.0), kv[0]))
+        ids = [m for _i, m in ids]
     skipped: List[str] = []
     for m in ids:
         if m not in catalog:
@@ -399,7 +412,8 @@ def plan(items: List[dict], *, catalog: Optional[set], checked: bool,
          mapping: Optional[Dict[int, str]] = None,
          floors: Optional[Dict[int, str]] = None,
          agent_tiers: Optional[Dict[str, List[str]]] = None,
-         agent_floor: Optional[Dict[int, str]] = None
+         agent_floor: Optional[Dict[int, str]] = None,
+         perf: Optional[Dict[str, Dict[str, float]]] = None
          ) -> Tuple[List[dict], Dict[str, Any]]:
     """给每个子任务补 `tier` / `model_planned` / `tier_reason`（就地改并返回同一列表）。
 
@@ -450,7 +464,7 @@ def plan(items: List[dict], *, catalog: Optional[set], checked: bool,
         pinned = it.get("pinned_tier")
         if pinned:
             tier = pinned if pinned in order_ else top
-            model, why = first_usable(tier, tiers, catalog, checked, blocked)
+            model, why = first_usable(tier, tiers, catalog, checked, blocked, perf)
             it.update(tier=tier, model_planned=model, tier_reason="pinned:%s" % why)
         elif it.get("model"):
             it.update(tier="explicit", model_planned=it["model"], tier_reason="explicit")
@@ -459,7 +473,7 @@ def plan(items: List[dict], *, catalog: Optional[set], checked: bool,
                       tier_reason="agent_model_domain_not_ccr")
         else:
             tier = tier_for(it.get("difficulty") or 2, mapping, floors, tiers)
-            model, why = first_usable(tier, tiers, catalog, checked, blocked)
+            model, why = first_usable(tier, tiers, catalog, checked, blocked, perf)
             it.update(tier=tier or None, model_planned=model, tier_reason=why)
 
         key = it["tier_reason"] or "unknown"

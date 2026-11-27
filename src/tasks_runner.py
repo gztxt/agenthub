@@ -16,6 +16,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
 import adapters.cli_agent as _cli_agent
+
+
+def _artifact_cwd() -> str:
+    """产物校验的解析基准：与派发 cwd 同源（执行者在哪写，就在哪判）。
+
+    用 `adapters.cli_agent.DEFAULT_CWD` 而不是 `os.getcwd()`：hub 服务的 cwd 取决于
+    systemd 的 WorkingDirectory，换一处启动就会变；派发默认目录是同一份常量。
+    """
+    return _cli_agent.DEFAULT_CWD
 import chain_judge
 import db
 import verifier
@@ -597,6 +606,30 @@ async def _verify_and_settle(run_id: str, row: dict, result: dict, attempts_done
     verdict = await asyncio.to_thread(verifier.verify, kind,
                                       output=result.get("response"),
                                       expect=row.get("verify_expect"))
+    # ── 2026-11-28（用户令 A）：产物落地校验 ──────────────────────────────
+    # verifier 只判回包文本 ⇒「回了一句"已写入"」也算 pass（假绿主源）。
+    # 子任务的 `files` 声明了会读或写的文件，但此前后从没参与判定。这里只补
+    # **确定的反证**：写类任务声明文件没改过 / 声明文件不存在或是空文件 ⇒ 覆盖成 fail，
+    # 走统一的「可修复 ⇒ 自动重试 / 不可修复 ⇒ failed」出口。
+    # 判不了（没声明 files、路径越界）**不覆盖**：不拿"没证据"当"失败"。
+    if verdict["status"] == verifier.STATUS_PASS:
+        try:
+            import artifact_verify as _artv
+            if _artv.enabled():
+                since_ts = None
+                if row.get("started_at"):
+                    try:
+                        since_ts = datetime.fromisoformat(str(row["started_at"])).timestamp()
+                    except (ValueError, TypeError):
+                        since_ts = None
+                av = await asyncio.to_thread(
+                    _artv.check, row.get("files"),
+                    cwd=_artifact_cwd(), since=since_ts, prompt=row.get("prompt"))
+                if av.get("status") == _artv.STATUS_FAIL:
+                    verdict = av
+        except Exception as e:  # noqa: BLE001 —— 校验是增强，异常不得带倒结算
+            print("[artifacts] 落地校验失败（按原 verdict 结算）：%s: %s"
+                  % (type(e).__name__, e))
     verify_ms = int((asyncio.get_event_loop().time() - v0) * 1000)
     if verdict["status"] == verifier.STATUS_PASS:
         # P1-4：**产物过 verifier ≠ 被接受**。AUTO_ACCEPT 开（默认）则立刻接受（＝旧行为），

@@ -300,3 +300,44 @@ magpie 只改 `[provider]`。若切换，jcode 走 ccr provider 块时拿到旧�
 （run 5e9a6c2a18 实测 `running=[]` 但有 3 个 pending 任务）⇒ 改为「非终态」过滤。
 
 **测试**：新增 `tests/test_collab_ui_l0.py` 7 例；本轮相关面 79 passed。
+
+## 用户报三问题修复 — 2026-11-27 18:0x
+
+**报障**：①历史页无历史记录（应可点选重新执行）②手机版看不到最下面 ③执行摘要不显眼（失败项要能继续执行）
+
+**取证（CDP 实测，不是推测）**
+| 现象 | 实测值 | 判定 |
+|---|---|---|
+| 历史「没记录」 | `runsCount="共 35 条 · 已列 20 条"`，但桌面 `histViewH=0` | 渲染了，被裁 |
+| 桌面裁切根因 | `.cb-right` 缺 `min-height:0` 高度约束 ⇒ `.cb-view` 算 0 | flex 链断 |
+| 手机看不到底部 | 390×844：`.cb-right bottom=984`（视口 844），历史容器 `top=928` | 溢出视口 |
+| 窄屏溢出根因 | `.cb-main` 保持 `flex:1 1 auto` 被压到视口高 ⇒ 内容溢出父级而非滚动 | flex 链断 |
+| 摘要空白 | `cbOpenRunPatched=false`，`window.openRun` 仍是原始实现 | patch 从未执行 |
+
+**修法（6 项，逐项有实测对照）**
+| # | 改动 | 修前 → 修后 |
+|---|---|---|
+| 1 | `.cb-right` 只留 `min-height:0`（写 `height:0` 反而算成 0，已实测） | 桌面 `histViewH` 0 → **603** |
+| 2 | 窄屏 `.cb-main{flex:0 0 auto}` + `.cb` 自滚 + `.cb-scroll{max-height:56vh}` | 整块 `scrollH` 13109 → **973** |
+| 3 | 窄屏左栏折叠（参数 490px 把结果挤出视口） | 左栏 490 → **44px**，右栏 `bottom=831` 在视口内 |
+| 4 | 切 tab 自动滚右栏进视口（复用 `HUB_NARROW_MQ`，不新增断点） | 历史 `top` 928 → **308** |
+| 5 | 运行内结果摘要条 + 失败项「继续执行」 | `chips=[成功0,失败1,运行中0,待执行0]`、`retryBtns=["t1"]` |
+| 6 | 历史条目「重新执行」（有失败/阻塞才显示） | 20 条里 **11 条**显示 |
+
+**「继续执行」语义**：`POST /api/tasks/{run}/retry` 带 `task_id` ⇒ 只把该任务拉回 `pending`，
+runner 逐步执行；**不重跑整条 run**。
+
+**踩坑两条**
+1. `cbPatchOpenRun` 挂 `DOMContentLoaded` **永不执行**（脚本执行完时该事件已发生）⇒ 摘要条一直空白。
+   改按 `document.readyState` 判断。
+2. HTML 模板走 Jinja `auto_reload`，改模板**不需要重启**（实测 `curl /` 已含新标记）。
+
+**并发会话与版本号撞车（须记录）**
+本会话提交 `0fcd2fd`（声称 v0.13.222）前，另有两个会话已提交
+`4f07315 v0.13.222`（协同故障复盘）与 `d050e5c v0.13.223`（兜底位换 dumate）。
+⇒ **同一个 222 被两个会话占用**；`src/main.py` 的 `VERSION` 被对方改成 0.13.223，
+本会话的 `sed 0.13.221→0.13.222` 因此未匹配、版本号未改。
+**未做**：不为版本号重启（`term_sessions=1`，用户 codebuddy 会话在跑，按军规不强杀）。
+功能已全部生效：`?v=882cb16f` == 磁盘 md5，`curl /` 含 `cbLeftToggle`，`hub.js` 含 `cbOutcome`。
+
+**测试**：`tests/test_collab_ui_l0.py` 13 例（新增 6 例）；`test_hubjs_split` 通过 ⇒ 分片与拼接一致。

@@ -86,6 +86,15 @@ REGISTRY: Dict[str, FedSource] = {
         id="claude_mem", label="claude-mem 观察库", kind="sqlite_fts", weight=0.8,
         desc="~/.claude-mem/claude-mem.db（observations FTS5 + session_summaries）",
         timeout_s=1.5),
+    # 2026-11-27（波3 S4）：magpie 长期记忆层。
+    # 为什么权重 0.9（高于会话档 0.5）：这里的条目是**成文事实**（frontmatter 带
+    # kind/scope/why/created），与判例 867「magpie memory = 长期事实层」定判一致。
+    # 为什么之前漏了：hub 的 7 路联邦里没有它，导致 magpie 侧写入的记忆在 hub 搜索
+    # 里完全不可见（实测 4 个 .md 文件、其中 hub-l2.md 是枢纽级事实）。
+    "magpie_memory": FedSource(
+        id="magpie_memory", label="magpie 长期记忆", kind="rg_text", weight=0.9,
+        desc="~/.config/magpie/memory/*.md（frontmatter: kind/scope/why）",
+        timeout_s=1.5),
     "claude_projects": FedSource(
         id="claude_projects", label="claude 原生记忆库", kind="rg_text", weight=0.8,
         desc="~/.claude/projects/**/memory/*.md（各项目目录下的人工事实文件）"),
@@ -161,6 +170,8 @@ REGISTRY: Dict[str, FedSource] = {
 #: 已知小疵（记录不改）：_rg_item 按 endswith("sessions") 判 category，四个新 id
 #: 全落 "knowledge"——含会话命中时分类略糊，不影响检索与融合（RRF 只看 rank+weight）。
 _RG_TARGETS: Dict[str, tuple] = {
+    # 2026-11-27（S4）：magpie 长期记忆 —— 与上面的会话档不同，是成文事实。
+    "magpie_memory": ([str(HOME / ".config" / "magpie" / "memory")], "*.md"),
     "pi_sessions": ([str(HOME / ".pi" / "agent" / "sessions")], "*.jsonl"),
     "codex_sessions": ([str(HOME / ".codex" / "sessions")], "*.jsonl"),
     # codebuddy：projects/<cwd 编码>/<session>.jsonl 为主，history.jsonl 是 prompt 台账

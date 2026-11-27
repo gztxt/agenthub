@@ -19,7 +19,8 @@
 | 3 | S1 读切 | ⛔ 改判合并进 S2 | — |
 | 3 | S2 写者收敛 | ✅ 已完工（默认仍 hub） | v0.13.218 |
 | 3 | S3 技能托管关系 | ✅ 已完工（无需写代理） | v0.13.219 |
-| 3 | S4–S5 记忆/下线旧副本 | ⏳ 未开工 | — |
+| 3 | S4 记忆检索并入 | ✅ 已完工 | v0.13.220 |
+| 3 | S5 下线旧副本 | ⏳ 未开工 | — |
 
 ## 错误与未完成（只记事实，不记推测）
 
@@ -232,3 +233,25 @@ ikuai-cli -> agents: claude,codebuddy,commandcode,devin,goose,grok,hermes,qoder,
 改为每次调用重解析。
 
 **未完成**：S4 记忆读写收敛、S5 下线 hub 自研副本（含 codex/pi 双写者的最终切换）。
+
+## 波3 · S4 magpie 记忆并入联邦检索 — 2026-11-27 12:4x
+
+**先取证（结论调整了任务形状）**
+- 全仓 `grep 'magpie/memory|magpie-memory|hub-l2'` 在 `src/` 与 `scripts/` 下 **零命中**
+  ⇒ hub **没有**在写 magpie memory；`hub-l2.md` / `hub-mem-*.md` 是 magpie 侧既有条目
+  （frontmatter `origin: user`、`sources: agent: hub`，最后更新 2026-11-20）。
+- 所以 S4 的「读写收敛」落成**只读并入**：把 magpie memory 加进 hub 联邦检索，
+  写入仍只走 magpie MCP（A 模式，判例 867 不推翻）。
+
+**改动**：`memfed.REGISTRY` + `_RG_TARGETS` + `memory.FED_FAST_SOURCES`。
+
+**验收**
+```
+_probe_one('magpie_memory') -> {'ok': True, 'count': 9, 'ms': 8.2}
+GET /api/memory/search?q=FCC&sources=magpie_memory -> count=3，命中 hub-mem-1/2.md
+默认快路 backends -> 8 路（含 magpie_memory）
+```
+
+**测试**：`tests/test_memory_magpie_l0.py` 5 例（注册/启用/目标路径/权重≥0.8/进快路与白名单）。
+
+**未完成**：S5 下线 hub 自研副本（技能扫描双源、modelcfg 写者最终切换、记忆本地 L1 与 magpie 的分工书面化）。

@@ -53,7 +53,7 @@ PROFILE_CHARS = int(os.getenv("MEMORY_PROFILE_CHARS", "1200"))
 #: 为何把 experiences（P0-1 D18）加进来：它查的是 hub **自己的** agents.db（同进程连接，
 #: 毫秒级，无 rg 扫树成本），且是**蒸馏过**的可复用单元 —— 默认召回它才是「经验接入联邦」
 #: 的实际含义（只登记不默认召＝注册了但没人用）。
-FED_FAST_SOURCES = "local,tdai,claude_mem,workbuddy_memory,claude_projects,experiences,unified_archive"
+FED_FAST_SOURCES = ("local,tdai,magpie_memory,claude_mem,workbuddy_memory,claude_projects,experiences,unified_archive")
 #: 注入段里单条记忆的截断长度（与 pi 扩展 fmtMem 的 160 字同口径，跨入口看起来一致）。
 FED_ITEM_CHARS = 160
 

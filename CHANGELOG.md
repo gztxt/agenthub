@@ -1,3 +1,30 @@
+## v0.13.220 — 波 3 · S4：magpie 长期记忆进入联邦检索（2026-11-27）
+
+**缺口**：hub 的联邦检索有 7 路（local / tdai / claude_mem / workbuddy_memory /
+claude_projects / experiences / unified_archive），**没有 magpie memory**。
+而 magpie 侧存着 9 个 `.md`，含枢纽级事实（`hub-l2.md`：FCC/CCR 端点约束等）
+⇒ 这些记忆在 hub 搜索里完全不可见。
+
+| 改动 | 判据 |
+|---|---|
+| `memfed.REGISTRY` 新增 `magpie_memory`（weight 0.9） | 成文事实权重高于会话档 0.5 |
+| `_RG_TARGETS` 指向 `~/.config/magpie/memory` + `*.md` | 探针 `count=9`，8.2ms |
+| `memory.FED_FAST_SOURCES` 加入该源 | 默认检索即含第 8 路 |
+
+**实测**
+```
+GET /api/memory/search?q=FCC&sources=magpie_memory&limit=3
+count=3  backends=[('magpie_memory', True, 3)]
+命中 hub-mem-1.md / hub-mem-2.md（CCR/FCC 时代证据）
+
+默认快路 backends = local, tdai_l1, claude_mem, magpie_memory,
+                     claude_projects, workbuddy_memory, experiences, unified_archive
+```
+
+**不影响任何写入**：只增加一条只读检索源；magpie memory 的写入口仍是 magpie MCP（A 模式，判例 867 未变）。
+
+**测试**：`tests/test_memory_magpie_l0.py` 5 例。
+
 ## v0.13.219 — 波 3 · S3：技能清单挂 magpie 托管关系（2026-11-27）
 
 **先查事实，结果推翻了计划里的写代理**

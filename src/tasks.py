@@ -492,6 +492,9 @@ _RUN_AGG_SQL = """
            MAX(COALESCE(r.round,1)) round, MAX(r.parent_run_id) parent_run_id,
            MAX(r.child_run_id) child_run_id, MAX(r.stop_reason) stop_reason,
            MAX(r.max_rounds) max_rounds, MAX(r.auto_rounds) auto_rounds,
+           /* 2026-11-28：主任务的**权威源**是 task_runs.goal（创建时原样落库），
+              tasks.goal 只是同一次写入的副本。两者都带出去，让上层能判来源。 */
+           MAX(r.goal) run_goal, MAX(r.origin) run_origin,
            GROUP_CONCAT(DISTINCT t.agent_id) agents,
            GROUP_CONCAT(DISTINCT COALESCE(NULLIF(t.model,''), NULLIF(t.model_planned,''),
                                           NULLIF(t.model_choice,''), '')) models,
@@ -579,7 +582,15 @@ _CHAIN_SESS_SQL = """
 #: `root_run_id` = 稳定的去重键；`run_id` = 链尾（「查看 / 续跑 / 重拆」指向最新一轮）。
 _CHAIN_SEL_SQL = """
     SELECT s.sid AS root_run_id, p.run_id AS run_id,
-           COALESCE(r0.goal, p.goal) AS goal,
+           COALESCE(NULLIF(r0.run_goal,''), p.goal) AS goal,
+           /* 2026-11-28（用户报「主任务显示的不是我输入的那条」）：把**目标来源**显式带出去。
+              权威源是 root run 的 `task_runs.goal`（创建时原样落库、此后无任何 UPDATE
+              路径）；只有老数据缺 task_runs 行时才退回 tasks.goal。
+              两个来源都不存在 ⇒ 空串（前端写「目标未记录」，不猜）。 */
+           CASE WHEN COALESCE(r0.run_goal,'') <> '' THEN 'task_runs'
+                WHEN COALESCE(p.goal,'') <> '' THEN 'tasks'
+                ELSE '' END AS goal_source,
+           COALESCE(r0.run_origin,'') AS goal_origin,
            s.rounds AS rounds, COALESCE(p.round,1) AS round, p.state AS state,
            s.total AS total, s.success AS success, s.failed AS failed,
            s.blocked AS blocked, s.running AS running, s.pending AS pending,

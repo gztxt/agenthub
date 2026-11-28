@@ -849,6 +849,7 @@
         /* 2026-11-28：行头「主任务」标签 + 子任务两行（编号/状态/执行者·模型·耗时 → 指令 → 失败原因） */
         .run-kicker{display:inline-block;margin-right:6px;padding:0 6px;border-radius:4px;background:var(--sel-bg);color:var(--accent-2);font-size:var(--fs-xs);font-weight:600;vertical-align:1px}
         .run-subs-h{padding:8px 12px 2px;font-size:var(--fs-xs);color:var(--muted);border-top:1px solid var(--divider)}
+        .run-goalnote{margin-left:6px;font-size:var(--fs-xs);color:var(--muted)}
         .run-sub-h{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
         .run-sub-who,.run-sub-id{font-size:var(--fs-xs);color:var(--muted);font-family:var(--font-mono)}
         .run-sub-err{margin-top:3px;font-size:var(--fs-xs);color:var(--danger);overflow-wrap:anywhere}
@@ -2546,8 +2547,9 @@
                                 </div>
                             </div>
                             <div class="hint" id="runsHint">
-                                每个条目 = <b>一次主任务</b>（你在上方目标框输入的那条）；
+                                <b>主任务</b>＝你在上方目标框输入的原文（创建时落库，之后不可改写）；
                                 点开展开它的<b>拆解子任务</b>（编号 · 状态 · 执行者·模型·耗时 · 指令 · 失败原因）。
+                                每条行右端有 run_id，排查时以它为准。
                             </div>
                             <div class="cb-scroll"><div id="runsBody" class="runs-acc"></div></div>
                             <div class="cb-tools"><span class="hint" id="runsMore"></span></div>
@@ -3658,7 +3660,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=1efac297';
+      var HUB_SRC = '/static/hub.js?v=23eed8b1';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

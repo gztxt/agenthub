@@ -323,15 +323,30 @@ COMPAT_JS = """<script id="agent-hub-compat">
     var ShimRO = function (cb) {
       var raf = 0;                             /* 每个实例独立节流 */
       var last = null;                         /* 本实例最近一次回调，供同帧合并 */
+      var seen = 0;                            /* 已投递次数 */
       return new _NativeRO(function (entries, obs) {
+        /* 2026-11-28 第三次复发后的改判：**首帧必须同步**。
+         * 原垫片（11-21）为了修老 WebView 的同步 loop，把**每一次**回调都延到
+         * requestAnimationFrame 里。pi-web 0.19 的会话树在 useLayoutEffect 里
+         * 先 setProperty 改样式、紧接着读 clientHeight 算高度 —— 它依赖的是
+         * 「布局已稳定」那一刻的读数。原生 RO 的首批通知发生在同一帧内布局之后，
+         * 而 rAF 版把它推到**下一帧**：首屏算出的高度是 0 ⇒ 树高 0 ⇒ 白屏；
+         * 刷新走增量路径（已有高度）才恢复。这正是「第一次打不开、刷新就好」的形态。
+         * 故：第 1 次同步投递（与原生语义一致），后续仍走 rAF 合并
+         * （老 WebView 的 loop 修法只在连续 resize 时才需要，首帧不该付这个代价）。
+         * 首帧异常用异步重抛：既不让 React 的 commit 链路在这里断掉（白屏），
+         * 也保证控制台能看到真错（不吞）。 */
+        if (seen++ === 0) {
+          try { cb(entries, obs); }
+          catch (e) { setTimeout(function () { throw e; }, 0); }
+          return;
+        }
         last = [entries, obs];
         if (raf) return;                       /* 只合并本实例同帧的多次触发 */
         raf = requestAnimationFrame(function () {
           raf = 0;
           var cur = last; last = null;
           if (!cur) return;
-          /* 不吞异常：上游 useLayoutEffect 首帧抛错必须冒泡，否则状态没初始化 ⇒
-           * pi-web 0.19 首屏白屏（刷新后才走增量路径恢复）。2026-11-27 首屏白屏根因。 */
           cb(cur[0], cur[1]);
         });
       });
@@ -472,6 +487,32 @@ def _hub_session_ok(header: bytes):
             except Exception:  # noqa: BLE001 —— 用户库不可用一律当未登录（fail-closed）
                 return False, None, ""
     return False, None, ""
+
+
+def _is_iframe_doc(header: bytes) -> bool:
+    """请求是否来自 **iframe 内导航**（`sec-fetch-dest: iframe`）。
+
+    只用于「未登录时怎么回」这一个分支：顶层导航照旧 302，iframe 里换成
+    顶层跳转页（同一个登录页塞进框里＝用户看到的"打不开"）。
+    """
+    for ln in header.split(b"\r\n"):
+        if ln.lower().startswith(b"sec-fetch-dest:"):
+            return ln.split(b":", 1)[1].strip().lower() == b"iframe"
+    return False
+
+
+def _iframe_login_page(loc: str) -> bytes:
+    """iframe 内的未登录页：把**顶层**导航去 hub 登录，登录后 next 回到本嵌入页。"""
+    import html as _html
+    href = _html.escape(loc, quote=True)
+    return ("""<!doctype html><meta charset="utf-8"><title>需要登录 AgentHub</title>
+<style>body{font:14px/1.6 system-ui,sans-serif;padding:18px;color:#333}
+a{color:#2c5f8a}</style>
+<p>登录状态已失效，正在跳转到 AgentHub 登录页…</p>
+<p>没有自动跳转？<a href="%s" target="_top">点此登录</a></p>
+<script>(function(){var u=%r;try{top.location.replace(u)}
+catch(e){try{window.parent.location.replace(u)}catch(e2){location.replace(u)}}})();</script>
+""" % (href, loc)).encode("utf-8")
 
 
 def _peer_of(writer) -> str:
@@ -1468,6 +1509,19 @@ class EmbedProxy:
                     nxt = urllib.parse.quote("http://%s:%d%s" % (host, self.listen[1],
                                                                  path.decode(errors="replace") or "/"))
                     loc = "http://%s:%d/?next=%s" % (host, self.hub_port, nxt)
+                    # 2026-11-28：**iframe 内不许出现"登录页套娃"**。
+                    # 用户报「pi web 在 agenthub 里打不开，刷新一下又可以」，2026-11-28
+                    # 08:38 日志给出机制：桥 302 回 hub 登录页 —— 而这个 302 发生在
+                    # **iframe 里**（顶栏仍是 hub），登录页被塞进 768px 的框里，
+                    # 用户看到的就是"打不开"；等顶栏登录完成后再刷新，Cookie 到位才恢复。
+                    # 处置：iframe 文档请求不返回 302，而是返回一张**把顶层导航到登录页**
+                    # 的小页面（登录后 next 直接回到嵌入地址）；无 JS 时给出可点的链接。
+                    # 判据 `sec-fetch-dest: iframe`（Chrome 76+ 全量支持，缺省按顶层处理）。
+                    if _is_iframe_doc(header):
+                        await self._send(writer, 200, _iframe_login_page(loc))
+                        log.info("[%s] 200 未登录(iframe) peer=%s %s %s -> 顶层跳登录 %s",
+                                 self.name, _peer, method.decode(errors="replace"), _p, loc)
+                        return
                     await self._write(writer, (
                         "HTTP/1.1 302 Found\r\nLocation: %s\r\n"
                         "Content-Length: 0\r\nCache-Control: no-store\r\n"

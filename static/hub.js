@@ -7982,6 +7982,15 @@ async function loadRuns(append) {
           ? '<button class="btn sm ghost" data-run-act="start" data-run-id="' + escapeHtml(rid) + '">续跑</button>' : '') +
         ((r.state === 'failed' || r.state === 'partial') && (r.round || 1) < (r.max_rounds || 2)
           ? '<button class="btn sm ghost" data-run-act="replan" data-run-id="' + escapeHtml(rid) + '">重拆下一轮</button>' : '');
+      /* 2026-11-28：主任务 = **创建时目标框原文**。来源由 API 的 goal_source 给出：
+         `task_runs` = 落库原文（唯一权威，全仓没有任何 UPDATE 它的路径）；
+         `tasks` = 老数据缺 task_runs 行时的回退；空 = 未记录（不猜，也不写"无目标"）。
+         `goal_origin=replan` 的会话是重拆轮 —— 目标是上一轮派生的、不是用户原文，
+         必须在行头写明，否则会被读成"主任务被改写"。 */
+      var goalTxt = r.goal || '';
+      var goalNote = (r.goal_source === 'task_runs') ? ''
+        : (r.goal_source === 'tasks' ? '（旧数据）' : '（目标未记录）');
+      var originNote = (String(r.goal_origin || '') === 'replan') ? '重拆目标' : '';
       var open = !!runOpenSet[rid];
       /* 主标题 = run.goal（这一次需求），副标题 = 它拆出来的 tasks[].prompt。
          副标题数据不在列表接口里 ⇒ 首次展开才拉 /api/tasks/<id> 并缓存；已缓存的
@@ -7993,9 +8002,12 @@ async function loadRuns(append) {
         /* 2026-11-28：显式写出「主任务」——用户的原话是「主任务 = 目标框输入的那条」，
            之前的行头只有一段 goal 文字，读起来像日志而不是一次任务。标签是
            `aria-hidden` 的视觉锚（读屏由 run-hd 的 role/title 承担，不重复念）。 */
-        '<span class="run-title" title="' + escapeHtml(r.goal || '') + '">' +
+        '<span class="run-title" title="' + escapeHtml(goalTxt || '(目标未记录)') + '">' +
           '<span class="run-kicker" aria-hidden="true">主任务</span>' +
-          escapeHtml(r.goal || '(无目标)') + '</span>' +
+          escapeHtml(goalTxt || '(目标未记录)') +
+          (goalNote ? '<span class="run-goalnote">' + escapeHtml(goalNote) + '</span>' : '') +
+          (originNote ? '<span class="run-goalnote">' + escapeHtml(originNote) + '</span>' : '') +
+        '</span>' +
         /* 2026-11-28：元信息按「先结论、后过程、再标识」排，一次只读一段：
            ① 状态徽章 + 子任务数（成败拆开写，只给 0/5 得让用户自己算）
            ② 过程量：轮次 / 耗时

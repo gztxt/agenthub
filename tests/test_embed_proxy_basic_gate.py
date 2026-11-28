@@ -117,3 +117,31 @@ class TestHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIframeLoginGate(unittest.TestCase):
+    """未登录的 **iframe 内**文档请求不得把 hub 登录页套进框里（2026-11-28）。
+
+    用户报「pi web 在 agenthub 里打不开，刷新一下又可以」。08:38 实况日志：
+    `[桥:pi] 302 未登录 peer=172.16.3.174 GET / -> hub 登录页` —— 这个 302 发生在
+    iframe 内部，登录页被塞进嵌入框，用户看到的就是"打不开"；顶栏登录完成后再刷新，
+    Cookie 到位才恢复。处置：iframe 文档请求返回**顶层跳登录**的小页面（登录后 next
+    回到嵌入地址），顶层导航仍走 302（原有行为不变）。
+    """
+
+    def test_detects_iframe_dest(self):
+        import embed_proxy as ep
+        self.assertTrue(ep._is_iframe_doc(
+            b"GET / HTTP/1.1\r\nHost: x\r\nSec-Fetch-Dest: iframe\r\n\r\n"))
+        self.assertFalse(ep._is_iframe_doc(
+            b"GET / HTTP/1.1\r\nSec-Fetch-Dest: document\r\n\r\n"))
+        self.assertFalse(ep._is_iframe_doc(b"GET / HTTP/1.1\r\n\r\n"),
+                         "缺头按顶层处理（老浏览器行为不变）")
+
+    def test_page_escapes_the_frame(self):
+        import embed_proxy as ep
+        loc = "http://172.16.3.227:3102/?next=http%3A//172.16.3.227%3A3201/"
+        html = ep._iframe_login_page(loc).decode("utf-8")
+        self.assertIn("top.location.replace", html)
+        self.assertIn('target="_top"', html, "无 JS 时必须有可点链接")
+        self.assertIn("172.16.3.227:3102", html)

@@ -3269,6 +3269,10 @@ function runSubsHtml(runId) {
         '<span class="run-sub-who" title="执行者 · 模型 · 耗时">' + escapeHtml(who) + '</span>' +
       '</div>' +
       '<div class="run-sub-txt" title="' + escapeHtml(p) + '">' + escapeHtml(p) + '</div>' +
+      /* 2026-11-28（用户令）：子任务也要能单独重跑，并且**换 agent/模型**。 */
+      (/pending|running|verifying|submitted/.test(String(t.status || ''))
+        ? '' : '<div class="run-sub-acts"><button class="btn ghost sm" data-task-retry="'
+          + escapeHtml(runId + ':' + (t.task_id || '')) + '">重新执行（换模型/agent）</button></div>') +
       (err ? '<div class="run-sub-err" title="' + escapeHtml(err) + '">' + escapeHtml(err.slice(0, 160)) +
              (err.length > 160 ? '…' : '') + '</div>' : '') +
       '</div>';
@@ -3358,6 +3362,15 @@ function bindRunActions() {
       /* 主标题行整行可点：先看是不是展开了某一行，再落到行内按钮。
          按钮（查看/续跑/重拆）自己也住在 .run-hd 里，所以必须先判 data-run-act
          并把这次点击整个吞掉，否则点「查看」会顺带把副标题也翻一下。 */
+      /* 子任务级重新执行（按钮在 .run-subs 里，必须**先**于 run-hd 手风琴判定，
+         否则点击会被当成展开/收起）。 */
+      var tr = ev.target.closest('[data-task-retry]');
+      if (tr && host.contains(tr)) {
+        ev.preventDefault();
+        var pair = (tr.getAttribute('data-task-retry') || '').split(':');
+        retryRun(pair[0], pair[1] || '', true);
+        return;
+      }
       var actEl = ev.target.closest('[data-run-act]');
       var tgl = ev.target.closest('[data-run-toggle]');
       /* 按钮住在 .run-hd 里，所以按钮点击也会命中 data-run-toggle。
@@ -3504,7 +3517,7 @@ async function loadRuns(append) {
       var st = runStatePill(r.state);
       var act = ((r.failed || 0) + (r.blocked || 0) > 0
           ? '<button class="btn sm danger" data-run-act="retry" data-run-id="' + escapeHtml(rid) +
-            '" title="把失败/阻塞的子任务拉回待执行队列并启动">重新执行</button>'
+            '" title="把失败/阻塞的子任务重新执行，并换掉上次失败的 agent 与模型">重新执行</button>'
           : '') +
           '<button class="btn sm ghost" data-run-act="open" data-run-id="' + escapeHtml(rid) + '">查看</button>' +
         (r.state === 'running' || r.state === 'pending' || r.state === 'waiting'
@@ -3990,7 +4003,35 @@ async function enterTasksPage() {
   bindRunActions();
   refreshTasks();
 }
-async function retryRun(id) { if (!id) return; try { await api('/api/tasks/' + id + '/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); toast('失败项已重置', 'ok'); runSigLast = ''; setTimeout(() => openRun(id), 1200); } catch (e) { toast(e.message, 'err'); } }
+async function retryRun(id, taskId, reassign) {
+  /* 2026-11-28（用户令）：重新执行要**换 agent / 换模型**（上次失败说明那组不行）。
+     后端 `reassign=true` 会逐条换并回传「从谁换成谁」，这里如实转述 ——
+     不写出来的话，用户无法判断"到底换没换"。 */
+  if (!id) return;
+  var payload = { reassign: reassign !== false };
+  if (taskId) payload.task_id = taskId;
+  try {
+    var d = await api('/api/tasks/' + id + '/retry', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)});
+    var rows = d.tasks || [];
+    var changed = rows.filter(function (x) { return x.changed; });
+    var msg;
+    if (!rows.length) msg = '没有失败/阻塞的任务可重跑';
+    else if (!changed.length) {
+      var why = (rows[0] && rows[0].reason) || '无路可换';
+      msg = '已重置 ' + rows.length + ' 条（未能换模型：' + why + '）';
+    } else {
+      var first = changed[0];
+      msg = '已重置 ' + rows.length + ' 条，其中 ' + changed.length + ' 条换组：'
+        + first.from_agent + (first.from_model ? '·' + String(first.from_model).split('/').pop() : '')
+        + ' → ' + first.to_agent + (first.to_model ? '·' + String(first.to_model).split('/').pop() : '');
+    }
+    toast(msg, changed.length ? 'ok' : 'warn');
+    runSigLast = '';
+    setTimeout(function () { openRun(id); }, 1200);
+  } catch (e) { toast(e.message, 'err'); }
+}
 async function delRun(id) { if (!id || !confirm('删除 run ' + id + '？')) return; try { await api('/api/tasks/' + id, { method: 'DELETE' }); currentRun = null; $('runPanel').style.display = 'none'; if (taskAccKey === 'run') setTaskAcc('hist'); refreshTasks(); } catch (e) { toast(e.message, 'err'); } }
 
 /* ── S4 定时任务 ──────────────────────────────────── */

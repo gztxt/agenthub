@@ -854,6 +854,7 @@
         .run-sub-who,.run-sub-id{font-size:var(--fs-xs);color:var(--muted);font-family:var(--font-mono)}
         .run-sub-err{margin-top:3px;font-size:var(--fs-xs);color:var(--danger);overflow-wrap:anywhere}
         .stat-ok{color:var(--ok);font-weight:600}
+        .run-sub-acts{margin-top:4px}
         /* 副标题是展开后才看的正文：原来单行 ellipsis 把 prompt 切成半句，
            展开等于没展开。改为整句折行，超高由 .run-subs 的 max-height 兜底滚动。 */
         .run-sub-txt { flex: 1; min-width: 0; white-space: normal; overflow-wrap: anywhere;
@@ -3660,7 +3661,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=23eed8b1';
+      var HUB_SRC = '/static/hub.js?v=dc1958d0';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

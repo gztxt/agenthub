@@ -221,6 +221,10 @@ def ensure_schema():
 
 class RetryIn(BaseModel):
     task_id: Optional[str] = None
+    # 2026-11-28（用户令）：「重新执行」不要沿用上次失败的 agent/模型。
+    # `reassign=True` ⇒ 由 `tasks_tiers.reassign_for_retry` 换人换模型后再入队；
+    # 缺省 False = 旧行为（同一个 agent/模型原地重跑），MCP/脚本调用逐字不变。
+    reassign: bool = False
 
 
 class AcceptIn(BaseModel):
@@ -961,14 +965,47 @@ async def start_run(run_id: str):
 
 @router.post("/api/tasks/{run_id}/retry")
 async def retry_run(run_id: str, body: RetryIn):
-    if body.task_id:
-        db.execute("UPDATE tasks SET status='pending',error=NULL,updated_at=? "
-                   "WHERE run_id=? AND task_id=?", (_tiers._now(), run_id, body.task_id))
-    else:
-        db.execute("UPDATE tasks SET status='pending',error=NULL,updated_at=? "
-                   "WHERE run_id=? AND status IN ('failed','blocked')", (_tiers._now(), run_id))
+    """把失败/阻塞的任务拉回待执行队列。
+
+    2026-11-28（用户令）：`reassign=true` 时**换 agent / 换模型**再入队 ——
+    「之前失败了，肯定是 agent 或者模型有问题」。换了谁、为什么换，逐条写进
+    `tier_reason` 与 `escalated_from_*`，页面上看得见；无路可换时如实写原因，
+    绝不假装换过（`no_reassign_path`）。
+    """
+    sql_where = ("run_id=? AND task_id=?" if body.task_id
+                 else "run_id=? AND status IN ('failed','blocked')")
+    args = (run_id, body.task_id) if body.task_id else (run_id,)
+    rows = db.query("SELECT * FROM tasks WHERE " + sql_where, args)
+    reassigned = []
+    for row in rows:
+        now = _tiers._now()
+        if not body.reassign:
+            db.execute("UPDATE tasks SET status='pending',error=NULL,updated_at=? "
+                       "WHERE run_id=? AND task_id=?", (now, run_id, row["task_id"]))
+            continue
+        nxt = _tiers.reassign_for_retry(row)
+        # 执行者读的是 model_planned（tasks_runner:360 `exec_model = row.get("model_planned")
+        # or row.get("model_choice")`），不是 model —— model 是**回包观测值**。
+        # 写错列的话「换了模型」只写在展示列上、派发仍用旧模型（第一版就这么错过）。
+        db.execute(
+            "UPDATE tasks SET status='pending',error=NULL,updated_at=?,"
+            " agent_id=?,model_planned=?,model=NULL,model_sent=NULL,"
+            " tier=?,tier_reason=?,attempts=?,models_tried=?,"
+            " escalated_from_agent=?,escalated_from_model=?"
+            " WHERE run_id=? AND task_id=?",
+            (now, nxt["agent_id"], (nxt["model"] or None), nxt.get("tier"),
+             ("retry_reassign:%s" % (nxt.get("reason") or ""))[:120],
+             nxt["attempts"], json.dumps(nxt["models_tried"], ensure_ascii=False),
+             (row.get("escalated_from_agent") or row.get("agent_id") or "")[:64],
+             (row.get("escalated_from_model") or row.get("model") or "")[:120],
+             run_id, row["task_id"]))
+        reassigned.append({"task_id": row["task_id"],
+                           "from_agent": nxt["from_agent"], "to_agent": nxt["agent_id"],
+                           "from_model": nxt["from_model"], "to_model": nxt["model"],
+                           "changed": nxt["changed"], "reason": nxt["reason"]})
     _runner._start_runner(run_id)
-    return {"run_id": run_id, "status": "retry-scheduled"}
+    return {"run_id": run_id, "status": "retry-scheduled",
+            "reassign": bool(body.reassign), "tasks": reassigned}
 
 
 @router.post("/api/tasks/{run_id}/accept")

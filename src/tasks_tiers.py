@@ -408,6 +408,72 @@ def _shadow_dispatch_note(items: Optional[List[dict]], pool: Optional[set]) -> N
         pass
 
 
+def reassign_for_retry(row: dict) -> Dict[str, Any]:
+    """「重新执行」时的**换人换模型**（用户令 2026-11-28）。
+
+    要求原话：「主任务和子任务都加重新执行按钮 … 不一定要使用之前设定的 agent 和模型，
+    要根据任务情况做变更，因为之前执行失败了，肯定是 agent 或者模型有问题」。
+
+    判据顺序（每一层都**不看**上次那组）：
+      ① agent 不在当前可用池（被摘/不可用）⇒ 直接换池里另一个；
+      ② 档位链路还有上一档 ⇒ `escalate_target` 升档（attempts 强制 +1，保证至少走一步）；
+      ③ 升档无路 ⇒ 模型回退表里换**没试过**的模型；
+      ④ 仍然无路 ⇒ 换 agent 阶梯里另一个（排除当前）。
+    返回**纯数据**（不写库），调用方决定落哪些列。全不可换时 `changed=False` 且
+    `reason` 说清为什么（绝不假装换过）。
+    """
+    try:
+        cat, checked = _catalog_snapshot()
+    except Exception:  # noqa: BLE001 —— 选型增强不得带倒重试
+        cat, checked = set(), False
+    agent = str(row.get("agent_id") or "")
+    model = str(row.get("model") or row.get("model_sent") or row.get("model_planned")
+                or row.get("model_choice") or "")
+    tier = row.get("tier")
+    attempts = int(row.get("attempts") or 0)
+    tried = parse_models_tried(row.get("models_tried"))
+    known = _known_agent_ids()
+    out = {"agent_id": agent, "model": model, "tier": tier, "changed": False,
+           "reason": "", "from_agent": agent, "from_model": model,
+           "models_tried": tried, "attempts": attempts + 1}
+
+    # ① agent 已不在可用池：换池里另一个（优先历史上成功的，其次声明序）
+    if known and agent not in known:
+        for cand in sorted(known - {agent}):
+            out.update(agent_id=cand, model="", changed=True,
+                       reason="agent_unavailable:%s" % cand)
+            return out
+
+    # ② 升档（模型或 agent），attempts+1 ⇒ 至少前进一档
+    esc = escalate_target(agent, model, attempts + 1, known,
+                          ccr_agents=_ccr_model_agents(), tier=tier,
+                          catalog=cat, catalog_checked=checked)
+    if esc.get("changed"):
+        out.update(agent_id=esc.get("agent_id") or agent,
+                   model=esc.get("model") if esc.get("agent_id") == agent else "",
+                   tier=(tier if esc.get("agent_id") != agent else tier),
+                   changed=True, reason=esc.get("reason") or "escalate")
+        return out
+
+    # ③ 模型回退：换没试过的模型（避开已知坏 provider）
+    if agent in _ccr_model_agents() and checked:
+        nxt = model_fallback_target(agent, tier, tried, catalog=cat,
+                                    catalog_checked=checked,
+                                    avoid_providers=_unhealthy_providers())
+        if nxt and nxt != model:
+            out.update(model=nxt, changed=True, reason="model_fallback:%s" % nxt)
+            return out
+
+    # ④ 换 agent（阶梯里排除当前那个）
+    for cand in _csv_env("TASK_ESCALATE_LADDER", "claude-code,codex"):
+        if cand != agent and cand in known:
+            out.update(agent_id=cand, model="", changed=True, reason="agent:%s" % cand)
+            return out
+
+    out["reason"] = "no_reassign_path（可用池里没有第二个 agent，档位与模型也都无路）"
+    return out
+
+
 def escalate_target(agent_id: str, model_choice: Optional[str], attempts: Any,
                     known: set, ccr_agents: Optional[set] = None,
                     tier: Optional[str] = None, tiers_cfg: Optional[dict] = None,

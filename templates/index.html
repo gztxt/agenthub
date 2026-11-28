@@ -783,13 +783,10 @@
         .cb-fail .why { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
         .cb-verdict { padding: 8px 12px; }
         /* 窄屏：参数在上、看板在下（同一断点 767px，不新增第二套） */
-        /* 2026-11-27 实测（390×844）：右栏 bottom=984 越过视口 140px，历史 20 条整块
-           在视口外 ⇒ 用户看到的是「没有历史记录」「看不到最下面」。
-           判据：窄屏整块 .cb 自己滚，右栏给固定可用高度，左栏展开不内滚。 */
+        /* 2026-11-27 390×844：右栏曾越过视口 140px ⇒ 窄屏整块 .cb 自己滚（判据见 tests）。 */
         @media (max-width: 767px) {
             #page-tasks .cb { overflow-y: auto; overscroll-behavior: contain; }
-            /* .cb-main 若保持 flex:1 1 auto，会被压到视口高、内容溢出父级而非滚动
-               （实测 right bottom=13140 但 .cb 不滚）⇒ 窄屏让它按内容撑开，由 .cb 滚。 */
+            /* flex:1 会把 .cb-main 压到视口高、内容溢出而非滚动 ⇒ 按内容撑开、由 .cb 滚。 */
             #page-tasks .cb-main { flex: 0 0 auto; flex-direction: column; overflow: visible; }
             .cb-left { flex: 0 0 auto; }
             /* 窄屏：折叠头可见，卡体默认收起（用户主要看进度/结果） */
@@ -802,26 +799,23 @@
             .cb-left.open .cb-box { display: flex; margin-top: 6px; }
             .cb-left:not(.open) .cb-box { display: none; }
             .cb-box { max-height: none; overflow: visible; }
-            /* 2026-11-27 实测：历史 20 条展开后整块 13000px ⇒ 整页滚动手感极差。
-               右栏内部滚（56vh），整块只保留必要的高度。 */
+            /* 历史展开后整块曾 13000px ⇒ 右栏内部滚 56vh。 */
+            .cb .run-hd{grid-template-columns:auto minmax(0,1fr)}
+            .cb .run-title{grid-column:2/-1;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+            .cb .run-meta{grid-column:1/-1;grid-row:3;flex-wrap:wrap;gap:2px}
+            .cb .run-meta>span{white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+            .cb .run-acts{grid-column:1/-1;grid-row:4;flex-wrap:wrap;gap:4px}
+            .cb .run-sub-who{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+            .cb .meta-wide{display:none}
+            .cb .sp-bd tr>:is(:nth-child(3),:nth-child(5),:nth-child(11)){display:none}
             .cb-right { flex: 0 0 auto; height: auto; min-height: 0; overflow: visible; }
             .cb-view { overflow: visible; }
             .cb-scroll { max-height: 56vh; overflow: auto; -webkit-overflow-scrolling: touch; }
             .cb-scrollbox { max-height: 46vh; }
         }
-        /* ── 协同历史手风琴（主标题 = run.goal，副标题 = tasks[].prompt）──
-           为什么不用 display:none 收起：它让高度瞬间归零，下面的卡片会跟着上下跳；
-           这里用 max-height 过渡，展开后放开纵向滚动，任务多也不撑破卡片。
-           箭头用 transform 旋转 ▸（不换字形），旋转后就是 ▾，且能跟着过渡走。
-
-           2026-11-03 两处改版：
-           ① 主标题**不许被截断**。原写法 `flex:1 1 240px` + `nowrap + ellipsis` 在窄屏
-              会把 goal 切成半截，用户看不出这是哪次协同。现在换成 grid 两行：第 1 行
-              只有箭头 + goal（goal 横跨剩余全部宽度，放不下就整句折行
-              overflow-wrap:anywhere），第 2 行是元信息 + 操作按钮。标题与按钮/元信息
-              **不在同一行争宽**，所以不存在「被挤成 3 个字 + 省略号」。
-              不用 flex-wrap 是因为换行位置随内容漂移，同一 run 在不同屏宽下行高不同。
-           ② 手风琴语义是**同时只开一个**（toggleRun 里关掉其它项），不是多选折叠。 */
+        /* 协同历史手风琴：主标题=run.goal、副标题=tasks[].prompt；max-height 过渡（display:none
+           会让下方卡片跳动）；grid 两行——第 1 行只有箭头+goal（可整句折行），第 2 行 meta+按钮，
+           标题不与按钮争宽；手风琴语义=同时只开一个。详见 tests/test_collab_ui_l0.py。 */
         .runs-acc { display: flex; flex-direction: column; }
         .run-item { border-bottom: 1px solid var(--divider); }
         .run-item:last-child { border-bottom: 0; }
@@ -846,7 +840,6 @@
         .run-subs { max-height: 0; overflow: hidden; transition: max-height .2s ease;
                     background: var(--surface-2); }
         .run-item.open .run-subs { max-height: 420px; overflow-y: auto; }
-        /* 2026-11-28：行头「主任务」标签 + 子任务两行（编号/状态/执行者·模型·耗时 → 指令 → 失败原因） */
         .run-kicker{display:inline-block;margin-right:6px;padding:0 6px;border-radius:4px;background:var(--sel-bg);color:var(--accent-2);font-size:var(--fs-xs);font-weight:600;vertical-align:1px}
         .run-subs-h{padding:8px 12px 2px;font-size:var(--fs-xs);color:var(--muted);border-top:1px solid var(--divider)}
         .run-goalnote{margin-left:6px;font-size:var(--fs-xs);color:var(--muted)}
@@ -855,6 +848,7 @@
         .run-sub-err{margin-top:3px;font-size:var(--fs-xs);color:var(--danger);overflow-wrap:anywhere}
         .stat-ok{color:var(--ok);font-weight:600}
         .run-sub-acts{margin-top:4px}
+        .run-sub-hist{margin-top:3px;font-size:var(--fs-xs);color:var(--warn)}
         /* 副标题是展开后才看的正文：原来单行 ellipsis 把 prompt 切成半句，
            展开等于没展开。改为整句折行，超高由 .run-subs 的 max-height 兜底滚动。 */
         .run-sub-txt { flex: 1; min-width: 0; white-space: normal; overflow-wrap: anywhere;
@@ -2516,7 +2510,7 @@
                                     </div>
                                     <div id="dagSvg" class="tscroll"></div>
                                     <div class="cb-scrollbox sp-bd box flush tscroll">
-                                        <table><thead><tr><th>任务</th><th>Agent</th><th>档</th><th>模型</th><th>依赖</th><th>状态</th><th>耗时</th><th>credits</th><th>输出/错误</th><th>操作</th></tr></thead>
+                                        <table><thead><tr><th>任务</th><th>Agent</th><th>档</th><th>模型</th><th>依赖</th><th>状态</th><th>重试</th><th>换组</th><th>判定</th><th>耗时</th><th>credits</th><th>输出/错误</th><th>操作</th></tr></thead>
                                         <tbody id="taskBody"></tbody></table>
                                     </div>
                                     <details>
@@ -3661,7 +3655,7 @@
          ?v= 由 scripts/build_hubjs.sh 按产物内容 md5 同步，勿手改。 -->
     <script>
     (function () {
-      var HUB_SRC = '/static/hub.js?v=dc1958d0';
+      var HUB_SRC = '/static/hub.js?v=dcb4f6ed';
       var gate = document.getElementById('loginGate');
       var form = document.getElementById('loginGateForm');
       var err = document.getElementById('loginGateErr');

@@ -299,3 +299,33 @@ class NarrowMemItemTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class NarrowCollabLayoutTest(unittest.TestCase):
+    CSS = _code()   # 剥注释后的模板正文（本文件唯一取文本口径）
+    """2026-11-28 用户报「历史记录在手机端排版完全不可用」（390×844 实测）。
+
+    现象（改前实测）：`.run-hd` 一行高 **1025px**、`.run-meta` **850px**，meta 子项被
+    三个按钮的 min-content 挤到 **14px**（「9 子任务」逐字折行）。
+    根因两层：
+      ① 窄屏覆盖规则没带前缀，而 `.run-hd/.run-meta/.run-acts` 的**基础规则写在 media
+         块之后**，同特异性后者胜 ⇒ 覆盖被静默吃掉（实测 meta 宽度 0）；
+      ② meta 里还有 run_id/agent/模型三个低价值项与一段 200+ 字的 stop_reason。
+    改后实测：run-hd 244px、meta 103px、`.run-meta` 258px、`#runsBody` 282/282 无内溢。
+    """
+
+    def test_overrides_are_specific_enough(self):
+        for sel in (".cb .run-hd{", ".cb .run-meta{", ".cb .run-acts{"):
+            self.assertIn(sel, self.CSS, "窄屏覆盖必须带 .cb 前缀（否则被后面的基础规则吃掉）")
+        self.assertNotIn("\n            .run-meta{grid-column:1/-1", self.CSS,
+                         "无前缀的覆盖会被基础规则覆盖——本文件就是这么假绿的")
+
+    def test_meta_children_cannot_break_per_char(self):
+        self.assertIn(".cb .run-meta>span{white-space:nowrap;max-width:100%", self.CSS,
+                      "meta 子项必须 nowrap，否则被挤到 14px 宽时逐字折行")
+        self.assertIn(".cb .meta-wide{display:none}", self.CSS,
+                      "窄屏要隐掉 agent/模型/run_id，否则 meta 撑成 11 行")
+
+    def test_long_stop_reason_is_trimmed(self):
+        js = (_REPO / "static" / "hub" / "04-terminal-ws.js").read_text(encoding="utf-8")
+        self.assertIn("String(r.stop_reason).slice(0, 24)", js,
+                      "stop_reason 可能是整段报错，不截断会把 meta 撑成 200px 高")

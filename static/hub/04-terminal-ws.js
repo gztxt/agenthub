@@ -3273,6 +3273,17 @@ function runSubsHtml(runId) {
       (/pending|running|verifying|submitted/.test(String(t.status || ''))
         ? '' : '<div class="run-sub-acts"><button class="btn ghost sm" data-task-retry="'
           + escapeHtml(runId + ':' + (t.task_id || '')) + '">重新执行（换模型/agent）</button></div>') +
+      (function () {
+        /* 2026-11-28（用户令）：重跑/重拆不许另起记录 —— 但执行情况必须合并在原任务上，
+           所以这里补一行「重试 ×N · 换组 …」，让"跑过几次、换过谁"留在原位可见。 */
+        var s2 = subSwap(t);
+        var n2 = Number(t.attempts || 0);
+        var bits = [];
+        if (n2) bits.push('重试 ×' + n2);
+        if (s2) bits.push(s2);
+        return bits.length ? '<div class="run-sub-hist" title="' + escapeHtml(bits.join(' · ')) + '">'
+          + escapeHtml(bits.join(' · ')) + '</div>' : '';
+      })() +
       (err ? '<div class="run-sub-err" title="' + escapeHtml(err) + '">' + escapeHtml(err.slice(0, 160)) +
              (err.length > 160 ? '…' : '') + '</div>' : '') +
       '</div>';
@@ -3561,11 +3572,17 @@ async function loadRuns(append) {
         '<span class="stat-ok">' + (r.success || 0) + ' 成功</span>' +
         (r.failed ? '<span class="stat-fail">' + r.failed + ' 失败</span>' : '') +
         (r.blocked ? '<span class="stat-block">' + r.blocked + ' 阻塞</span>' : '') +
-        '<span>' + escapeHtml(roundTxt) + (r.stop_reason ? ' · ' + escapeHtml(r.stop_reason) : '') + '</span>' +
+        /* stop_reason 可能是**整段报错**（实测有一行 200+ 字的 replan_error: LLM 网关 401…）
+           ⇒ 窄屏 meta 会被它撑成 200px 高。这里截 24 字，全文进 title。 */
+        '<span title="' + escapeHtml(r.stop_reason || '') + '">' + escapeHtml(roundTxt)
+          + (r.stop_reason ? ' · ' + escapeHtml(String(r.stop_reason).slice(0, 24))
+             + (String(r.stop_reason).length > 24 ? '…' : '') : '') + '</span>' +
         (r.duration_ms ? '<span>' + taskFmtDur(r.duration_ms) + '</span>' : '') +
-        '<span>' + escapeHtml(agents) + '</span>' +
-        '<span>' + escapeHtml(modelTxt) + '</span>' +
-        '<span class="run-id">' + escapeHtml(rid) + '</span>' +
+        /* 窄屏只留「状态/规模/轮次/时间」；agent、模型、run_id 进详情（390px 一行放不下，
+           全塞进来会把 meta 撑成 11 行）。 */
+        '<span class="meta-wide">' + escapeHtml(agents) + '</span>' +
+        '<span class="meta-wide">' + escapeHtml(modelTxt) + '</span>' +
+        '<span class="run-id meta-wide">' + escapeHtml(rid) + '</span>' +
         '<span>' + escapeHtml((r.created_at || '').slice(5, 16).replace('T', ' ')) + '</span>' +
         '</span>' +
         '<span class="run-acts">' + act + '</span>' +
@@ -3605,11 +3622,15 @@ async function openRun(runId) {
       return [t.task_id, t.status, t.agent, t.model, t.duration_ms].join('~');
     }).join('|') + '|' + ((d.run || {}).stop_reason || '');
     if (prevRun === runId && runSig === runSigLast && $('taskBody').children.length) {
-      $('runTitle').textContent = 'Run ' + runId + ' · ' + (d.goal || '').slice(0, 60);
+      $('runTitle').textContent = '主任务 · 第 ' + ((d.run || {}).round || 1) + '/'
+        + ((d.run || {}).max_rounds || '?') + ' 轮 · ' + (d.goal || '').slice(0, 60);
       return;
     }
     runSigLast = runSig;
-    $('runTitle').textContent = 'Run ' + runId + ' · ' + (d.goal || '').slice(0, 60);
+    /* 2026-11-28：标题以**主任务**为主，run_id 退到「更多指标」——
+       重拆会换 run_id，用 id 打头会让用户以为"又起了一条新记录"。 */
+    $('runTitle').textContent = '主任务 · 第 ' + ((d.run || {}).round || 1) + '/'
+      + ((d.run || {}).max_rounds || '?') + ' 轮 · ' + (d.goal || '').slice(0, 60);
     currentRunGoal = d.goal || '';
     currentRunTasks = {};
     (d.tasks || []).forEach(function (t) { currentRunTasks[t.task_id] = t; });
@@ -3669,7 +3690,7 @@ function renderRunSummary(d) {
     + (cnt.success || 0) + ' 成功 / ' + (cnt.failed || 0) + ' 失败 · ' + stop;
   var more = $('runSummaryMore'), det = $('runSummaryDetail');
   if (more && det) {
-    det.textContent = ts.length + ' 总任务 · 阻塞 ' + (cnt.blocked || 0)
+    det.textContent = 'run ' + (currentRun || '?') + ' · ' + ts.length + ' 总任务 · 阻塞 ' + (cnt.blocked || 0)
       + ' · 耗时 ' + taskFmtDur(ms) + ' · ' + taskFmtTokens(tok) + ' tokens';
     more.style.display = '';
   }
@@ -3898,6 +3919,29 @@ function taskStColor(s) {
   return TASK_TONE_HEX[taskStTone(s)] || cssToken('--border', '#8a8a8a');
 }
 
+/* 换组摘要：`escalated_from_*` 只记**上一个**，`models_tried` 是全量尝试史。
+   子任务行与详情表共用这两个函数，避免两处各拼一套（同一事实两种写法必漂移）。 */
+function subSwap(t) {
+  var from = String((t && t.escalated_from_agent) || '');
+  var cur = String((t && t.agent_id) || '');
+  var fromM = String((t && t.escalated_from_model) || '');
+  var curM = String((t && (t.model || t.model_sent || t.model_planned)) || '');
+  var parts = [];
+  if (from && from !== cur) parts.push('agent ' + from + '→' + cur);
+  if (fromM && fromM !== curM) parts.push('模型 ' + fromM.split('/').pop() + '→' +
+    (curM ? curM.split('/').pop() : 'agent 默认'));
+  var tried = [];
+  try { tried = JSON.parse((t && t.models_tried) || '[]') || []; } catch (e) { tried = []; }
+  if (tried.length) parts.push('试过 ' + tried.length + ' 个模型');
+  if (Number((t && t.model_fallbacks) || 0)) parts.push('模型回退 ' + t.model_fallbacks + ' 次');
+  return parts.join(' · ');
+}
+function shortSwap(t) {
+  var s = subSwap(t);
+  if (!s) return '-';
+  return s.length > 28 ? s.slice(0, 28) + '…' : s;
+}
+
 function renderTaskTable(tasks) {
   currentRunTasks = {};
   (tasks || []).forEach(t => { currentRunTasks[t.task_id] = t; });
@@ -3906,6 +3950,12 @@ function renderTaskTable(tasks) {
     '<td style="font-family:var(--font-mono);font-size:var(--fs-xs)">' + escapeHtml(t.model || t.model_planned || t.model_choice || '默认') + '</td>' +
     '<td>' + escapeHtml(t.tier || (t.tier_reason ? '' : '-')) + '</td>' +
     '<td>' + escapeHtml((t.deps || []).join(',')) + '</td><td>' + taskStatePill(t.status) + '</td>' +
+    /* 2026-11-28（用户令）：「重新执行/重拆」不另起记录，但**执行情况必须合并在原任务上**。
+       这三列就是合并面：重试次数、换组前后（agent 与模型）、判定结论。 */
+    '<td>' + (Number(t.attempts || 0) ? '×' + t.attempts : '-') + '</td>' +
+    '<td title="' + escapeHtml(subSwap(t)) + '">' + escapeHtml(shortSwap(t)) + '</td>' +
+    '<td title="' + escapeHtml(String(t.verify_reason || '')) + '">' +
+      escapeHtml(t.verdict || (t.verify_kind ? String(t.verify_kind) : '-')) + '</td>' +
     '<td>' + taskFmtDur(t.duration_ms) + '</td>' +
     /* 2026-11-27（T6）：成本列。credits 来自 magpie 账本（cost_backfill），
        没有回填时显示「-」而不是 0 —— 0 会被读成「零成本」。 */
